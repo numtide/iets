@@ -120,7 +120,13 @@ fn main() {
                 [] => help::arg_error("cache dump needs an ENTRY file"),
                 [_, extra, ..] => help::arg_error(format!("unexpected argument '{extra}'")),
             },
-            w => help::unknown_subcommand(w, &["gc", "dump"]),
+            Some("paths") => match &rest[1..] {
+                [file] => cli::cache_paths::cmd_cache_paths(file, false),
+                [file, j] if j == "--json" => cli::cache_paths::cmd_cache_paths(file, true),
+                [] => help::arg_error("cache paths needs an ENTRY file"),
+                [_, extra, ..] => help::arg_error(format!("unexpected argument '{extra}'")),
+            },
+            w => help::unknown_subcommand(w, &["gc", "dump", "paths"]),
         },
         _ => on_big_stack(move || match name {
             "build" => cli::build::cmd_build(&rest),

@@ -12,11 +12,16 @@ Add this to your `.envrc`:
 
 ```bash
 use_iets() {
-  local root script
+  local root entry script
+  local -a paths
   root="$(direnv_layout_dir)/iets-env"
+  entry="$(direnv_layout_dir)/iets-entry"
   watch_file flake.nix flake.lock
-  script="$(iets print-dev-env --builder daemon --gc-root "$root" "${1:-.}")" || true
-  eval "$(iets print-dev-env --watch-files "${1:-.}")"
+  script="$(iets print-dev-env --builder daemon --gc-root "$root" --entry-to "$entry" "${1:-.}")" || true
+  if [[ -s $entry && -e $(<"$entry") ]]; then
+    mapfile -d '' -t paths < <(iets cache paths "$(<"$entry")" 2>/dev/null)
+    ((${#paths[@]})) && watch_file "${paths[@]}"
+  fi
   eval "$script"
 }
 use_iets
@@ -35,12 +40,18 @@ Four parts matter:
   reload` rebuilds it.
 - `watch_file flake.nix flake.lock` is the floor. It is what nix-direnv
   watches, and it is all direnv has when there is no cache entry yet.
-- `print-dev-env --watch-files` prints one `watch_file` line with every file
-  the evaluation read. Run it after the first call, so that a first load
-  already has an entry to read. Run it before `eval "$script"`, so that a
-  shell hook that fails does not lose the watches. Give it the same
-  `FLAKEREF` and the same evaluation flags as the first call: the two must
-  name one cache entry.
+- `--entry-to FILE` names the cache entry the run read, and `iets cache
+  paths ENTRY` prints the paths a watcher has to watch, NUL-separated. The
+  `mapfile` turns them into one `watch_file` call: iets prints data, direnv's
+  calling convention stays in your `.envrc`. Do it before `eval "$script"`,
+  so that a shell hook that fails does not lose the watches.
+- **One `watch_file` call, not one per path.** The stdlib's `watch_file`
+  forks the direnv binary every time it is called, and it takes as many
+  paths as you give it. For 500 paths that is 25 ms in one call against
+  7.3 s one at a time. The NUL separator is what lets `mapfile` build the
+  array without splitting on whitespace in a path.
+- Passing the entry, rather than deriving its key again, is what lets the
+  two calls disagree about flags without silently finding nothing.
 
 The printed bash is what `nix develop` sources: variable assignments,
 exports, `declare -a` and `declare -A`, function definitions, the `PATH`
@@ -54,14 +65,15 @@ empty string leaves your environment alone.
 nix-direnv watches `flake.nix` and `flake.lock` and leaves the rest to
 `direnv reload`. iets does not have to guess. The tracing cache records
 every observation the evaluation made
-([explanation/caching.md](../explanation/caching.md)), and `--watch-files`
+([explanation/caching.md](../explanation/caching.md)), and `iets cache paths`
 turns that read set into direnv watches:
 
 | the evaluation | direnv watches |
 |---|---|
 | read a file: `import ./nix/shell.nix`, `readFile`, `importJSON`, `flake.nix`, `flake.lock`, a file of a `path:` input | the file |
 | listed a directory: `readDir ./conf.d` | the directory, whose mtime changes when an entry comes or goes |
-| asked for the kind of a path: `pathExists ./local.nix`, the nixpkgs `config.nix` probes | the path; direnv also sees a missing path appear |
+| asked for the kind of a path that is **missing**: `pathExists ./local.nix`, the nixpkgs `config.nix` probes | the path, because direnv sees it appear |
+| asked for the kind of a path that **exists** | nothing: existence was the observation, and an mtime is not that (a git index refresh moves `.git`) |
 | copied a path into the shell: `"${./hook.sh}"`, `./scripts` | the path and everything the copy took below it |
 | asked the source control system about a working tree | the file that the system names; for git, the index, which `git add`, a commit and a checkout rewrite |
 
@@ -85,15 +97,15 @@ Some things are left out on purpose:
   the first 500 in the order the evaluation read them, and says so on
   stderr. A usual flake shell has 10 to 20.
 
-`--watch-files` validates nothing and evaluates nothing: it reads one cache
-entry and prints. If the evaluation fails, the entry of the last good run is
-still there, so direnv still watches the file you have to fix.
+`iets cache paths` validates nothing and evaluates nothing: it reads one
+cache entry and prints. If the evaluation fails, the entry of the last good
+run is still there, so direnv still watches the file you have to fix.
 
-With no entry at all it fails, with code `no-read-set` and empty stdout, so
-`eval` leaves the environment alone. That is on purpose: an empty line cannot
-be told from a shell with nothing to watch outside the store, and direnv would
-then sit there watching nothing. A first load that never evaluated gets this
-alongside the real error; fix that one.
+A first load that never evaluated writes no entry, so `--entry-to` leaves
+the file empty and the `[[ -s $entry ]]` guard skips the loop. direnv then
+has `flake.nix` and `flake.lock` and nothing else, which is the floor and is
+correct: nothing is known about a shell that never evaluated. The real error
+is on stderr; fix that one.
 
 ## Use the NixOS module instead
 

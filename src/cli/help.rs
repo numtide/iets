@@ -177,8 +177,8 @@ Print the bash that 'nix print-dev-env' prints for a flake's devShell
                         ssh-ng://[user@]host
   --gc-root PATH        link PATH to the environment and keep it as a GC root
   --json                print what 'nix print-dev-env --json' prints
-  --watch-files         print a watch_file line for direnv: the files the
-                        evaluation read, from the cache entry
+  --entry-to FILE       write the path of this run's cache entry to FILE,
+                        for 'iets cache paths' (see use-with-direnv)
   --workers N, --timings, --cache-dir DIR  as for 'iets eval'
   --no-tracing-cache, --no-ir-cache, --no-cache  as for 'iets eval'
   --log-format F, --show-trace  as for 'iets eval'
@@ -210,13 +210,19 @@ Parse each FILE and print its syntax tree; FILE - reads the list from stdin.
 const CACHE: &str = "\
 usage: iets cache gc [--ttl DAYS] [--dry-run] [--cache-dir DIR]
        iets cache dump ENTRY
+       iets cache paths ENTRY [--json]
 
 gc removes the cache entries nobody read for DAYS days; dump prints the
 read set of a tracing-cache entry ('iets help caching').
 
+paths prints the paths a watcher has to watch for that entry's answer to
+go stale, NUL-separated, or --json with the kind of each. A command names
+its own entry with --entry-to.
+
   --ttl DAYS            the age limit in days
   -n, --dry-run         count what gc would remove, remove nothing
   --cache-dir DIR       sweep DIR instead of the default cache
+  --json                one object per path, with its kind
 ";
 
 pub const COMMANDS: &str =

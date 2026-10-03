@@ -64,7 +64,8 @@ dereference an address of the caller's choosing.
 | Hash a URL, or a fixed-output derivation | `api::fetch::url_hash(url, unpack, algo)`, `api::fetch::drv_hash(ev, root)` |
 | Daemon events | `remote::event::Event::{Started, Log, Phase, Stopped, Failed}` |
 | Nix configuration | `config::Config::load(&[])` |
-| Evaluation cache | `Run::cached(&args, subcommand)`, `Run::hit`, `trace::run::Cache` |
+| Evaluation cache | `Run::cached(&args, subcommand)`, `Run::hit`, `trace::run::Cache`; `Cache::entry_path()` names the entry a run reads |
+| What to watch for an answer to go stale | `api::watch::watch_paths(entry)` over an entry path, giving `Watched { path, kind }` capped at `api::watch::MAX` |
 | Flake references | `api::flake_ref`, `api::flake::{is_flake_ref, parse_attr_path, select, outputs, info, tree}`; `crate::flake` is private |
 | Where a tree comes from | `source::{SourceRef, Tree, Lock}`, `source::tree(ev, &r, pos)`; the fetchers, the input store and the SCM of a working tree (`source::scm::Scm`) are behind it |
 | `eval-jobs` style walks | `jobs::run`, `jobs::Opts` |

@@ -5,6 +5,7 @@
 pub mod build;
 pub mod cache_dump;
 pub mod cache_gc;
+pub mod cache_paths;
 pub mod classic;
 pub mod devenv;
 pub mod diff;

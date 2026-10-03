@@ -36,7 +36,6 @@ in `src/error.rs` for the rest, and the daemon's build status for builds.
 | `unknown-setting` | `src/config.rs` | a level-1 record: a setting Nix 2.34.8 does not know either, with Nix's text |
 | `unknown-lint` | `src/lint/mod.rs` | a level-1 record: a lint name in an `iets.toml` or in `IETS_LINT` that the registry does not have (docs/reference/lints.md) |
 | `cache-invalidated` | `src/trace/run.rs` | a level-3 record: what changed under a tracing cache entry, so the run evaluates again |
-| `no-read-set` | `src/cli/devenv.rs` | `print-dev-env --watch-files` has no entry for this shell, so it cannot tell direnv what to watch |
 | `io` | `ErrorKind::Io`, `Error::Io` | a file that cannot be read or written |
 | `unsupported` | `ErrorKind::Unsupported`, `Error::Unsupported` | a feature iets does not have; classic mode falls back to Nix |
 | `cancelled` | `ErrorKind::Cancelled` | a parallel helper was stopped; never reaches the user |

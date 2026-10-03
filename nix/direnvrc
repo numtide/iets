@@ -4,7 +4,8 @@
 # evaluation read, not only flake.nix and flake.lock. Local flake refs only
 # (`.`, `./x`, `/abs`, `~/x`, `path:`), with an optional `#attr`.
 use_flake() {
-  local ref="${1:-.}" uri root script
+  local ref="${1:-.}" uri root entry script
+  local -a paths
   if ! has iets; then
     log_error "use flake: iets is not installed; import the iets NixOS module"
     return 1
@@ -20,12 +21,22 @@ use_flake() {
     return 1
   fi
   root="$(direnv_layout_dir)/iets-env"
+  entry="$(direnv_layout_dir)/iets-entry"
   mkdir -p "$(direnv_layout_dir)"
   watch_file "$uri/flake.nix" "$uri/flake.lock"
-  # --gc-root needs the local daemon; a remote `builder` setting refuses it
-  script="$(iets print-dev-env --builder daemon --gc-root "$root" "$ref")" || true
+  # --gc-root needs the local daemon; a remote `builder` setting refuses it.
+  # --entry-to names the cache entry this run reads, so the watch list below
+  # needs no second key derivation and no matching set of flags.
+  script="$(iets print-dev-env --builder daemon --gc-root "$root" --entry-to "$entry" "$ref")" || true
   # after the evaluation, so the first load already has a read set; before the
-  # environment, so a shell hook that fails does not lose the watches
-  eval "$(iets print-dev-env --watch-files "$ref")"
+  # environment, so a shell hook that fails does not lose the watches.
+  #
+  # One call for the whole list, never one per path: `watch_file` forks the
+  # direnv binary every time, 25 ms for 500 paths in one call against 7.3 s
+  # one at a time.
+  if [[ -s $entry && -e $(<"$entry") ]]; then
+    mapfile -d '' -t paths < <(iets cache paths "$(<"$entry")" 2>/dev/null)
+    ((${#paths[@]})) && watch_file "${paths[@]}"
+  fi
   eval "$script"
 }

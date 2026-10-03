@@ -9,10 +9,10 @@
 #  g. `#attr` selects a shell;
 #  h. a `git worktree` of this repo at a path nix has never copied: iets
 #     prints the same bash without fetching the root tree;
-#  i. `--watch-files` lists the files the shell read, for a plain directory
-#     and a git work tree, and nothing from the store; with no entry it is an
-#     error, so direnv cannot mistake it for a shell with nothing to watch;
-#  j. it reads the cache entry and evaluates nothing;
+#  i. `cache paths` lists the files the shell read, for a plain directory
+#     and a git work tree, and nothing from the store; a path that is no
+#     entry is an error;
+#  j. it reads the cache entry, NUL-separated, and evaluates nothing;
 #  k. a real direnv with nix/direnvrc reloads when such a file is edited.
 # The scratch flakes sit on the nixpkgs this repo pins (lock written by hand,
 # so nothing is fetched: both evaluators find the tree in the store by narHash).
@@ -245,27 +245,32 @@ def run-tests [ctx: record]: nothing -> int {
   ^git -C $tracked add -A
   ^git -C $tracked -c user.name=t -c user.email=t@example.org commit -q -m init
 
-  let cold = (do { cd $watched; ^$iets print-dev-env --watch-files $watched | complete })
-  if $cold.exit_code != 0 and ($cold.stdout | is-empty) and ($cold.stderr | str contains "print-dev-env") {
-    $res ++= [(ok "i. --watch-files with no entry: an error that names the command, empty stdout")]
+  let nope = (^$iets cache paths $"($work)/no-such-entry" | complete)
+  if $nope.exit_code != 0 and ($nope.stdout | is-empty) {
+    $res ++= [(ok "i. cache paths on a path that is no entry: an error, empty stdout")]
   } else {
-    $res ++= [(bad $"i. --watch-files with no entry \(exit ($cold.exit_code)\)" $cold.stdout $cold.stderr)]
+    $res ++= [(bad $"i. cache paths on a non-entry \(exit ($nope.exit_code)\)" $nope.stdout $nope.stderr)]
   }
   for c in [[name dir extra]; [path $watched []] [git $tracked [".git/index"]]] {
-    iets-env $ctx $c.dir $"($work)/watched.sh"
-    let r = (do { cd $c.dir; ^$iets print-dev-env --watch-files --timings $c.dir | complete })
-    let want = ([flake.nix flake.lock other.nix versions.json hook.sh] ++ $c.extra | each {|f| $"'($c.dir)/($f)'" })
-    let missing = ($want | where {|w| not ($r.stdout | str contains $w) })
-    let unwanted = (["/nix/store" $env.IETS_CACHE_DIR "unread.txt"] | where {|u| $r.stdout | str contains $u })
-    if $r.exit_code == 0 and ($r.stdout | str starts-with "watch_file '") and ($missing | is-empty) and ($unwanted | is-empty) {
+    let entry = $"($work)/entry-($c.name)"
+    iets-env $ctx $c.dir $"($work)/watched.sh" --entry-to $entry
+    let p = (do { cd $c.dir; ^$iets cache paths (open --raw $entry | chomp) --json | complete })
+    let paths = (try { $p.stdout | from json | get path } catch { [] })
+    let want = ([flake.nix flake.lock other.nix versions.json hook.sh] ++ $c.extra | each {|f| $"($c.dir)/($f)" })
+    let missing = ($want | where {|w| $w not-in $paths })
+    let unwanted = (["/nix/store" $env.IETS_CACHE_DIR "unread.txt"] | where {|u| $paths | any {|p| $p | str contains $u } })
+    if $p.exit_code == 0 and ($missing | is-empty) and ($unwanted | is-empty) {
       $res ++= [(ok $"i. ($c.name) flake: the files the shell read are watched, the store and unread.txt are not")]
     } else {
-      $res ++= [(bad $"i. ($c.name) flake watch list" $"missing: ($missing)" $"unwanted: ($unwanted)" $r.stdout)]
+      $res ++= [(bad $"i. ($c.name) flake watch list" $"missing: ($missing)" $"unwanted: ($unwanted)" $p.stdout)]
     }
-    if ($r.stderr | str contains "nothing evaluated") and not ($r.stderr | str contains "eval:") {
-      $res ++= [(ok $"j. ($c.name) flake: --watch-files reads the entry and evaluates nothing")]
+    # the NUL form is what the .envrc reads, and it holds the same paths
+    let nul = (do { cd $c.dir; ^$iets cache paths (open --raw $entry | chomp) | complete })
+    let n = ($nul.stdout | split row (char -i 0) | where $it != "" | length)
+    if $nul.exit_code == 0 and $n == ($paths | length) and ($nul.stderr | is-empty) {
+      $res ++= [(ok $"j. ($c.name) flake: cache paths reads the entry, NUL-separated, and evaluates nothing")]
     } else {
-      $res ++= [(bad $"j. ($c.name) flake: --watch-files evaluated" $r.stderr)]
+      $res ++= [(bad $"j. ($c.name) flake: cache paths" $"($n) NUL paths vs ($paths | length) json" $nul.stderr)]
     }
   }
 

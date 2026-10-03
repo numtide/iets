@@ -27,7 +27,7 @@ iets COMMAND [ARGS...]
 | `print-dev-env` | print the bash of a flake's devShell |
 | `lint` | print the lint registry and the levels a run would use |
 | `parse` | parse Nix files and print or check the syntax tree |
-| `cache` | sweep old cache entries, or dump an entry's read set |
+| `cache` | sweep old cache entries, or print an entry's read set and its watchable paths |
 | `plumbing` | the machine-first operations (`docs/reference/plumbing.md`) |
 | `help`, `version` | the help of a command or a topic; the version |
 
@@ -803,7 +803,7 @@ FLAKEREF` prints, byte for byte.
 | `--builder URL` | the Nix daemon: `daemon` (default), `unix:///path`, `ssh-ng://[user@]host` |
 | `--gc-root PATH` | link `PATH` to the environment's store path and register it as an indirect GC root |
 | `--json` | print what `nix print-dev-env --json` prints |
-| `--watch-files` | print a `watch_file` line for direnv instead of the bash; see below |
+| `--entry-to FILE` | write the path of this run's cache entry to FILE; see below |
 | `--workers N`, `--timings`, `--cache-dir DIR` | as for `eval` |
 | `--no-tracing-cache`, `--no-ir-cache`, `--no-cache` | as for `eval` |
 | `--log-format F`, `--show-trace` | as for `eval` |
@@ -829,20 +829,11 @@ failure, or streamed with `--timings`.
 Exit: 0, non-zero on any error, and then stdout is empty, so `eval` of an
 empty string leaves the environment alone.
 
-`--watch-files` prints what direnv has to watch for this shell, from the read
-set of the cache entry that the same command without the flag wrote. It
-validates nothing, evaluates nothing and needs no daemon. Give it the same
-`FLAKEREF` and evaluation flags.
-stdout: one line, `watch_file 'PATH' 'PATH' ...`, for direnv to `eval`. The paths are the files, directory listings and path
-kinds the evaluation observed outside `/nix/store` and iets's stores, the git
-index when it queried git, and the members of each path the expression
-copied. The flake's own source tree is not expanded, and environment
-variables have nothing to watch. The list stops at 500 paths, with a note on
-stderr. `docs/how-to/use-with-direnv.md` has the `.envrc`.
-Exit: 0, and 1 with code `no-read-set` when there is no entry for this shell,
-because an empty line cannot be told from a shell that has nothing to watch
-outside the store. Run `print-dev-env` without the flag first; the flag never
-evaluates on its own.
+`--entry-to FILE` writes the path of the tracing-cache entry this run reads
+to `FILE`, whether the run hit or wrote it. Hand that to `iets cache paths`
+for the paths a watcher has to watch, instead of deriving the key a second
+time from a matching set of flags. `docs/how-to/use-with-direnv.md` has the
+`.envrc`.
 
 A `__structuredAttrs` shell gets its `.attrs.sh` and `.attrs.json`
 written next to the GC root (`PATH-attrs/`), or under
@@ -901,24 +892,38 @@ Exit: 0, 1 when a file failed to parse, 2 on a usage error.
 ```
 iets cache gc [--ttl DAYS] [--dry-run] [--cache-dir DIR]
 iets cache dump ENTRY
+iets cache paths ENTRY [--json]
 ```
 
 `gc` removes the cache entries nobody read for `DAYS` days, and the GC roots
 iets owns that nobody has used for as long. `dump` prints the read set of a
-tracing-cache entry.
+tracing-cache entry. `paths` prints the part of that read set a watcher has
+to watch for the entry's answer to go stale.
 
 | Flag | Effect |
 |---|---|
 | `--ttl DAYS` | the age limit in days |
 | `-n`, `--dry-run` | count what `gc` would remove, remove nothing |
 | `--cache-dir DIR` | sweep `DIR` instead of the default cache |
+| `--json` | `paths`: one object per path, with its `kind` |
 
 stdout: one line per swept directory — the tracing cache, `ir`, `inputs` and
 `roots` — with the entries removed of the entries there and the bytes;
 `(dry run)` with `-n`. A swept root frees no bytes of its own, so `roots`
 always reports 0.0 MiB; what it frees is what the next `nix collect-garbage`
 can then take. `dump` prints the read set.
-Exit: 0, 2 on a usage error. `gc` and `dump` are the only subcommands.
+
+`paths` prints one path per NUL byte, in the order the run read them, or a
+JSON array of `{path, kind}` under `--json`. `kind` is `content` a file the
+run read, `listing` a directory it listed, `absent` a path it found missing,
+`scm` the file a source-control query depends on, or `member` a file under a
+tree the run copied. A path under `/nix/store` or under iets's own stores is
+left out, and so is a path whose kind was observed while it existed: that
+observation was existence, which an mtime does not answer. The list stops at
+500 paths, with a note on stderr. A command names its own entry with
+`--entry-to FILE`.
+Exit: 0, 2 on a usage error, 1 when `ENTRY` is not a cache entry. `gc`,
+`dump` and `paths` are the only subcommands.
 
 The caches themselves are in `docs/explanation/caching.md`.
 

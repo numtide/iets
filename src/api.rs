@@ -11,6 +11,7 @@ pub mod installable;
 pub mod render;
 pub mod run;
 pub mod value;
+pub mod watch;
 
 use crate::eval::{Error, EvalConfig, Evaluator, Pos};
 use crate::runtime::Word;

@@ -266,10 +266,19 @@ same bytes, by the argument that makes an input store entry one observation
 file, and costs two system calls now. A store path whose name is not the
 hash of its content — a build output, say — keeps its tree observation.
 
-The read set has a second reader. `iets print-dev-env --watch-files` prints
-the mutable paths in it as a `watch_file` line for direnv, so direnv reloads
-a shell when a file its evaluation read changes
-(`docs/how-to/use-with-direnv.md`).
+The read set has a second reader. `iets cache paths ENTRY` prints the paths
+in it that a watcher can use, NUL-separated, or `--json` with the kind of
+each. The cache owns that answer, because it owns the read set; saying it in
+a watcher's own words is the consumer's part, and `nix/direnvrc` turns these
+into direnv `watch_file` calls (`docs/how-to/use-with-direnv.md`). A command
+names the entry it read with `--entry-to FILE`, so no caller has to derive
+the key a second time.
+
+The selection is for a watcher that compares modification times. A `Stat`
+observation is left out when its path exists: it recorded existence and kind,
+and an mtime is not that — a git index refresh moves `.git` without changing
+what was observed. A path observed `Missing` stays, because it has no mtime
+to churn and its creation is the change it looks like.
 
 A run that had an entry and lost it says why, in one line:
 

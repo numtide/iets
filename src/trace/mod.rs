@@ -6,6 +6,7 @@ pub mod key;
 pub mod run;
 pub mod store;
 pub mod validate;
+pub mod watch;
 pub mod wire;
 
 use std::borrow::Cow;

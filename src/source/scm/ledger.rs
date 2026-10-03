@@ -288,7 +288,10 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["file", "stat", "file", "stat", "tree"]);
         assert_eq!(validate(&mut obs, 2).unwrap().entries, 5);
-        let watched = crate::devenv::watch_paths(&obs, &[]);
+        let watched: Vec<String> = crate::trace::watch::watched(&obs, &[])
+            .into_iter()
+            .map(|w| w.path)
+            .collect();
         let want = ENTRIES.map(|e| format!("{}{e}", root.display()));
         assert_eq!(watched, want);
 

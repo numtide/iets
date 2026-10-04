@@ -35,6 +35,21 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The kind a `FileType` names. `of` takes the same decision from a
+    /// `Metadata`; a directory entry already carries the type, so a listing
+    /// needs no second `stat`.
+    pub fn of_file_type(ft: &fs::FileType) -> Kind {
+        if ft.is_symlink() {
+            Kind::Symlink
+        } else if ft.is_dir() {
+            Kind::Directory
+        } else if ft.is_file() {
+            Kind::Regular
+        } else {
+            Kind::Other
+        }
+    }
+
     pub fn of(r: &io::Result<fs::Metadata>) -> Kind {
         match r {
             Ok(m) => {
@@ -559,20 +574,59 @@ pub fn dir_listing_hash(entries: &mut [(Vec<u8>, Kind)]) -> Digest32 {
     h.finalize().into()
 }
 
+/// Scratch for [`dir_hash`], reused across the directories of one walk: every
+/// entry name in one buffer, and a side table that is what gets sorted. The
+/// listing of a validation is read once and thrown away, so holding 20k live
+/// `Vec<u8>` allocations to sort pointers at them is the whole cost
+/// (docs/explanation/caching.md).
+#[derive(Default)]
+pub struct DirBuf {
+    names: Vec<u8>,
+    ents: Vec<Ent>,
+}
+
+/// One entry: where its name is in `DirBuf::names`, and its kind.
+struct Ent {
+    at: u32,
+    len: u32,
+    kind: u8,
+}
+
+/// [`dir_listing_hash`] of `p`, without a `Vec` per entry. The digest is the
+/// same: the same canonical order over the same fields, so a cache entry
+/// written by either is read by both.
+pub fn dir_hash(p: &Path, buf: &mut DirBuf) -> io::Result<Digest32> {
+    buf.names.clear();
+    buf.ents.clear();
+    for e in fs::read_dir(p)? {
+        let e = e?;
+        let kind = Kind::of_file_type(&e.file_type()?);
+        let name = e.file_name();
+        let b = name.as_bytes();
+        buf.ents.push(Ent {
+            at: buf.names.len() as u32,
+            len: b.len() as u32,
+            kind: kind.to_u8(),
+        });
+        buf.names.extend_from_slice(b);
+    }
+    let DirBuf { names, ents } = buf;
+    let name_of = |e: &Ent| &names[e.at as usize..(e.at + e.len) as usize];
+    ents.sort_unstable_by(|a, b| name_of(a).cmp(name_of(b)).then(a.kind.cmp(&b.kind)));
+    let mut h = Sha256::new();
+    for e in ents.iter() {
+        h.update((e.len as u64).to_le_bytes());
+        h.update(name_of(e));
+        h.update([e.kind]);
+    }
+    Ok(h.finalize().into())
+}
+
 pub fn read_dir_kinds(p: &Path) -> io::Result<Vec<(Vec<u8>, Kind)>> {
     let mut out = Vec::new();
     for e in fs::read_dir(p)? {
         let e = e?;
-        let ft = e.file_type()?;
-        let kind = if ft.is_symlink() {
-            Kind::Symlink
-        } else if ft.is_dir() {
-            Kind::Directory
-        } else if ft.is_file() {
-            Kind::Regular
-        } else {
-            Kind::Other
-        };
+        let kind = Kind::of_file_type(&e.file_type()?);
         out.push((e.file_name().as_bytes().to_vec(), kind));
     }
     Ok(out)

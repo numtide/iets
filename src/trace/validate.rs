@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use super::{Kind, Obs, dir_listing_hash, mtime_ns, read_dir_kinds, stat_kind};
+use super::{DirBuf, Kind, Obs, dir_hash, mtime_ns, stat_kind};
+#[cfg(test)]
+use super::{dir_listing_hash, read_dir_kinds};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -74,7 +76,7 @@ fn file_sha256(p: &Path) -> std::io::Result<super::Digest32> {
     Ok(super::hash_to_digest(&h.finish()))
 }
 
-fn check(o: &Obs, rehashed: &AtomicUsize) -> Outcome {
+fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
     match o {
         Obs::File {
             path,
@@ -114,9 +116,9 @@ fn check(o: &Obs, rehashed: &AtomicUsize) -> Outcome {
             }
             Outcome::Refresh(super::file_obs(path, &m, *hash))
         }
-        Obs::Dir { path, hash } => match read_dir_kinds(os(path)) {
-            Ok(mut entries) => {
-                if dir_listing_hash(&mut entries) == *hash {
+        Obs::Dir { path, hash } => match dir_hash(os(path), dirs) {
+            Ok(now) => {
+                if now == *hash {
                     Outcome::Same
                 } else {
                     Outcome::Changed(format!("directory {} has different entries", lossy(path)))
@@ -242,6 +244,8 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
         for _ in 0..threads {
             s.spawn(crate::session::bind(|| {
                 let mut mine = Vec::new();
+                // one listing buffer per thread, reused for every directory it checks
+                let mut dirs = DirBuf::default();
                 loop {
                     if failed.load(Ordering::Relaxed) {
                         break;
@@ -250,7 +254,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
                     if i >= obs.len() {
                         break;
                     }
-                    match check(&obs[i], &rehashed) {
+                    match check(&obs[i], &rehashed, &mut dirs) {
                         Outcome::Same => {}
                         Outcome::Refresh(o) => mine.push((i, o)),
                         Outcome::Changed(why) => {
@@ -398,5 +402,55 @@ mod tests {
             let e = validate(&mut obs, 4).expect_err("the missing paths fail");
             assert_eq!(e.0, "/nonexistent/iets-validate-3 is gone");
         }
+    }
+}
+
+#[cfg(test)]
+mod dir_hash_tests {
+    use super::super::{DirBuf, dir_hash, dir_listing_hash, read_dir_kinds};
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// The buffered hash must answer exactly what the allocating one does, or
+    /// a cache entry written by one generation is unreadable by the next.
+    #[test]
+    fn dir_hash_agrees_with_dir_listing_hash() {
+        let d = std::env::temp_dir().join(format!("iets-dirhash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        // names that exercise the ordering: sorts differ for case, digits,
+        // length-prefix collisions and a non-UTF-8 byte
+        for n in [
+            "b",
+            "a",
+            "B",
+            "A",
+            "a-long-one",
+            "a0",
+            "_0",
+            "zz",
+            "10",
+            "2",
+        ] {
+            fs::write(d.join(n), b"x").unwrap();
+        }
+        fs::create_dir(d.join("adir")).unwrap();
+        std::os::unix::fs::symlink("a", d.join("alink")).unwrap();
+        fs::write(d.join(std::ffi::OsStr::from_bytes(b"non\xffutf8")), b"x").unwrap();
+
+        let mut entries = read_dir_kinds(&d).unwrap();
+        let want = dir_listing_hash(&mut entries);
+        let mut buf = DirBuf::default();
+        assert_eq!(dir_hash(&d, &mut buf).unwrap(), want);
+        // the buffer is reused, so a second directory must not see the first
+        let e = std::env::temp_dir().join(format!("iets-dirhash-e-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&e);
+        fs::create_dir_all(&e).unwrap();
+        let mut none = read_dir_kinds(&e).unwrap();
+        assert_eq!(dir_hash(&e, &mut buf).unwrap(), dir_listing_hash(&mut none));
+        assert_eq!(dir_hash(&d, &mut buf).unwrap(), want);
+
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&e);
     }
 }

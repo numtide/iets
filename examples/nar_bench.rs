@@ -38,7 +38,7 @@ fn main() {
         let t = Instant::now();
         bytes = match op {
             "hash" => {
-                let (h, size) = nar::nar_hash_filtered(path, HashAlgo::Sha256, &mut |_, _| true)
+                let (h, size) = nar::nar_hash_all(path, HashAlgo::Sha256, &mut |_, _| {})
                     .unwrap_or_else(|e| die(&format!("{e}")));
                 if i == 0 {
                     println!("# {} {}", h.to_sri(), size);

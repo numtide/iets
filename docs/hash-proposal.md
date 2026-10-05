@@ -6,8 +6,8 @@ how fast each of those is today, what the hardware allows, and which changes
 are worth making. Every number here was measured, and the harness that
 produced it is in the tree.
 
-Status: the plumbing in step 4 is built. Step 1 is prototyped and measures
-3.2x; the rest is still a proposal.
+Status: the plumbing in step 4 is built. Step 1 is built in `src/store/nar.rs`
+and measures 3.7x on the hashing dumps; the rest is still a proposal.
 
 ## How it was measured
 
@@ -151,7 +151,7 @@ Hashing scales across cores: 16 of these benchmarks at once run 14% slower
 than one. A faster kernel multiplies by the core count.
 ## The proposals
 
-### 1. Read the tree ahead of the hasher (prototyped, 3.2x)
+### 1. Read the tree ahead of the hasher (built, 3.7x)
 
 The dominant cost of hashing a source tree is not the hash. It is one thread
 waiting on 54630 serial `open`/`read`/`close` round trips and the directory
@@ -177,6 +177,14 @@ On the 54630-file tree, best of five:
 
 Hashing 208 MB on its own is 76 ms, so the pipeline is within 2x of the only
 work that cannot be removed, and it stops improving at 16 readers.
+
+The built version (`hash_tree` in `src/store/nar.rs`) keeps the walk on the
+calling thread, so a filter runs where it always did, and one pool both
+lists and reads. It measures 127.2 ms on the same tree, 3.72x, with its
+default of 8 pool threads (`IETS_NAR_READERS`); 16 threads cost 156 ms,
+because every thread contends on one lock. The pool starts after 512
+entries: a 262-entry tree pays nothing, a 700-file tree pays 1%, and 1500
+files already win 1.5x.
 
 **Two earlier shapes of this lost the whole win, which is the lesson.** One
 channel message and one allocation per file costs more than the syscalls it

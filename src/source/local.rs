@@ -94,16 +94,15 @@ fn dump_and_max_mtime(
     fp: &mut Option<crate::trace::TreeFp>,
 ) -> std::io::Result<(Hash, u64, i64)> {
     let mut mtime = std::fs::symlink_metadata(dir)?.mtime();
-    let mut filter = |p: &Path, t: nar::FileType| {
+    let mut see = |p: &Path, t: nar::FileType| {
         if let Ok(st) = std::fs::symlink_metadata(p) {
             mtime = mtime.max(st.mtime());
         }
         if let Some(fp) = fp.as_mut() {
             fp.entry(p, t, true);
         }
-        true
     };
-    let (hash, nar_size) = nar::nar_hash_filtered(dir, HashAlgo::Sha256, &mut filter)?;
+    let (hash, nar_size) = nar::nar_hash_all(dir, HashAlgo::Sha256, &mut see)?;
     Ok((hash, nar_size, mtime))
 }
 

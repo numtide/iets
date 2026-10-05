@@ -75,6 +75,9 @@ pub struct Settings {
     pub ir_stats: bool,
     /// `IETS_IR_MIN`: sources below this size are not cached.
     pub ir_min: usize,
+    /// `IETS_NAR_READERS`: threads that read a tree ahead of its NAR hash.
+    /// 0 hashes on the calling thread alone.
+    pub nar_readers: usize,
     /// `provenance`, `IETS_PROVENANCE`: `false` prints plain store paths.
     pub provenance: bool,
     /// `nix-bin-dir`, `IETS_NIX_BIN_DIR`: where the real Nix binaries live.
@@ -303,6 +306,7 @@ impl Settings {
             cache_dir: env.dir("IETS_CACHE_DIR").or(c.str("cache-dir")?),
             ir_stats: env.set("IETS_IR_STATS"),
             ir_min: env.num("IETS_IR_MIN")?.unwrap_or(1024),
+            nar_readers: env.num("IETS_NAR_READERS")?.unwrap_or(8),
             provenance: env.flag("IETS_PROVENANCE", c.bool("provenance")?, true)?,
             nix_bin_dir: env.dir("IETS_NIX_BIN_DIR").or(c.str("nix-bin-dir")?),
             no_fallback: env.flag("IETS_NO_FALLBACK", c.bool("no-fallback")?, false)?,

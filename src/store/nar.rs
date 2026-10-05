@@ -1,9 +1,13 @@
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::thread::{Scope, ScopedJoinHandle};
 
 use super::hash::{Hash, HashAlgo, Hasher};
 
@@ -382,21 +386,9 @@ impl Walk<'_> {
         }
     }
 
-    /// `open` then `fstat`, not `lstat` then `open`: the same two syscalls, but
-    /// the kernel resolves the path once and the size and mode we announce
-    /// cannot disagree with the bytes that follow.
     fn regular(&mut self) -> io::Result<()> {
-        let mut f = fs::File::open(self.cur())?;
-        let st = f.metadata()?;
-        if !st.is_file() {
-            return Err(io::Error::other(format!(
-                "file '{}' changed type while being read",
-                self.cur().display()
-            )));
-        }
-        let executable = st.permissions().mode() & 0o100 != 0;
-        let len = st.len();
-        self.w.regular(executable, len, &mut f)
+        let Walk { w, path, .. } = self;
+        regular_file(w, Path::new(OsStr::from_bytes(path)))
     }
 
     fn directory(&mut self, filter: &mut PathFilter<'_>, depth: usize) -> io::Result<()> {
@@ -454,26 +446,659 @@ pub fn dump_string(contents: &[u8], sink: &mut dyn Write) -> io::Result<()> {
     w.flush()
 }
 
+/// `open` then `fstat`, not `lstat` then `open`: the same two syscalls, but
+/// the kernel resolves the path once and the size and mode we announce
+/// cannot disagree with the bytes that follow.
+fn regular_file(w: &mut TreeWriter<'_>, path: &Path) -> io::Result<()> {
+    let mut f = fs::File::open(path)?;
+    let st = f.metadata()?;
+    if !st.is_file() {
+        return Err(changed_type(path));
+    }
+    w.regular(st.permissions().mode() & 0o100 != 0, st.len(), &mut f)
+}
+
+fn changed_type(path: &Path) -> io::Error {
+    io::Error::other(format!(
+        "file '{}' changed type while being read",
+        path.display()
+    ))
+}
+
+/// How a hashing dump reports each entry to its caller. `All` keeps every
+/// entry and only observes; `Filter` decides. Only `All` may enumerate ahead
+/// of the walk: a filter's answer is what says whether a directory may be
+/// read at all, and a filter is called in NAR order on the calling thread,
+/// so its answers cannot be known early.
+pub enum Visit<'a> {
+    All(&'a mut (dyn FnMut(&Path, FileType) + 'a)),
+    Filter(&'a mut PathFilter<'a>),
+}
+
+/// The knobs of a hashing dump. The pool starts only once the walk has seen
+/// `spawn_at` entries, so a small tree never pays for a thread.
+#[derive(Clone, Copy)]
+struct Knobs {
+    readers: usize,
+    spawn_at: usize,
+    /// Entries the pool may hold in listings the walk has not reached.
+    lookahead: usize,
+    /// Directories the pool may hold waiting to be listed.
+    queue_max: usize,
+}
+
+const KNOBS: Knobs = Knobs {
+    readers: 8,
+    spawn_at: 512,
+    lookahead: 1 << 16,
+    queue_max: 4096,
+};
+/// Items per batch, and the most contents bytes one batch holds: a file that
+/// does not fit is opened by the writer instead.
+const RUN_FILES: usize = 64;
+const RUN_BYTES: usize = 1 << 20;
+/// Batches in flight per pool thread.
+const DEPTH: usize = 3;
+
 /// Mirrors store-api.cc:hashPath for NixArchive ingestion, with a filter; returns (hash, NAR size).
 pub fn nar_hash_filtered(
     path: &Path,
     algo: HashAlgo,
     filter: &mut PathFilter<'_>,
 ) -> io::Result<(Hash, u64)> {
-    let mut h = Hasher::new(algo);
-    dump_path(path, &mut h, filter)?;
-    let size = h.bytes_written();
-    Ok((h.finish(), size))
+    hash_tree(path, algo, Visit::Filter(filter), knobs())
+}
+
+/// `nar_hash_filtered` for a caller that keeps every entry: `see` is told
+/// each one, in NAR order, and the enumeration runs ahead of the walk.
+pub fn nar_hash_all(
+    path: &Path,
+    algo: HashAlgo,
+    see: &mut dyn FnMut(&Path, FileType),
+) -> io::Result<(Hash, u64)> {
+    hash_tree(path, algo, Visit::All(see), knobs())
 }
 
 /// `nix hash path PATH`: sha256 of the NAR of `path`.
 pub fn nar_hash(path: &Path) -> io::Result<Hash> {
-    Ok(nar_hash_filtered(path, HashAlgo::Sha256, &mut |_, _| true)?.0)
+    Ok(nar_hash_all(path, HashAlgo::Sha256, &mut |_, _| {})?.0)
 }
 
 /// `nix-store --dump PATH | wc -c`.
 pub fn nar_size(path: &Path) -> io::Result<u64> {
-    Ok(nar_hash_filtered(path, HashAlgo::Sha256, &mut |_, _| true)?.1)
+    Ok(nar_hash_all(path, HashAlgo::Sha256, &mut |_, _| {})?.1)
+}
+
+fn knobs() -> Knobs {
+    Knobs {
+        readers: crate::session::Session::current().settings().nar_readers,
+        ..KNOBS
+    }
+}
+
+/// The NAR hash of `path` with the file system work off the hasher's thread.
+///
+/// The NAR is one serial byte stream, so the walk that orders it and the
+/// hasher that consumes it are each one thread; what runs wide is the reading.
+/// The walk (this thread, so the filter runs here) lists directories, calls
+/// the filter and emits batches: the events the writer replays and the files
+/// they name. A pool fills each batch with its files' bytes and, for `All`,
+/// lists directories ahead of the walk. The writer thread replays the batches
+/// in order into the hasher. Until the walk has seen `spawn_at` entries there
+/// is no pool and no writer: each batch is replayed here as soon as it closes,
+/// which is the serial dump with one indirection.
+fn hash_tree(
+    path: &Path,
+    algo: HashAlgo,
+    visit: Visit<'_>,
+    knobs: Knobs,
+) -> io::Result<(Hash, u64)> {
+    let ft = FileType::of(fs::symlink_metadata(path)?.file_type());
+    let mut root = path.as_os_str().as_bytes().to_vec();
+    while root.len() > 1 && root.last() == Some(&b'/') {
+        root.pop();
+    }
+    let h = Mutex::new(Hasher::new(algo));
+    let mut lk = Locked(&h);
+    let pool = Pool {
+        st: Mutex::new(PoolState::default()),
+        work: Condvar::new(),
+        ready: Condvar::new(),
+        filled: Condvar::new(),
+        stop: AtomicBool::new(false),
+        window: knobs.readers * DEPTH,
+        knobs,
+    };
+    std::thread::scope(|s| {
+        let mut p = Planner {
+            s,
+            pool: &pool,
+            h: &h,
+            w: TreeWriter::new(&mut lk),
+            writer: None,
+            visit,
+            path: root,
+            batch: Batch::default(),
+            seen: 0,
+            submitted: 0,
+        };
+        p.w.header()?;
+        let walked = p.node(ft, 0);
+        p.finish(walked)
+    })?;
+    let h = h.into_inner().unwrap();
+    let size = h.bytes_written();
+    Ok((h.finish(), size))
+}
+
+/// The hasher as the two writers of a dump see it: the walk's own until the
+/// pool starts, the writer thread's after. A lock per flush is one per
+/// buffer of the sink, not one per token.
+struct Locked<'a>(&'a Mutex<Hasher>);
+
+impl Write for Locked<'_> {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().write(b)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One directory's entries, sorted by name bytes, which is the order a NAR
+/// demands (archive.cc:dumpPath sorts the same way).
+struct Listing {
+    names: Vec<u8>,
+    /// `(offset into names, name length, type)`.
+    ents: Vec<(u32, u32, FileType)>,
+}
+
+fn listing(dir: &Path) -> io::Result<Listing> {
+    let mut l = Listing {
+        names: Vec::new(),
+        ents: Vec::new(),
+    };
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        let off = l.names.len();
+        l.names.extend_from_slice(e.file_name().as_bytes());
+        let ft = match e.file_type() {
+            Ok(ft) => FileType::of(ft),
+            // A file system whose `dirent` carries no `d_type`.
+            Err(_) => FileType::of(fs::symlink_metadata(e.path())?.file_type()),
+        };
+        l.ents.push((off as u32, (l.names.len() - off) as u32, ft));
+    }
+    let Listing { names, ents } = &mut l;
+    let key = |e: &(u32, u32, FileType)| &names[e.0 as usize..][..e.1 as usize];
+    ents.sort_unstable_by(|a, b| key(a).cmp(key(b)));
+    Ok(l)
+}
+
+enum Ev {
+    Dir,
+    EndDir,
+    /// A name in the batch's bytes.
+    Entry(u32, u32),
+    EndEntry,
+    /// The next of the batch's items.
+    Item,
+}
+
+/// What the writer replays, and the files and symlinks the pool resolves for
+/// it. Names and paths share one arena, so a batch is three allocations.
+#[derive(Default)]
+struct Batch {
+    ev: Vec<Ev>,
+    bytes: Vec<u8>,
+    /// `(offset into bytes, path length, is a symlink)`.
+    items: Vec<(u32, u32, bool)>,
+}
+
+/// A filled batch: one allocation for the contents, one slot per item.
+struct Slab {
+    bytes: Vec<u8>,
+    got: Vec<Got>,
+}
+
+enum Got {
+    /// `(offset, length, executable)` in the slab.
+    Bytes(usize, usize, bool),
+    Link(usize, usize),
+    /// Too big for the slab; the writer opens it.
+    Big,
+}
+
+fn fill(b: &Batch) -> io::Result<Slab> {
+    let mut s = Slab {
+        bytes: Vec::with_capacity(RUN_BYTES / 4),
+        got: Vec::with_capacity(b.items.len()),
+    };
+    for &(o, n, link) in &b.items {
+        let path = Path::new(OsStr::from_bytes(&b.bytes[o as usize..][..n as usize]));
+        let off = s.bytes.len();
+        if link {
+            s.bytes
+                .extend_from_slice(fs::read_link(path)?.as_os_str().as_bytes());
+            s.got.push(Got::Link(off, s.bytes.len() - off));
+            continue;
+        }
+        let f = fs::File::open(path)?;
+        let st = f.metadata()?;
+        if !st.is_file() {
+            return Err(changed_type(path));
+        }
+        let len = st.len();
+        if len > (RUN_BYTES - off) as u64 {
+            s.got.push(Got::Big);
+            continue;
+        }
+        s.bytes.reserve(len as usize);
+        let got = (&f).take(len).read_to_end(&mut s.bytes)?;
+        if got as u64 != len {
+            return Err(io::Error::other("file ended early while reading contents"));
+        }
+        s.got
+            .push(Got::Bytes(off, got, st.permissions().mode() & 0o100 != 0));
+    }
+    Ok(s)
+}
+
+/// Writes one batch. Without a slab every item is resolved here, which is
+/// what the serial dump does.
+fn replay(w: &mut TreeWriter<'_>, b: &Batch, slab: Option<&Slab>) -> io::Result<()> {
+    let mut i = 0;
+    for ev in &b.ev {
+        match *ev {
+            Ev::Dir => w.dir()?,
+            Ev::EndDir => w.end_dir()?,
+            Ev::Entry(o, n) => w.entry(&b.bytes[o as usize..][..n as usize])?,
+            Ev::EndEntry => w.end_entry()?,
+            Ev::Item => {
+                let (o, n, link) = b.items[i];
+                let path = Path::new(OsStr::from_bytes(&b.bytes[o as usize..][..n as usize]));
+                match slab.map(|s| (&s.got[i], s)) {
+                    Some((&Got::Bytes(off, len, exe), s)) => {
+                        w.regular(exe, len as u64, &mut &s.bytes[off..off + len])?
+                    }
+                    Some((&Got::Link(off, len), s)) => w.symlink(&s.bytes[off..off + len])?,
+                    _ if link => w.symlink(fs::read_link(path)?.as_os_str().as_bytes())?,
+                    _ => regular_file(w, path)?,
+                }
+                i += 1;
+            }
+        }
+    }
+    Ok(())
+}
+/// What the pool threads, the walk and the writer share.
+struct Pool {
+    st: Mutex<PoolState>,
+    /// Pool threads wait here for a batch or a directory.
+    work: Condvar,
+    /// The walk waits here for a listing or for the window.
+    ready: Condvar,
+    /// The writer waits here for its next batch.
+    filled: Condvar,
+    stop: AtomicBool,
+    /// Batches the walk may run ahead of the writer.
+    window: usize,
+    knobs: Knobs,
+}
+
+#[derive(Default)]
+struct PoolState {
+    dirs: HashMap<Vec<u8>, Slot>,
+    /// Directories to list ahead, last in first out with a listing's
+    /// subdirectories pushed in reverse, so the pool reads in NAR order and
+    /// what it holds is what the walk takes next.
+    queue: Vec<(Vec<u8>, usize)>,
+    /// Entries in `Done` listings.
+    held: usize,
+    /// Pool threads waiting on `work`: a wake-up is a syscall, so only as
+    /// many are woken as there are new jobs.
+    idle: usize,
+    /// The walk is waiting on `ready` for a listing.
+    wants_dir: bool,
+    batches: VecDeque<(usize, Batch)>,
+    filled: HashMap<usize, (Batch, io::Result<Slab>)>,
+    /// The batch the writer wants next.
+    next: usize,
+    submitted: usize,
+    done: bool,
+}
+
+enum Slot {
+    Queued,
+    Running,
+    Done(io::Result<Listing>),
+}
+
+enum Job {
+    Fill(usize, Batch),
+    List(Vec<u8>, usize),
+}
+
+impl PoolState {
+    /// Queues the subdirectories of a listing and returns how many.
+    fn queue_subdirs(
+        &mut self,
+        dir: &[u8],
+        l: &io::Result<Listing>,
+        depth: usize,
+        max: usize,
+    ) -> usize {
+        let Ok(l) = l else { return 0 };
+        if depth + 1 >= NAR_MAX_DEPTH {
+            return 0;
+        }
+        let room = max.saturating_sub(self.queue.len());
+        let subs: Vec<&(u32, u32, FileType)> = l
+            .ents
+            .iter()
+            .filter(|e| e.2 == FileType::Directory)
+            .take(room)
+            .collect();
+        for &&(off, len, _) in subs.iter().rev() {
+            let mut p = Vec::with_capacity(dir.len() + 1 + len as usize);
+            p.extend_from_slice(dir);
+            p.push(b'/');
+            p.extend_from_slice(&l.names[off as usize..][..len as usize]);
+            self.dirs.insert(p.clone(), Slot::Queued);
+            self.queue.push((p, depth + 1));
+        }
+        subs.len()
+    }
+}
+
+impl Pool {
+    fn wake(&self, st: &PoolState, jobs: usize) {
+        for _ in 0..jobs.min(st.idle) {
+            self.work.notify_one();
+        }
+    }
+
+    /// A pool thread. Filling comes before listing: the writer waits on a
+    /// fill, and the walk never waits on a listing that has not started.
+    fn serve(&self) {
+        loop {
+            let job = {
+                let mut st = self.st.lock().unwrap();
+                loop {
+                    if self.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Some((k, b)) = st.batches.pop_front() {
+                        break Job::Fill(k, b);
+                    }
+                    if st.held < self.knobs.lookahead
+                        && let Some((dir, depth)) = st.queue.pop()
+                    {
+                        if let Some(slot @ Slot::Queued) = st.dirs.get_mut(&dir) {
+                            *slot = Slot::Running;
+                            break Job::List(dir, depth);
+                        }
+                        continue;
+                    }
+                    st.idle += 1;
+                    st = self.work.wait(st).unwrap();
+                    st.idle -= 1;
+                }
+            };
+            match job {
+                Job::Fill(k, b) => {
+                    let slab = fill(&b);
+                    self.st.lock().unwrap().filled.insert(k, (b, slab));
+                    self.filled.notify_one();
+                }
+                Job::List(dir, depth) => {
+                    let l = listing(Path::new(OsStr::from_bytes(&dir)));
+                    let mut st = self.st.lock().unwrap();
+                    st.held += l.as_ref().map_or(0, |l| l.ents.len());
+                    let n = st.queue_subdirs(&dir, &l, depth, self.knobs.queue_max);
+                    st.dirs.insert(dir, Slot::Done(l));
+                    self.wake(&st, n);
+                    if st.wants_dir {
+                        self.ready.notify_all();
+                    }
+                }
+            }
+        }
+    }
+
+    /// The walk's own demand for a listing. It waits only on one a pool
+    /// thread is in the middle of; anything the pool has not started it reads
+    /// itself, so the lookahead cap can starve the pool but never the walk.
+    fn take(&self, dir: &[u8], depth: usize) -> io::Result<Listing> {
+        let mut st = self.st.lock().unwrap();
+        loop {
+            match st.dirs.get(dir) {
+                Some(Slot::Done(_)) => {
+                    let Some(Slot::Done(l)) = st.dirs.remove(dir) else {
+                        unreachable!()
+                    };
+                    let starved = st.held >= self.knobs.lookahead;
+                    st.held -= l.as_ref().map_or(0, |l| l.ents.len());
+                    if starved {
+                        self.wake(&st, 1);
+                    }
+                    return l;
+                }
+                Some(Slot::Running) => {
+                    st.wants_dir = true;
+                    st = self.ready.wait(st).unwrap();
+                    st.wants_dir = false;
+                }
+                _ => {
+                    st.dirs.remove(dir);
+                    drop(st);
+                    let l = listing(Path::new(OsStr::from_bytes(dir)));
+                    let mut st = self.st.lock().unwrap();
+                    let n = st.queue_subdirs(dir, &l, depth, self.knobs.queue_max);
+                    self.wake(&st, n);
+                    return l;
+                }
+            }
+        }
+    }
+
+    fn submit(&self, k: usize, b: Batch) -> io::Result<()> {
+        let mut st = self.st.lock().unwrap();
+        while k >= st.next + self.window {
+            if self.stop.load(Ordering::Relaxed) {
+                return Err(io::Error::other("the NAR writer stopped"));
+            }
+            st = self.ready.wait(st).unwrap();
+        }
+        st.batches.push_back((k, b));
+        st.submitted = k + 1;
+        self.wake(&st, 1);
+        Ok(())
+    }
+
+    /// The writer's next batch, or `None` once the walk is done and every
+    /// batch is written, or on stop.
+    fn next_filled(&self) -> Option<(Batch, io::Result<Slab>)> {
+        let mut st = self.st.lock().unwrap();
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            let k = st.next;
+            if let Some(x) = st.filled.remove(&k) {
+                st.next = k + 1;
+                self.ready.notify_all();
+                return Some(x);
+            }
+            if st.done && k >= st.submitted {
+                return None;
+            }
+            st = self.filled.wait(st).unwrap();
+        }
+    }
+
+    fn finish(&self) {
+        self.st.lock().unwrap().done = true;
+        self.filled.notify_all();
+    }
+
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.work.notify_all();
+        self.ready.notify_all();
+        self.filled.notify_all();
+    }
+}
+
+/// The walk: NAR order, the filter, and the batches.
+struct Planner<'scope, 'env, 'v> {
+    s: &'scope Scope<'scope, 'env>,
+    pool: &'env Pool,
+    h: &'env Mutex<Hasher>,
+    /// Used until the writer thread starts, then flushed and left.
+    w: TreeWriter<'env>,
+    writer: Option<ScopedJoinHandle<'scope, io::Result<()>>>,
+    visit: Visit<'v>,
+    /// See `Walk::path`.
+    path: Vec<u8>,
+    batch: Batch,
+    seen: usize,
+    submitted: usize,
+}
+
+impl Planner<'_, '_, '_> {
+    fn node(&mut self, ft: FileType, depth: usize) -> io::Result<()> {
+        if depth >= NAR_MAX_DEPTH {
+            return Err(io::Error::other(format!(
+                "path '{}' exceeds maximum NAR directory depth of {NAR_MAX_DEPTH}",
+                Path::new(OsStr::from_bytes(&self.path)).display()
+            )));
+        }
+        match ft {
+            FileType::Regular => self.item(false),
+            FileType::Symlink => self.item(true),
+            FileType::Directory => self.directory(depth),
+            FileType::Unknown => Err(io::Error::other(format!(
+                "file '{}' has an unsupported type",
+                Path::new(OsStr::from_bytes(&self.path)).display()
+            ))),
+        }
+    }
+
+    fn item(&mut self, link: bool) -> io::Result<()> {
+        let off = self.batch.bytes.len();
+        self.batch.bytes.extend_from_slice(&self.path);
+        self.batch
+            .items
+            .push((off as u32, self.path.len() as u32, link));
+        self.batch.ev.push(Ev::Item);
+        if self.writer.is_none() {
+            replay(&mut self.w, &self.batch, None)?;
+            self.batch.ev.clear();
+            self.batch.bytes.clear();
+            self.batch.items.clear();
+        } else if self.batch.items.len() >= RUN_FILES {
+            self.submit()?;
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self) -> io::Result<()> {
+        let b = std::mem::take(&mut self.batch);
+        self.pool.submit(self.submitted, b)?;
+        self.submitted += 1;
+        Ok(())
+    }
+
+    fn directory(&mut self, depth: usize) -> io::Result<()> {
+        if self.pool.stop.load(Ordering::Relaxed) {
+            return Err(io::Error::other("the NAR writer stopped"));
+        }
+        let l = match (&self.writer, &self.visit) {
+            (Some(_), Visit::All(_)) => self.pool.take(&self.path, depth)?,
+            _ => listing(Path::new(OsStr::from_bytes(&self.path)))?,
+        };
+        self.seen += l.ents.len();
+        if self.writer.is_none()
+            && self.pool.knobs.readers > 0
+            && self.seen >= self.pool.knobs.spawn_at
+        {
+            self.spawn()?;
+        }
+        self.batch.ev.push(Ev::Dir);
+        let base = self.path.len();
+        for &(off, len, ft) in &l.ents {
+            let name = &l.names[off as usize..][..len as usize];
+            self.path.push(b'/');
+            self.path.extend_from_slice(name);
+            let cur = Path::new(OsStr::from_bytes(&self.path));
+            let keep = match &mut self.visit {
+                Visit::All(see) => {
+                    see(cur, ft);
+                    true
+                }
+                Visit::Filter(f) => f(cur, ft),
+            };
+            if keep {
+                let o = self.batch.bytes.len();
+                self.batch.bytes.extend_from_slice(name);
+                self.batch.ev.push(Ev::Entry(o as u32, len));
+                self.node(ft, depth + 1)?;
+                self.batch.ev.push(Ev::EndEntry);
+            }
+            self.path.truncate(base);
+        }
+        self.batch.ev.push(Ev::EndDir);
+        Ok(())
+    }
+
+    fn spawn(&mut self) -> io::Result<()> {
+        self.w.flush()?;
+        let pool = self.pool;
+        for _ in 0..pool.knobs.readers {
+            self.s.spawn(move || pool.serve());
+        }
+        let h = self.h;
+        self.writer = Some(self.s.spawn(move || {
+            let mut lk = Locked(h);
+            let mut w = TreeWriter::new(&mut lk);
+            let r = (|| {
+                while let Some((b, slab)) = pool.next_filled() {
+                    replay(&mut w, &b, Some(&slab?))?;
+                }
+                w.flush()
+            })();
+            if r.is_err() {
+                pool.stop();
+            }
+            r
+        }));
+        Ok(())
+    }
+
+    /// Closes the last batch, lets the writer drain, and stops the pool. The
+    /// writer's error wins: a stop it caused is what the walk saw.
+    fn finish(mut self, walked: io::Result<()>) -> io::Result<()> {
+        let Some(writer) = self.writer.take() else {
+            walked?;
+            replay(&mut self.w, &self.batch, None)?;
+            return self.w.flush();
+        };
+        let r = walked.and_then(|()| match self.batch.ev.is_empty() {
+            true => Ok(()),
+            false => self.submit(),
+        });
+        if r.is_err() {
+            self.pool.stop();
+        }
+        self.pool.finish();
+        let wrote = writer
+            .join()
+            .map_err(|_| io::Error::other("the NAR writer panicked"))?;
+        self.pool.stop();
+        wrote.and(r)
+    }
 }
 
 /// Mirrors store-api.cc:hashPath for Flat ingestion: hash of the file bytes.
@@ -989,5 +1614,223 @@ pub(crate) mod tests {
             ("sub/z".into(), FileType::Regular),
         ];
         assert_eq!(seen, expect);
+    }
+
+    /// The serial walk, which every pipelined dump must reproduce byte for byte.
+    fn serial(path: &Path, filter: &mut PathFilter<'_>) -> io::Result<(Hash, u64)> {
+        let mut h = Hasher::new(HashAlgo::Sha256);
+        dump_path(path, &mut h, filter)?;
+        let size = h.bytes_written();
+        Ok((h.finish(), size))
+    }
+
+    fn piped(readers: usize) -> Knobs {
+        Knobs {
+            readers,
+            spawn_at: 0,
+            ..KNOBS
+        }
+    }
+
+    /// An empty directory, a zero-length file, an executable, a file too big
+    /// for a slab, a dangling symlink, deep nesting, names that only sort right
+    /// by bytes (`a` beside `a-b` and `a.txt`), more files than one batch holds
+    /// and more directories than one lookahead cap in `lookahead_cap_cannot_deadlock`.
+    fn awkward_tree(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("iets-nar-awkward-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = dir.join("tree");
+        fs::create_dir_all(t.join("empty")).unwrap();
+        fs::write(t.join("zero"), b"").unwrap();
+        fs::write(t.join("exe"), b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(t.join("exe"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(t.join("big"), vec![7u8; RUN_BYTES + 1]).unwrap();
+        symlink("nowhere", t.join("dangling")).unwrap();
+        let mut deep = t.join("deep");
+        for i in 0..30 {
+            deep.push(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf"), b"leaf").unwrap();
+        fs::create_dir(t.join("a")).unwrap();
+        fs::write(t.join("a/x"), b"x").unwrap();
+        fs::write(t.join("a.txt"), b"a").unwrap();
+        fs::write(t.join("a-b"), b"ab").unwrap();
+        fs::create_dir(t.join("many")).unwrap();
+        for i in 0..150 {
+            fs::write(t.join(format!("many/f{i:03}")), format!("file {i}")).unwrap();
+        }
+        fs::create_dir(t.join("dirs")).unwrap();
+        for i in 0..300 {
+            let d = t.join(format!("dirs/d{i:03}"));
+            fs::create_dir(&d).unwrap();
+            fs::write(d.join("f"), i.to_string()).unwrap();
+            if i % 3 == 0 {
+                fs::create_dir(d.join("sub")).unwrap();
+                fs::write(d.join("sub/g"), b"g").unwrap();
+                symlink("../f", d.join("sub/l")).unwrap();
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn pipelined_hash_matches_serial_on_awkward_shapes() {
+        let tree = awkward_tree("shapes");
+        for root in [
+            tree.clone(),
+            tree.join("big"),
+            tree.join("dangling"),
+            tree.join("exe"),
+            tree.join("empty"),
+        ] {
+            let want = serial(&root, &mut |_, _| true).unwrap();
+            assert_eq!(
+                hash_tree(
+                    &root,
+                    HashAlgo::Sha256,
+                    Visit::All(&mut |_, _| {}),
+                    piped(4)
+                )
+                .unwrap(),
+                want,
+                "{}",
+                root.display()
+            );
+            assert_eq!(
+                hash_tree(
+                    &root,
+                    HashAlgo::Sha256,
+                    Visit::Filter(&mut |_, _| true),
+                    piped(4)
+                )
+                .unwrap(),
+                want,
+                "{}",
+                root.display()
+            );
+            assert_eq!(
+                hash_tree(
+                    &root,
+                    HashAlgo::Sha256,
+                    Visit::All(&mut |_, _| {}),
+                    Knobs {
+                        readers: 0,
+                        ..KNOBS
+                    }
+                )
+                .unwrap(),
+                want,
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn pipelined_filter_sees_the_serial_sequence() {
+        let tree = awkward_tree("sequence");
+        let decide =
+            |p: &Path| !p.to_string_lossy().ends_with('1') && p.file_name().unwrap() != "deep";
+        let mut want = Vec::new();
+        let (wh, ws) = serial(&tree, &mut |p, t| {
+            let keep = decide(p);
+            want.push((p.to_path_buf(), t, keep));
+            keep
+        })
+        .unwrap();
+        let mut got = Vec::new();
+        let (gh, gs) = hash_tree(
+            &tree,
+            HashAlgo::Sha256,
+            Visit::Filter(&mut |p, t| {
+                let keep = decide(p);
+                got.push((p.to_path_buf(), t, keep));
+                keep
+            }),
+            piped(3),
+        )
+        .unwrap();
+        assert_eq!(got, want);
+        assert_eq!((gh, gs), (wh, ws));
+
+        let mut want = Vec::new();
+        serial(&tree, &mut |p, t| {
+            want.push((p.to_path_buf(), t));
+            true
+        })
+        .unwrap();
+        let mut got = Vec::new();
+        hash_tree(
+            &tree,
+            HashAlgo::Sha256,
+            Visit::All(&mut |p, t| got.push((p.to_path_buf(), t))),
+            piped(3),
+        )
+        .unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn lookahead_cap_cannot_deadlock() {
+        let tree = awkward_tree("cap");
+        let want = serial(&tree, &mut |_, _| true).unwrap();
+        let tight = Knobs {
+            readers: 2,
+            spawn_at: 0,
+            lookahead: 4,
+            queue_max: 2,
+        };
+        assert_eq!(
+            hash_tree(&tree, HashAlgo::Sha256, Visit::All(&mut |_, _| {}), tight).unwrap(),
+            want
+        );
+    }
+
+    #[test]
+    fn rejected_directory_is_never_read() {
+        let tree = awkward_tree("locked");
+        let locked = tree.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("secret"), b"s").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&locked).is_ok() {
+            return;
+        }
+        let mut reject = |p: &Path, _: FileType| p != locked;
+        let want = serial(&tree, &mut reject).unwrap();
+        let got = hash_tree(
+            &tree,
+            HashAlgo::Sha256,
+            Visit::Filter(&mut reject),
+            piped(4),
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got.unwrap(), want);
+    }
+
+    #[test]
+    fn too_deep_fails_in_both_modes() {
+        let mut deep = std::env::temp_dir().join(format!("iets-nar-deep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&deep);
+        let root = deep.clone();
+        for i in 0..NAR_MAX_DEPTH + 2 {
+            deep.push(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        let why = |r: io::Result<(Hash, u64)>| r.unwrap_err().to_string();
+        let want = why(serial(&root, &mut |_, _| true));
+        assert!(
+            want.contains("exceeds maximum NAR directory depth"),
+            "{want}"
+        );
+        let got = why(hash_tree(
+            &root,
+            HashAlgo::Sha256,
+            Visit::All(&mut |_, _| {}),
+            piped(4),
+        ));
+        assert_eq!(got, want);
     }
 }

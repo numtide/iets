@@ -103,7 +103,7 @@ impl GrpcConfig {
                     Error::Usage(format!("grpc://: '{what}' wants a number, got '{v}'"))
                 })
             };
-            // configuration.hh:Setting<bool>::set accepts only these two spellings.
+            // configuration.cc:310, BaseSetting<bool>::parse: exactly these spellings.
             let flag = |what: &str| -> Result<bool> {
                 match v.as_str() {
                     "true" | "1" | "yes" => Ok(true),

@@ -58,13 +58,14 @@ pub struct Settings {
     pub events: u32,
     /// `IETS_EVENTS_TO`: where the events go. `None` is stderr.
     pub events_to: Option<String>,
-    /// `IETS_PROFILE`, `eval-profiler=flamegraph`: sample the call
+    /// `IETS_PROFILE`: sample the call
     /// stack, weighed by time (`eval`) or by arena bytes (`alloc`).
     pub profile: Option<crate::profile::Mode>,
-    /// `IETS_PROFILE_TO`, `eval-profile-file`: where the folded lines go.
+    /// `IETS_PROFILE_TO`: where the folded lines go.
     /// `None` is stderr.
     pub profile_to: Option<String>,
-    /// `IETS_PROFILE_HZ`, `eval-profiler-frequency`: samples a second.
+    /// `IETS_PROFILE_HZ`: samples a second. Nix's `eval-profiler*` settings are
+    /// not read (src/config.rs).
     pub profile_hz: u32,
     /// `cache`, `IETS_CACHE`: the tracing and IR caches.
     pub cache: bool,

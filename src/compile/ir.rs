@@ -198,6 +198,7 @@ pub struct LetIr {
     pub body: IrRef,
 }
 
-// Every evaluated file keeps its IR for the whole run: ~120 MB for a NixOS
-// system at 48 bytes per node, so the node size is load-bearing.
+// Every evaluated file keeps its IR for the whole run: 101 MB on nixos-desktop
+// at 32 bytes per node, 122 MB when one variant made it 48, so the node size
+// is load-bearing.
 const _: () = assert!(size_of::<Ir>() == 32);

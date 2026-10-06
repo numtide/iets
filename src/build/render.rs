@@ -636,8 +636,31 @@ mod tests {
         (Renderer::new(style, Box::new(s.clone())), s)
     }
 
+    /// A duration as `fmt_duration` writes one: `0s`, `12s`, `3m04s`,
+    /// `1h02m03s`.
+    fn is_duration(s: &str) -> bool {
+        s.ends_with('s')
+            && s.starts_with(|c: char| c.is_ascii_digit())
+            && s.chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, 'h' | 'm' | 's'))
+    }
+
+    /// The sink's text, with every rendered duration normalised to `0s`.
+    /// A build that is still running is timed from `Instant::now()`
+    /// (`Build::elapsed`), so a loaded machine renders `1s` where an idle
+    /// one renders `0s` and an assertion on the whole verdict line fails.
+    /// Nothing here is about the clock: `event.rs` tests `fmt_duration`.
     fn text(s: &Sink) -> String {
-        String::from_utf8(s.0.lock().unwrap().clone()).unwrap()
+        let raw = String::from_utf8(s.0.lock().unwrap().clone()).unwrap();
+        raw.split_inclusive([' ', '\n'])
+            .map(|t| {
+                let core = t.trim_matches(|c: char| matches!(c, ' ' | '\n' | '(' | ')' | ','));
+                match is_duration(core) {
+                    true => t.replacen(core, "0s", 1),
+                    false => t.to_string(),
+                }
+            })
+            .collect()
     }
 
     fn ev(kind: Kind) -> BuildEvent {

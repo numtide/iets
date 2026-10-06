@@ -344,9 +344,18 @@ local `nix.conf` must therefore list and trust the cache (`substituters`,
 | the `Schedule` stream | reconnects when the scheduler says `Restarting`, or goes away with `UNAVAILABLE`, `UNKNOWN` or `INTERNAL`, for up to `restart-grace`, and sends every unanswered `Want` again |
 | a bounced `BuildDerivation` (`ABORTED`, `FAILED_PRECONDITION`, `UNAVAILABLE`, `UNKNOWN`, `INTERNAL`) | back to the scheduler, up to `reschedule-retries` times (build.cc:`buildAssigned`). Unlike build.cc, each ask after the first waits: 1 s doubling to 30 s |
 | `NOT_FOUND` | the worker has not got the `.drv` closure: iets uploads it (`QueryValidPaths` then `AddMultipleToStore`, with the same routing headers) and asks once more |
+| an `Assigned` naming an address that bounced twice in a row | refused without a call: the derivation goes back to the scheduler once the address's cooldown has passed, bounded by `restart-grace`, not by `reschedule-retries` |
 
-A worker that crashed stays placeable until the scheduler notices, and
-every bounce off it is instant.
+A worker that crashed stays placeable until the scheduler notices (42 s
+seen on farm.numtide.com, 2026-09-22) and every bounce off it is instant.
+
+The back-off above is per derivation, so `src/remote/grpc/health.rs` holds
+what the threads of one batch share: two consecutive bounces off an
+address close it for the same ladder, and a build that returns a result on
+it, failed or not, clears the count. The refusals are bounded by
+`restart-grace` because they cost no call, and the error names the last
+address: `waited 120s, and every worker the scheduler assigned turns
+builds away (last 'bld3:50051')`.
 
 ## Measured: the transports
 

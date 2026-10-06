@@ -19,6 +19,7 @@ use tonic::transport::Channel;
 
 use crate::error::{Error, Result};
 
+use super::health::Health;
 use super::proto::sched_msg::Msg;
 use super::proto::scheduler_client::SchedulerClient;
 use super::{Client, GrpcConfig, Headers, c_request, first_line, proto};
@@ -40,6 +41,8 @@ pub struct Sched {
     state: Arc<Mutex<State>>,
     task: tokio::task::JoinHandle<()>,
     grace: Duration,
+    /// What the batch has learnt about the addresses it was assigned.
+    pub health: Health,
 }
 
 impl Sched {
@@ -55,7 +58,13 @@ impl Sched {
             state,
             task,
             grace: Duration::from_secs(c.cfg.restart_grace),
+            health: Health::default(),
         })
+    }
+
+    /// `restart-grace`, which also bounds the refusals in `build::build`.
+    pub fn grace(&self) -> Duration {
+        self.grace
     }
 
     /// Sends `want` and waits for the scheduler's answer. `Unplaceable` is

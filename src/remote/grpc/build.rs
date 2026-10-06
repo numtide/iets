@@ -441,8 +441,11 @@ pub fn build(
     act: &Activity,
 ) -> Result<(BuildResult, usize)> {
     let mut calls = 0usize;
-    for n in 0..=c.cfg.reschedule_retries {
-        std::thread::sleep(reschedule_pause(n));
+    let mut bounces = 0u32;
+    // A refusal costs no call, so spending `reschedule-retries` on it would
+    // fail the derivation with nothing attempted. Bounded like `Unplaceable`.
+    let refuse_by = Instant::now() + sched.grace();
+    loop {
         let (worker, assign_id) = match sched.place(job.want())? {
             // 2 = AlreadyValid.
             Answer::Cached => {
@@ -456,26 +459,46 @@ pub fn build(
             }
             Answer::Assigned { worker, assign_id } => (worker, assign_id),
         };
+        if let Some(wait) = sched.health.refusal(&worker) {
+            let left = refuse_by.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Error::Store(format!(
+                    "'{}': waited {}s, and every worker the scheduler assigned turns builds away (last '{worker}')",
+                    job.drv_path,
+                    sched.grace().as_secs()
+                )));
+            }
+            std::thread::sleep(wait.min(left));
+            continue;
+        }
         match build_derivation(c, job, &worker, assign_id, objects, tx, act, &mut calls)? {
-            Some(res) => return Ok((res, calls)),
-            None => continue,
+            Some(res) => {
+                sched.health.worked(&worker);
+                return Ok((res, calls));
+            }
+            None => {
+                sched.health.bounced(&worker);
+                bounces += 1;
+                if bounces > c.cfg.reschedule_retries {
+                    return Err(Error::Store(format!(
+                        "'{}': gave up after {} reschedules",
+                        job.drv_path, c.cfg.reschedule_retries
+                    )));
+                }
+                std::thread::sleep(reschedule_pause(bounces));
+            }
         }
     }
-    Err(Error::Store(format!(
-        "'{}': gave up after {} reschedules",
-        job.drv_path, c.cfg.reschedule_retries
-    )))
 }
 
-/// None before the first ask, then 1 s doubling to 30 s: 121 s over the
-/// default 8 reschedules. build.cc asks again at once, but a worker that
-/// crashed stays placeable until the scheduler notices (42 s seen), and every
-/// bounce off it is instant, so back-to-back asks spent the budget first.
+/// After the `n`th bounce: 1 s doubling to 30 s, 121 s over the default 8
+/// reschedules. build.cc asks again at once, but a worker that crashed stays
+/// placeable until the scheduler notices (42 s seen), and every bounce off it
+/// is instant, so back-to-back asks spent the budget first. This is one
+/// derivation's own backstop; `health` is what stops the whole batch walking
+/// this ladder against the same address.
 fn reschedule_pause(n: u32) -> Duration {
-    match n {
-        0 => Duration::ZERO,
-        n => Duration::from_secs((1u64 << (n - 1).min(5)).min(30)),
-    }
+    Duration::from_secs((1u64 << n.saturating_sub(1).min(5)).min(30))
 }
 
 /// build.cc:`buildAssigned`: `NOT_FOUND` means the worker lacks the `.drv`
@@ -885,8 +908,8 @@ mod tests {
 
     #[test]
     fn reschedules_back_off_past_a_dead_worker() {
-        let p: Vec<u64> = (0..=8).map(|n| reschedule_pause(n).as_secs()).collect();
-        assert_eq!(p, [0, 1, 2, 4, 8, 16, 30, 30, 30]);
+        let p: Vec<u64> = (1..=8).map(|n| reschedule_pause(n).as_secs()).collect();
+        assert_eq!(p, [1, 2, 4, 8, 16, 30, 30, 30]);
         assert_eq!(reschedule_pause(u32::MAX).as_secs(), 30);
     }
 

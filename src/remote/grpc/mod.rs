@@ -6,6 +6,7 @@
 pub mod backend;
 pub mod build;
 pub mod drvwire;
+pub mod health;
 pub mod sched;
 
 #[allow(clippy::all, clippy::pedantic)]

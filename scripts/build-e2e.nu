@@ -88,7 +88,9 @@ in { ci = o.checks.${system}; }
   $ok = ($ok | append (verdict (($r6.exit_code == 0) and (($m.willBuild | length) == 4)) "the plan has the four checks" $r6.stdout))
 
   print "== 7. no verdict without an evaluation"
-  let r7 = (go $iets build --builder daemon --no-tracing-cache -E $"let f = import ($tmp)/fresh/flake.nix; in \(f.outputs { self = null; }\).checks.($system) // { broken = throw \"boom\"; }")
+  # --impure: an `-E` expression's project is the working directory, and this
+  # one imports the scratch flake under TMPDIR (docs/reference/settings.md)
+  let r7 = (go $iets build --builder daemon --impure --no-tracing-cache -E $"let f = import ($tmp)/fresh/flake.nix; in \(f.outputs { self = null; }\).checks.($system) // { broken = throw \"boom\"; }")
   $ok = ($ok | append (verdict (($r7.exit_code == 1) and ($r7.stdout == "") and ($r7.stderr =~ 'boom')) "an attribute that throws stops the run" $"exit ($r7.exit_code) ($r7.stderr)"))
   $ok = ($ok | append (verdict (not ($r7.stderr =~ 'building fb-')) "nothing was built" $r7.stderr))
   let r7e = (go $iets build --builder daemon -E '{ a = { }; }')

@@ -19,6 +19,13 @@ def --wrapped nej [ctx: record, ...args: string] {
 
 def gc-roots [dir: string]: nothing -> list<string> { ls $dir | get name | path basename | sort }
 
+# iets evaluates a file purely and nix-eval-jobs follows nix.conf
+# (docs/reference/settings.md), so the iets side of a file case gets
+# `--impure` and the two stay comparable. `--flake` means pure in both.
+def impure-for [args: list<string>]: nothing -> list<string> {
+  if ($args | any {|a| $a in ["--flake" "--impure"] }) { [] } else { ["--impure"] }
+}
+
 # check NAME ARGS: both tools get ARGS; GCROOTS in ARGS is replaced by
 # a directory per tool whose entries are compared too.
 def check [ctx: record, name: string, args: list<string>]: nothing -> bool {
@@ -28,7 +35,7 @@ def check [ctx: record, name: string, args: list<string>]: nothing -> bool {
   mkdir $"($work)/($name).nej-gc" $"($work)/($name).iets-gc"
   let stdin = (open --raw ($env.STDIN? | default "/dev/null"))
   let n = ($stdin | nej $ctx ...$nargs | complete)
-  let i = ($stdin | ^($ctx.iets) eval-jobs ...$iargs | complete)
+  let i = ($stdin | ^($ctx.iets) eval-jobs ...(impure-for $args) ...$iargs | complete)
   let nn = ($n.stdout | norm)
   let ii = ($i.stdout | norm)
   let nr = (gc-roots $"($work)/($name).nej-gc")
@@ -53,9 +60,9 @@ def check [ctx: record, name: string, args: list<string>]: nothing -> bool {
 def chunks [ctx: record, name: string, args: list<string>]: nothing -> bool {
   let work = $ctx.work
   let n = (nej $ctx ...$args | complete)
-  let i0 = (^($ctx.iets) eval-jobs --chunks 2 --chunk 0 ...$args | complete)
+  let i0 = (^($ctx.iets) eval-jobs ...(impure-for $args) --chunks 2 --chunk 0 ...$args | complete)
   let i = if $i0.exit_code == 0 {
-    let i1 = (^($ctx.iets) eval-jobs --chunks 2 --chunk 1 ...$args | complete)
+    let i1 = (^($ctx.iets) eval-jobs ...(impure-for $args) --chunks 2 --chunk 1 ...$args | complete)
     { stdout: ($i0.stdout + $i1.stdout), exit_code: $i1.exit_code }
   } else {
     $i0
@@ -77,7 +84,7 @@ def chunks [ctx: record, name: string, args: list<string>]: nothing -> bool {
 # expect-fail NAME ARGS: both tools must exit non-zero.
 def expect-fail [ctx: record, name: string, args: list<string>]: nothing -> bool {
   let nrc = (nej $ctx ...$args | complete | get exit_code)
-  let irc = (^($ctx.iets) eval-jobs ...$args | complete | get exit_code)
+  let irc = (^($ctx.iets) eval-jobs ...(impure-for $args) ...$args | complete | get exit_code)
   if $nrc != 0 and $irc != 0 {
     print $"ok   ($name) \(both fail\)"
     true

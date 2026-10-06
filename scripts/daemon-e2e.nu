@@ -113,7 +113,7 @@ def run-tests [iets: string, nixpkgs: string, work: string] {
   print "== 2. hello through the local daemon (closure already valid)"
   let hello = (^nix-instantiate -I $"nixpkgs=($nixpkgs)" '<nixpkgs>' -A hello err> /dev/null | chomp)
   let expected = (out-of nix-store -q --outputs $hello | chomp)
-  let r = (^$iets build --builder daemon --timings --no-tracing-cache -I $"nixpkgs=($nixpkgs)" -E '(import <nixpkgs> {}).hello' | complete)
+  let r = (^$iets build --builder daemon --impure --timings --no-tracing-cache -I $"nixpkgs=($nixpkgs)" -E '(import <nixpkgs> {}).hello' | complete)
   $r.stderr | save -f $"($work)/client2.log"
   if $r.exit_code != 0 { print ($r.stderr | chomp); fail "client exited non-zero" }
   let out = ($r.stdout | chomp)
@@ -125,7 +125,7 @@ def run-tests [iets: string, nixpkgs: string, work: string] {
   print "== 3. hello cold against a scratch chroot daemon, --no-build"
   let scratch = $"local?root=($work)/store"
   let sock = (scratch-daemon $"($work)/store")
-  let r = (^$iets build --builder $"unix://($sock)" --timings --no-tracing-cache --no-build -I $"nixpkgs=($nixpkgs)" -E '(import <nixpkgs> {}).hello' | complete)
+  let r = (^$iets build --builder $"unix://($sock)" --timings --no-tracing-cache --no-build --impure -I $"nixpkgs=($nixpkgs)" -E '(import <nixpkgs> {}).hello' | complete)
   $r.stderr | save -f $"($work)/client3.log"
   if $r.exit_code != 0 { print ($r.stderr | chomp); fail "client exited non-zero" }
   show-matching $timing_lines $"($work)/client3.log"
@@ -146,7 +146,7 @@ def run-tests [iets: string, nixpkgs: string, work: string] {
   print $"ok: ($q.paths) paths registered, hashes and ca match the local store"
 
   print "== 4. hello warm against the scratch daemon"
-  let r = (^$iets build --builder $"unix://($sock)" --timings --no-tracing-cache --no-build -I $"nixpkgs=($nixpkgs)" -E '(import <nixpkgs> {}).hello' | complete)
+  let r = (^$iets build --builder $"unix://($sock)" --timings --no-tracing-cache --no-build --impure -I $"nixpkgs=($nixpkgs)" -E '(import <nixpkgs> {}).hello' | complete)
   $r.stderr | save -f $"($work)/client4.log"
   if $r.exit_code != 0 { print ($r.stderr | chomp); fail "client exited non-zero" }
   show-matching $timing_lines $"($work)/client4.log"

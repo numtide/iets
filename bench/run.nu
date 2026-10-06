@@ -13,6 +13,6 @@ def main [...workloads: string] {
   let ws = if ($workloads | is-empty) { [nixos-desktop] } else { $workloads }
   for w in $ws {
     let f = $"($env.PWD)/bench/workloads/($w).nix"
-    ^hyperfine --shell=none --warmup 1 --runs ($env.RUNS? | default "5") --export-markdown $"bench/results/($w).md" -n nix $"nix-instantiate --eval --strict --option pure-eval false -I nixpkgs=($np) ($f)" -n fix $"($fix) eval --strict --no-progress --option pure-eval false -I nixpkgs=($np) --compile-cache-dir ($env.PWD)/bench/fix-cache ($f)" -n iets $"($iets) eval --strict --no-tracing-cache -I nixpkgs=($np) ($f)"
+    ^hyperfine --shell=none --warmup 1 --runs ($env.RUNS? | default "5") --export-markdown $"bench/results/($w).md" -n nix $"nix-instantiate --eval --strict --option pure-eval false -I nixpkgs=($np) ($f)" -n fix $"($fix) eval --strict --no-progress --option pure-eval false -I nixpkgs=($np) --compile-cache-dir ($env.PWD)/bench/fix-cache ($f)" -n iets $"($iets) eval --impure --strict --no-tracing-cache -I nixpkgs=($np) ($f)"
   }
 }

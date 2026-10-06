@@ -41,7 +41,7 @@ def main [] {
       continue
     }
     with-env {IETS_CACHE_DIR: $cache} {
-      ^$iets eval --strict -I $"nixpkgs=($np)" $workload | ignore
+      ^$iets eval --impure --strict -I $"nixpkgs=($np)" $workload | ignore
     }
     let now = (sizes $cache)
     $rows = ($rows | append {

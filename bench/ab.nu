@@ -26,12 +26,12 @@ def main [
   let outpaths = (mktemp --tmpdir outpaths.XXXXXX)
   $"import ($np)/ci/eval/outpaths.nix { path = ($np); systems = [ \"x86_64-linux\" ]; includeBroken = false; }\n" | save -f $outpaths
   mut cases = [
-    { name: "nixos-desktop w1", args: [eval --strict --no-tracing-cache --workers "1" -I $"nixpkgs=($np)" $desktop] }
-    { name: "nixos-desktop w4", args: [eval --strict --no-tracing-cache --workers "4" -I $"nixpkgs=($np)" $desktop] }
-    { name: "nixos-minimal w1", args: [eval --strict --no-tracing-cache --workers "1" -I $"nixpkgs=($np)" $minimal] }
+    { name: "nixos-desktop w1", args: [eval --impure --strict --no-tracing-cache --workers "1" -I $"nixpkgs=($np)" $desktop] }
+    { name: "nixos-desktop w4", args: [eval --impure --strict --no-tracing-cache --workers "4" -I $"nixpkgs=($np)" $desktop] }
+    { name: "nixos-minimal w1", args: [eval --impure --strict --no-tracing-cache --workers "1" -I $"nixpkgs=($np)" $minimal] }
   ]
   if not $skip_outpaths {
-    $cases = ($cases | append { name: "outpaths 0/8 w1", args: [eval-jobs --no-instantiate --workers "1" --chunks "8" --chunk "0" -I $"nixpkgs=($np)" $outpaths] })
+    $cases = ($cases | append { name: "outpaths 0/8 w1", args: [eval-jobs --impure --no-instantiate --workers "1" --chunks "8" --chunk "0" -I $"nixpkgs=($np)" $outpaths] })
   }
   mut rows = []
   for c in $cases {

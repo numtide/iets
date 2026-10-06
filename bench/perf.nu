@@ -38,12 +38,12 @@ def main [
   $"import ($np)/ci/eval/outpaths.nix { path = ($np); systems = [ \"x86_64-linux\" ]; includeBroken = false; }\n" | save -f $outpaths
   mut rows = []
   for w in [1 4] {
-    let r = (median-run $iets [eval --strict --no-tracing-cache --workers ($w | into string) -I $"nixpkgs=($np)" $desktop] $runs)
+    let r = (median-run $iets [eval --impure --strict --no-tracing-cache --workers ($w | into string) -I $"nixpkgs=($np)" $desktop] $runs)
     $rows = ($rows | append ($r | insert workload "nixos-desktop" | insert workers $w))
   }
   if not $skip_outpaths {
     for w in [1 4] {
-      let r = (measure $iets [eval-jobs --no-instantiate --workers ($w | into string) --chunks 8 --chunk 0 -I $"nixpkgs=($np)" $outpaths])
+      let r = (measure $iets [eval-jobs --impure --no-instantiate --workers ($w | into string) --chunks 8 --chunk 0 -I $"nixpkgs=($np)" $outpaths])
       $rows = ($rows | append ($r | insert workload "outpaths chunk 0/8" | insert workers $w))
     }
   }

@@ -66,7 +66,7 @@ op that evaluates share one parser (`src/cli/mod.rs:parse_eval_args`).
 | `-A PATH`, `--attr PATH` | select the attribute `PATH`; the last one wins |
 | `--arg N EXPR`, `--argstr N STR` | call a top-level function with `N` |
 | `-I P=PATH`, `--include P=PATH`, `-IP=PATH` | make `<P>` resolve to `PATH` |
-| `--impure`, `--no-pure-eval` | turn pure evaluation off |
+| `--impure`, `--no-pure-eval` | turn pure evaluation off; it is on by default, and the `pure` key in the user `iets.toml` changes that (`docs/reference/settings.md`) |
 | `--pure-eval` | turn pure evaluation on |
 | `--option NAME VALUE` | set a nix.conf setting. The evaluation and fetch settings apply (`docs/reference/settings.md`). A store setting gives one `ignored-setting` warning: these commands send a daemon no settings |
 | `--json-log-path PATH` | also write every log record to `PATH` |
@@ -613,7 +613,7 @@ Walk a jobset and print one JSON line per derivation, as nix-eval-jobs
 
 | Flag | Status | Notes |
 |---|---|---|
-| `FILE`, `-E EXPR`, `--expr EXPR` | identical | The argument is a file unless `--flake`; the top level is auto-called with the `--arg`s, like `releaseExprTopLevelValue`. |
+| `FILE`, `-E EXPR`, `--expr EXPR` | identical | The argument is a file unless `--flake`; the top level is auto-called with the `--arg`s, like `releaseExprTopLevelValue`. A file evaluates purely here, where nix-eval-jobs follows nix.conf: this is a native command (`docs/reference/settings.md`). `nix-eval-jobs`, the classic name, keeps nix-eval-jobs's default. |
 | `--arg N E`, `--argstr N S`, `--arg-from-file N F`, `--arg-from-stdin N` | identical | |
 | `-I`, `--include` | identical | |
 | `--flake REF[#attr]` | identical for locked local flakes | `REF` is a directory (`.`, `./x`, `path:/x`); the fragment is looked up in `outputs` verbatim. Without a fragment the root is the `callFlake` result (`_type`, `inputs`, `outputs`, `sourceInfo`), to be `--select`ed. Registries and unlocked inputs are out of scope. Evaluation is pure unless `--impure`. |

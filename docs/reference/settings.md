@@ -96,9 +96,14 @@ against.
 The two standard workloads:
 
 ```
-iets eval --strict --no-tracing-cache --workers 1 -I nixpkgs=$NP bench/workloads/nixos-desktop.nix
-iets eval-jobs --no-instantiate --workers 1 --chunks 8 --chunk 0   # ci/eval/outpaths.nix
+iets eval --impure --strict --no-tracing-cache --workers 1 -I nixpkgs=$NP bench/workloads/nixos-desktop.nix
+iets eval-jobs --impure --no-instantiate --workers 1 --chunks 8 --chunk 0   # ci/eval/outpaths.nix
 ```
+
+Both workloads reach nixpkgs through `<nixpkgs>`, which a pure evaluation
+has not got, so they are run with `--impure`. That is what they always
+measured: the native default was impure until the project root arrived
+(`docs/explanation/flakes-and-sources.md`).
 
 ### fix-hashes
 

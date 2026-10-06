@@ -6,8 +6,10 @@ use lib.nu [ROOT chomp iets-bin isolate run-in verdict]
 
 # iets eval --strict --timings ARGS: rc, stdout, the `cache:` lines joined with
 # spaces, and the `re-evaluating:` line the reporter prints on an invalidation.
+# `--impure`: the workload observes the environment and the search path, which
+# is what the cache has to invalidate on.
 def --wrapped run-eval [iets: string, ...args: string]: nothing -> record {
-  let r = (^$iets eval --strict --timings ...$args | complete)
+  let r = (^$iets eval --impure --strict --timings ...$args | complete)
   {
     rc: $r.exit_code
     out: ($r.stdout | chomp)
@@ -158,7 +160,7 @@ def run-tests [iets: string, work: string]: nothing -> int {
   "http://z.example\n" | save -f $"($work)/src/url.nix"
   let w1 = (run-eval $iets --lint url-literal=warn $"($work)/src/url.nix")
   let w2 = (run-eval $iets --lint url-literal=warn $"($work)/src/url.nix")
-  let r1 = (^$iets eval --strict --timings --lint url-literal=warn $"($work)/src/url.nix" | complete)
+  let r1 = (^$iets eval --impure --strict --timings --lint url-literal=warn $"($work)/src/url.nix" | complete)
   let warned = ($r1.stderr | lines | where ($it | str starts-with "warning: [url-literal]") | length)
   $res ++= [(verdict ($w1.status =~ 'miss' and ($w2.status | str contains "cache: hit") and $warned == 1 and ($r1.stderr | str contains "cache: hit")) "a lint warning is replayed on a hit" $"lint warning replay \(($w2.status) warned=($warned)\)")]
 

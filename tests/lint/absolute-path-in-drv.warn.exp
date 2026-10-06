@@ -1,2 +1,2 @@
-warning: [absolute-path-in-drv] derivation 'x': attribute 'src' holds the absolute path '/pwd/lint/flake-root/data' of the flake at '/pwd/lint/flake-root'; interpolate the path to copy it, or pass a relative name
+warning: [absolute-path-in-drv] derivation 'x': attribute 'src' holds the absolute path '/pwd/lint/flake-root/data' of this project; interpolate the path to copy it, or pass a relative name
   at /pwd/lint/absolute-path-in-drv.nix:1:56

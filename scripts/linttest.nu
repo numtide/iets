@@ -155,7 +155,7 @@ def main [] {
   cp -r lint/scope/flake/root $work
   cp -r lint/scope/flake/dep $work
   let dir = $"($work)/root"
-  let hash = (^$iets eval --raw --no-tracing-cache -E $"\(builtins.fetchTree { type = \"path\"; path = \"($work)/dep\"; }).narHash" | complete | get stdout | chomp)
+  let hash = (^$iets eval --raw --impure --no-tracing-cache -E $"\(builtins.fetchTree { type = \"path\"; path = \"($work)/dep\"; }).narHash" | complete | get stdout | chomp)
   let store = (^readlink -f (^bash -c "command -v nu" | chomp) | chomp)
   for f in [flake.nix flake.lock] {
     let text = (open --raw $"($dir)/($f)" | str replace -a "@DEP@" $"($work)/dep" | str replace -a "@HASH@" $hash | str replace -a "@STORE@" $store)
@@ -180,7 +180,9 @@ def main [] {
   $res ++= [(verdict $ok "flake: the dir-copy-flake error names the store path of the copy" $"flake: dir at error: ($r.stderr)")]
   let r = (^$iets eval --raw --no-tracing-cache --lint-scope all ...$copies $"($dir)#inputFile" | complete)
   $res ++= [(verdict (($r.stdout | str starts-with "/nix/store/") and not ($r.stderr | str contains "warning:")) "flake: \"${./file}\" inside an input is neither a re-copy nor a path-copy" $"flake: input file: ($r.stderr)")]
-  let r = (^$iets eval --raw --no-tracing-cache ...$copies $"($dir)#store" | complete)
+  # --impure: a pure evaluation may not read a store path it did not allow,
+  # so the copy that `path-copy` reports never happens
+  let r = (^$iets eval --raw --impure --no-tracing-cache ...$copies $"($dir)#store" | complete)
   $res ++= [(verdict (($r.stderr | str contains "warning: [store-path-recopy]") and ($r.stderr | str contains "warning: [path-copy] path '")) "flake: a pre-existing store path is still a re-copy" $"flake: store: ($r.stderr)")]
   "[lint.inputs.dep]\nurl-literal = \"warn\"\n" | save -f $"($dir)/iets.toml"
   let r = (^$iets eval --raw --no-tracing-cache --lint url-literal=warn $"($dir)#value" | complete)

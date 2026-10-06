@@ -6,33 +6,50 @@
 //! `absolute-path-in-drv` lints split on it (`lint::purity`), and the
 //! project `iets.toml` walk stops at it (`lint::find_config_file`).
 //!
-//! A marker is a `flake.nix`, the root of a working tree of an SCM iets
-//! knows (`source::scm`), or an `iets.toml`. The first two say what Nix
-//! says; `iets.toml` lets a checkout that installs neither name its own
-//! root. `docs/explanation/flakes-and-sources.md` says why the root is an
-//! allow list and not a copy of a tree.
+//! **A working tree wins over a file marker, however deep the file marker
+//! is.** A repository is the unit the code lives in: a subdirectory that
+//! holds an `iets.toml` to set lint levels, or a `flake.nix` of its own,
+//! must not stop a sibling directory from being read. Only outside a
+//! working tree — an unpacked tarball, a scratch directory — does the
+//! nearest `flake.nix` or `iets.toml` name the root.
+//!
+//! `docs/explanation/flakes-and-sources.md` says why the root is an allow
+//! list and not a copy of a tree.
 
 use std::path::{Path, PathBuf};
 
-/// Every entry whose presence makes `dir` a project root, in probe order.
-pub fn markers(dir: &Path) -> impl Iterator<Item = PathBuf> + use<'_> {
-    std::iter::once(dir.join("flake.nix"))
-        .chain(crate::source::scm::root_markers(dir))
-        .chain(std::iter::once(dir.join("iets.toml")))
-}
+/// The markers of a directory that is no working tree, in probe order.
+pub const FILES: [&str; 2] = ["flake.nix", "iets.toml"];
 
-/// Whether `dir` is a project root. A marker's presence decides, not its
-/// type: `.git` is a directory in a checkout and a file in a worktree.
-pub fn is_root(dir: &Path) -> bool {
-    markers(dir).any(|m| m.exists())
+/// Every entry whose presence makes `dir` a project root, in probe order.
+/// `lint::purity` probes these through the tracing cache.
+pub fn markers(dir: &Path) -> impl Iterator<Item = PathBuf> + use<'_> {
+    crate::source::scm::root_markers(dir).chain(FILES.iter().map(|f| dir.join(f)))
 }
 
 /// The nearest project root at or above `start`, `None` above every marker.
+/// `present` decides whether a marker is there: the file system for a
+/// frontend, the tracing cache's own `stat` for the lint.
+///
+/// The walk goes to the top whenever no working tree is found, so a
+/// `.git` that appears above a file marker is still the answer — and, for
+/// the lint, so every probe it depends on is an observation.
+pub fn find_with(start: &Path, mut present: impl FnMut(&Path) -> bool) -> Option<PathBuf> {
+    let mut file_marker = None;
+    for dir in start.ancestors() {
+        if crate::source::scm::root_markers(dir).any(|m| present(&m)) {
+            return Some(dir.to_path_buf());
+        }
+        if file_marker.is_none() && FILES.iter().any(|f| present(&dir.join(f))) {
+            file_marker = Some(dir.to_path_buf());
+        }
+    }
+    file_marker
+}
+
+/// [`find_with`] on the file system.
 pub fn find(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|d| is_root(d))
-        .map(Path::to_path_buf)
+    find_with(start, |m| m.exists())
 }
 
 #[cfg(test)]
@@ -62,9 +79,27 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// The nearest root wins: a sub-flake is its own project.
+    /// A working tree beats a file marker below it: an `iets.toml` that
+    /// sets lint levels for a subdirectory must not shrink what a pure
+    /// evaluation there may read.
     #[test]
-    fn the_nearest_root_wins() {
+    fn a_working_tree_wins_over_a_file_marker_below_it() {
+        let d = tmp("tree");
+        let sub = d.join("sub");
+        std::fs::create_dir_all(sub.join("deep")).unwrap();
+        std::fs::write(sub.join("iets.toml"), "").unwrap();
+        std::fs::write(sub.join("flake.nix"), "").unwrap();
+        assert_eq!(find(&sub.join("deep")).as_deref(), Some(sub.as_path()));
+        let marker = crate::source::scm::root_markers(&d).next().unwrap();
+        std::fs::write(&marker, "").unwrap();
+        assert_eq!(find(&sub.join("deep")).as_deref(), Some(d.as_path()));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Outside a working tree the nearest file marker wins, so a sub-flake
+    /// of an unpacked tarball is its own project.
+    #[test]
+    fn the_nearest_file_marker_wins_without_a_working_tree() {
         let d = tmp("nearest");
         let inner = d.join("inner");
         std::fs::create_dir_all(inner.join("deep")).unwrap();

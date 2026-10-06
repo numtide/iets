@@ -221,8 +221,8 @@ cache that no worker reads, a search path that resolves to nothing.
 
 The evaluator therefore has no setter. `eval::EvalConfig` is a builder. It
 holds each setting that is fixed before evaluation: the system, `pure-eval`,
-the session, the search path, the lints, the IR cache, `keep_aterm`,
-`keep_site`, the `--dump-drvs` directory and the trace switch. `build()`
+the project root, the session, the search path, the lints, the IR cache,
+`keep_aterm`, `keep_site`, the `--dump-drvs` directory and the trace switch. `build()`
 makes the evaluator. `api::run::Run` holds the builder, not an evaluator.
 `Run::go` sets the trace switch, calls `build()`, then calls `try_run`. This
 is the one construction site of each command that goes through `Run`.

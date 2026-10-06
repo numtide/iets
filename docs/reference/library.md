@@ -98,7 +98,12 @@ let mut ev = Evaluator::new();          // adopts the session
 
 `EvalConfig::new().session(session)` skips the thread-local altogether.
 An evaluator has no setter: each setting goes to the `EvalConfig` before
-`build()`. Threads the library starts inherit the session of the thread
+`build()`. Two defaults differ from the command line, because a host has
+neither a command line nor an entry file: evaluation is impure, and there
+is no project root. `api::run::Run::new` is what reads the `pure` setting
+and finds the root from the arguments, so a frontend built that way gets
+the behaviour `docs/reference/settings.md` describes; a host that builds
+its own `EvalConfig` sets `pure(true)` and `project_root(…)` itself. Threads the library starts inherit the session of the thread
 that started them; a host that starts its own calls `Session::enter` on
 each, or `session::bind(f)`. A thread that entered none uses a fallback
 session that writes nowhere.

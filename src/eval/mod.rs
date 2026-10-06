@@ -539,9 +539,9 @@ impl Evaluator {
         let Some(root) = &self.project_root else {
             return false;
         };
-        path.len() >= root.len()
-            && path.starts_with(root)
-            && (path.len() == root.len() || path[root.len()] == b'/')
+        // a root of "/" becomes "", so that every absolute path is below it
+        let root: &[u8] = root.strip_suffix(b"/").unwrap_or(root);
+        path.starts_with(root) && (path.len() == root.len() || path[root.len()] == b'/')
     }
 
     #[inline]

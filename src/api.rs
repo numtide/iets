@@ -197,11 +197,11 @@ pub fn entry_dir(a: &EvalArgs) -> std::path::PathBuf {
     std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
 }
 
-/// The project this run's sources belong to: the nearest root at or above
-/// [`entry_dir`], else that directory itself (`crate::project`). A pure
-/// evaluation reads below it, and it is part of the tracing-cache key, so a
-/// `flake.nix` or an `iets.toml` that appears above the entry asks for a new
-/// entry instead of replaying one that another root allowed.
+/// The project this run's sources belong to: the root at or above
+/// [`entry_dir`] that `crate::project` finds, else that directory itself. A
+/// pure evaluation reads below it, and it is part of the tracing-cache key,
+/// so a marker that appears above the entry asks for a new entry instead of
+/// replaying one that another root allowed.
 ///
 /// A flake gets none. Its root tree is already a virtual store copy with the
 /// tracked files as its filter, and the flake directory as a second, unfiltered

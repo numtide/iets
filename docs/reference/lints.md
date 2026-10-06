@@ -43,10 +43,9 @@ source wins over an earlier one:
 3. the `[lint]` table of the project's `iets.toml`: the nearest one found
    by walking up from the entry file's directory, the flake directory, or
    cwd for `-E` (each `[lint.inputs.<node>]` table is a source of its own,
-   see Scope); the walk stops at the project root, the first directory
-   holding a `flake.nix`, the root of a working tree or an `iets.toml`; any
-   key but `[lint]` in this file is an error
-   (`docs/reference/settings.md`);
+   see Scope); the walk stops at the project root
+   (`docs/explanation/flakes-and-sources.md`); any key but `[lint]` in this
+   file is an error (`docs/reference/settings.md`);
 4. `IETS_LINT="name=level,name=level"`;
 5. `--lint SELECTOR=LEVEL`, repeatable.
 
@@ -361,9 +360,9 @@ through concatenation, interpolation, `concatStringsSep`,
 `replaceStrings` and attrset coercion like the store elements do. It is
 invisible to `getContext` and `hasContext`, `unsafeDiscardStringContext`
 strips it, and it never reaches an ATerm. `derivationStrict` reads it per
-attribute. The project root of a path is the nearest ancestor holding a
-`flake.nix`, the root of a working tree or an `iets.toml`; the probes are
-`Stat` observations of the tracing cache.
+attribute. The project root of a path is the one
+`docs/explanation/flakes-and-sources.md` defines, found by the same walk;
+the probes are `Stat` observations of the tracing cache.
 
 Both are **errors** by default, and they are the price of a pure
 evaluation that reads the checkout instead of a copy of a tree

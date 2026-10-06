@@ -291,9 +291,9 @@ tree, a dirty tree and a shallow clone.
 
 A native command evaluates purely by default, where `nix-instantiate`,
 `nix-build` and `nix-shell` do not, and a pure run reads below its project:
-the nearest directory at or above the entry file holding a `flake.nix`, a
-working-tree root or an `iets.toml`, else that directory itself
-(`docs/explanation/flakes-and-sources.md`). Nix has no such root. The
+the working tree the entry file is in, else the nearest `flake.nix`
+directory, else the outermost `iets.toml` one, else the entry's own
+directory (`docs/explanation/flakes-and-sources.md`). Nix has no such root. The
 nearest thing it has is `restrict-eval` with `allowed-uris`, which iets does
 not implement.
 

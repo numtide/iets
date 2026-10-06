@@ -16,10 +16,20 @@ A native command evaluates purely, whether or not a flake is involved
 (`reference/settings.md`). Pure evaluation reads a file only under a store
 path the evaluation allowed, so an entry file that is not a flake would have
 nothing to read, its own text included. iets therefore gives such a run a
-**project**: the nearest directory at or above the entry file that holds a
-`flake.nix`, the root of a working tree or an `iets.toml`, and the entry
-file's own directory when no ancestor holds one (`src/project.rs`). A pure
-evaluation reads below it.
+**project**, found by walking up from the entry file (`src/project.rs`). A
+pure evaluation reads below it.
+
+Three markers answer, and each says something different, so each is weighed
+differently:
+
+| marker | weight | why |
+|:---|:---|:---|
+| a working tree | the nearest one wins over everything below it | the repository is the unit the code lives in, so a subdirectory marker must not stop a sibling directory from being read |
+| `flake.nix` | the nearest one, when there is no working tree | it claims a boundary: Nix makes that directory a tree. An unpacked tarball or a store copy of a checkout lands here |
+| `iets.toml` | the outermost one, and only when neither above answers | it claims nothing. It sets lint levels for what is below it, a project may hold several, and a deep one must not shrink the root |
+
+With no marker at all, the entry file's own directory is the project, so a
+one-off expression in a scratch directory still evaluates.
 
 A working tree is the one `source::scm` knows, the same detection the root
 flake of a flake reference goes through ("The root flake is your working

@@ -29,12 +29,38 @@ const KEYS: &[&str] = &[
     "workers",
 ];
 
+/// One `builder` entry: where to build, and what the place will accept.
+///
+/// The constraints are declared, not probed: the worker protocol has no op
+/// that asks a daemon which platforms it builds, and a probe would have to be
+/// trusted anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderSpec {
+    pub url: String,
+    /// Platforms it builds. Empty means whatever `system` resolves to, which
+    /// is what a single builder has always meant.
+    pub systems: Vec<String>,
+    /// `requiredSystemFeatures` it satisfies.
+    pub features: Vec<String>,
+}
+
+impl BuilderSpec {
+    /// A URL with no constraints.
+    pub fn bare(url: &str) -> BuilderSpec {
+        BuilderSpec {
+            url: url.to_string(),
+            systems: Vec::new(),
+            features: Vec::new(),
+        }
+    }
+}
+
 /// The settings of this process: the files, then the environment for the knobs
 /// that have one.
 pub struct Settings {
-    /// `builder`: where derivations are realised. `None` falls back to the
-    /// nix.conf `store` setting; resolve it with [`builder`].
-    pub builder: Option<String>,
+    /// `builder`: where derivations are realised. Empty falls back to the
+    /// nix.conf `store` setting; resolve it with [`builders`].
+    pub builder: Vec<BuilderSpec>,
     /// `source-map`: `STOREPATH=LOCALDIR` pairs (docs/explanation/provenance.md).
     pub source_map: Vec<(String, String)>,
     /// `workers`, `IETS_WORKERS`: worker threads. `None` asks the machine.
@@ -154,16 +180,22 @@ pub fn take_options(argv: &[String]) -> Result<Taken> {
 }
 
 /// Where a command builds: its own flag, else the `builder` setting, else the
-/// nix.conf `store` setting.
-pub fn builder(flag: Option<&str>, cfg: &crate::config::Config) -> String {
-    flag.map(str::to_string)
-        .or_else(|| {
-            crate::session::Session::current()
-                .settings()
-                .builder
-                .clone()
-        })
-        .unwrap_or_else(|| cfg.store())
+/// nix.conf `store` setting. Never empty.
+pub fn builders(flag: Option<&str>, cfg: &crate::config::Config) -> Vec<BuilderSpec> {
+    if let Some(flag) = flag {
+        let specs = split_urls(flag);
+        if !specs.is_empty() {
+            return specs;
+        }
+    }
+    let set = crate::session::Session::current()
+        .settings()
+        .builder
+        .clone();
+    if !set.is_empty() {
+        return set;
+    }
+    vec![BuilderSpec::bare(&cfg.store())]
 }
 
 /// The user's settings file. It may set every key; a project's `iets.toml`
@@ -286,7 +318,13 @@ impl Settings {
             },
         )?;
         Ok(Settings {
-            builder: c.str("builder")?,
+            builder: c
+                .get(
+                    "builder",
+                    "a URL, or a list of URLs or {url, systems, features} tables",
+                    read_builders,
+                )?
+                .unwrap_or_default(),
             source_map,
             workers,
             fiber_stack_mb: env.num("IETS_FIBER_STACK_MB")?.or(c.int("fiber-stack-mb")?),
@@ -339,6 +377,48 @@ impl Default for Settings {
 /// The VALUE of `--iets-option NAME VALUE`: a TOML boolean, integer, string
 /// or array when it reads as one, else the text itself, so `fix-hashes always`
 /// needs no quotes. Bare text for `source-map` is a whitespace-separated list.
+/// `builder` in each of its three forms: one URL, several URLs, or several
+/// tables that also carry the constraints.
+fn read_builders(v: &toml::Value) -> Option<Vec<BuilderSpec>> {
+    if let Some(url) = v.as_str() {
+        return Some(split_urls(url));
+    }
+    v.as_array()?.iter().map(read_builder).collect()
+}
+
+fn read_builder(v: &toml::Value) -> Option<BuilderSpec> {
+    if let Some(url) = v.as_str() {
+        return Some(BuilderSpec::bare(url));
+    }
+    let t = v.as_table()?;
+    let words = |key: &str| -> Option<Vec<String>> {
+        match t.get(key) {
+            None => Some(Vec::new()),
+            Some(v) => v
+                .as_array()?
+                .iter()
+                .map(|e| e.as_str().map(str::to_string))
+                .collect(),
+        }
+    };
+    Some(BuilderSpec {
+        url: t.get("url")?.as_str()?.to_string(),
+        systems: words("systems")?,
+        features: words("features")?,
+    })
+}
+
+/// `--builder` and `IETS_CONFIG` carry one string, so several places are
+/// separated there, as nix.conf's `builders` separates machines. A URL's own
+/// query string uses `&`, never `;`, so nothing is ambiguous.
+fn split_urls(spec: &str) -> Vec<BuilderSpec> {
+    spec.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(BuilderSpec::bare)
+        .collect()
+}
+
 fn flag_value(name: &str, value: &str) -> toml::Value {
     use toml::Value::{Array, Boolean, Integer, String};
     let table = format!("v = {value}").parse::<toml::Table>();
@@ -520,13 +600,13 @@ mod tests {
             _ => None,
         });
         let s = Settings::load_from(&file, &opts(&[("builder", "flag")]), &env).unwrap();
-        assert_eq!(s.builder.as_deref(), Some("flag"));
+        assert_eq!(s.builder, vec![BuilderSpec::bare("flag")]);
         assert_eq!(s.workers, Some(5));
         assert_eq!(s.fiber_stack_mb, Some(2));
         assert_eq!(s.fetch_max_size, 1);
         assert!(s.cache, "IETS_CACHE=1 wins over cache = false");
         let s = Settings::load_from(&file, &[], &NO_ENV).unwrap();
-        assert_eq!(s.builder.as_deref(), Some("user"));
+        assert_eq!(s.builder, vec![BuilderSpec::bare("user")]);
         assert_eq!(s.workers, Some(2));
         assert!(!s.cache);
         let inline = Env(|n| (n == "IETS_CONFIG").then(|| "workers = 3".into()));
@@ -564,9 +644,58 @@ mod tests {
     }
 
     #[test]
+    fn builder_reads_all_three_forms() {
+        let one = |text: &str| {
+            let env = Env(|n| (n == "IETS_CONFIG").then(|| "".into()));
+            let file = scratch("builders");
+            std::fs::write(&file, text).unwrap();
+            Settings::load_from(&file, &[], &env).unwrap().builder
+        };
+        assert_eq!(
+            one("builder = \"daemon\""),
+            vec![BuilderSpec::bare("daemon")]
+        );
+        assert_eq!(
+            one("builder = [\"daemon\", \"ssh-ng://bld1\"]"),
+            vec![
+                BuilderSpec::bare("daemon"),
+                BuilderSpec::bare("ssh-ng://bld1")
+            ]
+        );
+        assert_eq!(
+            one(
+                "builder = [{ url = \"ssh-ng://bld1\", systems = [\"aarch64-linux\"], features = [\"kvm\"] }]"
+            ),
+            vec![BuilderSpec {
+                url: "ssh-ng://bld1".into(),
+                systems: vec!["aarch64-linux".into()],
+                features: vec!["kvm".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_flag_carries_several_places_separated_by_a_semicolon() {
+        assert_eq!(
+            split_urls("daemon ; ssh-ng://bld1"),
+            vec![
+                BuilderSpec::bare("daemon"),
+                BuilderSpec::bare("ssh-ng://bld1")
+            ]
+        );
+        // A URL's own query string uses `&`, so it survives the split whole.
+        assert_eq!(
+            split_urls("grpc://farm:50051?system=aarch64-linux&insecure=1"),
+            vec![BuilderSpec::bare(
+                "grpc://farm:50051?system=aarch64-linux&insecure=1"
+            )]
+        );
+    }
+
+    #[test]
     fn a_missing_file_is_skipped_and_the_defaults_hold() {
         let s = Settings::load_from(&scratch("none"), &[], &NO_ENV).unwrap();
-        assert_eq!(s.builder, None);
+        assert_eq!(s.builder, vec![]);
         assert_eq!(s.workers, None);
         assert_eq!(s.fetch_max_size, 16 << 30);
         assert_eq!(s.fix_hashes, FixHashes::Ask);
@@ -646,7 +775,10 @@ mod tests {
                 "no-fallback = 1",
                 "'no-fallback' wants true or false, got 1",
             ),
-            ("builder = 4", "'builder' wants a string, got 4"),
+            (
+                "builder = 4",
+                "'builder' wants a URL, or a list of URLs or {url, systems, features} tables, got 4",
+            ),
             (
                 "fix-hashes = \"yes\"",
                 "'fix-hashes' wants \"ask\", \"always\" or \"never\"",

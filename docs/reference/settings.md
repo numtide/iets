@@ -253,7 +253,7 @@ there, plus six keys that have no environment variable:
 
 | Key | Type | Default |
 |:---|:---|:---|
-| `builder` | URL: `daemon`, `unix://PATH`, `ssh-ng://[user@]host`, `grpc://host:port`; not used by the shell commands (`docs/reference/classic.md`) | the nix.conf `store` setting (itself `auto`) |
+| `builder` | one URL, or a list of them, or a list of `{url, systems, features}` tables: `daemon`, `unix://PATH`, `ssh-ng://[user@]host`, `grpc://host:port`; not used by the shell commands (`docs/reference/classic.md`) | the nix.conf `store` setting (itself `auto`) |
 | `source-map` | array of `"STOREPATH=LOCALDIR"` strings | empty |
 | `fetch-max-size` | integer (bytes) | 17179869184 (16 GiB) |
 | `shell-gc-root` | bool | `true` |
@@ -287,7 +287,7 @@ Neither switch touches the roots a caller names: `nix-instantiate
 --gc-root`, `print-dev-env --gc-root` and `iets build --fetch-to`. One
 root per thing.
 
-`source-map` is the only list. `fetch-max-size` caps
+`source-map` and `builder` are the lists. `fetch-max-size` caps
 the decompressed bytes of one flake input download, together with what a
 sparse member of the archive expands to; a stream that
 decompresses over 1000 times its size past its first 16 MiB is refused
@@ -304,6 +304,29 @@ affected: drvs and sources for `nix-instantiate --add-root`, its GC roots
 and the `nix-build`/`nix build` out-links always go to the local daemon,
 and a remote `builder`'s outputs are copied back first
 (`docs/reference/classic.md`).
+
+`builder` may name several places. Each one declares what it accepts, and
+a derivation goes to the first that accepts it: order is the policy, since
+there is no cost model yet (`docs/executors-proposal.md`).
+
+```toml
+builder = [
+  { url = "daemon", systems = ["x86_64-linux"] },
+  { url = "ssh-ng://bld1", systems = ["aarch64-linux"], features = ["kvm"] },
+]
+```
+
+An undeclared `systems` or `features` accepts anything, so one entry that
+declares neither takes every derivation, which is what a single `builder`
+has always done: the store itself refuses what it cannot build, and it is
+the only one that knows. A derivation no place accepts is an error that
+names every place and what it declared, before anything is uploaded.
+
+`--builder` carries one string, so it separates places with `;`
+(`--builder 'daemon; ssh-ng://bld1'`), as nix.conf's `builders` separates
+machines. A URL's own query string uses `&`, never `;`. A classic name
+addresses one store, as the tool it stands in for does, so it takes the
+first place and warns about the rest.
 
 # `nix.conf`
 

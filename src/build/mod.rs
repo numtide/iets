@@ -17,6 +17,7 @@
 
 pub mod backend;
 pub mod event;
+pub mod executor;
 pub mod fanout;
 pub mod fixhash;
 pub mod render;

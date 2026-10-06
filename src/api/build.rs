@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use crate::build::executor::Places;
 use crate::build::upload::PlanUpload;
 use crate::build::{Dispatcher, Outcome, Target};
 use crate::builtins::derivation::DrvInfo;
@@ -44,17 +45,17 @@ pub fn config() -> Config {
     Config::load(&[]).unwrap_or_else(|_| Config::empty())
 }
 
-/// Where the builds go: the flag, else the `builder` setting, else nix.conf's
-/// `store` (docs/reference/settings.md).
+/// Every place the builds may go: the flag, else the `builder` setting, else
+/// nix.conf's `store` (docs/reference/settings.md).
+pub fn places(url: Option<&str>, cfg: &Config) -> Result<Places> {
+    Places::parse(&crate::settings::builders(url, cfg), &cfg.system())
+}
+
+/// The one store a command addresses, for the commands that address a store
+/// rather than build: `plumbing missing`, `prefetch`, `--dry-run`. With
+/// several places that is the first one.
 pub fn transport(url: Option<&str>, cfg: &Config) -> Result<Transport> {
-    let url = crate::settings::builder(url, cfg);
-    Transport::parse_checked(&url, &cfg.system())
-        .map_err(|e| Error::Usage(e.to_string()))?
-        .ok_or_else(|| {
-            Error::Usage(format!(
-                "unsupported builder '{url}': expected daemon, unix:///path, ssh-ng://[user@]host or grpc://host:port"
-            ))
-        })
+    Ok(places(url, cfg)?.get(0).transport.clone())
 }
 
 /// The upload plan for `roots`, from the derivations and sources this

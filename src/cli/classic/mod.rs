@@ -161,7 +161,23 @@ fn settings_with(c: &Common, use_builder: bool) -> Result<(Config, Transport, Op
     cfg.announce();
     let url = if use_builder {
         let flag = store_given(c).then(|| cfg.store());
-        crate::settings::builder(flag.as_deref(), &cfg)
+        // A classic name addresses one store, as the tool it stands in for
+        // does. Placing across several is `iets build`'s (docs/reference/classic.md).
+        let specs = crate::settings::builders(flag.as_deref(), &cfg);
+        if let [first, rest @ ..] = specs.as_slice()
+            && !rest.is_empty()
+        {
+            let names: Vec<&str> = rest.iter().map(|s| s.url.as_str()).collect();
+            crate::log::line(&format!(
+                "warning: a classic name builds on one place: using '{}', ignoring {}",
+                first.url,
+                names.join(", ")
+            ));
+        }
+        specs
+            .first()
+            .map(|s| s.url.clone())
+            .unwrap_or_else(|| cfg.store())
     } else {
         cfg.store()
     };

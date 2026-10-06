@@ -668,21 +668,19 @@ fn level_char(l: Level) -> char {
 }
 
 /// The nearest project `iets.toml` at or above `start`, stopping at the
-/// project root. The walk must not leave the project: a world-writable
-/// `/tmp/iets.toml` would otherwise set a lint level for every evaluation
-/// below it, and the file is untrusted input (`settings::check_project`).
-/// A directory that holds `.git` or `flake.nix` is the root.
+/// project root (`crate::project`). The walk must not leave the project: a
+/// world-writable `/tmp/iets.toml` would otherwise set a lint level for
+/// every evaluation below it, and the file is untrusted input
+/// (`settings::check_project`).
 pub fn find_config_file(start: &Path) -> Option<PathBuf> {
+    let root = crate::project::find(start)?;
     let mut dir = start.to_path_buf();
     loop {
         let f = dir.join("iets.toml");
         if f.is_file() {
             return Some(f);
         }
-        if dir.join(".git").exists() || dir.join("flake.nix").is_file() {
-            return None;
-        }
-        if !dir.pop() {
+        if dir == root || !dir.pop() {
             return None;
         }
     }

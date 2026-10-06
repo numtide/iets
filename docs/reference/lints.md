@@ -44,8 +44,8 @@ source wins over an earlier one:
    by walking up from the entry file's directory, the flake directory, or
    cwd for `-E` (each `[lint.inputs.<node>]` table is a source of its own,
    see Scope); the walk stops at the project root, the first directory
-   holding a `.git` or a `flake.nix`; any key but `[lint]` in this file is an
-   error
+   holding a `flake.nix`, a `.git` or an `iets.toml`; any key but `[lint]`
+   in this file is an error
    (`docs/reference/settings.md`);
 4. `IETS_LINT="name=level,name=level"`;
 5. `--lint SELECTOR=LEVEL`, repeatable.
@@ -348,8 +348,8 @@ are part of the IR cache key and their warnings are stored in the entry;
 | `large-source-copy` | purity | evaluator | off | a recursive path copy whose NAR (after filters) exceeds `max-bytes` |
 | `git-in-source` | purity | evaluator | **warn** | a recursive path copy of a directory whose top level keeps a `.git` entry |
 | `dir-copy-unfiltered` | purity | evaluator | off | a directory outside the store copied whole by a string coercion: no filter, and not a tree the flake machinery already turned into a tracked file set |
-| `impure-path-in-drv` | purity | evaluator | off | a derivation attribute (env, `args`, structured attrs) holds the text of a path outside the store and not under a `flake.nix` directory (`toString ./x`), so the .drv depends on the checkout location |
-| `absolute-path-in-drv` | purity | evaluator | off | as above, for a path under a `flake.nix` directory: an absolute path a flake evaluation would have copied |
+| `impure-path-in-drv` | purity | evaluator | off | a derivation attribute (env, `args`, structured attrs) holds the text of a path outside the store and outside any project root (`toString ./x`), so the .drv depends on the checkout location |
+| `absolute-path-in-drv` | purity | evaluator | off | as above, for a path under a project root: an absolute path a flake evaluation would have copied |
 | `tree-meta-in-drv` | purity | evaluator | **warn** | a derivation attribute (env, `args`, structured attrs) holds metadata of a source tree as a string: `rev`, `shortRev`, `dirtyRev`, `dirtyShortRev`, `lastModifiedDate` or `narHash`, so each commit gives a new .drv and a rebuild. The tree that the value comes from gives the level (Scope): the root tree by default, a locked input only with `[lint.inputs.<node>]`. Not for the integers `lastModified` and `revCount` (Limits); `rev-count` reports a read of `revCount` |
 | `rev-count` | purity | evaluator | **warn** | the evaluation reads `revCount` of a source tree that has a name (`self.revCount`, `inputs.<node>.revCount`). The attribute is deprecated: the count of all revisions is expensive to compute, a shallow clone has none, and each commit changes it. `self ? revCount` and `builtins.attrNames self` are not a read. The tree gives the level (Scope): the root tree by default, a locked input only with `[lint.inputs.<node>]`. The site is the selection that reads the attribute; a read that is not a selection has no site (Scope) |
 | `unknown-allow` | meta | parser | **warn** | a word of a `# iets: allow` comment that is not a lint name, a family or `all`, or a `# iets:` directive other than `allow` (Silencing one site) |
@@ -361,8 +361,9 @@ through concatenation, interpolation, `concatStringsSep`,
 `replaceStrings` and attrset coercion like the store elements do. It is
 invisible to `getContext` and `hasContext`, `unsafeDiscardStringContext`
 strips it, and it never reaches an ATerm. `derivationStrict` reads it per
-attribute. The flake root of a path is the nearest ancestor holding a
-`flake.nix`; the probes are `Stat` observations of the tracing cache.
+attribute. The project root of a path is the nearest ancestor holding a
+`flake.nix`, a `.git` or an `iets.toml`; the probes are `Stat` observations
+of the tracing cache.
 
 `tree-meta-in-drv` uses the same context element with a different
 payload. `fetchTree` and the root tree of a flake put it on each metadata

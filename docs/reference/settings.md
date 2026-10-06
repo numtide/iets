@@ -205,8 +205,9 @@ spelling.
 
 A second `iets.toml` is the project's: the nearest one found by walking up
 from the entry file or the flake directory (`docs/reference/lints.md`). **The
-walk stops at the project root**, the first directory that holds a `.git` or a
-`flake.nix`, and it looks in that directory before it stops. It must not leave
+walk stops at the project root**, the first directory that holds a
+`flake.nix`, a `.git` or an `iets.toml`, and it looks in that directory
+before it stops. It must not leave
 the project: a `/tmp/iets.toml`, which every user may write, would otherwise
 set a lint level for every evaluation below it. The
 user file is trusted, because whoever can write it already controls the

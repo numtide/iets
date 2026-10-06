@@ -29,6 +29,7 @@ pub mod nixbin;
 pub mod parallel;
 pub mod print;
 pub mod profile;
+pub mod project;
 pub mod provenance;
 pub mod remote;
 pub mod runtime;

@@ -103,15 +103,24 @@ pub fn dir_copy_unfiltered(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalRes
     })
 }
 
-/// The nearest ancestor of `path` (or `path`) that holds a `flake.nix`.
-/// Every probe is a `Stat` observation, so a new `flake.nix` is a cache miss.
-fn flake_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
+/// The nearest project root at or above `path` (`crate::project`). Every
+/// probe is a `Stat` observation, so a new marker is a cache miss.
+fn project_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
     let mut dir = crate::compile::canon_path(path);
     loop {
-        let mut probe = dir.clone();
-        probe.extend_from_slice(b"/flake.nix");
-        if ev.trace().stat_now(&probe, true) == crate::trace::Kind::Regular {
-            return Some(dir);
+        for m in crate::project::MARKERS {
+            let mut probe = dir.clone();
+            probe.push(b'/');
+            probe.extend_from_slice(m.as_bytes());
+            let kind = ev.trace().stat_now(&probe, true);
+            let hit = if m == ".git" {
+                kind != crate::trace::Kind::Missing
+            } else {
+                kind == crate::trace::Kind::Regular
+            };
+            if hit {
+                return Some(dir);
+            }
         }
         let i = dir.iter().rposition(|&b| b == b'/')?;
         if i == 0 {
@@ -123,7 +132,7 @@ fn flake_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
 
 /// Derivation `drv_name` received attribute `key` whose value carries the
 /// text of the non-store path `path`: `absolute-path-in-drv` under a
-/// flake root, `impure-path-in-drv` elsewhere.
+/// project root, `impure-path-in-drv` elsewhere.
 fn path_in_drv(
     ev: &mut Evaluator,
     drv_name: &str,
@@ -131,10 +140,10 @@ fn path_in_drv(
     path: &[u8],
     attr_pos: Pos,
 ) -> EvalResult<()> {
-    match flake_root_of(ev, path) {
+    match project_root_of(ev, path) {
         Some(root) => ev.lint(LintId::AbsolutePathInDrv, attr_pos, || {
             format!(
-                "derivation '{drv_name}': attribute '{key}' holds the absolute path '{}' of the flake at '{}'; interpolate the path to copy it, or pass a relative name",
+                "derivation '{drv_name}': attribute '{key}' holds the absolute path '{}' of the project at '{}'; interpolate the path to copy it, or pass a relative name",
                 String::from_utf8_lossy(path),
                 String::from_utf8_lossy(&root)
             )

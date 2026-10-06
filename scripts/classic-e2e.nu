@@ -609,7 +609,9 @@ in { aDrv = a.drvPath; bDrv = b.drvPath; aOut = a.outPath; bOut = b.outPath; }
   let ifd = $"import \(derivation { name = \"x\"; system = builtins.currentSystem; builder = \"/bin/sh\"; args = [\"-c\" \"echo 42 > $out\"]; })"
   $ok = ($ok | append (cmp-case "import from derivation falls back"
     (run-both $farm nix-instantiate --eval -E $ifd)))
-  let r = (^$iets eval -E $ifd | complete)
+  # --impure: the expression names `builtins.currentSystem`, which a pure
+  # evaluation has not got, and the point here is the IFD refusal
+  let r = (^$iets eval --impure -E $ifd | complete)
   $ok = ($ok | append (verdict ($r.exit_code == 1 and ($r.stderr | str contains "import from derivation is not supported"))
     "iets eval refuses import from derivation" $"exit ($r.exit_code), stderr '($r.stderr)'"))
 

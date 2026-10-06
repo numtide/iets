@@ -154,9 +154,9 @@ registry! {
     Fod: "fod", Purity, Evaluator, Off, "a fixed-output derivation; the message names the derivation and its hash mode";
     LargeSourceCopy: "large-source-copy", Purity, Evaluator, Off, "a path copy whose NAR exceeds `max-bytes` (default 8 MiB)";
     GitInSource: "git-in-source", Purity, Evaluator, Warn, "a path copy of a directory that contains a `.git` entry";
-    DirCopyUnfiltered: "dir-copy-unfiltered", Purity, Evaluator, Off, "a directory coerced to a string is copied whole, untracked and ignored files included; use `builtins.path` with a filter";
-    ImpurePathInDrv: "impure-path-in-drv", Purity, Evaluator, Off, "a derivation attribute holds the text of a path outside the store and outside any flake root (`toString ./x`), so the .drv depends on the checkout location";
-    AbsolutePathInDrv: "absolute-path-in-drv", Purity, Evaluator, Off, "a derivation attribute holds the text of a path under a flake root, an absolute path a flake evaluation would have copied";
+    DirCopyUnfiltered: "dir-copy-unfiltered", Purity, Evaluator, Warn, "a directory coerced to a string is copied whole, untracked and ignored files included; use `builtins.path` with a filter";
+    ImpurePathInDrv: "impure-path-in-drv", Purity, Evaluator, Error, "a derivation attribute holds the text of a path outside the store and outside any project root (`toString ./x`), so the .drv depends on the checkout location";
+    AbsolutePathInDrv: "absolute-path-in-drv", Purity, Evaluator, Error, "a derivation attribute holds the text of a path under a project root, an absolute path a flake evaluation would have copied";
     TreeMetaInDrv: "tree-meta-in-drv", Purity, Evaluator, Warn, "a derivation attribute holds metadata of the flake's source tree (`self.rev`, `self.lastModifiedDate`, ...), so each commit gives a new .drv and a rebuild; a locked input is silent without `[lint.inputs.<node>]`";
     RevCount: "rev-count", Purity, Evaluator, Warn, "the evaluation reads `revCount` of the flake's source tree, which is deprecated: the count is expensive, a shallow clone has none, and each commit changes it; use `lastModifiedDate` and `shortRev`; a locked input is silent without `[lint.inputs.<node>]`";
     UnknownAllow: "unknown-allow", Meta, Parser, Warn, "a `# iets: allow` comment that names a lint the registry does not know, so a typo does not silence nothing";

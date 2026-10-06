@@ -197,6 +197,26 @@ pub fn entry_dir(a: &EvalArgs) -> std::path::PathBuf {
     std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
 }
 
+/// The project this run's sources belong to: the nearest root at or above
+/// [`entry_dir`], else that directory itself (`crate::project`). A pure
+/// evaluation reads below it, and it is part of the tracing-cache key, so a
+/// `flake.nix` or an `iets.toml` that appears above the entry asks for a new
+/// entry instead of replaying one that another root allowed.
+///
+/// A flake gets none. Its root tree is already a virtual store copy with the
+/// tracked files as its filter, and the flake directory as a second, unfiltered
+/// root would let an evaluation read an untracked file by its absolute path
+/// (docs/explanation/flakes-and-sources.md).
+pub fn project_root(a: &EvalArgs) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStringExt;
+    if matches!(a.input, Some(Input::Flake(_))) {
+        return None;
+    }
+    let dir = entry_dir(a);
+    let root = crate::project::find(&dir).unwrap_or(dir);
+    Some(root.into_os_string().into_vec())
+}
+
 /// The lint configuration of a run (docs/reference/lints.md).
 pub fn lint_config(a: &EvalArgs) -> Result<crate::lint::Config, Box<Error>> {
     let cwd = cwd();
@@ -363,8 +383,11 @@ pub fn setup_cache_more(
     }
     let cwd = cwd();
     let mut k = Key::new(subcommand);
-    if a.pure == Some(true) {
+    if cfg.is_pure() {
         k.field("pure-eval", b"1");
+        if let Some(root) = project_root(a) {
+            k.field("project-root", &root);
+        }
     }
     // the read set holds the file this names, but not the fact that another
     // run read another file under the same command

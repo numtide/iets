@@ -287,6 +287,35 @@ iets prints `warning: [rev-count] 'self.revCount' is deprecated: ...`.
 the value, `self ? revCount` and the attribute names with Nix on a clean
 tree, a dirty tree and a shallow clone.
 
+## Pure evaluation of a project with no flake
+
+A native command evaluates purely by default, where `nix-instantiate`,
+`nix-build` and `nix-shell` do not, and a pure run reads below its project:
+the nearest directory at or above the entry file holding a `flake.nix`, a
+working-tree root or an `iets.toml`, else that directory itself
+(`docs/explanation/flakes-and-sources.md`). Nix has no such root. The
+nearest thing it has is `restrict-eval` with `allowed-uris`, which iets does
+not implement.
+
+Three things follow, and `nix` needs `--impure` to be compared against any
+of them:
+
+| | Nix, pure | iets, pure |
+|:---|:---|:---|
+| `builtins.readFile ./x` with no flake | forbidden | the file, when `./x` is in the project |
+| `toString ./x` under the root flake or project | a store path | a store path under a flake, the checkout path under a project |
+| `"${./x}"` under the root flake or project | a path inside the tree copy | the same under a flake; one copy of that path alone under a project |
+
+The last two are what keeps a position, an error message and a
+`toString` naming the file the user edits. A `.drv` that holds such a path
+is the case that does not survive another checkout location, so
+`impure-path-in-drv` and `absolute-path-in-drv` are errors by default
+(`docs/reference/lints.md`).
+
+The user setting `pure = false` restores Nix's defaults for the native
+commands. A project `iets.toml` may not set it
+(`docs/reference/settings.md`).
+
 ## Classic mode
 
 `nix-instantiate`, `nix-build` and `nix-eval-jobs` under Nix's own names

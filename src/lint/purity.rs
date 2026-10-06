@@ -106,21 +106,15 @@ pub fn dir_copy_unfiltered(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalRes
 /// The nearest project root at or above `path` (`crate::project`). Every
 /// probe is a `Stat` observation, so a new marker is a cache miss.
 fn project_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
     let mut dir = crate::compile::canon_path(path);
     loop {
-        for m in crate::project::MARKERS {
-            let mut probe = dir.clone();
-            probe.push(b'/');
-            probe.extend_from_slice(m.as_bytes());
-            let kind = ev.trace().stat_now(&probe, true);
-            let hit = if m == ".git" {
-                kind != crate::trace::Kind::Missing
-            } else {
-                kind == crate::trace::Kind::Regular
-            };
-            if hit {
-                return Some(dir);
-            }
+        let at = std::path::Path::new(std::ffi::OsStr::from_bytes(&dir));
+        let hit = crate::project::markers(at).any(|m| {
+            ev.trace().stat_now(m.as_os_str().as_bytes(), true) != crate::trace::Kind::Missing
+        });
+        if hit {
+            return Some(dir);
         }
         let i = dir.iter().rposition(|&b| b == b'/')?;
         if i == 0 {

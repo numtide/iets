@@ -186,6 +186,12 @@ pub struct Evaluator {
     pub store: crate::source::LazyStore,
     /// `pure-eval` (docs/reference/settings.md).
     pure: bool,
+    /// The project this run's sources belong to (`crate::project`). A pure
+    /// evaluation reads below it as well as below the store paths it allowed,
+    /// so a checkout with no flake evaluates purely. `None` under a classic
+    /// name, which answers like nix
+    /// (docs/explanation/flakes-and-sources.md).
+    project_root: Option<Vec<u8>>,
     /// The session this evaluator was made in: its settings and its log.
     /// A field, not a thread-local lookup, because the fan-out checks read
     /// it on the hot path (docs/reference/library.md).
@@ -294,6 +300,7 @@ pub const DEFAULT_SYSTEM: &str = "x86_64-linux";
 pub struct EvalConfig {
     system: &'static str,
     pure: bool,
+    project_root: Option<Vec<u8>>,
     session: std::sync::Arc<crate::session::Session>,
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
     lints: crate::lint::Config,
@@ -311,6 +318,7 @@ impl Default for EvalConfig {
         EvalConfig {
             system: DEFAULT_SYSTEM,
             pure: false,
+            project_root: None,
             session: crate::session::Session::current(),
             search_path: Vec::new(),
             lints: Default::default(),
@@ -339,6 +347,20 @@ impl EvalConfig {
     /// `pure-eval` (docs/reference/settings.md).
     pub fn pure(mut self, pure: bool) -> EvalConfig {
         self.pure = pure;
+        self
+    }
+
+    /// What [`EvalConfig::pure`] settled on: the tracing-cache key needs it,
+    /// and a frontend's flag is not the whole answer any more.
+    pub fn is_pure(&self) -> bool {
+        self.pure
+    }
+
+    /// The project a pure evaluation may read below, with no flake
+    /// (`crate::project`). The path must be absolute and hold no trailing
+    /// slash, as `crate::project::find` returns it.
+    pub fn project_root(mut self, root: Option<Vec<u8>>) -> EvalConfig {
+        self.project_root = root;
         self
     }
 
@@ -490,6 +512,7 @@ impl EvalConfig {
             ir_cache: self.ir_cache,
             store: Default::default(),
             pure: self.pure,
+            project_root: self.project_root,
             session: self.session,
         };
         crate::builtins::install(&mut ev);
@@ -508,6 +531,17 @@ impl Evaluator {
     #[inline]
     pub fn pure(&self) -> bool {
         self.pure
+    }
+
+    /// Whether `path` is this run's project root or lies below it. A pure
+    /// evaluation reads there (`builtins::store_hooks::allowed`).
+    pub fn in_project(&self, path: &[u8]) -> bool {
+        let Some(root) = &self.project_root else {
+            return false;
+        };
+        path.len() >= root.len()
+            && path.starts_with(root)
+            && (path.len() == root.len() || path[root.len()] == b'/')
     }
 
     #[inline]

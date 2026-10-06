@@ -44,8 +44,8 @@ source wins over an earlier one:
    by walking up from the entry file's directory, the flake directory, or
    cwd for `-E` (each `[lint.inputs.<node>]` table is a source of its own,
    see Scope); the walk stops at the project root, the first directory
-   holding a `flake.nix`, a `.git` or an `iets.toml`; any key but `[lint]`
-   in this file is an error
+   holding a `flake.nix`, the root of a working tree or an `iets.toml`; any
+   key but `[lint]` in this file is an error
    (`docs/reference/settings.md`);
 4. `IETS_LINT="name=level,name=level"`;
 5. `--lint SELECTOR=LEVEL`, repeatable.
@@ -362,8 +362,8 @@ through concatenation, interpolation, `concatStringsSep`,
 invisible to `getContext` and `hasContext`, `unsafeDiscardStringContext`
 strips it, and it never reaches an ATerm. `derivationStrict` reads it per
 attribute. The project root of a path is the nearest ancestor holding a
-`flake.nix`, a `.git` or an `iets.toml`; the probes are `Stat` observations
-of the tracing cache.
+`flake.nix`, the root of a working tree or an `iets.toml`; the probes are
+`Stat` observations of the tracing cache.
 
 `tree-meta-in-drv` uses the same context element with a different
 payload. `fetchTree` and the root tree of a flake put it on each metadata

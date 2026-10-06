@@ -98,6 +98,13 @@ pub fn at(root: &Path) -> Option<&'static dyn Scm> {
     KNOWN.iter().copied().find(|s| s.root_marker(root).exists())
 }
 
+/// The entry that would make `dir` the root of a working tree, one per SCM,
+/// in the order detection asks them. `crate::project` probes these beside
+/// its own markers, and the lint probes them through the tracing cache.
+pub fn root_markers(dir: &Path) -> impl Iterator<Item = PathBuf> + use<'_> {
+    KNOWN.iter().map(|s| s.root_marker(dir))
+}
+
 /// The working tree that holds `dir`: its SCM and its root, the nearest
 /// ancestor (or `dir` itself) that an SCM knows as one.
 pub fn detect(dir: &Path) -> Option<(&'static dyn Scm, PathBuf)> {

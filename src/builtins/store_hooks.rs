@@ -68,10 +68,16 @@ pub fn resolve(ev: &Evaluator, path: &[u8]) -> SrcPath {
 }
 
 /// Whether a pure evaluation may read `path` (eval.cc: rootFS is the store
-/// behind an allow list): only under a store path this evaluation added or a
-/// fetch found on disk. Always true when impure.
+/// behind an allow list): under a store path this evaluation added or a fetch
+/// found on disk, or inside this run's project. Always true when impure.
+///
+/// The project is iets's own entry, and it is an allow list, not a copy of a
+/// tree: a path keeps naming the checkout, so `toString ./x` and every
+/// position name the file the user edits. A path that reaches a derivation
+/// that way is the one thing the checkout location can break, and
+/// `impure-path-in-drv` reports it (docs/explanation/flakes-and-sources.md).
 pub fn allowed(ev: &Evaluator, path: &[u8]) -> bool {
-    !ev.pure() || ev.known.under(path).is_some()
+    !ev.pure() || ev.known.under(path).is_some() || ev.in_project(path)
 }
 
 /// Which components a resolution follows (source-accessor.hh:SymlinkResolution).

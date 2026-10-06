@@ -23,6 +23,7 @@ const KEYS: &[&str] = &[
     "nix-bin-dir",
     "no-fallback",
     "provenance",
+    "pure",
     "shell-gc-root",
     "source-map",
     "workers",
@@ -77,6 +78,11 @@ pub struct Settings {
     pub ir_min: usize,
     /// `provenance`, `IETS_PROVENANCE`: `false` prints plain store paths.
     pub provenance: bool,
+    /// `pure`: `pure-eval` for the native commands, which a classic name does
+    /// not read (docs/reference/settings.md). A project file may not set it:
+    /// an impure evaluation reads any path and fetches without a hash, so a
+    /// clone could read a key and post it.
+    pub pure: bool,
     /// `nix-bin-dir`, `IETS_NIX_BIN_DIR`: where the real Nix binaries live.
     pub nix_bin_dir: Option<PathBuf>,
     /// `no-fallback`, `IETS_NO_FALLBACK`: fail instead of running the real Nix.
@@ -304,6 +310,7 @@ impl Settings {
             ir_stats: env.set("IETS_IR_STATS"),
             ir_min: env.num("IETS_IR_MIN")?.unwrap_or(1024),
             provenance: env.flag("IETS_PROVENANCE", c.bool("provenance")?, true)?,
+            pure: c.bool("pure")?.unwrap_or(true),
             nix_bin_dir: env.dir("IETS_NIX_BIN_DIR").or(c.str("nix-bin-dir")?),
             no_fallback: env.flag("IETS_NO_FALLBACK", c.bool("no-fallback")?, false)?,
             shell_gc_root: c.bool("shell-gc-root")?.unwrap_or(true),
@@ -564,7 +571,17 @@ mod tests {
         assert_eq!(s.fetch_max_size, 16 << 30);
         assert_eq!(s.fix_hashes, FixHashes::Ask);
         assert!(s.cache && s.provenance && s.shell_gc_root && s.build_gc_root);
+        assert!(s.pure);
         assert!(!s.no_fallback);
+    }
+
+    #[test]
+    fn the_user_file_turns_purity_off() {
+        let f = scratch("pure");
+        std::fs::write(&f, "pure = false\n").unwrap();
+        assert!(!Settings::load_from(&f, &[], &NO_ENV).unwrap().pure);
+        let s = Settings::load_from(&f, &opts(&[("pure", "true")]), &NO_ENV).unwrap();
+        assert!(s.pure, "--iets-option wins over the file");
     }
 
     #[test]

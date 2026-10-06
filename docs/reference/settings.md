@@ -206,8 +206,8 @@ spelling.
 A second `iets.toml` is the project's: the nearest one found by walking up
 from the entry file or the flake directory (`docs/reference/lints.md`). **The
 walk stops at the project root**, the first directory that holds a
-`flake.nix`, a `.git` or an `iets.toml`, and it looks in that directory
-before it stops. It must not leave
+`flake.nix`, the root of a working tree or an `iets.toml`, and it looks in
+that directory before it stops. It must not leave
 the project: a `/tmp/iets.toml`, which every user may write, would otherwise
 set a lint level for every evaluation below it. The
 user file is trusted, because whoever can write it already controls the
@@ -223,6 +223,7 @@ that tries to set `nix-bin-dir` is worth stopping on.
 |:---|:---|
 | `nix-bin-dir` | name the binary the classic fallback execs: arbitrary code |
 | `builder` | receive the closure, sources and all, and hand back outputs of its choice |
+| `pure` | `false` gives the evaluation of a clone `getEnv`, a read of any absolute path and a fetch with no hash: read a private key, then post it as the path of a URL |
 | `fix-hashes` | `always` rewrites source files and accepts whatever hash the network served, with no question asked |
 | `cache-dir` | point the caches at a directory it ships, so a planted entry answers for an evaluation; or write the caches anywhere |
 | `source-map` | make errors, provenance and lint roots name local directories outside the clone |
@@ -244,7 +245,7 @@ leaves `/etc` at the same switch, so nothing checks for it.
 ## Keys
 
 Every key in the **File** column above, with the type and default given
-there, plus three keys that have no environment variable:
+there, plus six keys that have no environment variable:
 
 | Key | Type | Default |
 |:---|:---|:---|
@@ -253,6 +254,13 @@ there, plus three keys that have no environment variable:
 | `fetch-max-size` | integer (bytes) | 17179869184 (16 GiB) |
 | `shell-gc-root` | bool | `true` |
 | `build-gc-root` | bool | `true` |
+| `pure` | bool | `true` |
+
+`pure` is `pure-eval` for the native commands, and `false` brings the old
+default back for every run. The classic names do not read it: each one
+keeps Nix's own rule, so one command line answers the same whichever
+binary `PATH` found. `--impure` is the per-run form. **`pure` is a user
+setting alone**: see the project file below.
 
 `shell-gc-root` is the switch on the roots `nix-shell` and `nix develop`
 keep for themselves: on, a shell entry links what it realised in
@@ -501,7 +509,7 @@ The same rules as Nix, per command:
 | `nix-instantiate`, `nix-build`, `nix-shell` | nix.conf `pure-eval`, else off | `--pure-eval`, `--no-pure-eval`, `--impure`, `--option pure-eval`; the last one wins |
 | `nix eval`, `nix build`, `nix develop`, `nix print-dev-env` | on (main.cc); nix.conf does not change it | the same flags. `-f`/`--file` turns it off, and is a usage error when `pure-eval` was **overridden** — set by a flag, a user `nix.conf`, `$NIX_CONFIG` or `--option`, whatever the value; the system `$NIX_CONF_DIR/nix.conf` does not count, because `loadConfFile` clears the bit after it (installables.cc:460). A flag that turns purity off takes `-f` instead of refusing it. iets falls back on the error |
 | `nix-eval-jobs` | `--flake`: on. Otherwise nix.conf, else off | `--impure` beats `--flake`; without `--flake`, `--pure-eval` and `--option pure-eval` |
-| `iets eval`, `iets build`, `iets eval-jobs` | off | `--pure-eval`, `--no-pure-eval`, `--impure`, `--option pure-eval`; `eval-jobs --flake` as nix-eval-jobs. nix.conf is read by `eval-jobs` only |
+| the native commands (`iets eval`, `iets build`, …) | **on**, and the `pure` key in the user `iets.toml` changes it | `--pure-eval`, `--no-pure-eval`, `--impure`, `--option pure-eval`; `eval-jobs --flake` as nix-eval-jobs. nix.conf is read by `eval-jobs` only |
 
 `nix-shell --impure` is the shell's environment flag (nix-build.cc takes
 it), not `pure-eval`.

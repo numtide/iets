@@ -35,8 +35,21 @@ pub struct Run {
 impl Run {
     /// The configuration `a` asks for. `Err` is the exit code of a setting
     /// that does not resolve, a lint selector or `--dump-drvs`.
+    ///
+    /// A native command evaluates purely unless a flag or the user's `pure`
+    /// setting says otherwise. The classic names keep Nix's own defaults, so
+    /// one command line answers the same whichever binary `PATH` found
+    /// (`cli::classic`, docs/reference/settings.md).
     pub fn new(a: &EvalArgs) -> Result<Run, i32> {
-        Run::over(EvalConfig::new().pure(a.pure == Some(true)), a)
+        let pure = a
+            .pure
+            .unwrap_or_else(|| crate::session::Session::current().settings().pure);
+        Run::over(
+            EvalConfig::new()
+                .pure(pure)
+                .project_root(super::project_root(a)),
+            a,
+        )
     }
 
     /// [`Run::new`] on a configuration that has the system and `pure-eval`
@@ -162,6 +175,8 @@ mod tests {
         list + "]"
     }
 
+    /// Impure: the workloads below import absolute paths under a temporary
+    /// directory, and a pure run reads neither those nor the search path.
     fn args(expr: &str, cache_dir: &std::path::Path, workers: usize) -> EvalArgs {
         EvalArgs {
             input: Some(Input::Expr(expr.to_string())),
@@ -169,6 +184,7 @@ mod tests {
             no_tracing_cache: true,
             no_ir_cache: false,
             workers,
+            pure: Some(false),
             ..EvalArgs::new()
         }
     }

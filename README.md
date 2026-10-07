@@ -1,175 +1,152 @@
-# iets
+# iets - at least it's *something*
 
-A Nix evaluator written from scratch in Rust, and a build client that ships
-what it evaluates to a Nix daemon.
+> DISCLAIMER: this project is LLM-ware. This README is written by my little
+> hands. The rest of the project is LLM output with *some* level of
+> supervision. Mostly Opus 5.5 and Fable 5.1 at the time of writing.
 
-It is a drop-in: it answers to the classic command names, computes the same
-store paths as Nix 2.34.8, and hands anything it does not implement to the
-real `nix`. It keeps no store of its own.
-
-The aim is to compress the Nix stack. A working Nix setup today is a dozen
-helper tools, and most of them exist because Nix lacks one capability or
-one good default. iets supplies that capability or default, so Nix feels
-good to use with no configuration. Speed is the first result, not the
-last. The means are good abstractions and good defaults, not a jumbo
-binary: a feature belongs when it falls out of what the evaluator already
-owns.
-
-```
-nix develop -c cargo build --release
-./target/release/iets eval --strict -E '1 + 1'
-./target/release/iets --help
-./target/release/iets help            # the commands, and the topics below
-./target/release/iets help settings   # a documentation page, out of the binary
-```
-
-New here? [docs/tutorial/getting-started.md](docs/tutorial/getting-started.md)
-walks from that build to a cache hit in ten minutes.
-
-The binary carries the reference documentation, so `iets help TOPIC` works
-from anywhere, with no `docs/` directory in sight.
-
-## Why
-
-**It is about 2.5× cheaper and 2 to 4.7× faster.** Measured on an idle 32-core
-machine against Nix 2.34.8, same nixpkgs, identical drvPaths:
-
-| workload | iets | nix 2.34.8 |
-|---|---:|---:|
-| nixos-minimal, instructions | 7.7 G | 19.4 G |
-| nixos-desktop, instructions | 10.0 G | 25.8 G |
-| nixos-desktop, wall, 1 worker | 0.98 s | 2.20 s |
-| nixos-desktop, wall, 4 workers | **0.47 s** | 2.20 s |
-
-These are warm compiled-file cache runs, which is what you get after the first
-evaluation of a tree. With `--no-ir-cache`, so every file is parsed and
-compiled again, the instruction ratio is 1.96× on minimal and 2.11× on
-desktop. Nix has no equivalent cache to turn off.
-
-**Runs are cached.** A second `eval` or `build` of the same command validates
-the files, directories and environment variables the first run read, then
-replays the result — nixos-desktop in 40 ms instead of 1 s. Unlike Nix's eval
-cache this works for `--expr` and `--file`, not only for flakes.
-See [docs/explanation/caching.md](docs/explanation/caching.md).
-
-**It evaluates in parallel** without changing a single result
-([docs/explanation/evaluation.md](docs/explanation/evaluation.md)), and
-**it builds what it evaluated from memory** — derivations never touch the
-disk on the way to the daemon
-([docs/how-to/build-remotely.md](docs/how-to/build-remotely.md)).
-
-## Fewer tools
-
-Each of these replaces a separate tool. None is a bundled copy of that tool:
-each one is a short path over the evaluator, the cache and the build client
-that iets has anyway.
+iets is a re-implementation of the Nix client that focuses on providing a good
+out of the box user experience. The input is based on more than a decade of
+using the language and seeing how the community and customers use it. There is
+a jump we can make forward.
 
 ```sh
-iets build -A hello nixpkgs/default.nix        # nix-build, plus --builder ssh-ng:// or grpc://
-iets build .#checks                            # every check of this system, one verdict each
+iets build -A hello ./nixpkgs                  # nix-build
+iets build .#checks                            # nix-fast-build
 iets eval-jobs --flake .#hydraJobs             # nix-eval-jobs
-iets search -I nixpkgs=/path ripgrep           # nix search, byte-identical, index cached
-iets diff -A hello -A figlet nixpkgs/default.nix   # nix-diff; --closure is nvd
+iets search -I nixpkgs=./nixpkgs ripgrep       # nix search
+iets diff -A hello -A figlet ./nixpkgs         # nix-diff; --closure is nvd
 iets prefetch --unpack https://example.org/x.tar.gz # nurl, nix-prefetch
 iets print-dev-env --gc-root .direnv/env .     # nix-direnv's `use flake`
 ```
 
-One worked example of each swap:
-[docs/how-to/replace-nix-tools.md](docs/how-to/replace-nix-tools.md).
+## Features
 
-Under the classic names — `nix-instantiate`, `nix-build`, `nix-shell`,
-`nix-eval-jobs`, `nix` — the same binary behaves as that
-command and execs the real `nix` for the rest
-([docs/reference/classic.md](docs/reference/classic.md)).
+Some topics I had in mind:
 
-A wrong fixed-output hash can be rewritten in place, with a prompt on a
-terminal and silently in CI
-([docs/how-to/fix-hashes.md](docs/how-to/fix-hashes.md)). NixOS hosts
-import `nixosModules.default` and set `iets.classic.enable` to put those
-names ahead of `nix` in the system path
-([docs/reference/classic.md](docs/reference/classic.md)).
+Sometimes Nix hangs. Many beginners hit Ctrl-C thinking Nix is stuck. It was
+just evaluating, with no feedback, and slowly. iets fixes that by making eval
+2-4.7x faster than Nix 2.34.8 on NixOS configs (see `bench/`). And by letting
+you know what it's up to.
 
-## For programs and agents
+Bumping FODs (fixed-output derivations) means putting a bad hash, running a
+build, and then replacing the errored hash with the right one. iets detects
+the error, fixes the hash in your source, and builds again. See
+[docs/how-to/fix-hashes.md](docs/how-to/fix-hashes.md).
 
-Every command speaks JSON and returns stable exit codes, and errors carry a
-code, a position and often the fix
-([docs/reference/errors.md](docs/reference/errors.md)). `--log-format
-internal-json` emits Nix's own activity records, so `nix-output-monitor` works
-unchanged.
+Nix eval is impure, unless you use flakes. No hate against flakes, they are
+supported out of the box, but eval puring shouldn't be coupled to them. iets
+adds introspection tools to detect when impurities leak into evals or builds.
+See [docs/reference/lints.md](docs/reference/lints.md).
 
-`iets plumbing` is the low-level surface underneath the user-facing commands:
-one operation per command, JSON in and out, composable
-(`iets plumbing resolve --dump-drvs d x.nix | iets plumbing plan --roots -`).
-There is one implementation of each capability; `tests/layering.rs` enforces
-it. The contracts are in
-[docs/reference/plumbing.md](docs/reference/plumbing.md) and the rule behind
-them in
-[docs/explanation/plumbing-and-porcelain.md](docs/explanation/plumbing-and-porcelain.md).
+Eval caching is done by tracing all the files being used for a particular
+eval. That means eval caching is supported on all operations, not just flakes.
+It is also more precise. So running `nix fmt` through iets is pretty instant.
+See [docs/explanation/caching.md](docs/explanation/caching.md).
 
-The crate also builds as a library, with a safe value handle
-(`api::value::{Eval, Value}`) and no process-global state. It is not ready
-to embed in a long-lived program: the evaluator does not free memory until
-the process exits. See
-[docs/how-to/embed-the-evaluator.md](docs/how-to/embed-the-evaluator.md).
+iets doesn't need a local `/nix/store` to work. It's a single binary you can
+have in your CI environment, and that pushes all the builds to a Nix daemon or
+a remote builder over `ssh-ng://` or `grpc://` (like https://nixbuild.net).
+See [docs/how-to/build-remotely.md](docs/how-to/build-remotely.md).
 
-Driving iets from a script or an agent:
+It's a drop-in. Call it as `nix`, `nix-build`, `nix-shell` or
+`nix-instantiate` and it behaves like that command. Whatever it doesn't
+implement goes to the real `nix`. See
+[docs/reference/classic.md](docs/reference/classic.md).
+
+It's also made for scripts and agents. Every command speaks JSON, has stable
+exit codes, and errors come with a code, a position and often the fix. See
 [docs/how-to/script-iets.md](docs/how-to/script-iets.md).
 
-## Status
+iets's evaluator keeps track of which source some Nix code comes from. That
+means we can enable/disable language features based on the "package". And
+start to evolve the language without it being an all-or-nothing situation.
 
-Private and under active development. The hard invariant is drvPath parity
-with Nix 2.34.8 on NixOS systems from nixpkgs; `nix flake check` runs the unit
-tests, clippy, fmt, the `tests/lang` suite and the layering rule, and the
-scripts under `scripts/` compare against a real `nix` byte for byte. Where
-behaviour differs on purpose,
-[docs/reference/divergences.md](docs/reference/divergences.md) records it.
+Speaking of which (experimental): we also keep track of the source to drv
+correspondence. So when a build fails, we can tell you where the error came
+from, in your source instead of the /nix/store. Sometimes. This one still
+needs more work. See
+[docs/explanation/provenance.md](docs/explanation/provenance.md).
+
+## Scope
+
+For now iets is 100% a client and there is no nix-daemon implementation. I'm
+trying to strike a balance and make it featureful enough that it provides a
+good out-of-the-box user experience and shortens the list of tools needed to
+use Nix day-to-day, without becoming a kitchen sink.
+
+## Not supported (yet)
+
+Some things iets doesn't do. Under the classic names, most of these fall
+back to the real `nix`, so you mostly won't notice.
+
+* No nix-daemon, and no store of its own. Builds go to a daemon or a remote
+  builder.
+* Flakes have to be local and locked. No registry refs like `nixpkgs#hello`,
+  no remote roots like `github:NixOS/nixpkgs#hello`, and no `nix flake
+  lock`. Remote *inputs* in a `flake.lock` are fine.
+* No `git` or `hg` fetching. That means `fetchGit` and git inputs too.
+* No import-from-derivation (IFD).
+* Unpinned `fetchurl`, `fetchTarball` without a `sha256`, and `fetchClosure`
+  aren't there either.
+* Only a handful of `nix` subcommands are native. The rest run the real
+  `nix`.
+* The library never frees memory, so don't embed it in a long-running
+  program yet.
+* Lots of other small details. iets is still very fresh.
+
+The full list is in
+[docs/reference/classic.md](docs/reference/classic.md#fallback-rules) and
+[docs/reference/divergences.md](docs/reference/divergences.md).
+
+## Project status / LLM-ware
+
+As said in the disclaimer, this project is LLM-ware. Which is a very different
+way to write software than the traditional way. Traditionally we would write
+everything from the ground up. Designing the architecture. Picking the right
+libraries. When done rigorously, we would get a sense of if a project is done
+well or not.
+
+With LLMs it's top-down.
+
+I spent a lot of time verifying the outputs, which is pretty easy to do with
+Nix. And poked at the architecture in different angles. But the insides of
+the project are not 100% understood by me. And not necessarily the most
+pleasing to read. At some levels, the software is of better quality than if I
+had written it by hand. And then in others, there could be gaping holes the
+LLM pretended was fine, because I didn't prompt it correctly.
+
+How to get to a level of craft that makes me proud is still an open question
+for me. And I think the best way to find out is to lean into it.
+
+## Installation
+
+Build it from source:
+
+```sh
+nix develop -c cargo build --release
+./target/release/iets eval --strict -E '1 + 1'
+./target/release/iets help
+```
+
+On NixOS, import `nixosModules.default` and set `iets.classic.enable = true`.
+That puts the classic names (`nix-build`, `nix-shell`, ...) ahead of `nix` in
+your path.
 
 ## Documentation
 
-[ARCHITECTURE.md](ARCHITECTURE.md) is the map of the crate. The rest is in
-`docs/`, in four parts.
+`./docs` is LLM-generated, but it should be useful as reference. Start with
+[docs/tutorial/getting-started.md](docs/tutorial/getting-started.md). The
+binary also carries the reference docs, so `iets help TOPIC` works from
+anywhere. [ARCHITECTURE.md](ARCHITECTURE.md) is the map of the code.
 
-**Learn it.** [tutorial/getting-started.md](docs/tutorial/getting-started.md)
-— one path from a build to a cache hit.
+## Credits
 
-**Do a thing.**
-
-| | |
-|---|---|
-| [how-to/build-remotely.md](docs/how-to/build-remotely.md) | a daemon, `unix://`, `ssh-ng://` or `grpc://` |
-| [how-to/use-with-direnv.md](docs/how-to/use-with-direnv.md) | `print-dev-env` in an `.envrc` |
-| [how-to/replace-nix-tools.md](docs/how-to/replace-nix-tools.md) | `nix search`, nix-diff, nvd, nurl, nix-eval-jobs, building a flake's checks |
-| [how-to/fix-hashes.md](docs/how-to/fix-hashes.md) | rewrite a wrong fixed-output hash |
-| [how-to/script-iets.md](docs/how-to/script-iets.md) | JSON, exit codes, log records, the plumbing pipeline |
-| [how-to/embed-the-evaluator.md](docs/how-to/embed-the-evaluator.md) | the crate as a library |
-
-**Look it up.**
-
-| | |
-|---|---|
-| [reference/commands.md](docs/reference/commands.md) | every command and flag |
-| [reference/plumbing.md](docs/reference/plumbing.md) | the plumbing operations and their JSON |
-| [reference/classic.md](docs/reference/classic.md) | what each classic name handles |
-| [reference/settings.md](docs/reference/settings.md) | `iets.toml`, `nix.conf` and every `IETS_*` variable |
-| [reference/errors.md](docs/reference/errors.md) | error codes, exit codes, log records |
-| [reference/events.md](docs/reference/events.md) | the `IETS_EVENTS` JSON stream |
-| [reference/lints.md](docs/reference/lints.md) | every lint |
-| [reference/syntax-tree.md](docs/reference/syntax-tree.md) | the JSON form of the syntax tree |
-| [reference/builtins.md](docs/reference/builtins.md) | the primop surface |
-| [reference/divergences.md](docs/reference/divergences.md) | where iets differs from Nix on purpose |
-| [reference/library.md](docs/reference/library.md) | the library entry points |
-
-**Understand it.**
-
-| | |
-|---|---|
-| [explanation/evaluation.md](docs/explanation/evaluation.md) | laziness, the value model, the fiber scheduler |
-| [explanation/caching.md](docs/explanation/caching.md) | the three stores, and why the input store is safe |
-| [explanation/flakes-and-sources.md](docs/explanation/flakes-and-sources.md) | a reference becomes a tree |
-| [explanation/plumbing-and-porcelain.md](docs/explanation/plumbing-and-porcelain.md) | the layer rule, and what it cost |
-| [explanation/provenance.md](docs/explanation/provenance.md) | a store path back to the file that made it |
-| [explanation/lint-scope.md](docs/explanation/lint-scope.md) | what iets lints, and how a project makes its own rules |
-| [explanation/history.md](docs/explanation/history.md) | what was tried and removed |
+* All the computer scientists and OSS developers whose output was used to
+  train the models.
+* The agents also looked at code from [Nix](https://github.com/NixOS/nix),
+  [fix](https://github.com/psyclyx/fix) and
+  [Determinate Nix](https://github.com/DeterminateSystems/nix-src) when
+  comparing for speed.
 
 ## Licence
 

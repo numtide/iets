@@ -13,7 +13,7 @@ pub mod strings;
 pub mod text;
 
 use crate::eval::{Evaluator, Pos};
-use crate::runtime::*;
+use crate::runtime::{PrimFn, Word};
 use crate::syntax::symbol::Sym;
 
 pub struct Registry {

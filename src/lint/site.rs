@@ -12,7 +12,6 @@ type Kind<'a> = &'a dyn Fn(&Expr) -> bool;
 /// The span of the site of `id` at offset `off` of `src`, which parsed
 /// into `ast`, and the text that replaces it.
 pub fn finding(src: &[u8], ast: &Ast, id: LintId, off: u32) -> Option<(Span, Option<String>)> {
-    use LintId::*;
     let interp = |e: &Expr| {
         let has = |p: &StrPart| matches!(p, StrPart::Interp(_));
         matches!(e, Expr::Str(p) if ast.parts(*p).iter().any(has))
@@ -44,16 +43,16 @@ pub fn finding(src: &[u8], ast: &Ast, id: LintId, off: u32) -> Option<(Span, Opt
     let var = |e: &Expr| matches!(e, Expr::Var(_));
     // first choice first; `true` when a binding at the site goes before them
     let (binds, kinds): (bool, &[Kind]) = match id {
-        AbsolutePathLiteral | ShortPathLiteral => (false, &[&path]),
-        UrlLiteral => (false, &[&string]),
-        EqTypeMismatch | EqFunction => (false, &[&eq]),
-        OrNonAttrs => (false, &[&or]),
-        ImpureBuiltin => (false, &[&apply, &select, &var]),
-        UnhashedFetch | Ifd | ReadThroughCopy => (false, &[&apply]),
+        LintId::AbsolutePathLiteral | LintId::ShortPathLiteral => (false, &[&path]),
+        LintId::UrlLiteral => (false, &[&string]),
+        LintId::EqTypeMismatch | LintId::EqFunction => (false, &[&eq]),
+        LintId::OrNonAttrs => (false, &[&or]),
+        LintId::ImpureBuiltin => (false, &[&apply, &select, &var]),
+        LintId::UnhashedFetch | LintId::Ifd | LintId::ReadThroughCopy => (false, &[&apply]),
         // `inherit (self) revCount`, then `getAttr "revCount" self`: the call
         // starts where its `builtins.getAttr` starts
-        RevCount => (true, &[&apply, &select]),
-        UnknownAllow => {
+        LintId::RevCount => (true, &[&apply, &select]),
+        LintId::UnknownAllow => {
             let word = src.get(off as usize..)?;
             let len = word.iter().take_while(|b| !b" \t,\r\n".contains(b)).count();
             let end = off + len as u32;
@@ -75,8 +74,8 @@ pub fn finding(src: &[u8], ast: &Ast, id: LintId, off: u32) -> Option<(Span, Opt
     let span = *span.or_else(|| kinds.iter().find_map(node))?;
     let text = String::from_utf8_lossy(src.get(span.start as usize..span.end as usize)?);
     let edit = match id {
-        UrlLiteral if !text.starts_with(['"', '\'']) => Some(format!("\"{text}\"")),
-        ShortPathLiteral => Some(format!("./{text}")),
+        LintId::UrlLiteral if !text.starts_with(['"', '\'']) => Some(format!("\"{text}\"")),
+        LintId::ShortPathLiteral => Some(format!("./{text}")),
         _ => None,
     };
     Some((span, edit))

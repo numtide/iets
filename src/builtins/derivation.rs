@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::Registry;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::print::{json_escape, lexicographic_order, print_json};
-use crate::runtime::*;
+use crate::runtime::{AttrsObj, Ctx, Word, split_built};
 use crate::store::drv::{
     Derivation, DerivationOutput, DrvError, DrvHashCache, InputNode,
     finalize_input_addressed_outputs, hash_derivation_modulo, load_derivation_from_store,

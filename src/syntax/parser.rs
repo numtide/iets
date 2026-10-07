@@ -8,7 +8,10 @@
 //! moved into the `Ast` side tables in one block when their parent node
 //! is complete, so a nested construct never splits its parent's run.
 
-use super::ast::*;
+use super::ast::{
+    Ast, AttrElem, BinOp, Bind, BindKind, Expr, ExprId, FileId, Formal, Note, Param, PathExpr,
+    PathKind, Range, Span, StrPart, UnOp,
+};
 use super::lexer::{IndPart, Lexer, PathPart, StrEnd, Tok, Token};
 use super::symbol::{FxHashMap, Interner, Sym};
 use super::{ParseError, line_col};

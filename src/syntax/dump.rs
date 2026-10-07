@@ -2,7 +2,10 @@
 //! machine form of `iets parse --json` (docs/reference/syntax-tree.md) and
 //! `sexp` the S-expressions of `iets parse` and of the tests.
 
-use super::ast::*;
+use super::ast::{
+    Ast, AttrElem, BinOp, Bind, BindKind, Expr, ExprId, Formal, Param, PathKind, Range, Span,
+    StrPart, UnOp,
+};
 use super::symbol::{Interner, Sym};
 
 /// A node with its kind, its span and its fields in order, or a plain

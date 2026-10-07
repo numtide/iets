@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::force::{CellState, T_JOB, bail_requested, fanout_range, take_cell};
 use crate::print::{json_escape, lexicographic_order, print_json};
-use crate::runtime::*;
+use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
 use crate::store::drv::{Derivation, DerivationOutput, load_derivation_from_store};
 use crate::store::path::{STORE_DIR, StorePath};
 use crate::syntax::symbol::Sym;

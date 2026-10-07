@@ -8,7 +8,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::Word;
 use crate::syntax::symbol::Sym;
 
 /// The `parse-toml-timestamps` experimental feature.

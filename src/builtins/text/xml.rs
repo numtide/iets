@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::compile::ir::ParamIr;
 use crate::eval::{EvalResult, Evaluator, Pos};
-use crate::runtime::*;
+use crate::runtime::{AttrsObj, Ctx, Value, Word, ctx_to_arena};
 
 pub fn to_xml(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let mut out: Vec<u8> = Vec::new();

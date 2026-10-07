@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
-use crate::runtime::*;
+use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
 
 /// C's `%g` with precision 6, as `std::ostream << double` prints.
 pub fn format_g(f: f64) -> String {

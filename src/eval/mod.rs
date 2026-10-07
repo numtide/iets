@@ -17,7 +17,10 @@ use crate::compile::ir::{
 use crate::compile::{Compiler, Globals};
 use crate::parallel::shared::SharedMap;
 use crate::runtime::arena::{STAT_NAMES, Stat};
-use crate::runtime::*;
+use crate::runtime::{
+    Arena, AttrsObj, Cell, Ctx, EnvObj, Kind, LambdaObj, ListObj, MAX_LEAVES, StringObj, ThunkObj,
+    UNION_MIN, Value, ValueType, Word, ctx_to_arena, leaf_count,
+};
 use crate::store::path::{STORE_DIR, StorePath};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::FileId;

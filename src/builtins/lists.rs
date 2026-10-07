@@ -3,7 +3,7 @@
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::runtime::arena::Stat;
-use crate::runtime::*;
+use crate::runtime::{Value, Word};
 
 pub fn register(r: &mut Registry) {
     r.op("__head", 1, head);

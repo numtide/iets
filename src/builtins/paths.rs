@@ -17,7 +17,7 @@ use super::Registry;
 use super::store_hooks::{self, At, Follow};
 use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
 use crate::store::hash::{Hash, HashAlgo, Hasher, hash_bytes};
 use crate::store::nar::FileType;
 use crate::store::path::{

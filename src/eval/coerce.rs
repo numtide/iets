@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use super::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Cell, Ctx, Taint, Value, ValueType, Word};
 
 impl Evaluator {
     /// Coerce a value to a string, collecting context into `ctx`.

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Ctx, Word, ctx_to_arena, split_built};
 use crate::store::path::StorePath;
 
 pub fn register(r: &mut Registry) {

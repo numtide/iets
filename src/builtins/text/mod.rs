@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use super::Registry;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Ctx, ListObj, StringObj, Word, ctx_to_arena};
 use crate::store::hash::{Hash, HashAlgo, HashFormat, hash_bytes};
 
 pub use fromtoml::set_parse_toml_timestamps;

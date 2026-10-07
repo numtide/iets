@@ -8,7 +8,7 @@ use std::fmt;
 
 use crate::error::{Error, Result as R};
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Value, Word};
 use crate::source::{AttrVal, Attrs, str_attr};
 use crate::store::hash::{Hash, HashAlgo};
 

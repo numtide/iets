@@ -2,7 +2,7 @@
 
 use super::Registry;
 use crate::eval::{ArithOp, EvalResult, Evaluator, Pos};
-use crate::runtime::*;
+use crate::runtime::Word;
 
 pub fn register(r: &mut Registry) {
     r.op("__add", 2, add);

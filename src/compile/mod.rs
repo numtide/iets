@@ -12,7 +12,10 @@ use crate::syntax::ast::{
     Ast, AttrElem, BinOp, Bind, BindKind, Expr, ExprId, Note, Param, PathKind, StrPart, UnOp,
 };
 use crate::syntax::symbol::{FxHashMap, Interner, Sym};
-use ir::*;
+use ir::{
+    AttrElemIr, AttrsIr, BindIr, BindScope, DynBindIr, FormalIr, Ir, IrRef, LambdaIr, LetIr,
+    ParamIr, SelectIr,
+};
 
 /// Names visible at the root of every file.
 #[derive(Clone)]

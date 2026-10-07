@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Ctx, Taint, Value, Word};
 use crate::source::{
     AttrVal, Attrs, SourceRef, Tree, bool_attr, int_attr, last_modified_date, parse_nar_hash,
     str_attr, to_url,

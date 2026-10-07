@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::runtime::Word;
 use crate::runtime::arena::Stat;
-use crate::runtime::*;
 use crate::syntax::symbol::Sym;
 
 pub fn register(r: &mut Registry) {

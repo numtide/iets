@@ -323,10 +323,17 @@ fn visit(
 
 /// eval-error.hh: the errors `catch (EvalError &)` in search.cc swallows.
 fn swallowed(e: &Error) -> bool {
-    use ErrorKind::*;
+    use ErrorKind as K;
     matches!(
         e.kind,
-        Eval | Type | Throw | Assert | Abort | UndefinedVar | InfiniteRecursion | MissingAttr
+        K::Eval
+            | K::Type
+            | K::Throw
+            | K::Assert
+            | K::Abort
+            | K::UndefinedVar
+            | K::InfiniteRecursion
+            | K::MissingAttr
     )
 }
 

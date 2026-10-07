@@ -13,7 +13,10 @@
 
 use std::path::PathBuf;
 
-use super::ir::*;
+use super::ir::{
+    AttrElemIr, AttrsIr, BindIr, BindScope, DynBindIr, FormalIr, Ir, IrRef, LambdaIr, LetIr,
+    ParamIr, SelectIr,
+};
 use crate::eval::{Evaluator, Pos};
 use crate::runtime::{Kind, Word};
 use crate::syntax::symbol::{FxHashMap, Sym};

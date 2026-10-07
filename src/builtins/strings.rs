@@ -2,7 +2,7 @@
 
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::*;
+use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
 
 pub fn register(r: &mut Registry) {
     r.op("__stringLength", 1, string_length);

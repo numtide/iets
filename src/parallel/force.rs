@@ -9,7 +9,7 @@ use super::Ctx;
 use super::sched::{self, Driver, Runtime, Slot, Task, Worker};
 use super::thunk::{self, Claim};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
-use crate::runtime::*;
+use crate::runtime::{AttrsObj, Cell, Kind, ListObj, Value, Word};
 
 pub const MIN_FANOUT: usize = 4;
 pub const BATCH: u32 = 16;

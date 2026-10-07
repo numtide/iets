@@ -6,17 +6,23 @@
 //! dispatcher's backend.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
+use std::{mem, result, thread};
 
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::build::backend::{self, Drv};
 use crate::error::{Error, Result};
 use crate::log::{Activity, RES_BUILD_LOG_LINE, RES_SET_PHASE};
+use crate::remote::plan;
+use crate::session;
 use crate::store::drv::Derivation;
 use crate::store::nar::restore_path;
 use crate::store::path::StorePath;
@@ -24,8 +30,8 @@ use crate::store::path::StorePath;
 use super::super::copy::topo_sort;
 use super::super::event::{Event, Log, Phase};
 use super::super::plan::{Object, Plan};
-use super::super::worker::wire::write_object;
-use super::super::worker::wire::write_u64;
+use super::super::worker::Connection;
+use super::super::worker::wire::{write_object, write_u64};
 use super::drvwire::{BUILD_PROTOCOL, BuildResult, PathInfo, write_basic_derivation};
 use super::sched::{Answer, Sched};
 use super::{Client, Headers, c_request, first_line, gone_away, proto};
@@ -33,7 +39,7 @@ use super::{Client, Headers, c_request, first_line, gone_away, proto};
 /// The shared timings, and what only this transport counts.
 #[derive(Debug, Default, Clone)]
 pub struct Timings {
-    pub common: crate::build::backend::Timings,
+    pub common: backend::Timings,
     pub drvs: usize,
     pub drvs_cached: usize,
     pub calls: usize,
@@ -74,7 +80,7 @@ pub fn substitute(c: &mut Client, paths: &[StorePath], t: &mut Timings) -> Resul
 
 /// Derivations parsed from their ATerms: every derivation of the batch's
 /// closure, since the client walks it.
-pub fn drv_table(drvs: &[crate::build::backend::Drv]) -> Result<BTreeMap<StorePath, Derivation>> {
+pub fn drv_table(drvs: &[Drv]) -> Result<BTreeMap<StorePath, Derivation>> {
     let mut out = BTreeMap::new();
     for d in drvs {
         let drv = Derivation::parse(&d.aterm, Derivation::name_from_path(&d.path)?)?;
@@ -170,7 +176,7 @@ impl ChunkShip {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let data = std::mem::take(&mut self.buf);
+        let data = mem::take(&mut self.buf);
         self.sent.fetch_add(data.len() as u64, Ordering::Relaxed);
         self.tx
             .blocking_send(proto::AddMultipleChunk {
@@ -218,8 +224,8 @@ pub fn add_multiple(c: &mut Client, objects: &[&Object], t: &mut Timings) -> Res
                 if !gone_away(&s) || Instant::now() + pause > deadline {
                     return Err(c.status_error(&s, "AddMultipleToStore"));
                 }
-                crate::errln!("{}: {}, retrying", c.cfg.authority, first_line(s.message()));
-                std::thread::sleep(pause);
+                errln!("{}: {}, retrying", c.cfg.authority, first_line(s.message()));
+                thread::sleep(pause);
                 pause = (pause * 2).min(Duration::from_secs(4));
             }
         }
@@ -232,18 +238,18 @@ fn upload(
     c: &Client,
     objects: &[&Object],
     headers: &Headers,
-) -> std::result::Result<u64, tonic::Status> {
+) -> result::Result<u64, tonic::Status> {
     let (tx, rx) = tokio::sync::mpsc::channel::<proto::AddMultipleChunk>(4);
     let mut stub = c.stub.clone();
     let rt = &c.rt;
     let n = objects.len();
-    crate::remote::plan::prehash_drvs(objects);
+    plan::prehash_drvs(objects);
     let sent = Arc::new(AtomicU64::new(0));
-    std::thread::scope(|s| {
+    thread::scope(|s| {
         let producer = {
             let tx = tx.clone();
             let sent = Arc::clone(&sent);
-            s.spawn(crate::session::bind(move || -> io::Result<()> {
+            s.spawn(session::bind(move || -> io::Result<()> {
                 // store.cc sends the flags alone first; the zstd stream
                 // follows in its own messages.
                 tx.blocking_send(proto::AddMultipleChunk {
@@ -286,9 +292,9 @@ fn closed() -> io::Error {
 /// broke, a source that no longer dumps as evaluated, reaches the server only
 /// as its end ("gRPC stream ended"), so the local error wins then.
 fn upload_outcome<T>(
-    reply: std::result::Result<T, tonic::Status>,
+    reply: result::Result<T, tonic::Status>,
     written: io::Result<()>,
-) -> std::result::Result<(), tonic::Status> {
+) -> result::Result<(), tonic::Status> {
     match (reply, written) {
         (_, Err(e)) if e.kind() != io::ErrorKind::BrokenPipe => {
             Err(tonic::Status::internal(e.to_string()))
@@ -374,7 +380,7 @@ pub fn build(
     sched: &Sched,
     job: &Job,
     objects: &Objects,
-    tx: &std::sync::mpsc::Sender<Event>,
+    tx: &Sender<Event>,
     act: &Activity,
 ) -> Result<(BuildResult, usize)> {
     let mut calls = 0usize;
@@ -405,7 +411,7 @@ pub fn build(
                     sched.grace().as_secs()
                 )));
             }
-            std::thread::sleep(wait.min(left));
+            thread::sleep(wait.min(left));
             continue;
         }
         match build_derivation(c, job, &worker, assign_id, objects, tx, act, &mut calls)? {
@@ -422,7 +428,7 @@ pub fn build(
                         job.drv_path, c.cfg.reschedule_retries
                     )));
                 }
-                std::thread::sleep(reschedule_pause(bounces));
+                thread::sleep(reschedule_pause(bounces));
             }
         }
     }
@@ -448,7 +454,7 @@ fn build_derivation(
     worker: &str,
     assign_id: u64,
     objects: &Objects,
-    tx: &std::sync::mpsc::Sender<Event>,
+    tx: &Sender<Event>,
     act: &Activity,
     calls: &mut usize,
 ) -> Result<Option<BuildResult>> {
@@ -486,7 +492,7 @@ fn build_derivation(
             | tonic::Code::Unavailable
             | tonic::Code::Unknown
             | tonic::Code::Internal => {
-                crate::errln!(
+                errln!(
                     "{}: {}, asking the scheduler again",
                     job.drv_path,
                     first_line(s.message())
@@ -503,9 +509,9 @@ fn try_build_derivation(
     req: &proto::BuildDerivationRequest,
     headers: &Headers,
     drv_path: &StorePath,
-    tx: &std::sync::mpsc::Sender<Event>,
+    tx: &Sender<Event>,
     act: &Activity,
-) -> std::result::Result<BuildResult, tonic::Status> {
+) -> result::Result<BuildResult, tonic::Status> {
     let mut stub = c.stub.clone();
     let req = c_request(req.clone(), headers);
     let mut stream =
@@ -645,7 +651,7 @@ impl NarDecoder {
     fn feed(&mut self, data: &[u8]) -> io::Result<Vec<u8>> {
         self.dec.write_all(data)?;
         self.dec.flush()?;
-        Ok(std::mem::take(self.dec.get_mut()))
+        Ok(mem::take(self.dec.get_mut()))
     }
 }
 
@@ -698,25 +704,25 @@ pub fn fetch_into_dir(
 ) -> Result<()> {
     t.calls += 1;
     let spool_path = |i: usize| dir.join(format!(".nar-{i}"));
-    let mut open: Option<(usize, std::fs::File)> = None;
+    let mut open: Option<(usize, File)> = None;
     let r = fetch_nars(c, paths, &mut |i, bytes, eof| {
         if open.as_ref().is_none_or(|(j, _)| *j != i) {
-            open = Some((i, std::fs::File::create(spool_path(i))?));
+            open = Some((i, File::create(spool_path(i))?));
         }
         open.as_mut().expect("opened").1.write_all(bytes)?;
         if eof {
             open = None;
             let p = spool_path(i);
-            let mut f = std::fs::File::open(&p)?;
+            let mut f = File::open(&p)?;
             let out = restore_path(&mut f, &dir.join(paths[i].base_name()));
             drop(f);
-            let _ = std::fs::remove_file(&p);
+            let _ = fs::remove_file(&p);
             return out;
         }
         Ok(())
     });
     for i in 0..paths.len() {
-        let _ = std::fs::remove_file(spool_path(i));
+        let _ = fs::remove_file(spool_path(i));
     }
     r
 }
@@ -732,7 +738,7 @@ pub fn fetch_into_dir(
 pub fn register(
     c: &mut Client,
     paths: &[StorePath],
-    conn: &mut super::super::worker::Connection,
+    conn: &mut Connection,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<usize> {
     let names: Vec<String> = paths.iter().map(StorePath::to_string).collect();
@@ -799,7 +805,7 @@ fn remote_closure(
     let mut infos: HashMap<StorePath, PathInfo> = HashMap::new();
     let mut queue: Vec<StorePath> = paths.to_vec();
     while !queue.is_empty() {
-        let batch: Vec<StorePath> = std::mem::take(&mut queue)
+        let batch: Vec<StorePath> = mem::take(&mut queue)
             .into_iter()
             .filter(|p| !infos.contains_key(p))
             .collect::<BTreeSet<_>>()
@@ -832,10 +838,12 @@ fn remote_closure(
 mod tests {
     use super::*;
 
+    use crate::build::backend::tests::every_timing;
+
     #[test]
     fn the_timings_report_with_every_line() {
         let t = Timings {
-            common: crate::build::backend::tests::every_timing(),
+            common: every_timing(),
             drvs: 11,
             drvs_cached: 10,
             calls: 12,

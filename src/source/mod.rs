@@ -20,6 +20,7 @@ pub mod scm;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::error;
 use crate::eval::{EvalResult, Evaluator, Pos};
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::path::StorePath;
@@ -74,7 +75,7 @@ pub fn to_url(a: &Attrs) -> String {
     parts.join("&")
 }
 
-pub fn parse_nar_hash(s: &str) -> crate::error::Result<Hash> {
+pub fn parse_nar_hash(s: &str) -> error::Result<Hash> {
     Hash::parse_any(s, Some(HashAlgo::Sha256)).map_err(Into::into)
 }
 

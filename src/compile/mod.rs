@@ -17,6 +17,9 @@ use ir::{
     ParamIr, SelectIr,
 };
 
+use std::cell::Cell;
+use std::{env, mem};
+
 /// Names visible at the root of every file.
 #[derive(Clone)]
 pub struct Globals {
@@ -38,14 +41,14 @@ pub struct Compiler<'a> {
     scopes: Vec<Scope>,
     /// Open lambdas, innermost last: the index in `scopes` of the param
     /// frame and whether the body has read a variable from outside it.
-    lambdas: Vec<(usize, std::cell::Cell<bool>)>,
+    lambdas: Vec<(usize, Cell<bool>)>,
     /// Directory of the file being compiled, for relative paths.
     base_dir: Vec<u8>,
     /// Global offset of this file's first byte.
     base: u32,
     home: Option<Vec<u8>>,
     /// Set when a `~/` path literal was compiled; the evaluator then records `$HOME`.
-    pub used_home: std::cell::Cell<bool>,
+    pub used_home: Cell<bool>,
     /// Lint levels; `None` for an embedded source, which is never linted.
     lints: Option<&'a lint::Config>,
     /// The warnings the compile produced; the evaluator reports them.
@@ -134,8 +137,8 @@ impl<'a> Compiler<'a> {
             lambdas: Vec::new(),
             base_dir: base_dir.to_vec(),
             base,
-            home: std::env::var_os("HOME").map(|h| h.into_encoded_bytes()),
-            used_home: std::cell::Cell::new(false),
+            home: env::var_os("HOME").map(|h| h.into_encoded_bytes()),
+            used_home: Cell::new(false),
             lints,
             diags: Vec::new(),
             sym_builtins,
@@ -905,7 +908,7 @@ impl<'a> Compiler<'a> {
         if m.rec {
             let pos = m.pos;
             let mut m = m;
-            let dynamics = std::mem::take(&mut m.dynamics);
+            let dynamics = mem::take(&mut m.dynamics);
             let (binds, from) = self.lower_rec_binds(m)?;
             // dynamics of rec sets are evaluated in the rec env: compile them
             // while its scope is still pushed
@@ -1129,8 +1132,7 @@ impl<'a> Compiler<'a> {
             Param::Ident(sym) => {
                 let mut m = FxHashMap::default();
                 m.insert(sym, 0);
-                self.lambdas
-                    .push((self.scopes.len(), std::cell::Cell::new(false)));
+                self.lambdas.push((self.scopes.len(), Cell::new(false)));
                 self.scopes.push(Scope::Lexical(m));
                 let body = self.expr(body)?;
                 self.scopes.pop();
@@ -1183,8 +1185,7 @@ impl<'a> Compiler<'a> {
                     }
                     idx += 1;
                 }
-                self.lambdas
-                    .push((self.scopes.len(), std::cell::Cell::new(false)));
+                self.lambdas.push((self.scopes.len(), Cell::new(false)));
                 self.scopes.push(Scope::Lexical(m));
                 let mut firs = Vec::with_capacity(sorted.len());
                 for f in &sorted {

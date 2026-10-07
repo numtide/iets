@@ -18,10 +18,17 @@
 //! the oracle the spool's NAR is held to (`spool_matches_the_tree`).
 
 #[cfg(test)]
+use std::collections::BTreeMap;
 #[cfg(test)]
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, File, Permissions};
+#[cfg(test)]
+use std::io::Cursor;
+#[cfg(test)]
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(test)]
+use super::spool;
 #[cfg(test)]
 use crate::error::{Error, Result};
 
@@ -60,10 +67,10 @@ fn make_parents(root: &Path, rel: &Path) -> Result<PathBuf> {
         if i + 1 == n {
             break;
         }
-        match std::fs::symlink_metadata(&at) {
+        match fs::symlink_metadata(&at) {
             Ok(m) if m.is_dir() => {}
             Ok(_) => {
-                std::fs::remove_file(&at)
+                fs::remove_file(&at)
                     .map_err(|e| Error::io(format!("cannot replace {}", at.display()), e))?;
                 mkdir(&at)?;
             }
@@ -75,16 +82,16 @@ fn make_parents(root: &Path, rel: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 fn mkdir(at: &Path) -> Result<()> {
-    std::fs::create_dir(at).map_err(|e| Error::io(format!("cannot create {}", at.display()), e))
+    fs::create_dir(at).map_err(|e| Error::io(format!("cannot create {}", at.display()), e))
 }
 
 #[cfg(test)]
 /// Whatever is at `at` goes away, unless it is a directory.
 fn clear(at: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(at) {
+    match fs::symlink_metadata(at) {
         Err(_) => Ok(()),
         Ok(m) if m.is_dir() => Ok(()),
-        Ok(_) => std::fs::remove_file(at)
+        Ok(_) => fs::remove_file(at)
             .map_err(|e| Error::io(format!("cannot replace {}", at.display()), e)),
     }
 }
@@ -94,10 +101,10 @@ fn clear(at: &Path) -> Result<()> {
 /// hash: `dest`, or its single entry when that is the only one and is a
 /// directory (git-utils.cc:dereferenceSingletonDirectory).
 pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(dest)
+    fs::create_dir_all(dest)
         .map_err(|e| Error::io(format!("cannot create {}", dest.display()), e))?;
-    let mut links: std::collections::BTreeMap<PathBuf, PathBuf> = Default::default();
-    let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+    let mut links: BTreeMap<PathBuf, PathBuf> = Default::default();
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
         .map_err(|e| Error::io("cannot read the tarball", e))?;
@@ -109,8 +116,8 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
         if kind.is_pax_global_extensions() {
             continue;
         }
-        let pax = super::spool::pax_sparse(&mut entry)?;
-        let name = super::spool::member_name(&pax, &entry)?;
+        let pax = spool::pax_sparse(&mut entry)?;
+        let name = spool::member_name(&pax, &entry)?;
         let rel = member_path(&name);
         if rel.as_os_str().is_empty() {
             continue;
@@ -123,8 +130,8 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
         }
         let at = make_parents(dest, &rel)?;
         if kind.is_dir() {
-            if std::fs::symlink_metadata(&at).is_ok_and(|m| !m.is_dir()) {
-                std::fs::remove_file(&at)
+            if fs::symlink_metadata(&at).is_ok_and(|m| !m.is_dir()) {
+                fs::remove_file(&at)
                     .map_err(|e| Error::io(format!("cannot replace {}", at.display()), e))?;
             }
             if !at.is_dir() {
@@ -137,7 +144,7 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
                 .ok_or_else(|| bad(format!("tarball symlink '{}' has no target", rel.display())))?
                 .into_owned();
             clear(&at)?;
-            std::os::unix::fs::symlink(&target, &at)
+            symlink(&target, &at)
                 .map_err(|e| Error::io(format!("cannot create {}", at.display()), e))?;
         } else if kind.is_hard_link() {
             let target = entry
@@ -150,18 +157,18 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
             // libarchive gives every other type flag AE_IFREG (tarfile.cc:224)
             let executable = entry.header().mode().unwrap_or(0o644) & 0o100 != 0;
             clear(&at)?;
-            let out = std::fs::File::create(&at)
+            let out = File::create(&at)
                 .map_err(|e| Error::io(format!("cannot write {}", at.display()), e))?;
             let size = pax.as_ref().map_or_else(|| entry.size(), |s| s.size);
-            super::spool::expand(&mut entry, pax.as_ref(), &out, 0, size).map_err(|e| {
+            spool::expand(&mut entry, pax.as_ref(), &out, 0, size).map_err(|e| {
                 Error::io(
                     format!("cannot read '{}' from the tarball", rel.display()),
                     e,
                 )
             })?;
-            std::fs::set_permissions(
+            fs::set_permissions(
                 &at,
-                std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+                Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
             )
             .map_err(|e| Error::io(format!("cannot set the mode of {}", at.display()), e))?;
         }
@@ -177,10 +184,10 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
             )));
         }
         // a link carries no `id`, so it never takes a name a member claimed
-        if std::fs::symlink_metadata(&at).is_ok() {
+        if fs::symlink_metadata(&at).is_ok() {
             continue;
         }
-        std::fs::copy(&from, &at).map_err(|e| {
+        fs::copy(&from, &at).map_err(|e| {
             Error::io(
                 format!("cannot link {} to {}", at.display(), from.display()),
                 e,
@@ -193,7 +200,7 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 /// git-utils.cc:dereferenceSingletonDirectory: one entry, and a directory.
 fn singleton(dest: &Path) -> PathBuf {
-    let mut entries = match std::fs::read_dir(dest) {
+    let mut entries = match fs::read_dir(dest) {
         Ok(e) => e,
         Err(_) => return dest.to_path_buf(),
     };
@@ -213,20 +220,23 @@ fn singleton(dest: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::{env, io, str};
+
+    use crate::fetch::http;
 
     /// The unpacked tree, flattened: a directory is `dir`, a symlink `-> target`,
     /// a file its contents with a leading `x` when it is executable. Only what
     /// the NAR of the tree holds.
     fn tree(dest: &Path) -> BTreeMap<String, String> {
         fn walk(root: &Path, at: &Path, out: &mut BTreeMap<String, String>) {
-            let mut names: Vec<PathBuf> = std::fs::read_dir(at)
+            let mut names: Vec<PathBuf> = fs::read_dir(at)
                 .unwrap()
                 .map(|e| e.unwrap().path())
                 .collect();
             names.sort();
             for p in names {
                 let rel = p.strip_prefix(root).unwrap().display().to_string();
-                let m = std::fs::symlink_metadata(&p).unwrap();
+                let m = fs::symlink_metadata(&p).unwrap();
                 if m.is_symlink() {
                     out.insert(
                         rel,
@@ -257,9 +267,9 @@ mod tests {
     }
 
     fn work(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("iets-unpack-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+        let p = env::temp_dir().join(format!("iets-unpack-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
         p
     }
 
@@ -275,7 +285,7 @@ mod tests {
                 0
             });
             if *kind == tar::EntryType::Symlink || *kind == tar::EntryType::Link {
-                h.set_link_name(std::str::from_utf8(data).unwrap()).unwrap();
+                h.set_link_name(str::from_utf8(data).unwrap()).unwrap();
             }
             let body: &[u8] = if *kind == tar::EntryType::Regular {
                 data
@@ -286,7 +296,7 @@ mod tests {
         }
         let tar = b.into_inner().unwrap();
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        io::Write::write_all(&mut gz, &tar).unwrap();
         gz.finish().unwrap()
     }
 
@@ -302,7 +312,7 @@ mod tests {
             ("repo-abc/flake.nix", REG, 0o644, b"{}\n"),
             ("repo-abc/sub/", DIR, 0o755, b""),
         ]);
-        let root = unpack(crate::fetch::http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
+        let root = unpack(http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
         assert_eq!(root.file_name().unwrap(), "repo-abc");
         assert_eq!(
             tree(&root),
@@ -311,7 +321,7 @@ mod tests {
                 ("sub".to_string(), "dir".to_string()),
             ])
         );
-        std::fs::remove_dir_all(&w).unwrap();
+        fs::remove_dir_all(&w).unwrap();
     }
 
     /// Two top-level entries, or one that is a file: nothing is stripped.
@@ -319,7 +329,7 @@ mod tests {
     fn keeps_the_root_when_it_is_not_a_single_directory() {
         let w = work("nostrip");
         let two = tar_gz(&[("a/", DIR, 0o755, b""), ("b", REG, 0o644, b"x")]);
-        let root = unpack(crate::fetch::http::decompress(two).unwrap(), &w.join("two")).unwrap();
+        let root = unpack(http::decompress(two).unwrap(), &w.join("two")).unwrap();
         assert_eq!(root, w.join("two"));
         assert_eq!(
             tree(&root),
@@ -330,9 +340,9 @@ mod tests {
         );
 
         let one = tar_gz(&[("only", REG, 0o644, b"x")]);
-        let root = unpack(crate::fetch::http::decompress(one).unwrap(), &w.join("one")).unwrap();
+        let root = unpack(http::decompress(one).unwrap(), &w.join("one")).unwrap();
         assert_eq!(root, w.join("one"));
-        std::fs::remove_dir_all(&w).unwrap();
+        fs::remove_dir_all(&w).unwrap();
     }
 
     #[test]
@@ -346,7 +356,7 @@ mod tests {
             ("t/link", tar::EntryType::Symlink, 0o777, b"plain"),
             ("t/same", tar::EntryType::Link, 0o644, b"t/plain"),
         ]);
-        let root = unpack(crate::fetch::http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
+        let root = unpack(http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
         assert_eq!(
             tree(&root),
             BTreeMap::from([
@@ -357,7 +367,7 @@ mod tests {
                 ("same".to_string(), "p".to_string()),
             ])
         );
-        std::fs::remove_dir_all(&w).unwrap();
+        fs::remove_dir_all(&w).unwrap();
     }
 
     /// The last copy of a member wins, as the git sink's `id` ordering does.
@@ -369,12 +379,12 @@ mod tests {
             ("t/f", REG, 0o644, b"first"),
             ("t/f", REG, 0o755, b"second"),
         ]);
-        let root = unpack(crate::fetch::http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
+        let root = unpack(http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
         assert_eq!(
             tree(&root),
             BTreeMap::from([("f".to_string(), "xsecond".to_string())])
         );
-        std::fs::remove_dir_all(&w).unwrap();
+        fs::remove_dir_all(&w).unwrap();
     }
 
     /// A device, socket or fifo member is an error, as tarfile.cc:253 is.
@@ -382,9 +392,9 @@ mod tests {
     fn an_unsupported_member_type_is_an_error() {
         let w = work("kinds");
         let bytes = tar_gz(&[("dev", tar::EntryType::Fifo, 0o644, b"")]);
-        let e = unpack(crate::fetch::http::decompress(bytes).unwrap(), &w.join("y"));
+        let e = unpack(http::decompress(bytes).unwrap(), &w.join("y"));
         assert!(e.unwrap_err().to_string().contains("unsupported file type"));
-        std::fs::remove_dir_all(&w).unwrap();
+        fs::remove_dir_all(&w).unwrap();
     }
 
     /// An absolute member name loses its root and `..` is applied, as
@@ -405,12 +415,11 @@ mod tests {
     #[test]
     fn nar_hash_of_the_fixture() {
         let w = work("golden");
-        let bytes = std::fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/tree.tar.gz"),
-        )
-        .unwrap();
-        let root = unpack(crate::fetch::http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
-        let want = std::fs::read_to_string(
+        let bytes =
+            fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/tree.tar.gz"))
+                .unwrap();
+        let root = unpack(http::decompress(bytes).unwrap(), &w.join("x")).unwrap();
+        let want = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/narHash"),
         )
         .unwrap();
@@ -418,6 +427,6 @@ mod tests {
             crate::store::nar::nar_hash(&root).unwrap().to_sri(),
             want.trim()
         );
-        std::fs::remove_dir_all(&w).unwrap();
+        fs::remove_dir_all(&w).unwrap();
     }
 }

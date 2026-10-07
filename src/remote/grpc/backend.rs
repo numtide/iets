@@ -19,13 +19,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use crate::build::backend::{Backend, Batch, Phase, Status, add_roots, link_targets, local};
+use crate::build::backend::{self, Backend, Batch, Phase, Status, add_roots, link_targets, local};
 use crate::build::fanout;
 use crate::error::{Error, Result};
 use crate::log::{
-    ACT_BUILD, ACT_BUILDS, ACT_COPY_PATH, ACT_COPY_PATHS, ACT_REALISE, ACT_UNKNOWN, Activity,
+    self, ACT_BUILD, ACT_BUILDS, ACT_COPY_PATH, ACT_COPY_PATHS, ACT_REALISE, ACT_UNKNOWN, Activity,
     LVL_ERROR, LVL_INFO, LVL_TALKATIVE, RES_PROGRESS,
 };
+use crate::remote::copy::Copying;
 use crate::remote::event::{Event, Started};
 use crate::remote::plan::{Object, Plan};
 use crate::remote::worker::{Connection, failed_event};
@@ -52,7 +53,7 @@ impl Grpc {
         let c = Client::open(cfg)?;
         Ok(Grpc {
             t: Timings {
-                common: crate::build::backend::Timings {
+                common: backend::Timings {
                     trusted: c.info.trusted,
                     ..Default::default()
                 },
@@ -203,7 +204,7 @@ fn build_batch(
             Some(res) if res.success() => continue,
             Some(res) => (
                 format!("status {}: {}", res.status, res.error_msg),
-                crate::log::build_exit(res.status, &res.error_msg),
+                log::build_exit(res.status, &res.error_msg),
             ),
             None => ("the farm never reached this derivation".to_string(), 1),
         };
@@ -257,7 +258,7 @@ impl Backend for Grpc {
             return Ok(0);
         }
         let t0 = Instant::now();
-        let _copying = crate::remote::copy::Copying::new(objects.len(), "local", &self.c.cfg.url());
+        let _copying = Copying::new(objects.len(), "local", &self.c.cfg.url());
         let bytes = build::add_multiple(&mut self.c, objects, &mut self.t)?;
         self.t.common.add += t0.elapsed();
         self.t.common.add_paths += objects.len();

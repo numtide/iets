@@ -8,11 +8,12 @@
 use std::collections::HashMap;
 
 use crate::eval::{Evaluator, Pos};
-use crate::store::path::STORE_DIR;
+use crate::session::Session;
+use crate::store::path::{STORE_DIR, StorePath};
 use crate::store::source::SourceOrigin;
 
 pub fn enabled() -> bool {
-    crate::session::Session::current().settings().provenance
+    Session::current().settings().provenance
 }
 
 /// How many times a mapping may point at another mapped tree.
@@ -130,9 +131,7 @@ impl SourceMap {
 
     /// The same map from a set of source records, for a run that replayed
     /// them from the cache instead of evaluating.
-    pub fn from_sources(
-        sources: &HashMap<crate::store::path::StorePath, SourceOrigin>,
-    ) -> SourceMap {
+    pub fn from_sources(sources: &HashMap<StorePath, SourceOrigin>) -> SourceMap {
         let mut m = SourceMap::default();
         for (p, o) in sources.iter() {
             if let Some(local) = o.at.local() {
@@ -142,7 +141,7 @@ impl SourceMap {
                 );
             }
         }
-        for (store, local) in &crate::session::Session::current().settings().source_map {
+        for (store, local) in &Session::current().settings().source_map {
             m.insert(store.as_bytes(), local.as_bytes());
         }
         m.sort();

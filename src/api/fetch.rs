@@ -4,31 +4,36 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::{io, slice};
 
 use crate::api::build as apibuild;
 use crate::build::render::Style;
-use crate::build::{Dispatcher, Reporter, Target};
+use crate::build::{Dispatcher, Reporter, Target, backend};
 use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::fetch::http::{self, Limits};
+use crate::fetch::spool::{self, Tree};
+use crate::provenance::Provenance;
+use crate::remote::worker;
 use crate::store::drv::{Derivation, DerivationOutput};
 use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::path::StorePath;
+use crate::{config, log};
 
 /// The flat hash of the bytes `url` serves, or with `unpack` the NAR hash of
 /// the tree the archive holds (`docs/reference/flakes.md` builds the same tree).
 pub fn url_hash(url: &str, unpack: bool, algo: HashAlgo) -> Result<Hash> {
-    let cfg = crate::config::Config::read(&[]).unwrap_or_else(|_| crate::config::Config::empty());
+    let cfg = config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty());
     let limits = Limits::new(&cfg)?;
     let mut h = Hasher::new(algo);
     if !unpack {
         http::get(url, &[], limits, false, &mut h)?;
         return Ok(h.finish());
     }
-    let mut spool = crate::fetch::spool::scratch("prefetch")?;
+    let mut spool = spool::scratch("prefetch")?;
     http::get(url, &[], limits, true, &mut spool)?;
-    crate::fetch::spool::Tree::index(spool, limits.max_size)?
+    Tree::index(spool, limits.max_size)?
         .dump(&mut h)
         .map_err(|e| Error::io("cannot hash the unpacked tree", e))?;
     Ok(h.finish())
@@ -95,17 +100,17 @@ fn build(
     let cfg = apibuild::config();
     let transport = apibuild::transport(None, &cfg)?;
     let sources = ev.known.origins();
-    let plan = apibuild::plan_with(std::slice::from_ref(root), drvs, &sources)?;
-    let opts = crate::remote::worker::Options::default();
-    let backend = crate::build::backend::open(&transport, &opts, &mut |_| {})?;
+    let plan = apibuild::plan_with(slice::from_ref(root), drvs, &sources)?;
+    let opts = worker::Options::default();
+    let backend = backend::open(&transport, &opts, &mut |_| {})?;
     // nothing to watch: the build is meant to fail, and this command's only
     // output is the hash it fails on.
-    let quiet = Reporter::with_output(Style::detect(), Box::new(std::io::sink()));
+    let quiet = Reporter::with_output(Style::detect(), Box::new(io::sink()));
     let mut d = apibuild::Dispatch::with(
-        Dispatcher::with_backend(backend, crate::provenance::Provenance::snapshot(ev), quiet),
+        Dispatcher::with_backend(backend, Provenance::snapshot(ev), quiet),
         plan,
     );
-    crate::log::want_mismatch(name);
+    log::want_mismatch(name);
     let outcomes = d.submit(vec![Target::new(name, root.clone(), Vec::new())])?;
     let why = match outcomes.first() {
         Some(o) if o.success => "the fake hash is the hash it produced".to_string(),
@@ -117,9 +122,9 @@ fn build(
     };
     // a remote builder's message comes back as the log of the build, which
     // `log::want_mismatch` does not see
-    let text = crate::log::strip_ansi(&why);
-    let got = (crate::log::take_mismatches().into_iter().next())
-        .or_else(|| crate::log::mismatch(&text).filter(|_| text.contains(&format!("-{name}.drv"))));
+    let text = log::strip_ansi(&why);
+    let got = (log::take_mismatches().into_iter().next())
+        .or_else(|| log::mismatch(&text).filter(|_| text.contains(&format!("-{name}.drv"))));
     match got {
         Some((_, got)) => Ok(Hash::parse_any(&got, None).map_or(got, |h| h.to_sri())),
         None => Err(Error::Store(format!("cannot prefetch '{name}': {why}"))),

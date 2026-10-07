@@ -3,21 +3,25 @@
 //! (docs/reference/commands.md).
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+use std::str;
 use std::sync::Arc;
 
 use crate::api::run::{Outcome, Run};
-use crate::api::{EvalArgs, Input, cwd, installable, report};
+use crate::api::{self, EvalArgs, Input, cwd, flake, installable, report};
 use crate::builtins::text::regex::{self, Prog};
 use crate::cli::classic::nix::{global_flag, nix_settings};
 use crate::cli::classic::{Argv, Common, eval_config, fallback, lookup_file_arg};
-use crate::cli::help;
+use crate::cli::{self, help, render};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::force::{T_ATTRS_WHNF, fanout};
 use crate::runtime::{AttrsObj, Value, Word};
 use crate::trace::run::Cache;
+use crate::trace::store::Part;
+use crate::{argv, error, log, print};
 use ErrorKind as K;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 const NAME: &str = "nix";
 const BOLD: &[u8] = b"\x1b[0;1m";
@@ -86,7 +90,7 @@ pub fn cmd_search(argv: &[String]) -> i32 {
     // The default installable is `<nixpkgs>`: iets has no flake registry, so
     // `nix search nixpkgs` has nothing to resolve.
     match s.what.take() {
-        Some(w) if crate::api::flake::is_flake_ref(&w) => s.what = Some(w),
+        Some(w) if flake::is_flake_ref(&w) => s.what = Some(w),
         Some(w) => s.file = Some(w),
         None if s.expr.is_none() && s.file.is_none() => s.file = Some("<nixpkgs>".into()),
         None => {}
@@ -114,7 +118,7 @@ fn parse(argv: &[String], native: bool) -> Result<Search, String> {
             // the cache flags are iets's own, so a classic `nix search`
             // keeps rejecting them and falls back
             _ if native
-                && crate::cli::cache_flag(&mut s.cache, &t, || {
+                && cli::cache_flag(&mut s.cache, &t, || {
                     a.value(&t).unwrap_or_else(|e| help::arg_error(e))
                 }) => {}
             _ => {
@@ -142,9 +146,7 @@ fn parse(argv: &[String], native: bool) -> Result<Search, String> {
 /// A first argument that names an installable rather than a regex: a flake
 /// reference, `<name>`, or a path that is there.
 fn looks_installable(w: &str) -> bool {
-    crate::api::flake::is_flake_ref(w)
-        || (w.starts_with('<') && w.ends_with('>'))
-        || std::path::Path::new(w).exists()
+    flake::is_flake_ref(w) || (w.starts_with('<') && w.ends_with('>')) || Path::new(w).exists()
 }
 
 fn run(mut s: Search, classic: Option<&[String]>) -> i32 {
@@ -161,7 +163,7 @@ fn run(mut s: Search, classic: Option<&[String]>) -> i32 {
     let bail = |why: String| -> i32 {
         match classic {
             Some(argv) => fallback(NAME, argv, &why),
-            None => crate::error::Error::Unsupported(why).report(),
+            None => error::Error::Unsupported(why).report(),
         }
     };
     let (cfg, _, _) = match nix_settings(&mut s.c, s.file.is_some(), true) {
@@ -184,12 +186,12 @@ fn run(mut s: Search, classic: Option<&[String]>) -> i32 {
     let r = Run::on(ec).workers(workers).cached(&key_args(&s), "search");
     let index = match r.hit(|c| {
         c.replay_warnings();
-        decode(&c.part(crate::trace::store::Part::Result)?)
+        decode(&c.part(Part::Result)?)
     }) {
         Some(index) => index,
         None => {
             let run = Arc::clone(&s);
-            match crate::cli::run_reported(r, move |ev, cache| build(ev, &run, cache)) {
+            match cli::run_reported(r, move |ev, cache| build(ev, &run, cache)) {
                 Outcome::Ok(index) => index,
                 Outcome::Failed(code) => return code,
                 Outcome::Unsupported(why) => return bail(why),
@@ -198,20 +200,20 @@ fn run(mut s: Search, classic: Option<&[String]>) -> i32 {
     };
     let (out, results) = match show_results(&index, &res, &exclude, &s) {
         Ok(r) => r,
-        Err(e) => return crate::error::Error::Eval(e).report(),
+        Err(e) => return error::Error::Eval(e).report(),
     };
-    crate::cli::render::bytes(&out);
+    render::bytes(&out);
     if results == 0 && !s.json {
-        return crate::log::Report {
+        return log::Report {
             hint: Some("use fewer or shorter regexes".into()),
-            ..crate::log::Report::new("no-results", "no results for the given search term(s)!")
+            ..log::Report::new("no-results", "no results for the given search term(s)!")
         }
         .emit();
     }
     0
 }
 
-fn build(ev: &mut Evaluator, s: &Search, cache: Option<Cache>) -> crate::error::Result<Vec<Entry>> {
+fn build(ev: &mut Evaluator, s: &Search, cache: Option<Cache>) -> error::Result<Vec<Entry>> {
     let mut index = Vec::new();
     for (v, mut path) in cursors(ev, s, &cwd())? {
         visit(ev, v, &mut path, true, &mut index, s.native)?;
@@ -228,14 +230,11 @@ fn build(ev: &mut Evaluator, s: &Search, cache: Option<Cache>) -> crate::error::
 /// expression or a file takes the value at the attribute path.
 fn cursors(ev: &mut Evaluator, s: &Search, cwd: &[u8]) -> EvalResult<Vec<(Word, Vec<Vec<u8>>)>> {
     let attr = s.what.as_deref().unwrap_or("");
-    let args = crate::api::auto_args(ev, &s.c.flags.args, cwd)?;
+    let args = api::auto_args(ev, &s.c.flags.args, cwd)?;
     if s.expr.is_some() || s.file.is_some() {
         let root = match &s.expr {
             Some(e) => ev.eval_string(e, cwd)?,
-            None => ev.eval_file(
-                &crate::argv::bytes(s.file.as_deref().unwrap_or("")),
-                Pos::NONE,
-            )?,
+            None => ev.eval_file(&argv::bytes(s.file.as_deref().unwrap_or("")), Pos::NONE)?,
         };
         // Natively the root is auto-called, so a function like nixpkgs'
         // `default.nix` is a package set (docs/reference/commands.md).
@@ -250,9 +249,9 @@ fn cursors(ev: &mut Evaluator, s: &Search, cwd: &[u8]) -> EvalResult<Vec<(Word, 
         )]);
     }
     let (loc, fragment) = attr.split_once('#').unwrap_or((attr, ""));
-    let fr = crate::api::flake_ref(loc, cwd)
+    let fr = api::flake_ref(loc, cwd)
         .map_err(|e| Error::boxed(ErrorKind::Unsupported, e.to_string(), Pos::NONE))?;
-    let outputs = crate::api::flake::outputs(ev, &fr)?;
+    let outputs = flake::outputs(ev, &fr)?;
     let found = installable::from_outputs(
         ev,
         outputs,
@@ -310,7 +309,7 @@ fn visit(
         // parallel: the helpers force the children while the walk reads them
         let a = ev.arena.flat(a);
         fanout(ev, T_ATTRS_WHNF, Word::from_ref(a), a.len());
-        for attr in crate::print::lexicographic_order(ev, a) {
+        for attr in print::lexicographic_order(ev, a) {
             path.push(ev.interner.name(attr.sym).to_vec());
             let r = visit(ev, attr.cell.get(), path, false, out, lenient);
             path.pop();
@@ -436,16 +435,16 @@ fn show(path: &[Vec<u8>]) -> String {
 /// The file `import` would read: a directory resolves to its `default.nix`.
 fn entry_file(p: Vec<u8>) -> String {
     let mut p = p;
-    if std::path::Path::new(std::ffi::OsStr::from_bytes(&p)).is_dir() {
+    if Path::new(OsStr::from_bytes(&p)).is_dir() {
         p.extend_from_slice(b"/default.nix");
     }
-    crate::argv::encode(std::ffi::OsString::from_vec(p))
+    argv::encode(OsString::from_vec(p))
 }
 
 fn compile_all(res: &[String]) -> Result<Vec<Prog>, String> {
     res.iter()
         .map(|r| {
-            regex::compile_opt(&crate::argv::bytes(r), true)
+            regex::compile_opt(&argv::bytes(r), true)
                 .map_err(|_| format!("invalid regular expression '{r}'"))
         })
         .collect()
@@ -539,8 +538,8 @@ fn show_results(
         }
     }
     if s.json {
-        let pretty = s.pretty.unwrap_or_else(crate::cli::render::pretty);
-        out = crate::cli::render::json(&json_out(&json)?, pretty);
+        let pretty = s.pretty.unwrap_or_else(render::pretty);
+        out = render::json(&json_out(&json)?, pretty);
     }
     Ok((out, results))
 }
@@ -550,7 +549,7 @@ fn show_results(
 /// it.
 fn json_out(m: &BTreeMap<&[u8], &Entry>) -> Result<serde_json::Value, Box<Error>> {
     fn text(b: &[u8]) -> Result<&str, Box<Error>> {
-        std::str::from_utf8(b).map_err(|_| {
+        str::from_utf8(b).map_err(|_| {
             Error::boxed(
                 ErrorKind::Eval,
                 "JSON serialization error: invalid UTF-8 byte in string",

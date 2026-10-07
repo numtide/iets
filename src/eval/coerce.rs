@@ -4,6 +4,8 @@
 use std::borrow::Cow;
 
 use super::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::builtins::store_hooks;
+use crate::lint::{LintId, coerce};
 use crate::runtime::{Cell, Ctx, Taint, Value, ValueType, Word};
 
 impl Evaluator {
@@ -58,7 +60,7 @@ impl Evaluator {
             Value::Path(p) => {
                 if copy_to_store {
                     let sp = self.copy_path_to_store(p.path, pos)?;
-                    crate::lint::coerce::path_copy(self, p.path, sp, pos)?;
+                    coerce::path_copy(self, p.path, sp, pos)?;
                     ctx.push(Ctx::Opaque(sp));
                     Ok(Cow::Borrowed(sp))
                 } else {
@@ -180,8 +182,8 @@ impl Evaluator {
                 "file names are not allowed to end in '.drv'"
             );
         }
-        crate::lint::coerce::store_path_recopy(self, path, pos)?;
-        crate::builtins::store_hooks::copy_path_to_store(self, path, pos)
+        coerce::store_path_recopy(self, path, pos)?;
+        store_hooks::copy_path_to_store(self, path, pos)
     }
 
     /// The `==` operator. Nix compares two fresh operand temporaries
@@ -189,10 +191,8 @@ impl Evaluator {
     pub fn eq_values_top(&mut self, a: Word, b: Word, pos: Pos) -> EvalResult<bool> {
         let a = self.force(a)?;
         let b = self.force(b)?;
-        if self.lint_on(crate::lint::LintId::EqTypeMismatch)
-            || self.lint_on(crate::lint::LintId::EqFunction)
-        {
-            crate::lint::coerce::eq(self, a, b, pos)?;
+        if self.lint_on(LintId::EqTypeMismatch) || self.lint_on(LintId::EqFunction) {
+            coerce::eq(self, a, b, pos)?;
         }
         // the operands are fresh copies in Nix, so its slot shortcut never
         // applies here: a function is unequal and a NaN is unequal to itself

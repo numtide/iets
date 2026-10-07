@@ -6,7 +6,9 @@
 //! swaps stack pointers. Nothing else is saved: the compiler treats the
 //! switch as an ordinary call, so caller-saved registers are already dead.
 
+use std::fmt::{self, Display, Formatter};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::{error, io, mem, ptr};
 
 pub const DEFAULT_STACK: usize = 256 << 20;
 /// Stack of the demand fiber and of the process main thread. The demand
@@ -36,11 +38,11 @@ pub struct StackError {
 pub enum Why {
     /// More than `MAX_RESERVE`, before anything was mapped.
     OverLimit,
-    Mmap(std::io::Error),
+    Mmap(io::Error),
 }
 
-impl std::fmt::Display for StackError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for StackError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "cannot reserve {} MiB of fiber stacks: ",
@@ -57,7 +59,7 @@ impl std::fmt::Display for StackError {
     }
 }
 
-impl std::error::Error for StackError {}
+impl error::Error for StackError {}
 
 /// Check the reservation the demand fiber and `workers - 1` helper fibers
 /// of `stack_size` bytes make.
@@ -130,13 +132,13 @@ pub fn install_overflow_handler() {
             ss_flags: 0,
             ss_size: ALT,
         };
-        libc::sigaltstack(&ss, std::ptr::null_mut());
-        let mut sa: libc::sigaction = std::mem::zeroed();
+        libc::sigaltstack(&ss, ptr::null_mut());
+        let mut sa: libc::sigaction = mem::zeroed();
         sa.sa_sigaction = on_segv as *const () as usize;
         sa.sa_flags = libc::SA_ONSTACK | libc::SA_SIGINFO;
         libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGSEGV, &sa, ptr::null_mut());
+        libc::sigaction(libc::SIGBUS, &sa, ptr::null_mut());
     }
 }
 
@@ -160,7 +162,7 @@ impl Stack {
         // inaccessible as a guard. NORESERVE keeps large reservations cheap.
         let base = unsafe {
             let p = libc::mmap(
-                std::ptr::null_mut(),
+                ptr::null_mut(),
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
@@ -170,7 +172,7 @@ impl Stack {
             if p == libc::MAP_FAILED {
                 return Err(StackError {
                     bytes: size,
-                    why: Why::Mmap(std::io::Error::last_os_error()),
+                    why: Why::Mmap(io::Error::last_os_error()),
                 });
             }
             libc::mprotect(p, GUARD, libc::PROT_NONE);
@@ -230,8 +232,8 @@ pub struct Fiber {
 impl Fiber {
     pub fn new(stack_size: usize, entry: Entry, arg: *mut ()) -> Result<Fiber, StackError> {
         Ok(Fiber {
-            sp: std::ptr::null_mut(),
-            caller_sp: std::ptr::null_mut(),
+            sp: ptr::null_mut(),
+            caller_sp: ptr::null_mut(),
             stack: Stack::new(stack_size)?,
             state: AtomicU8::new(NEW),
             entry,
@@ -246,7 +248,7 @@ impl Fiber {
         debug_assert!(matches!(self.state.load(Ordering::Relaxed), NEW | FINISHED));
         self.entry = entry;
         self.arg = arg;
-        self.sp = std::ptr::null_mut();
+        self.sp = ptr::null_mut();
         self.state.store(NEW, Ordering::Relaxed);
     }
 
@@ -291,11 +293,13 @@ unsafe extern "C" fn fiber_main(f: *mut Fiber) -> ! {
 mod arch {
     use super::Fiber;
 
+    use core::arch::{asm, naked_asm};
+
     /// Saves rbx rbp r12-r15 mxcsr x87cw, stores rsp into `*save`, loads
     /// `load` as rsp, restores, returns into the target's frame.
     #[unsafe(naked)]
     pub unsafe extern "C" fn switch(save: *mut *mut u8, load: *mut u8) {
-        core::arch::naked_asm!(
+        naked_asm!(
             "push rbp",
             "push rbx",
             "push r12",
@@ -324,7 +328,7 @@ mod arch {
     /// in r12 and rsp 16-byte aligned.
     #[unsafe(naked)]
     unsafe extern "C" fn trampoline() {
-        core::arch::naked_asm!(
+        naked_asm!(
             "mov rdi, r12",
             "call {main}",
             "ud2",
@@ -356,7 +360,7 @@ mod arch {
         // SAFETY: reads a register into a local; touches no memory and
         // leaves the stack and the flags alone.
         unsafe {
-            core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags));
+            asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags));
         }
         sp
     }
@@ -366,10 +370,13 @@ mod arch {
 mod arch {
     use super::Fiber;
 
+    use core::arch::{asm, naked_asm};
+    use std::ptr;
+
     /// Saves x19-x30, d8-d15, fpcr; swaps sp. Untested: no aarch64 box.
     #[unsafe(naked)]
     pub unsafe extern "C" fn switch(save: *mut *mut u8, load: *mut u8) {
-        core::arch::naked_asm!(
+        naked_asm!(
             "sub sp, sp, #176",
             "stp x19, x20, [sp, #0]",
             "stp x21, x22, [sp, #16]",
@@ -405,7 +412,7 @@ mod arch {
 
     #[unsafe(naked)]
     unsafe extern "C" fn trampoline() {
-        core::arch::naked_asm!(
+        naked_asm!(
             "mov x0, x19",
             "bl {main}",
             "brk #1",
@@ -417,7 +424,7 @@ mod arch {
         // SAFETY: writes 176 bytes below `top`, inside the mapping.
         unsafe {
             let sp = top.sub(176);
-            std::ptr::write_bytes(sp, 0, 176);
+            ptr::write_bytes(sp, 0, 176);
             let t = sp as *mut u64;
             *t = fiber as u64; // x19
             *t.add(11) = trampoline as *const () as usize as u64; // x30
@@ -431,7 +438,7 @@ mod arch {
         // SAFETY: reads a register into a local; touches no memory and
         // leaves the stack and the flags alone.
         unsafe {
-            core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+            asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
         }
         sp
     }
@@ -452,6 +459,7 @@ pub fn sp() -> usize {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::{hint, thread};
 
     struct Counter {
         fiber: *mut Fiber,
@@ -468,7 +476,7 @@ mod tests {
 
     fn counting(stack: usize, entry: Entry) -> (&'static mut Counter, &'static mut Fiber) {
         let c = Box::leak(Box::new(Counter {
-            fiber: std::ptr::null_mut(),
+            fiber: ptr::null_mut(),
             n: AtomicUsize::new(0),
         }));
         let f = Box::leak(Box::new(
@@ -500,7 +508,7 @@ mod tests {
         let (c, f) = counting(1 << 20, count_entry);
         let fp = f as *mut Fiber as usize;
         for i in 1..=3 {
-            std::thread::spawn(move || {
+            thread::spawn(move || {
                 let f = unsafe { &mut *(fp as *mut Fiber) };
                 f.state.store(RUNNING, Ordering::Relaxed);
                 unsafe { f.resume() };
@@ -536,11 +544,11 @@ mod tests {
     #[inline(never)]
     fn deep(n: u64) -> u64 {
         let buf = [n; 64];
-        let p = std::hint::black_box(&buf);
+        let p = hint::black_box(&buf);
         if n == 0 {
             p[3]
         } else {
-            deep(n - 1) + std::hint::black_box(p)[5] - n
+            deep(n - 1) + hint::black_box(p)[5] - n
         }
     }
 

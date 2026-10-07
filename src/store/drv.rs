@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::{error, fmt, fs, mem, str};
 
 use super::hash::{
-    Hash, HashAlgo, HashFormat, base16_encode_into, base16_encode_into_bytes, hash_bytes,
+    Hash, HashAlgo, HashError, HashFormat, base16_encode_into, base16_encode_into_bytes, hash_bytes,
 };
 use super::path::{
-    DRV_EXTENSION, IngestionMethod, STORE_DIR, StorePath, make_fixed_output_path, make_output_path,
-    make_text_path, output_path_name,
+    DRV_EXTENSION, IngestionMethod, STORE_DIR, StorePath, StorePathError, make_fixed_output_path,
+    make_output_path, make_text_path, output_path_name,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,16 +18,16 @@ impl fmt::Display for DrvError {
     }
 }
 
-impl std::error::Error for DrvError {}
+impl error::Error for DrvError {}
 
-impl From<super::path::StorePathError> for DrvError {
-    fn from(e: super::path::StorePathError) -> DrvError {
+impl From<StorePathError> for DrvError {
+    fn from(e: StorePathError) -> DrvError {
         DrvError(e.0)
     }
 }
 
-impl From<super::hash::HashError> for DrvError {
-    fn from(e: super::hash::HashError) -> DrvError {
+impl From<HashError> for DrvError {
+    fn from(e: HashError) -> DrvError {
         DrvError(e.0)
     }
 }
@@ -477,7 +477,7 @@ impl Derivation {
         drv.env.sort_by(|a, b| a.0.cmp(&b.0));
         drv.env.dedup_by(|later, earlier| {
             if later.0 == earlier.0 {
-                std::mem::swap(&mut earlier.1, &mut later.1);
+                mem::swap(&mut earlier.1, &mut later.1);
                 true
             } else {
                 false
@@ -522,7 +522,7 @@ impl Derivation {
 
     /// `env_get` of a value that is UTF-8; `None` for one that is not.
     pub fn env_str(&self, key: &str) -> Option<&str> {
-        self.env_get(key).and_then(|v| std::str::from_utf8(v).ok())
+        self.env_get(key).and_then(|v| str::from_utf8(v).ok())
     }
 
     /// Inserts or replaces `key` in the sorted env.
@@ -825,8 +825,8 @@ pub fn path_derivation_modulo(
 pub fn load_derivation_from_store(drv_path: &StorePath) -> Result<Derivation, DrvError> {
     let name = Derivation::name_from_path(drv_path)?;
     let full = format!("{STORE_DIR}/{}", drv_path.base_name());
-    let text = std::fs::read(&full)
-        .map_err(|e| DrvError(format!("cannot read derivation '{full}': {e}")))?;
+    let text =
+        fs::read(&full).map_err(|e| DrvError(format!("cannot read derivation '{full}': {e}")))?;
     Derivation::parse(&text, name)
 }
 
@@ -905,14 +905,14 @@ mod tests {
     /// Copies of /nix/store/*.drv produced by Nix 2.34.8 (`cp /nix/store/<name> tests/fixtures/drv/`).
     /// The file name is the store path, so `drv_path()` is checked against it.
     fn fixtures() -> Vec<(StorePath, Vec<u8>)> {
-        let mut v: Vec<(StorePath, Vec<u8>)> = std::fs::read_dir(fixture_dir())
+        let mut v: Vec<(StorePath, Vec<u8>)> = fs::read_dir(fixture_dir())
             .unwrap()
             .map(|e| {
                 let e = e.unwrap();
                 let base = e.file_name().into_string().unwrap();
                 (
                     StorePath::from_base_name(&base).unwrap(),
-                    std::fs::read(e.path()).unwrap(),
+                    fs::read(e.path()).unwrap(),
                 )
             })
             .collect();
@@ -928,7 +928,7 @@ mod tests {
     fn fixture_loader(drv_path: &StorePath) -> Result<Derivation, DrvError> {
         let local = fixture_dir().join(drv_path.base_name());
         if local.exists() {
-            let text = std::fs::read(local).unwrap();
+            let text = fs::read(local).unwrap();
             return Derivation::parse(&text, Derivation::name_from_path(drv_path)?);
         }
         load_derivation_from_store(drv_path)
@@ -966,7 +966,7 @@ mod tests {
     /// The whole input closure of `drv` is vendored under tests/fixtures/drv.
     fn closure_in_fixtures(drv: &Derivation) -> bool {
         drv.input_drvs.keys().all(|p| {
-            let Ok(text) = std::fs::read(fixture_dir().join(p.base_name())) else {
+            let Ok(text) = fs::read(fixture_dir().join(p.base_name())) else {
                 return false;
             };
             Derivation::name_from_path(p)
@@ -1130,7 +1130,7 @@ mod tests {
             Some("/nix/store/nx6zsacidiymqhs3yji2j0i0srcnnvkc-ia-dev")
         );
         let expected =
-            std::fs::read(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv")).unwrap();
+            fs::read(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv")).unwrap();
         assert_eq!(drv.unparse().unwrap(), expected);
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
             "/nix/store/sqjiq38d04j09g4dws6a9d644618zf21-fr.drv"
         );
         let expected =
-            std::fs::read(fixture_dir().join("sqjiq38d04j09g4dws6a9d644618zf21-fr.drv")).unwrap();
+            fs::read(fixture_dir().join("sqjiq38d04j09g4dws6a9d644618zf21-fr.drv")).unwrap();
         assert_eq!(drv.unparse().unwrap(), expected);
     }
 
@@ -1237,8 +1237,7 @@ mod tests {
 
     #[test]
     fn masked_unparse_blanks_output_paths_and_env() {
-        let text =
-            std::fs::read(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv")).unwrap();
+        let text = fs::read(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv")).unwrap();
         let drv = Derivation::parse(&text, "ia").unwrap();
         let masked = String::from_utf8(drv.unparse_with(true, None).unwrap()).unwrap();
         assert!(masked.starts_with("Derive([(\"dev\",\"\",\"\",\"\"),(\"out\",\"\",\"\",\"\")],"));

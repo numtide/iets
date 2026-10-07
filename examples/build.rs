@@ -6,6 +6,8 @@
 //! Uses the library only (`iets::api`), never `iets::cli`.
 
 use std::collections::HashMap;
+use std::env;
+use std::process::{self, ExitCode};
 
 use iets::api::installable::drv_roots;
 use iets::api::{self, EvalArgs, Input};
@@ -17,14 +19,14 @@ use iets::remote::{plan, worker};
 use iets::store::locate::locate_in_store;
 use iets::store::path::StorePath;
 
-fn main() -> std::process::ExitCode {
+fn main() -> ExitCode {
     // a frontend owns the run state and says where messages go
     let session = iets::session::Session::new();
     session.log.write_to_stderr();
     let _entered = session.enter();
     let mut url = "daemon".to_string();
     let mut a = EvalArgs::new();
-    let mut argv = std::env::args().skip(1);
+    let mut argv = env::args().skip(1);
     while let Some(arg) = argv.next() {
         let mut next = || {
             argv.next()
@@ -45,14 +47,14 @@ fn main() -> std::process::ExitCode {
 
     // a setting that does not resolve is reported already
     let Ok(run) = iets::api::run::Run::new(&a) else {
-        return std::process::ExitCode::from(1);
+        return ExitCode::from(1);
     };
     let r = run.go(move |ev, _| eval_and_build(ev, a, url));
     match r {
-        Ok(c) => std::process::ExitCode::from(c),
+        Ok(c) => ExitCode::from(c),
         Err(e) => {
             eprintln!("error: {e}");
-            std::process::ExitCode::from(1)
+            ExitCode::from(1)
         }
     }
 }
@@ -122,5 +124,5 @@ fn eval_and_build(ev: &mut Evaluator, a: EvalArgs, url: String) -> u8 {
 
 fn die(msg: &str) -> ! {
     eprintln!("usage: build [--builder URL] [-I prefix=path]... [-A attr] (-E EXPR | FILE): {msg}");
-    std::process::exit(2)
+    process::exit(2)
 }

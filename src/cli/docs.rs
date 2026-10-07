@@ -7,6 +7,8 @@
 
 use std::process::exit;
 
+use crate::cli::help;
+
 /// One documentation page `iets help` can be asked for.
 pub struct Page {
     /// The bare topic name, which is also the file's base name.
@@ -183,8 +185,8 @@ pub fn list() -> String {
 /// Prints the page, or where it lives when the binary does not carry it.
 pub fn show(p: &Page) -> ! {
     match p.text {
-        Some(t) => crate::cli::help::out(t),
-        None => crate::cli::help::out(&format!(
+        Some(t) => help::out(t),
+        None => help::out(&format!(
             "'{topic}' is docs/{q}/{topic}.md in the iets repository.\n\
              This binary carries the reference pages only; 'iets help' lists them.\n",
             topic = p.topic,

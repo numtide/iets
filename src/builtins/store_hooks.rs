@@ -19,14 +19,18 @@ use std::fs;
 use std::io::{self, Read};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::str::from_utf8;
 use std::sync::Arc;
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::lint::{LintId, purity};
+use crate::source::scm;
 use crate::store::hash::{HashAlgo, Hasher};
-use crate::store::nar::{FileType, PathFilter};
+use crate::store::nar::{FileType, PathFilter, dump_path, dump_string, nar_hash_filtered};
 use crate::store::path::{STORE_DIR, StorePath};
 use crate::store::source::{SourceOrigin, Src, SrcPath};
-use crate::trace::Kind;
+use crate::trace::{self, Kind, Obs};
+use crate::treestore::{self, StoredTree};
 
 /// Nix reads a copied tree from the store; iets never writes the store, so
 /// a path under a store path this evaluation produced from a local tree
@@ -43,7 +47,7 @@ pub fn locate(ev: &Evaluator, path: &[u8]) -> Option<SrcPath> {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => (rest, &b""[..]),
     };
-    let base = std::str::from_utf8(base).ok()?;
+    let base = from_utf8(base).ok()?;
     let sp = StorePath::from_base_name(base).ok()?;
     let at = match ev.known.origin(&sp) {
         Some(o) => o.at,
@@ -55,7 +59,7 @@ pub fn locate(ev: &Evaluator, path: &[u8]) -> Option<SrcPath> {
     };
     // a vanished entry falls back to the store, which a build has usually filled by then
     if let Src::Spool { name, .. } = &at.src
-        && crate::treestore::get(name).is_none()
+        && treestore::get(name).is_none()
     {
         return None;
     }
@@ -223,7 +227,7 @@ fn untracked(at: &SrcPath, pos: Pos) -> Option<Box<Error>> {
         return None;
     };
     let rel = OsStr::from_bytes(&at.rel);
-    let scm = crate::source::scm::at(root)?;
+    let scm = scm::at(root)?;
     if fs::symlink_metadata(root.join(rel)).is_err() {
         return None;
     }
@@ -261,7 +265,7 @@ pub fn stat(ev: &Evaluator, path: &[u8], follow: bool) -> Kind {
 /// What a [`SrcPath`] opens.
 pub enum At<'a> {
     Disk(Vec<u8>),
-    Spool(Arc<crate::treestore::StoredTree>, &'a str),
+    Spool(Arc<StoredTree>, &'a str),
     Mem(&'a [u8]),
 }
 
@@ -343,7 +347,7 @@ impl SrcPath {
                 if !self.accepts(&self.in_spool()) {
                     return None;
                 }
-                Some(At::Spool(crate::treestore::get(name)?, name))
+                Some(At::Spool(treestore::get(name)?, name))
             }
             Src::Mem(b) => self.rel.is_empty().then_some(At::Mem(b)),
         }
@@ -378,7 +382,7 @@ impl SrcPath {
                 r.map(|_| kind)
             }
             At::Spool(tree, name) => {
-                crate::treestore::record(ev, &tree, name);
+                treestore::record(ev, &tree, name);
                 Ok(kind_of(tree.stat(&self.rel, follow).ok_or_else(missing)?))
             }
             At::Mem(_) => Ok(Kind::Regular),
@@ -428,7 +432,7 @@ impl SrcPath {
                     Err((STAT, e))
                 }
                 r => {
-                    crate::treestore::record(ev, &tree, name);
+                    treestore::record(ev, &tree, name);
                     r.map_err(|e| (READ, e))
                 }
             },
@@ -468,16 +472,16 @@ impl SrcPath {
                     }
                 }
                 if ev.trace().is_on() {
-                    ev.trace().record(crate::trace::Obs::Dir {
+                    ev.trace().record(Obs::Dir {
                         path: p,
-                        hash: crate::trace::dir_listing_hash(&mut listing),
+                        hash: trace::dir_listing_hash(&mut listing),
                     });
                 }
                 Ok(out)
             }
             At::Spool(tree, name) => {
                 let entries = tree.list(&self.rel).map_err(|e| (STAT, e))?;
-                crate::treestore::record(ev, &tree, name);
+                treestore::record(ev, &tree, name);
                 let here = self.in_spool();
                 Ok(entries
                     .into_iter()
@@ -494,17 +498,15 @@ impl SrcPath {
     /// that records the tree must see what the filter hides.
     pub fn dump(&self, sink: &mut dyn io::Write, filter: &mut PathFilter<'_>) -> io::Result<()> {
         match &self.src {
-            Src::Fs { root, .. } => {
-                crate::store::nar::dump_path(&below(root, &self.rel), sink, filter)
-            }
-            Src::Spool { name, .. } => crate::treestore::get(name)
+            Src::Fs { root, .. } => dump_path(&below(root, &self.rel), sink, filter),
+            Src::Spool { name, .. } => treestore::get(name)
                 .ok_or_else(|| {
                     io::Error::other(format!(
                         "the input store no longer holds '{name}'; evaluate again to fetch it"
                     ))
                 })?
                 .dump(&self.rel, &self.in_spool(), sink, filter),
-            Src::Mem(b) => crate::store::nar::dump_string(b, sink),
+            Src::Mem(b) => dump_string(b, sink),
         }
     }
 
@@ -542,7 +544,7 @@ pub fn copy_path_to_store(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "source".into());
     let fixed = |hash| {
-        crate::treestore::store_path(&name, hash)
+        treestore::store_path(&name, hash)
             .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))
     };
     let (sp, origin, hash, nar_size) = match at.at() {
@@ -553,13 +555,13 @@ pub fn copy_path_to_store(
         Some(At::Spool(tree, base))
             if at.rel.is_empty() && matches!(at.src, Src::Spool { accepted: None, .. }) =>
         {
-            crate::treestore::record(ev, &tree, base);
+            treestore::record(ev, &tree, base);
             let sp = StorePath::from_base_name(base)
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))?;
             (sp, at.clone(), tree.nar_hash(), tree.nar_size())
         }
         Some(At::Spool(tree, base)) => {
-            crate::treestore::record(ev, &tree, base);
+            treestore::record(ev, &tree, base);
             let mut h = Hasher::new(HashAlgo::Sha256);
             at.nar(&mut h).map_err(copy_err)?;
             let size = h.bytes_written();
@@ -573,14 +575,14 @@ pub fn copy_path_to_store(
                 _ => None,
             };
             // a plain local directory, not a tree the flake machinery filtered
-            if ev.lint_on(crate::lint::LintId::DirCopyUnfiltered)
+            if ev.lint_on(LintId::DirCopyUnfiltered)
                 && accepted.is_none()
                 && !ev.is_store_path_text(path)
                 && ev.trace().stat_now(local.as_os_str().as_bytes(), true) == Kind::Directory
             {
-                crate::lint::purity::dir_copy_unfiltered(ev, path, pos)?;
+                purity::dir_copy_unfiltered(ev, path, pos)?;
             }
-            let git_lint = ev.lint_on(crate::lint::LintId::GitInSource);
+            let git_lint = ev.lint_on(LintId::GitInSource);
             let mut saw_git = false;
             let mut fp = ev.trace().fp(&local);
             let mut filter = |p: &Path, t: FileType| {
@@ -594,18 +596,17 @@ pub fn copy_path_to_store(
                 keep
             };
             let (hash, nar_size) =
-                crate::store::nar::nar_hash_filtered(&local, HashAlgo::Sha256, &mut filter)
-                    .map_err(copy_err)?;
+                nar_hash_filtered(&local, HashAlgo::Sha256, &mut filter).map_err(copy_err)?;
             ev.trace().tree(
                 &local,
-                crate::trace::hash_to_digest(&hash),
+                trace::hash_to_digest(&hash),
                 accepted.as_deref(),
                 fp,
             );
             if saw_git {
-                crate::lint::purity::git_in_source(ev, path, pos)?;
+                purity::git_in_source(ev, path, pos)?;
             }
-            crate::lint::purity::large_source_copy(ev, path, nar_size, pos)?;
+            purity::large_source_copy(ev, path, nar_size, pos)?;
             (fixed(&hash)?, SrcPath::fs(local, accepted), hash, nar_size)
         }
     };
@@ -632,6 +633,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use crate::store::hash::Hash;
+
     #[test]
     fn virtual_tree_reads_go_to_the_local_files() {
         let ev = Evaluator::new();
@@ -644,7 +647,7 @@ mod tests {
             sp.clone(),
             SourceOrigin::tree(
                 SrcPath::fs(root, Some(Arc::new(accepted))),
-                crate::store::hash::Hash::from_bytes(HashAlgo::Sha256, &[0u8; 32]).unwrap(),
+                Hash::from_bytes(HashAlgo::Sha256, &[0u8; 32]).unwrap(),
                 0,
             ),
         );

@@ -9,9 +9,15 @@
 //! reader must follow.
 
 use std::cell::RefCell;
-use std::io::Write;
+use std::io::{self, Write};
+use std::path::Path;
+use std::str::from_utf8;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::{mem, result};
+
+use crate::settings::Settings;
+use crate::{log, print};
 
 thread_local! {
     /// The line a record is built in. A thread keeps it, so a record in a
@@ -84,7 +90,7 @@ impl Group {
     /// The mask `names` asks for: a comma-separated list, or `all` for every
     /// cold group. The error names what was not understood, because a
     /// mistyped group would otherwise watch nothing in silence.
-    pub fn mask(names: &str) -> std::result::Result<u32, String> {
+    pub fn mask(names: &str) -> result::Result<u32, String> {
         let mut mask = 0;
         for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
             if name == "all" {
@@ -131,19 +137,19 @@ impl Events {
     /// Watches what `IETS_EVENTS` names, where `IETS_EVENTS_TO` says. A path
     /// that does not open is reported once and the stream stays off, as a
     /// `json-log-path` that does not open is.
-    pub fn open(&self, settings: &crate::settings::Settings) {
+    pub fn open(&self, settings: &Settings) {
         if settings.events == 0 {
             return;
         }
         self.watch(settings.events);
         let path = settings.events_to.as_deref().unwrap_or("-");
         if path == "-" {
-            self.write_to(Box::new(std::io::stderr()));
+            self.write_to(Box::new(io::stderr()));
             return;
         }
-        match crate::log::open_sink(std::path::Path::new(path)) {
+        match log::open_sink(Path::new(path)) {
             Ok(w) => self.write_to(w),
-            Err(e) => crate::errln!(
+            Err(e) => errln!(
                 "error (ignored): opening events file \"{path}\": {}",
                 crate::error::io_text(&e)
             ),
@@ -166,7 +172,7 @@ impl Events {
         let Some(Some(sink)) = self.sink.get() else {
             return None;
         };
-        let mut line = LINE.with(|b| std::mem::take(&mut *b.borrow_mut()));
+        let mut line = LINE.with(|b| mem::take(&mut *b.borrow_mut()));
         line.clear();
         line.extend_from_slice(b"{\"event\":");
         push_str(&mut line, event.as_bytes());
@@ -179,7 +185,7 @@ impl Events {
 fn push_str(out: &mut Vec<u8>, s: &[u8]) {
     let lossy = String::from_utf8_lossy(s);
     // the only error is invalid UTF-8, which `lossy` has already replaced
-    let _ = crate::print::json_escape(out, lossy.as_bytes());
+    let _ = print::json_escape(out, lossy.as_bytes());
 }
 
 /// How one value appears in a record: it writes a whole JSON value, and
@@ -222,7 +228,7 @@ pub fn quote_in_place(out: &mut Vec<u8>, start: usize) {
     let plain = out[start..]
         .iter()
         .all(|&b| b >= 0x20 && b != b'"' && b != b'\\')
-        && std::str::from_utf8(&out[start..]).is_ok();
+        && from_utf8(&out[start..]).is_ok();
     if plain {
         out.insert(start, b'"');
         out.push(b'"');
@@ -271,7 +277,7 @@ impl Drop for Rec<'_> {
         let mut w = self.sink.lock().unwrap_or_else(|e| e.into_inner());
         let _ = w.write_all(&self.line);
         drop(w);
-        let line = std::mem::take(&mut self.line);
+        let line = mem::take(&mut self.line);
         LINE.with(|b| *b.borrow_mut() = line);
     }
 }

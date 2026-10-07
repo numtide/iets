@@ -10,19 +10,22 @@ mod tests;
 use ast::{Ast, FileId, Span};
 use symbol::Interner;
 
+use std::error;
+use std::fmt::{self, Display, Formatter};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
     pub span: Span,
     pub msg: String,
 }
 
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&self.msg)
     }
 }
 
-impl std::error::Error for ParseError {}
+impl error::Error for ParseError {}
 
 pub fn parse(src: &[u8], file: FileId, interner: &mut Interner) -> Result<Ast, ParseError> {
     parser::Parser::new(src, interner).parse_file(file)

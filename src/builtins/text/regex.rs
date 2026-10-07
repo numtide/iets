@@ -16,6 +16,8 @@
 //! - Ranges compare bytes as signed chars; classes are the C locale's.
 //! - The pattern size limit counts states as `Parser::piece` does.
 
+use std::{array, iter, mem};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Invalid,
@@ -477,9 +479,9 @@ impl Compiler {
 
     fn star(&mut self, inner: &Node, min1: bool) {
         let one = match inner {
-            Node::Byte(b) => Some(std::array::from_fn(|c| c == *b as usize)),
+            Node::Byte(b) => Some(array::from_fn(|c| c == *b as usize)),
             Node::Set(s) => Some(**s),
-            Node::Any => Some(std::array::from_fn(|c| c != 0)),
+            Node::Any => Some(array::from_fn(|c| c != 0)),
             _ => None,
         };
         if let Some(s) = one {
@@ -511,7 +513,7 @@ fn first_bytes(insts: &[Inst], sets: &[ByteSet], stop_at_bol: bool) -> Option<By
     let mut seen = vec![false; insts.len()];
     let mut work = vec![0usize];
     while let Some(pc) = work.pop() {
-        if std::mem::replace(&mut seen[pc], true) {
+        if mem::replace(&mut seen[pc], true) {
             continue;
         }
         match insts[pc] {
@@ -614,7 +616,7 @@ impl<'a> Exec<'a> {
     }
 
     fn set_reg(&mut self, reg: u32, v: usize) -> bool {
-        let old = std::mem::replace(&mut self.regs[reg as usize], v);
+        let old = mem::replace(&mut self.regs[reg as usize], v);
         self.stack.push(Frame::Reg(reg, old));
         true
     }
@@ -768,7 +770,7 @@ pub fn match_exact(prog: &Prog, hay: &[u8]) -> Option<Vec<Option<(usize, usize)>
 pub fn matches<'a>(prog: &'a Prog, hay: &'a [u8]) -> impl Iterator<Item = Match> + 'a {
     let mut ex = Exec::new(prog, hay);
     let mut next = ex.search(0, false, false);
-    std::iter::from_fn(move || {
+    iter::from_fn(move || {
         let m = next.take()?;
         next = if m.start < m.end {
             ex.search(m.end, false, false)
@@ -785,6 +787,9 @@ pub fn matches<'a>(prog: &'a Prog, hay: &'a [u8]) -> impl Iterator<Item = Match>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Instant;
+    use std::{fs, hint};
 
     fn caps(re: &str, s: &str) -> Option<Vec<Option<String>>> {
         let p = compile(re.as_bytes()).unwrap();
@@ -828,7 +833,7 @@ mod tests {
     fn regex_bench() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/regex-bench.json");
         let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         for e in v.as_array().unwrap() {
             let (kind, re) = (e["kind"].as_str().unwrap(), e["re"].as_str().unwrap());
             let inputs: Vec<&[u8]> = e["inputs"]
@@ -840,13 +845,13 @@ mod tests {
             let prog = compile(re.as_bytes()).unwrap();
             let mut best = f64::MAX;
             for _ in 0..5 {
-                let t = std::time::Instant::now();
+                let t = Instant::now();
                 for _ in 0..200 {
                     for s in &inputs {
                         if kind == "m" {
-                            std::hint::black_box(match_exact(&prog, s));
+                            hint::black_box(match_exact(&prog, s));
                         } else {
-                            std::hint::black_box(matches(&prog, s).count());
+                            hint::black_box(matches(&prog, s).count());
                         }
                     }
                 }

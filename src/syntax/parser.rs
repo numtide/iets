@@ -16,6 +16,10 @@ use super::lexer::{IndPart, Lexer, PathPart, StrEnd, Tok, Token};
 use super::symbol::{FxHashMap, Interner, Sym};
 use super::{ParseError, line_col};
 
+use std::str;
+
+use crate::lint::allow;
+
 type R<T> = Result<T, ParseError>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -174,7 +178,7 @@ impl<'a> Parser<'a> {
     fn allows(&mut self) {
         for a in self.lx.take_allows() {
             let text = &self.src[a.text.start as usize..a.text.end as usize];
-            let (mask, bad) = crate::lint::allow::parse_comment(text);
+            let (mask, bad) = allow::parse_comment(text);
             self.ast.allows.add(a.line.start, a.line.end, mask);
             for (off, msg) in bad {
                 let start = self.ast.bytes.len() as u32;
@@ -768,7 +772,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Float => {
                 self.bump();
-                let text = std::str::from_utf8(self.text(t)).unwrap();
+                let text = str::from_utf8(self.text(t)).unwrap();
                 let v: f64 = text.parse().unwrap_or(f64::INFINITY);
                 // lexer.l reports every strtod ERANGE, so an overflow, a
                 // subnormal and an underflow to zero are all invalid

@@ -12,13 +12,18 @@
 //! the only switch.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::{self, Builder};
+use std::time::Duration;
 
 use crate::eval::error::Pos;
+use crate::log;
 use crate::parallel::interner::Interner;
 use crate::parallel::shared::Files;
+use crate::session::Session;
 use crate::syntax::symbol::Sym;
 
 /// Frames below this are left out of a sample, so hashing one stays bounded.
@@ -179,7 +184,7 @@ impl Profile {
         let Some(to) = self.to.get() else { return };
         let Ok(g) = self.folded.lock() else { return };
         if g.is_empty() {
-            crate::errln!(
+            errln!(
                 "profile: no samples at {} Hz, so the evaluation was shorter than one tick",
                 self.hz.load(Ordering::Relaxed)
             );
@@ -198,14 +203,14 @@ impl Profile {
             let _ = writeln!(out, " {count}");
         }
         if to == "-" {
-            let _ = std::io::stderr().write_all(&out);
+            let _ = io::stderr().write_all(&out);
             return;
         }
-        match crate::log::open_sink(std::path::Path::new(to)) {
+        match log::open_sink(Path::new(to)) {
             Ok(mut w) => {
                 let _ = w.write_all(&out);
             }
-            Err(e) => crate::errln!(
+            Err(e) => errln!(
                 "error (ignored): opening profile file \"{to}\": {}",
                 crate::error::io_text(&e)
             ),
@@ -244,7 +249,7 @@ impl Profile {
 
 /// Starts profiling this session, when it asked for it. The tick thread
 /// holds the session: it ends on the first tick after [`Profile::write`].
-pub fn open(session: &Arc<crate::session::Session>) {
+pub fn open(session: &Arc<Session>) {
     let s = session.settings();
     let Some(mode) = s.profile else {
         return;
@@ -260,15 +265,13 @@ pub fn open(session: &Arc<crate::session::Session>) {
         .to
         .set(s.profile_to.clone().unwrap_or_else(|| "-".to_string()));
     let own = session.clone();
-    let _ = std::thread::Builder::new()
-        .name("iets-profile".into())
-        .spawn(move || {
-            let period = std::time::Duration::from_micros(1_000_000 / hz as u64);
-            while !own.profile.stop.load(Ordering::Relaxed) {
-                std::thread::sleep(period);
-                own.profile.tick.fetch_add(1, Ordering::Relaxed);
-            }
-        });
+    let _ = Builder::new().name("iets-profile".into()).spawn(move || {
+        let period = Duration::from_micros(1_000_000 / hz as u64);
+        while !own.profile.stop.load(Ordering::Relaxed) {
+            thread::sleep(period);
+            own.profile.tick.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 }
 
 #[cfg(test)]

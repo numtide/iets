@@ -2,36 +2,38 @@
 //! tree is resolved and its outputs are evaluated; `crate::flake` is private
 //! and nothing above this line reaches into it (docs/explanation/plumbing-and-porcelain.md).
 
+use std::fs;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
-use crate::eval::{EvalResult, Evaluator};
+use crate::eval::{EvalResult, Evaluator, Pos};
+use crate::flake;
 use crate::runtime::Word;
-use crate::source::{AttrVal, Attrs, Lock, SourceRef};
+use crate::source::{self, AttrVal, Attrs, Lock, SourceRef, lock};
 
 pub use crate::flake::FlakeRef;
 pub use crate::source::Tree;
 
 /// A command-line input that names a flake rather than a `.nix` file.
 pub fn is_flake_ref(arg: &str) -> bool {
-    crate::flake::is_flake_ref(arg)
+    flake::is_flake_ref(arg)
 }
 
 /// attr-path.cc:parseAttrPath: `.` separates, `"..."` quotes.
 pub fn parse_attr_path(s: &str) -> Result<Vec<String>> {
-    crate::flake::parse_attr_path(s)
+    flake::parse_attr_path(s)
 }
 
 /// eval-cache.cc:AttrCursor::findAlongAttrPath: walks `path` from `v`,
 /// forcing each step; `None` when a step is missing or is not an attrset.
 pub fn select(ev: &mut Evaluator, v: Word, path: &[String]) -> EvalResult<Option<Word>> {
-    crate::flake::select(ev, v, path)
+    flake::select(ev, v, path)
 }
 
 /// The flake's outputs, with the reference's attribute path selected from
 /// them. The lock is read, the inputs are fetched and `call-flake.nix` runs.
 pub fn outputs(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
-    crate::flake::eval_flake(ev, fr)
+    flake::eval_flake(ev, fr)
 }
 
 /// flakeref.cc:FlakeRef::to_string for the references iets parses: how a
@@ -51,7 +53,7 @@ pub fn url(fr: &FlakeRef) -> String {
 
 /// The tree a reference names, copied or fetched if it is not here yet.
 pub fn tree(ev: &mut Evaluator, r: &SourceRef) -> EvalResult<Tree> {
-    crate::source::tree(ev, r, crate::eval::Pos::NONE)
+    source::tree(ev, r, Pos::NONE)
 }
 
 /// What a flake names before anything is evaluated: the directory, where its
@@ -65,9 +67,9 @@ pub struct Info {
 /// Reads `FLAKEREF/flake.lock` and checks it. Nothing is fetched and
 /// nothing is evaluated.
 pub fn info(fr: &FlakeRef) -> Result<Info> {
-    let lock = std::fs::read(fr.dir.join("flake.lock"))
+    let lock = fs::read(fr.dir.join("flake.lock"))
         .map_err(|e| e.to_string())
-        .and_then(|b| crate::source::lock::check(&b).map_err(|e| e.to_string()))
+        .and_then(|b| lock::check(&b).map_err(|e| e.to_string()))
         .map_err(|why| Error::Flake(format!("flake.lock: {why}")))?;
     Ok(Info {
         dir: fr.dir.clone(),
@@ -97,7 +99,7 @@ impl Info {
             match (locked["type"].as_str(), locked["narHash"].as_str()) {
                 (Some("path"), _) => {}
                 (Some("github" | "gitlab" | "sourcehut" | "tarball" | "git" | "hg"), Some(h)) => {
-                    let h = crate::source::parse_nar_hash(h)
+                    let h = source::parse_nar_hash(h)
                         .map_err(|e| Error::Flake(format!("input '{name}': {e}")))?;
                     attrs.insert("narHash".into(), AttrVal::Str(h.to_sri()));
                     out.push((name.to_string(), SourceRef::Locked(attrs)));

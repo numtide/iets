@@ -4,13 +4,16 @@
 //! [`Run::on`] and keeps only what it needs (docs/explanation/plumbing-and-porcelain.md).
 
 use crate::eval::{ErrorKind, EvalConfig, Evaluator};
+use crate::parallel;
 use crate::parallel::fiber::StackError;
+use crate::session::Session;
 use crate::store::path::StorePath;
 use crate::trace::run::Cache;
+use crate::trace::store::Part;
 
-use super::EvalArgs;
-use super::build::Plan;
-use crate::error::Error;
+use super::build::{self, Plan};
+use super::{EvalArgs, project_root, report, setup_cache, setup_cache_more};
+use crate::error::{self, Error};
 
 /// What one run produced: what the caller asked for, an error that was
 /// reported and its exit code, or something this frontend does not serve,
@@ -42,13 +45,9 @@ impl Run {
     /// one command line answers the same whichever binary `PATH` found
     /// (`cli::classic`, docs/reference/settings.md).
     pub fn new(a: &EvalArgs) -> Result<Run, i32> {
-        let pure = a
-            .pure
-            .unwrap_or_else(|| crate::session::Session::current().settings().pure);
+        let pure = a.pure.unwrap_or_else(|| Session::current().settings().pure);
         Run::over(
-            EvalConfig::new()
-                .pure(pure)
-                .project_root(super::project_root(a)),
+            EvalConfig::new().pure(pure).project_root(project_root(a)),
             a,
         )
     }
@@ -58,7 +57,7 @@ impl Run {
     pub fn over(base: EvalConfig, a: &EvalArgs) -> Result<Run, i32> {
         match a.config(base) {
             Ok(cfg) => Ok(Run::on(cfg).workers(a.workers)),
-            Err(e) => Err(crate::error::Error::Eval(e).report()),
+            Err(e) => Err(error::Error::Eval(e).report()),
         }
     }
 
@@ -68,20 +67,20 @@ impl Run {
         Run {
             cfg,
             cache: None,
-            workers: crate::parallel::default_workers(),
+            workers: parallel::default_workers(),
         }
     }
 
     /// Opens the tracing cache of `subcommand`, keyed on `a`.
     pub fn cached(mut self, a: &EvalArgs, subcommand: &str) -> Run {
-        self.cache = super::setup_cache(a, subcommand, &self.cfg);
+        self.cache = setup_cache(a, subcommand, &self.cfg);
         self
     }
 
     /// [`Run::cached`] with the installables after the first in the key
     /// (`api::setup_cache_more`).
     pub fn cached_more(mut self, a: &EvalArgs, subcommand: &str, more: &[String]) -> Run {
-        self.cache = super::setup_cache_more(a, subcommand, &self.cfg, more);
+        self.cache = setup_cache_more(a, subcommand, &self.cfg, more);
         self
     }
 
@@ -103,7 +102,7 @@ impl Run {
     /// The result bytes of the entry this run validated: what the command
     /// wrote with `Cache::write` last time, when the read set still holds.
     pub fn hit_result(&self) -> Option<Vec<u8>> {
-        self.hit(|c| c.part(crate::trace::store::Part::Result))
+        self.hit(|c| c.part(Part::Result))
     }
 
     /// A `build` entry this run validated: the roots `Cache::write_build`
@@ -113,7 +112,7 @@ impl Run {
         self.hit(|c| {
             let (roots, drvs, sources) = c.read_build()?;
             let paths: Vec<StorePath> = roots.iter().map(|(p, _)| p.clone()).collect();
-            let plan = super::build::plan_with(&paths, &drvs, &sources).ok()?;
+            let plan = build::plan_with(&paths, &drvs, &sources).ok()?;
             c.replay_warnings();
             Some((roots, plan))
         })
@@ -129,14 +128,14 @@ impl Run {
         let store = self.cache.as_ref().map(|c| &c.store);
         let ev = self.cfg.trace_in(store).build();
         let cache = self.cache;
-        crate::parallel::try_run(self.workers, ev, move |ev| f(ev, cache))
+        parallel::try_run(self.workers, ev, move |ev| f(ev, cache))
     }
 
     /// [`Run::go`] with the error classified: what this frontend does not
     /// serve becomes `Unsupported`, anything else is reported once.
     pub fn eval<T: Send + 'static>(
         self,
-        f: impl FnOnce(&mut Evaluator, Option<Cache>) -> crate::error::Result<T> + Send + 'static,
+        f: impl FnOnce(&mut Evaluator, Option<Cache>) -> error::Result<T> + Send + 'static,
     ) -> Result<Outcome<T>, StackError> {
         self.go(move |ev, cache| match f(ev, cache) {
             Ok(t) => Outcome::Ok(t),
@@ -144,7 +143,7 @@ impl Run {
             Err(Error::Eval(e)) if e.kind == ErrorKind::Unsupported => {
                 Outcome::Unsupported(e.msg.clone())
             }
-            Err(Error::Eval(e)) => Outcome::Failed(super::report(ev, &e)),
+            Err(Error::Eval(e)) => Outcome::Failed(report(ev, &e)),
             Err(e) => Outcome::Failed(e.report()),
         })
     }
@@ -153,14 +152,18 @@ impl Run {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{EvalArgs, Input};
+    use crate::api::{self, EvalArgs, Input};
+
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+    use std::{env, fs, thread};
 
     /// `n` files that each cost real parsing and compiling, and the
     /// expression that imports them all from one list. They are slow on
     /// purpose: a file the main fiber is still compiling is a file the
     /// helpers steal, which is what this has to observe.
-    fn workload(dir: &std::path::Path, n: usize) -> String {
-        std::fs::create_dir_all(dir).expect("workload directory");
+    fn workload(dir: &Path, n: usize) -> String {
+        fs::create_dir_all(dir).expect("workload directory");
         let mut elems = String::new();
         for i in 0..4000 {
             elems += &format!("{i} ");
@@ -169,7 +172,7 @@ mod tests {
         for i in 0..n {
             let f = dir.join(format!("m{i}.nix"));
             let src = format!("let xs = [ {elems}]; in builtins.length xs + {i}\n");
-            std::fs::write(&f, src).expect("workload file");
+            fs::write(&f, src).expect("workload file");
             list += &format!(" (import {}) ", f.display());
         }
         list + "]"
@@ -177,7 +180,7 @@ mod tests {
 
     /// Impure: the workloads below import absolute paths under a temporary
     /// directory, and a pure run reads neither those nor the search path.
-    fn args(expr: &str, cache_dir: &std::path::Path, workers: usize) -> EvalArgs {
+    fn args(expr: &str, cache_dir: &Path, workers: usize) -> EvalArgs {
         EvalArgs {
             input: Some(Input::Expr(expr.to_string())),
             cache_dir: Some(cache_dir.to_string_lossy().into_owned()),
@@ -195,8 +198,8 @@ mod tests {
         Run::new(&a)
             .expect("the arguments configure")
             .go(move |ev, _| {
-                let v = crate::api::evaluate(ev, a).expect("the workload evaluates");
-                crate::parallel::force_deep(ev, v).expect("the workload forces");
+                let v = api::evaluate(ev, a).expect("the workload evaluates");
+                parallel::force_deep(ev, v).expect("the workload forces");
                 ev.ir_cache().expect("the run has an IR cache").hits()
             })
             .expect("the fiber stacks")
@@ -206,17 +209,17 @@ mod tests {
     /// helper fiber has every setting of the arguments.
     #[test]
     fn a_fiber_template_carries_the_configuration() {
-        let d = std::env::temp_dir().join(format!("iets-run-cfg-{}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-run-cfg-{}", std::process::id()));
         let mut a = args("1", &d, 4);
         a.includes = vec![(b"nixpkgs".to_vec(), b"/nonexistent".to_vec())];
         a.lint_roots = vec!["/nonexistent".into()];
-        let want = crate::api::lint_config(&a).expect("the lints resolve");
+        let want = api::lint_config(&a).expect("the lints resolve");
         let run = Run::new(&a).expect("the arguments configure");
         let fiber = run.cfg.build().clone();
         assert!(fiber.ir_cache().is_some(), "a fiber without the IR cache");
         assert_eq!(fiber.search_path()[0], a.includes[0]);
         assert_eq!(*fiber.lint_config(), want);
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// Every fiber shares one IR cache handle, so a warm run reads one entry
@@ -225,14 +228,14 @@ mod tests {
     /// four-worker count collapses.
     #[test]
     fn helper_fibers_read_the_ir_cache() {
-        let d = std::env::temp_dir().join(format!("iets-run-ircache-{}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-run-ircache-{}", std::process::id()));
         let n = 400;
         let expr = workload(&d.join("src"), n);
         let cache = d.join("cache");
         hits(args(&expr, &cache, 1));
         let one = hits(args(&expr, &cache, 1));
         let four = hits(args(&expr, &cache, 4));
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
         assert_eq!(one, n as u64, "a warm run reads one entry per file");
         assert_eq!(four, one, "helper fibers read the IR cache too");
     }
@@ -246,15 +249,15 @@ mod tests {
         Run::new(&a)
             .expect("the arguments configure")
             .go(move |ev, _| {
-                let v = crate::api::evaluate(ev, a).expect("the workload evaluates");
-                crate::parallel::force_deep(ev, v).expect("the workload forces");
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let v = api::evaluate(ev, a).expect("the workload evaluates");
+                parallel::force_deep(ev, v).expect("the workload forces");
+                let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     let n = ev.counts().derivations;
-                    if n >= want || std::time::Instant::now() > deadline {
+                    if n >= want || Instant::now() > deadline {
                         return n;
                     }
-                    std::thread::yield_now();
+                    thread::yield_now();
                 }
             })
             .expect("the fiber stacks")
@@ -266,7 +269,7 @@ mod tests {
     /// counters alone the four-worker number is a fraction of it.
     #[test]
     fn the_counters_cover_the_helper_fibers() {
-        let d = std::env::temp_dir().join(format!("iets-run-counts-{}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-run-counts-{}", std::process::id()));
         let n = 400;
         let expr = format!(
             "builtins.genList (i: derivation {{ name = \"c${{toString i}}\"; \
@@ -274,7 +277,7 @@ mod tests {
         );
         let one = derivations(args(&expr, &d, 1), n as u64);
         let four = derivations(args(&expr, &d, 4), one);
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
         assert_eq!(one, n as u64, "one derivation per list element");
         assert_eq!(four, one, "the helper fibers' derivations are counted too");
     }

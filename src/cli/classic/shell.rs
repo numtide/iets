@@ -4,6 +4,7 @@
 //! `print-dev-env`; nothing here builds the `-env` derivation.
 //! See `docs/reference/classic.md`.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -11,23 +12,27 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::{env, fs, slice};
 
-use super::{Argv, Common, common_flag, fallback};
-use crate::api::build::{self as apibuild, Root};
-use crate::api::installable;
+use super::{Argv, Common, common_flag, eval_config, fallback, lookup_file_arg, shell_settings};
+use crate::api::build::Root;
+use crate::api::{build as apibuild, installable};
 use crate::build::backend::Worker;
 use crate::build::upload::{PlanUpload, Uploader};
-use crate::cli::{Outcome, auto_args, cwd, report};
+use crate::builtins::derivation;
+use crate::cli::{self, Outcome, Run, auto_args, cwd, devenv, report};
 use crate::compile::ir::ParamIr;
 use crate::devenv::escape_shell_arg_always as esc;
-use crate::error::Error as CrateError;
+use crate::error::{self, Error as CrateError};
 use crate::eval::{Error, ErrorKind, Evaluator, Pos};
-use crate::remote::event::Event;
+use crate::remote::event::{self, Event};
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
-use crate::runtime::Value;
+use crate::runtime::{Value, Word};
 use crate::store::drv::{Derivation, DerivationOutput};
 use crate::store::path::{STORE_DIR, StorePath, hash_placeholder};
+use crate::syntax::symbol::Sym;
+use crate::{cachefs, log};
 use serde_json::Value as Json;
 
 const NAME: &str = "nix-shell";
@@ -125,7 +130,7 @@ fn is_shebang(argv: &[String]) -> bool {
     let Some(first) = argv.first() else {
         return false;
     };
-    std::fs::read(first).is_ok_and(|b| b.starts_with(b"#!"))
+    fs::read(first).is_ok_and(|b| b.starts_with(b"#!"))
 }
 
 pub fn main(argv: &[String]) -> i32 {
@@ -139,7 +144,7 @@ pub fn main(argv: &[String]) -> i32 {
     if let Err(reason) = default_file(&mut s) {
         return CrateError::Usage(reason).report();
     }
-    let (cfg, transport, options) = match super::shell_settings(&s.c) {
+    let (cfg, transport, options) = match shell_settings(&s.c) {
         Ok(t) => t,
         Err(reason) => fallback(NAME, argv, &reason),
     };
@@ -151,16 +156,16 @@ pub fn main(argv: &[String]) -> i32 {
     // nix-build.cc sets this before it evaluates, so `builtins.getEnv` sees it
     // and the child inherits it.
     unsafe {
-        std::env::set_var("IN_NIX_SHELL", if s.pure { "pure" } else { "impure" });
+        env::set_var("IN_NIX_SHELL", if s.pure { "pure" } else { "impure" });
     }
-    let ec = super::eval_config(&s.c, &cfg);
+    let ec = eval_config(&s.c, &cfg);
     let s = Arc::new(s);
     let run = Arc::clone(&s);
     let cores = match cfg.cores() {
         Ok(c) => c,
         Err(e) => return e.report(),
     };
-    match crate::cli::run_reported(crate::cli::Run::on(ec), move |ev, _| prepare(ev, &run)) {
+    match cli::run_reported(Run::on(ec), move |ev, _| prepare(ev, &run)) {
         Outcome::Failed(code) => code,
         Outcome::Unsupported(reason) => fallback(NAME, argv, &reason),
         Outcome::Ok(r) => realise(&s, &transport, &options, *r, cores),
@@ -222,7 +227,7 @@ enum Bash {
     Drv(StorePath),
 }
 
-fn prepare(ev: &mut Evaluator, s: &Shell) -> crate::error::Result<Box<Ready>> {
+fn prepare(ev: &mut Evaluator, s: &Shell) -> error::Result<Box<Ready>> {
     let cwd = cwd();
     let mut roots: Vec<Root> = Vec::new();
     let args = auto_args(ev, &s.c.flags.args, &cwd)?;
@@ -233,7 +238,7 @@ fn prepare(ev: &mut Evaluator, s: &Shell) -> crate::error::Result<Box<Ready>> {
             key.push(file.as_bytes().to_vec());
             ev.eval_string(file, &cwd)?
         } else {
-            let p = super::lookup_file_arg(ev, file, &cwd)?;
+            let p = lookup_file_arg(ev, file, &cwd)?;
             let p = resolve_shell_expr_path(&p)
                 .map_err(|m| Error::boxed(ErrorKind::Eval, m, Pos::NONE))?;
             key.push(p.clone());
@@ -246,7 +251,7 @@ fn prepare(ev: &mut Evaluator, s: &Shell) -> crate::error::Result<Box<Ready>> {
             args
         };
         for attr in &s.c.flags.attrs {
-            let v = crate::api::installable::find_along_attr_path(ev, root, attr, args)?;
+            let v = installable::find_along_attr_path(ev, root, attr, args)?;
             let v = ev.force(v)?;
             let args = if takes_in_nix_shell(ev, v) {
                 with_in_nix_shell(ev, args)?
@@ -262,7 +267,7 @@ fn prepare(ev: &mut Evaluator, s: &Shell) -> crate::error::Result<Box<Ready>> {
             "nix-shell requires a single derivation".into(),
         ));
     }
-    let drv = crate::builtins::derivation::load_drv(ev, &roots[0].drv)?;
+    let drv = derivation::load_drv(ev, &roots[0].drv)?;
     if !drv
         .outputs
         .values()
@@ -294,7 +299,7 @@ fn prepare(ev: &mut Evaluator, s: &Shell) -> crate::error::Result<Box<Ready>> {
 /// nix-build.cc: `$NIX_BUILD_SHELL`, else `(import <nixpkgs> {}).bashInteractive`;
 /// any evaluation error means bash from the environment.
 fn bash(ev: &mut Evaluator, cwd: &[u8]) -> Bash {
-    if let Some(sh) = std::env::var_os("NIX_BUILD_SHELL") {
+    if let Some(sh) = env::var_os("NIX_BUILD_SHELL") {
         return Bash::Path(sh.to_string_lossy().into_owned());
     }
     let mut roots = Vec::new();
@@ -309,12 +314,12 @@ fn bash(ev: &mut Evaluator, cwd: &[u8]) -> Bash {
             let msg =
                 "the 'bashInteractive' attribute in <nixpkgs> did not evaluate to a derivation";
             CrateError::Eval(Error::boxed(ErrorKind::Type, msg, Pos::NONE)).report();
-            crate::log::line("uses bash from your environment");
+            log::line("uses bash from your environment");
             Bash::Path("bash".into())
         }
         Err(e) => {
             report(ev, &e);
-            crate::log::line("uses bash from your environment");
+            log::line("uses bash from your environment");
             Bash::Path("bash".into())
         }
     }
@@ -322,7 +327,7 @@ fn bash(ev: &mut Evaluator, cwd: &[u8]) -> Bash {
 
 /// nix-build.cc:takesNixShellAttr: a function with an `inNixShell` formal gets
 /// it passed as `true`.
-fn takes_in_nix_shell(ev: &Evaluator, w: crate::runtime::Word) -> bool {
+fn takes_in_nix_shell(ev: &Evaluator, w: Word) -> bool {
     let Value::Lambda(l) = w.view() else {
         return false;
     };
@@ -334,15 +339,12 @@ fn takes_in_nix_shell(ev: &Evaluator, w: crate::runtime::Word) -> bool {
         .any(|f| ev.interner.name(f.sym) == b"inNixShell")
 }
 
-fn with_in_nix_shell(
-    ev: &mut Evaluator,
-    args: crate::runtime::Word,
-) -> Result<crate::runtime::Word, Box<Error>> {
-    let mut entries: Vec<(crate::syntax::symbol::Sym, Pos, crate::runtime::Word)> = args
+fn with_in_nix_shell(ev: &mut Evaluator, args: Word) -> Result<Word, Box<Error>> {
+    let mut entries: Vec<(Sym, Pos, Word)> = args
         .as_attrs()
         .map(|a| a.iter().map(|x| (x.sym, x.pos, x.cell.get())).collect())
         .unwrap_or_default();
-    entries.push((ev.sym(b"inNixShell"), Pos::NONE, crate::runtime::Word::TRUE));
+    entries.push((ev.sym(b"inNixShell"), Pos::NONE, Word::TRUE));
     ev.mk_attrs(&mut entries, Pos::NONE)
 }
 
@@ -350,16 +352,16 @@ fn with_in_nix_shell(
 /// file and execs bash. Returns only on failure.
 fn realise(s: &Shell, transport: &Transport, options: &Options, r: Ready, cores: u64) -> i32 {
     let quiet = s.c.quiet;
-    let failed = std::cell::Cell::new(false);
-    let mut on_event = |e: crate::remote::event::Event| {
+    let failed = Cell::new(false);
+    let mut on_event = |e: event::Event| {
         match e {
             // under internal-json a line of a build is already its result record
-            Event::Log(l) if !quiet && (l.drv_path.is_empty() || !crate::log::json()) => {
-                crate::log::line(&String::from_utf8_lossy(&l.line))
+            Event::Log(l) if !quiet && (l.drv_path.is_empty() || !log::json()) => {
+                log::line(&String::from_utf8_lossy(&l.line))
             }
             Event::Failed(f) => {
                 failed.set(true);
-                crate::log::line(&format!(
+                log::line(&format!(
                     "error: build of '{}' failed: {}",
                     f.drv_path, f.reason
                 ));
@@ -390,7 +392,7 @@ fn realise(s: &Shell, transport: &Transport, options: &Options, r: Ready, cores:
     }
     let upload = PlanUpload::new(&r.plan, &apibuild::locate_store).upload(
         &mut w,
-        std::slice::from_ref(&r.drv_path),
+        slice::from_ref(&r.drv_path),
         &mut on_event,
     );
     if let Err(e) = upload {
@@ -400,11 +402,11 @@ fn realise(s: &Shell, transport: &Transport, options: &Options, r: Ready, cores:
         Ok(results) => {
             for b in &results {
                 if !b.success() {
-                    let code = crate::log::build_exit(b.status, &b.msg);
+                    let code = log::build_exit(b.status, &b.msg);
                     failed.set(true);
                     let reason = format!("status {}: {}", b.status, b.msg);
                     let text = format!("error: build failed: {reason}");
-                    crate::log::build_failed(None, &reason, code, Some(&text));
+                    log::build_failed(None, &reason, code, Some(&text));
                 }
             }
         }
@@ -453,9 +455,9 @@ fn keep_inputs(
     r: &Ready,
     shell: &str,
     transport: &Transport,
-    on_event: &mut dyn FnMut(crate::remote::event::Event),
+    on_event: &mut dyn FnMut(event::Event),
 ) {
-    if !crate::cli::devenv::shell_roots(transport) {
+    if !devenv::shell_roots(transport) {
         return;
     }
     let key: Vec<&[u8]> = r.key.iter().map(|p| p.as_slice()).collect();
@@ -486,27 +488,27 @@ fn keep_inputs(
         let index = i.to_string();
         let mut parts = key.clone();
         parts.push(index.as_bytes());
-        let Some(link) = crate::cachefs::root_link(None, &parts) else {
+        let Some(link) = cachefs::root_link(None, &parts) else {
             return;
         };
-        crate::cli::devenv::keep_root(transport, &link, p, Some(&mut w.conn));
+        devenv::keep_root(transport, &link, p, Some(&mut w.conn));
     }
 }
 
 /// nix-build.cc's `runEnv` tail: the environment, the rc file, `execvp`.
-fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::Result<()> {
-    let tmp_dir = std::env::temp_dir().join(format!(
+fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> error::Result<()> {
+    let tmp_dir = env::temp_dir().join(format!(
         "nix-shell-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos())
     ));
-    std::fs::create_dir_all(&tmp_dir)
+    fs::create_dir_all(&tmp_dir)
         .map_err(|e| CrateError::io(format!("cannot create '{}'", tmp_dir.display()), e))?;
     let tmp = tmp_dir.to_string_lossy().into_owned();
 
-    let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    let mut env: BTreeMap<OsString, OsString> = env::vars_os().collect();
     if s.pure {
         let keep: BTreeSet<&OsStr> = KEEP_VARS
             .iter()
@@ -569,8 +571,8 @@ fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::R
     Err(CrateError::io(format!("executing shell '{shell}'"), e))
 }
 
-fn write(path: &Path, text: impl AsRef<[u8]>) -> crate::error::Result<()> {
-    std::fs::write(path, text)
+fn write(path: &Path, text: impl AsRef<[u8]>) -> error::Result<()> {
+    fs::write(path, text)
         .map_err(|e| CrateError::io(format!("cannot write '{}'", path.display()), e))
 }
 
@@ -618,7 +620,7 @@ fn rc_script(s: &Shell, shell: &str, tmp: &str, structured_rc: &str) -> String {
     rc.push_str("unset NIX_ENFORCE_PURITY; ");
     rc.push_str("shopt -u nullglob; ");
     rc.push_str("unset TZ; ");
-    if let Some(tz) = std::env::var_os("TZ") {
+    if let Some(tz) = env::var_os("TZ") {
         rc.push_str(&format!("export TZ={}; ", esc(&tz.to_string_lossy())));
     }
     rc.push_str("shopt -s execfail;");
@@ -632,7 +634,7 @@ fn rc_script(s: &Shell, shell: &str, tmp: &str, structured_rc: &str) -> String {
 fn prepare_structured_attrs(
     sa: &str,
     outputs: &BTreeMap<String, DerivationOutput>,
-) -> crate::error::Result<serde_json::Map<String, Json>> {
+) -> error::Result<serde_json::Map<String, Json>> {
     let mut json: serde_json::Map<String, Json> = serde_json::from_str(sa)
         .map_err(|e| CrateError::Store(format!("structured attrs are not valid JSON: {e}")))?;
     let exports = match json.get("exportReferencesGraph") {

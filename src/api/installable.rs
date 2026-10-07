@@ -6,9 +6,10 @@ use std::collections::HashSet;
 
 use crate::api::build::Root;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
-use crate::runtime::Ctx;
-use crate::runtime::Word;
+use crate::runtime::{self, AttrsObj, Cell, Ctx, Word};
 use crate::store::path::StorePath;
+
+use super::flake;
 
 /// Which `getActualAttrPaths` table a fragment is tried against
 /// (installable-flake.cc, with each command's own defaults and prefixes).
@@ -108,9 +109,9 @@ pub fn from_outputs(
     let candidates = attr_paths(prefixes, fragment, ev.current_system());
     let mut found = Vec::new();
     for c in &candidates {
-        let path = super::flake::parse_attr_path(c)
+        let path = flake::parse_attr_path(c)
             .map_err(|m| Error::boxed(ErrorKind::Eval, m.to_string(), Pos::NONE))?;
-        if let Some(value) = super::flake::select(ev, outputs, &path)? {
+        if let Some(value) = flake::select(ev, outputs, &path)? {
             found.push(Found { value, path });
             if want == Want::First {
                 return Ok(found);
@@ -142,7 +143,7 @@ pub fn find_along_attr_path(
     args: Word,
 ) -> EvalResult<Word> {
     let mut v = root;
-    let path = super::flake::parse_attr_path(attr_path)
+    let path = flake::parse_attr_path(attr_path)
         .map_err(|e| Error::boxed(ErrorKind::Parse, e.to_string(), Pos::NONE))?;
     for attr in path {
         v = ev.auto_call(v, args)?;
@@ -216,7 +217,7 @@ fn string_list(ev: &mut Evaluator, w: Word, not_list: &str, ctx: &str) -> EvalRe
     let Some(l) = w.as_list() else {
         return Err(Error::boxed(ErrorKind::Type, not_list, Pos::NONE));
     };
-    let cells: Vec<Word> = l.cells().iter().map(crate::runtime::Cell::get).collect();
+    let cells: Vec<Word> = l.cells().iter().map(Cell::get).collect();
     cells
         .into_iter()
         .map(|c| forced_string(ev, c, ctx))
@@ -225,7 +226,7 @@ fn string_list(ev: &mut Evaluator, w: Word, not_list: &str, ctx: &str) -> EvalRe
 
 /// `type = "derivation"`, the test both the get-drvs walk and the output
 /// selection start from.
-fn is_derivation(ev: &mut Evaluator, attrs: &'static crate::runtime::AttrsObj) -> EvalResult<bool> {
+fn is_derivation(ev: &mut Evaluator, attrs: &'static AttrsObj) -> EvalResult<bool> {
     let Some(t) = attrs.get(ev.s.type_) else {
         return Ok(false);
     };
@@ -234,7 +235,7 @@ fn is_derivation(ev: &mut Evaluator, attrs: &'static crate::runtime::AttrsObj) -
 }
 
 /// The `drvPath` of a derivation attrset.
-fn drv_of(ev: &mut Evaluator, attrs: &'static crate::runtime::AttrsObj) -> EvalResult<StorePath> {
+fn drv_of(ev: &mut Evaluator, attrs: &'static AttrsObj) -> EvalResult<StorePath> {
     let Some(dp) = attrs.get(ev.s.drv_path) else {
         return Err(Error::boxed(
             ErrorKind::MissingAttr,
@@ -249,7 +250,7 @@ fn drv_of(ev: &mut Evaluator, attrs: &'static crate::runtime::AttrsObj) -> EvalR
 /// The `outputName` of a derivation attrset.
 fn output_name(
     ev: &mut Evaluator,
-    attrs: &'static crate::runtime::AttrsObj,
+    attrs: &'static AttrsObj,
     drv: &StorePath,
 ) -> EvalResult<String> {
     let sym = ev.sym(b"outputName");
@@ -291,7 +292,7 @@ pub fn drv_roots(
         for c in s.ctx {
             match c {
                 Ctx::Built { drv, output } => {
-                    let (layers, root) = crate::runtime::split_built(drv);
+                    let (layers, root) = runtime::split_built(drv);
                     if !layers.is_empty() {
                         return Err(bad(
                             "iets: the output of a dynamic derivation is not an installable"
@@ -545,10 +546,7 @@ fn drv_pname(s: &str) -> &str {
 }
 
 /// `meta.mainProgram`, else `pname`; `None` when neither is there.
-fn main_program(
-    ev: &mut Evaluator,
-    attrs: &'static crate::runtime::AttrsObj,
-) -> EvalResult<Option<String>> {
+fn main_program(ev: &mut Evaluator, attrs: &'static AttrsObj) -> EvalResult<Option<String>> {
     let meta_sym = ev.sym(b"meta");
     let main_sym = ev.sym(b"mainProgram");
     if let Some(m) = attrs.get(meta_sym) {

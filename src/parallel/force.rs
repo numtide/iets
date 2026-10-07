@@ -2,13 +2,17 @@
 //! fiber an `Evaluator`, the parallel `force_thunk`, strict-demand fan-out,
 //! and the range tasks helpers run.
 
-use std::collections::HashSet;
-use std::sync::atomic::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::mem;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
-use super::Ctx;
 use super::sched::{self, Driver, Runtime, Slot, Task, Worker};
 use super::thunk::{self, Claim};
-use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
+use super::{Ctx, fiber};
+use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::jobs;
 use crate::runtime::{AttrsObj, Cell, Kind, ListObj, Value, Word};
 
 pub const MIN_FANOUT: usize = 4;
@@ -66,7 +70,7 @@ impl Driver for SyncEv {
         // SAFETY: the fiber is switched out and this worker holds the slot,
         // so nothing else references its evaluator.
         let ev = unsafe { ev_of(slot) };
-        std::mem::swap(&mut ev.arena, &mut w.arena);
+        mem::swap(&mut ev.arena, &mut w.arena);
         // a fiber parked in the middle of a task keeps its counters until it
         // is resumed, which a stats line printed meanwhile would not see
         ev.fold_counters();
@@ -167,7 +171,7 @@ fn stack_exhausted(ev: &mut Evaluator, pos: Pos) -> Box<Error> {
 /// True when this fiber has less than the margin of stack left.
 #[inline]
 pub fn stack_low(ev: &Evaluator) -> bool {
-    ev.par.stack_lo != 0 && super::fiber::sp() < ev.par.stack_lo
+    ev.par.stack_lo != 0 && fiber::sp() < ev.par.stack_lo
 }
 
 /// True once this helper fiber must stop: cancelled by deadlock resolution.
@@ -187,9 +191,9 @@ pub fn bail_requested(ev: &Evaluator) -> bool {
 /// stay process-wide: they are sampled on the force path, where a session
 /// lookup would cost more than the diagnostic is worth, and two sessions
 /// would only blur one debug line.
-pub static MAIN_POS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static SAMPLE_POS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+pub static MAIN_POS: AtomicU64 = AtomicU64::new(0);
+pub static SAMPLE_POS: AtomicBool = AtomicBool::new(false);
+pub static START: OnceLock<Instant> = OnceLock::new();
 
 /// Parallel `Evaluator::force_thunk`: claim, evaluate, publish. A thunk
 /// another fiber already forced is answered here and not in the claim
@@ -264,7 +268,7 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
         }
     };
     if SAMPLE_POS.load(Ordering::Relaxed) && ev.par.is_main && w.thunk_kind() == Kind::Thunk {
-        let p = crate::eval::ir_pos(w.as_thunk().ir());
+        let p = eval::ir_pos(w.as_thunk().ir());
         MAIN_POS.store(p.0 as u64, Ordering::Relaxed);
     }
     if bail_requested(ev) {
@@ -328,7 +332,7 @@ pub fn journal(ev: &mut Evaluator, _msg: String) -> bool {
     }
 }
 
-pub static EFFECT_BAILS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static EFFECT_BAILS: AtomicUsize = AtomicUsize::new(0);
 
 type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
 
@@ -338,9 +342,8 @@ type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
 /// seen. Only for an effect the program may lose without losing anything
 /// it returns. The counter keeps the demand path off the lock while the
 /// map is empty, which is every run without lints.
-static PENDING: std::sync::Mutex<Option<std::collections::HashMap<u64, Vec<Deferred>>>> =
-    std::sync::Mutex::new(None);
-static NPENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PENDING: Mutex<Option<HashMap<u64, Vec<Deferred>>>> = Mutex::new(None);
+static NPENDING: AtomicUsize = AtomicUsize::new(0);
 
 /// Run an effect, or hold it back when a helper produced it. The demand
 /// path runs it at once.
@@ -730,7 +733,7 @@ fn run_task(ev: &mut Evaluator, t: Task) {
         }
         T_JOB => {
             let a = obj.as_attrs().expect("attrs task");
-            crate::jobs::prefetch_range(ev, a, start, end);
+            jobs::prefetch_range(ev, a, start, end);
         }
         k => panic!("unknown task kind {k}"),
     }
@@ -778,17 +781,15 @@ pub fn import_thunk(ev: &mut Evaluator, resolved: &[u8], pos: Pos) -> Word {
 fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
     let resolved = args[0].as_string().expect("path string").bytes;
     let pos = Pos(args[1].imm_int_value() as u32);
-    let t0 = SAMPLE_POS
-        .load(Ordering::Relaxed)
-        .then(std::time::Instant::now);
+    let t0 = SAMPLE_POS.load(Ordering::Relaxed).then(Instant::now);
     let src = ev.read_source(resolved, pos)?;
-    let dir = crate::eval::dir_of(resolved).to_vec();
+    let dir = eval::dir_of(resolved).to_vec();
     let ir = ev.compile_file(resolved, src, &dir)?;
     if let Some(t0) = t0 {
         // SAFETY: this fiber owns its slot; the borrow ends with the
         // statement and nothing else borrows the slot here.
         let w = unsafe { slot_mut(ev) }.worker().idx;
-        crate::errln!(
+        errln!(
             "import t={}ms {}us main={} w{} {}",
             START.get().map_or(0, |s| s.elapsed().as_millis()),
             t0.elapsed().as_micros(),

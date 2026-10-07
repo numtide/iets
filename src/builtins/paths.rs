@@ -5,26 +5,31 @@
 //! `fetchTarball` with a `sha256`, `getFlake`, `parseFlakeRef` and
 //! `flakeRefToString` work (`flake`).
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
-use std::fs;
-use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::str::from_utf8;
 use std::sync::Arc;
+use std::{fs, io};
 
 use super::Registry;
 use super::store_hooks::{self, At, Follow};
 use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
+use crate::flake::{self, fetch, flakeref};
+use crate::lint::{LintId, coerce, purity};
+use crate::runtime::{self, Ctx, Value, Word, ctx_to_arena};
 use crate::store::hash::{Hash, HashAlgo, Hasher, hash_bytes};
+use crate::store::locate;
 use crate::store::nar::FileType;
 use crate::store::path::{
-    IngestionMethod, STORE_DIR, StorePath, make_fixed_output_path, make_text_path,
+    IngestionMethod, STORE_DIR, StorePath, StorePathError, make_fixed_output_path, make_text_path,
 };
 use crate::store::source::{SourceOrigin, Src, SrcPath};
-use crate::trace::Kind;
+use crate::trace::{self, Kind};
+use crate::{log, treestore};
 
 pub fn register(r: &mut Registry) {
     r.op("__readFile", 1, read_file);
@@ -37,26 +42,14 @@ pub fn register(r: &mut Registry) {
     r.op("__path", 1, path);
     r.op("__toFile", 2, to_file);
     r.op("__fetchurl", 1, fetchurl);
-    r.op(
-        "fetchTarball",
-        1,
-        crate::flake::fetch::fetch_tarball_builtin,
-    );
+    r.op("fetchTarball", 1, fetch::fetch_tarball_builtin);
     r.op("fetchGit", 1, fetch_git);
-    r.op("fetchTree", 1, crate::flake::fetch::fetch_tree);
+    r.op("fetchTree", 1, fetch::fetch_tree);
     r.op("fetchMercurial", 1, fetch_mercurial);
     r.op("__fetchClosure", 1, fetch_closure);
-    r.op("__getFlake", 1, crate::flake::get_flake);
-    r.op(
-        "__parseFlakeRef",
-        1,
-        crate::flake::flakeref::parse_flake_ref,
-    );
-    r.op(
-        "__flakeRefToString",
-        1,
-        crate::flake::flakeref::flake_ref_to_string,
-    );
+    r.op("__getFlake", 1, flake::get_flake);
+    r.op("__parseFlakeRef", 1, flakeref::parse_flake_ref);
+    r.op("__flakeRefToString", 1, flakeref::flake_ref_to_string);
 }
 
 macro_rules! unsupported {
@@ -94,7 +87,7 @@ unsupported!(
     "iets: network fetchers are not supported (builtins.fetchClosure)"
 );
 
-fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
+fn lossy(b: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 
@@ -112,7 +105,7 @@ fn io_error(e: io::Error, verb: &str, p: &[u8], pos: Pos) -> Box<Error> {
 }
 
 fn utf8(b: &[u8], pos: Pos) -> EvalResult<&str> {
-    std::str::from_utf8(b).map_err(|_| {
+    from_utf8(b).map_err(|_| {
         Error::boxed(
             ErrorKind::Eval,
             format!("'{}' is not valid UTF-8", lossy(b)),
@@ -200,11 +193,11 @@ pub fn realise_path(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<Vec<u8>
             Ctx::Impure(_) => continue,
             Ctx::Opaque(sp) | Ctx::DrvDeep(sp) => {
                 if store_hooks::locate(ev, sp).is_some()
-                    || ev.trace().stat_now(sp, true) != crate::trace::Kind::Missing
+                    || ev.trace().stat_now(sp, true) != trace::Kind::Missing
                 {
                     continue;
                 }
-                if let Ok(Ok(d)) = std::str::from_utf8(sp).map(StorePath::parse)
+                if let Ok(Ok(d)) = from_utf8(sp).map(StorePath::parse)
                     && ev.drv.drvs.lock().contains_key(&d)
                 {
                     kind = ErrorKind::Unsupported;
@@ -261,7 +254,7 @@ fn realise_existing(
             pos,
         ));
     }
-    crate::lint::coerce::read_through_copy(ev, &p, pos)?;
+    coerce::read_through_copy(ev, &p, pos)?;
     let shown = at.local().map_or(p, |l| l.into_os_string().into_vec());
     Ok((at, shown))
 }
@@ -332,7 +325,7 @@ fn path_exists(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> 
     if !store_hooks::allowed(ev, &p) {
         return Ok(Word::FALSE);
     }
-    crate::lint::coerce::read_through_copy(ev, &p, pos)?;
+    coerce::read_through_copy(ev, &p, pos)?;
     let at = at.unwrap_or_else(|| store_hooks::fs_path(&p));
     match at.stat(ev, must_be_dir) {
         Ok(k) => Ok(Word::from_bool(k == Kind::Directory || !must_be_dir)),
@@ -370,7 +363,7 @@ fn is_store_path(p: &[u8]) -> bool {
 fn to_store_path(p: &[u8]) -> Option<(Result<StorePath, ()>, &[u8])> {
     let rest = p.strip_prefix(STORE_DIR.as_bytes())?.strip_prefix(b"/")?;
     let end = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
-    let base = std::str::from_utf8(&rest[..end]).ok()?;
+    let base = from_utf8(&rest[..end]).ok()?;
     Some((
         StorePath::from_base_name(base).map_err(|_| ()),
         &rest[end..],
@@ -493,7 +486,7 @@ fn references(ev: &Evaluator, sp: Option<StorePath>) -> BTreeSet<StorePath> {
             .and_then(|o| o.text_refs().cloned())
             .unwrap_or_default(),
         Some(k) if k.flake.is_some() => BTreeSet::new(),
-        _ => crate::store::locate::references_of(&sp),
+        _ => locate::references_of(&sp),
     }
 }
 
@@ -510,15 +503,15 @@ fn add_path_inner(
 ) -> EvalResult<StorePath> {
     let name = utf8(name, pos)?;
     let refs = references(ev, in_store);
-    crate::lint::coerce::store_path_recopy(ev, path, pos)?;
-    crate::lint::coerce::read_through_copy(ev, path, pos)?;
-    let store_err = |e: crate::store::path::StorePathError| Error::boxed(ErrorKind::Eval, e.0, pos);
+    coerce::store_path_recopy(ev, path, pos)?;
+    coerce::read_through_copy(ev, path, pos)?;
+    let store_err = |e: StorePathError| Error::boxed(ErrorKind::Eval, e.0, pos);
     let expected_sp = expected
         .map(|h| make_fixed_output_path(method, &h, name, &refs))
         .transpose()
         .map_err(store_err)?;
     if let Some(sp) = &expected_sp
-        && ev.trace().stat_now(sp.to_full_string().as_bytes(), true) != crate::trace::Kind::Missing
+        && ev.trace().stat_now(sp.to_full_string().as_bytes(), true) != trace::Kind::Missing
     {
         ev.known.lock().entry(sp.clone()).or_default();
         return Ok(sp.clone());
@@ -558,7 +551,7 @@ fn add_path_inner(
         None => return Err(missing(path)),
         Some(At::Mem(_)) => return Err(store_hooks::recopy_unsupported(path, pos)),
         Some(At::Spool(entry, base)) => {
-            crate::treestore::record(ev, &entry, base);
+            treestore::record(ev, &entry, base);
             false
         }
         Some(At::Disk(_)) => true,
@@ -597,7 +590,7 @@ fn add_path_inner(
                 .then(|| ev.trace().fp(&resolved))
                 .flatten();
             let mut err: Option<Box<Error>> = None;
-            let git_lint = on_disk && ev.lint_on(crate::lint::LintId::GitInSource);
+            let git_lint = on_disk && ev.lint_on(LintId::GitInSource);
             let mut saw_git = false;
             let mut f = |p: &Path, t: FileType| -> bool {
                 let keep = if !at.accepts(p) {
@@ -639,18 +632,14 @@ fn add_path_inner(
             nar_size = h.bytes_written();
             let h = h.finish();
             if on_disk {
-                ev.trace().tree(
-                    &resolved,
-                    crate::trace::hash_to_digest(&h),
-                    accepted.as_ref(),
-                    fp,
-                );
+                ev.trace()
+                    .tree(&resolved, trace::hash_to_digest(&h), accepted.as_ref(), fp);
             }
             if saw_git {
-                crate::lint::purity::git_in_source(ev, path, pos)?;
+                purity::git_in_source(ev, path, pos)?;
             }
             if on_disk {
-                crate::lint::purity::large_source_copy(ev, path, nar_size, pos)?;
+                purity::large_source_copy(ev, path, nar_size, pos)?;
             }
             h
         }
@@ -723,7 +712,7 @@ fn parse_sha256_allow_empty(s: &[u8], pos: Pos) -> EvalResult<Hash> {
     let s = utf8(s, pos)?;
     if s.is_empty() {
         let zero = Hash::from_bytes(HashAlgo::Sha256, &[0u8; 32]).expect("32 bytes");
-        crate::log::line(&format!(
+        log::line(&format!(
             "warning: found empty hash, assuming '{}'",
             zero.to_sri()
         ));
@@ -823,7 +812,7 @@ fn ctx_internal(c: &Ctx) -> String {
         Ctx::DrvDeep(d) => format!("={}", base(d)),
         // value/context.cc: one `<output>!` per layer, then the `.drv`'s name
         Ctx::Built { drv, output } => {
-            let (layers, root) = crate::runtime::split_built(drv);
+            let (layers, root) = runtime::split_built(drv);
             let mut s = format!("!{}!", lossy(output));
             for l in layers {
                 s.push_str(&lossy(l));

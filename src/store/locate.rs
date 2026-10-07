@@ -1,14 +1,14 @@
 //! Where the local store keeps an input source.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use crate::error::Error as CrateError;
-use crate::store::path::STORE_DIR;
-use crate::store::path::StorePath;
-use crate::store::source::SourceKind;
-use crate::store::source::SourceOrigin;
-use crate::store::source::SrcPath;
+use crate::error::{self, Error as CrateError};
+use crate::nixbin;
+use crate::store::path::{STORE_DIR, StorePath};
+use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
 
 /// What the store answered for a path, kept for the life of the process: the
 /// references of a valid store path never change.
@@ -30,7 +30,7 @@ pub fn references_of(path: &StorePath) -> BTreeSet<StorePath> {
 }
 
 fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
-    let out = std::process::Command::new(crate::nixbin::nix())
+    let out = Command::new(nixbin::nix())
         .args([
             "--extra-experimental-features",
             "nix-command",
@@ -38,7 +38,7 @@ fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
             "--json",
             full,
         ])
-        .stderr(std::process::Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
@@ -58,9 +58,9 @@ fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
 /// that is not valid locally, or whose content address v1 cannot send (an input-addressed
 /// output pinned with `builtins.storePath`), is `None`: the daemon substitutes it.
 pub fn locate_in_store(
-    paths: &[crate::store::path::StorePath],
-    overrides: &HashMap<String, std::path::PathBuf>,
-) -> crate::error::Result<Vec<Option<crate::store::source::SourceOrigin>>> {
+    paths: &[StorePath],
+    overrides: &HashMap<String, PathBuf>,
+) -> error::Result<Vec<Option<SourceOrigin>>> {
     let ask: Vec<String> = paths
         .iter()
         .map(|p| p.to_string())
@@ -68,7 +68,7 @@ pub fn locate_in_store(
         .collect();
     let mut info: HashMap<String, serde_json::Value> = HashMap::new();
     if !ask.is_empty() {
-        let out = std::process::Command::new(crate::nixbin::nix())
+        let out = Command::new(nixbin::nix())
             .args([
                 "--extra-experimental-features",
                 "nix-command",
@@ -76,7 +76,7 @@ pub fn locate_in_store(
                 "--json",
             ])
             .args(&ask)
-            .stderr(std::process::Stdio::inherit())
+            .stderr(Stdio::inherit())
             .output()
             .map_err(|e| CrateError::io("nix path-info", e))?;
         if !out.status.success() {
@@ -115,7 +115,7 @@ pub fn locate_in_store(
                     .unwrap_or_default()
                     .into_iter()
                     .map(|r| StorePath::parse(r).map_err(CrateError::from))
-                    .collect::<crate::error::Result<_>>()?;
+                    .collect::<error::Result<_>>()?;
                 SourceKind::Text { references }
             } else {
                 return Ok(None);

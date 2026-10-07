@@ -1,8 +1,11 @@
 //! String primops.
 
 use super::Registry;
-use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::eval::{self, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::parallel;
 use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
+
+use std::cmp::Ordering;
 
 pub fn register(r: &mut Registry) {
     r.op("__stringLength", 1, string_length);
@@ -87,7 +90,7 @@ fn concat_strings_sep(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult
         pos,
         "while evaluating the second argument (the list of strings to concat) passed to builtins.concatStringsSep",
     )?;
-    crate::parallel::fanout_list_coerce(ev, l); // parallel
+    parallel::fanout_list_coerce(ev, l); // parallel
     let mut ctx: Vec<Ctx> = sep.ctx.to_vec();
     let mut out: Vec<u8> = Vec::new();
     for (i, c) in l.cells().iter().enumerate() {
@@ -168,22 +171,22 @@ fn components_lt(c1: &[u8], c2: &[u8]) -> bool {
     }
 }
 
-pub fn compare_versions_bytes(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+pub fn compare_versions_bytes(a: &[u8], b: &[u8]) -> Ordering {
     let (mut p1, mut p2) = (0usize, 0usize);
     loop {
         if p1 >= a.len() && p2 >= b.len() {
-            return std::cmp::Ordering::Equal;
+            return Ordering::Equal;
         }
         let c1 = next_component(a, &mut p1);
         let c2 = next_component(b, &mut p2);
         if components_lt(c1, c2) {
-            return std::cmp::Ordering::Less;
+            return Ordering::Less;
         }
         if components_lt(c2, c1) {
-            return std::cmp::Ordering::Greater;
+            return Ordering::Greater;
         }
         if c1.is_empty() && c2.is_empty() {
-            return std::cmp::Ordering::Equal;
+            return Ordering::Equal;
         }
     }
 }
@@ -218,9 +221,9 @@ fn compare_versions(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<W
         "while evaluating the second argument passed to builtins.compareVersions",
     )?;
     Ok(Word::imm_int(match compare_versions_bytes(a, b) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
     }))
 }
 
@@ -273,7 +276,7 @@ fn base_name_of(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
 fn dir_of(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let w = ev.force(args[0])?;
     if let Value::Path(p) = w.view() {
-        let d = crate::eval::dir_of(p.path);
+        let d = eval::dir_of(p.path);
         return Ok(ev.arena.mk_path(d));
     }
     let mut ctx = Vec::new();

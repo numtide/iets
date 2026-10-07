@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 
-use super::Evaluator;
+use super::{EvalConfig, Evaluator};
+
+use crate::print;
 
 fn eval_str(src: &str) -> String {
     let mut ev = Evaluator::new();
     let v = ev.eval_string(src, b"/").expect("eval");
     let v = ev.force_deep(v).expect("force");
     let mut out = Vec::new();
-    crate::print::print_ambiguous(&mut ev, v, 1, &mut out, &mut HashSet::new(), 0).unwrap();
+    print::print_ambiguous(&mut ev, v, 1, &mut out, &mut HashSet::new(), 0).unwrap();
     String::from_utf8(out).unwrap()
 }
 
@@ -168,13 +170,13 @@ fn reading_a_derivation_output_is_unsupported() {
 }
 
 fn eval_pure(src: &str) -> Result<String, String> {
-    let mut ev = super::EvalConfig::new().pure(true).build();
+    let mut ev = EvalConfig::new().pure(true).build();
     let v = ev
         .eval_string(src, b"/")
         .and_then(|v| ev.force_deep(v))
         .map_err(|e| e.msg)?;
     let mut out = Vec::new();
-    crate::print::print_ambiguous(&mut ev, v, 1, &mut out, &mut HashSet::new(), 0).unwrap();
+    print::print_ambiguous(&mut ev, v, 1, &mut out, &mut HashSet::new(), 0).unwrap();
     Ok(String::from_utf8(out).unwrap())
 }
 

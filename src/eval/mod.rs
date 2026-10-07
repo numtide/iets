@@ -7,24 +7,43 @@ pub mod error;
 mod tests;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::path::PathBuf;
+use std::str::from_utf8;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use std::{fs, mem};
 
 pub use error::{Error, ErrorKind, EvalResult, Pos};
 
+use crate::builtins::derivation::DrvState;
+use crate::builtins::{self, store_hooks};
+use crate::compile::cache::{self, IrCache};
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, ParamIr, SelectIr,
 };
-use crate::compile::{Compiler, Globals};
-use crate::parallel::shared::SharedMap;
-use crate::runtime::arena::{STAT_NAMES, Stat};
+use crate::compile::{self, Compiler, Globals};
+use crate::events::{self, Field, Group};
+use crate::lint::allow::Allows;
+use crate::lint::coerce::{or_non_attrs, read_through_copy};
+use crate::lint::{self, Diag, Lints, purity};
+use crate::parallel::shared::{ArenaUse, Counts, Files, SharedMap, SymWords, Totals};
+use crate::profile::{self, Stack};
+use crate::runtime::arena::{self, STAT_NAMES, Stat};
 use crate::runtime::{
     Arena, AttrsObj, Cell, Ctx, EnvObj, Kind, LambdaObj, ListObj, MAX_LEAVES, StringObj, ThunkObj,
     UNION_MIN, Value, ValueType, Word, ctx_to_arena, leaf_count,
 };
+use crate::session::Session;
+use crate::source::LazyStore;
 use crate::store::path::{STORE_DIR, StorePath};
 use crate::store::source::{SourceOrigin, SrcPath};
-use crate::syntax::ast::FileId;
+use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, Interner, Sym};
+use crate::trace::{self, Trace, store};
+use crate::{argv, parallel, syntax};
 
 pub const MAX_CALL_DEPTH: u32 = 10000;
 
@@ -40,10 +59,10 @@ pub struct FileInfo {
     pub line_starts: Vec<u32>,
     /// The `# iets: allow` lines, set once the file is parsed or its IR
     /// cache entry loaded, before any of its IR runs.
-    allows: std::sync::OnceLock<crate::lint::allow::Allows>,
+    allows: OnceLock<Allows>,
     /// The source and its tree, read and parsed again for the first finding
     /// in the file (`lint::site`).
-    parsed: std::sync::OnceLock<Option<(Vec<u8>, crate::syntax::ast::Ast)>>,
+    parsed: OnceLock<Option<(Vec<u8>, Ast)>>,
 }
 
 impl FileInfo {
@@ -68,33 +87,28 @@ impl FileInfo {
             path,
             base,
             line_starts,
-            allows: std::sync::OnceLock::new(),
-            parsed: std::sync::OnceLock::new(),
+            allows: OnceLock::new(),
+            parsed: OnceLock::new(),
         }
     }
 
     /// Every compile of one path sees the same source, so a second set
     /// (a helper fiber compiling the file again) carries the same table.
-    pub fn set_allows(&self, allows: crate::lint::allow::Allows) {
+    pub fn set_allows(&self, allows: Allows) {
         let _ = self.allows.set(allows);
     }
 
     #[inline]
-    pub fn allows(&self) -> &crate::lint::allow::Allows {
-        self.allows
-            .get()
-            .unwrap_or(crate::lint::allow::Allows::EMPTY)
+    pub fn allows(&self) -> &Allows {
+        self.allows.get().unwrap_or(Allows::EMPTY)
     }
 
     /// The source `read` gives and its tree; `None` when there is no source
     /// to read or it does not parse.
-    pub fn parsed(
-        &self,
-        read: impl FnOnce() -> Option<Vec<u8>>,
-    ) -> Option<&(Vec<u8>, crate::syntax::ast::Ast)> {
+    pub fn parsed(&self, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<&(Vec<u8>, Ast)> {
         let parse = || {
             let src = read()?;
-            let ast = crate::syntax::parse(&src, FileId(0), &mut Interner::new()).ok()?;
+            let ast = syntax::parse(&src, FileId(0), &mut Interner::new()).ok()?;
             Some((src, ast))
         };
         self.parsed.get_or_init(parse).as_ref()
@@ -138,11 +152,11 @@ pub struct WellKnown {
 pub struct Evaluator {
     pub(crate) arena: Arena,
     pub interner: Interner,
-    pub files: crate::parallel::shared::Files,
+    pub files: Files,
     pub globals: Globals,
     pub root_env: &'static EnvObj,
     /// Resolved path -> lazy import thunk (`parallel::import_thunk`).
-    import_cache: crate::parallel::shared::SharedMap<Vec<u8>, Word>,
+    import_cache: SharedMap<Vec<u8>, Word>,
     /// `(prefix, path)` entries, `-I` first then `NIX_PATH`.
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
     pub call_depth: u32,
@@ -155,38 +169,38 @@ pub struct Evaluator {
     pub nr_thunks: u64,
     pub nr_function_calls: u64,
     pub nr_store_adds: u64,
-    pub t_compile: std::time::Duration,
+    pub t_compile: Duration,
     /// Where those counters and `drv.nr_derivations` go when this fiber
     /// finishes a task. Shared, so a stats line covers every fiber.
-    totals: std::sync::Arc<crate::parallel::shared::Totals>,
+    totals: Arc<Totals>,
     /// `IETS_STATS`: a stats line will read the arena totals, so a switch
     /// folds into them. Nothing else does, so a normal run skips the fold.
     fold_arenas: bool,
     /// One shared context-free string per symbol, made on first use.
-    sym_strings: crate::parallel::shared::SymWords,
+    sym_strings: SymWords,
     /// Source path -> virtual store path, like Nix's `srcToStore`.
-    pub src_to_store: crate::parallel::shared::SharedMap<Vec<u8>, &'static [u8]>,
+    pub src_to_store: SharedMap<Vec<u8>, &'static [u8]>,
     /// Every store path this evaluation added or a fetch found on disk: the
     /// paths a pure evaluation may read (eval.cc:allowPath).
     pub known: SharedMap<StorePath, Known>,
     /// Locked `narHash` -> flake input name, from the lock file, for messages
     /// about an input that must be fetched.
-    pub input_names: crate::parallel::shared::SharedMap<String, String>,
+    pub input_names: SharedMap<String, String>,
     /// Lint levels (docs/reference/lints.md).
-    lint_config: crate::lint::Config,
+    lint_config: lint::Config,
     /// The warnings emitted so far.
-    pub lints: crate::lint::Lints,
-    pub drv: crate::builtins::derivation::DrvState,
-    pub par: crate::parallel::Ctx,
+    pub lints: Lints,
+    pub drv: DrvState,
+    pub par: parallel::Ctx,
     /// This fiber's shadow stack for the sampled profile.
-    prof: crate::profile::Stack,
+    prof: Stack,
     /// Read-set recorder for the tracing cache; off unless the run has an entry to write.
-    trace: crate::trace::Trace,
+    trace: Trace,
     /// Compiled-IR cache for imported files; `None` when disabled.
-    ir_cache: Option<std::sync::Arc<crate::compile::cache::IrCache>>,
+    ir_cache: Option<Arc<IrCache>>,
     /// The eval store, opened on the first flake input that is missing from it
     /// (`crate::source`).
-    pub store: crate::source::LazyStore,
+    pub store: LazyStore,
     /// `pure-eval` (docs/reference/settings.md).
     pure: bool,
     /// The project this run's sources belong to (`crate::project`). A pure
@@ -198,7 +212,7 @@ pub struct Evaluator {
     /// The session this evaluator was made in: its settings and its log.
     /// A field, not a thread-local lookup, because the fan-out checks read
     /// it on the hot path (docs/reference/library.md).
-    session: std::sync::Arc<crate::session::Session>,
+    session: Arc<Session>,
 }
 
 /// A position in a record, `file:line:column`, the way an error names one.
@@ -207,7 +221,7 @@ pub enum At {
     None,
 }
 
-impl crate::events::Field for At {
+impl Field for At {
     fn write(self, out: &mut Vec<u8>) {
         let start = out.len();
         match self {
@@ -215,12 +229,12 @@ impl crate::events::Field for At {
                 out.extend_from_slice(file);
                 for n in [line, col] {
                     out.push(b':');
-                    crate::events::push_u64(out, n as u64);
+                    events::push_u64(out, n as u64);
                 }
             }
             At::None => out.extend_from_slice("«none»".as_bytes()),
         }
-        crate::events::quote_in_place(out, start);
+        events::quote_in_place(out, start);
     }
 }
 
@@ -261,7 +275,7 @@ impl SharedMap<StorePath, Known> {
             .strip_prefix(STORE_DIR.as_bytes())?
             .strip_prefix(b"/")?;
         let end = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
-        let sp = StorePath::from_base_name(std::str::from_utf8(&rest[..end]).ok()?).ok()?;
+        let sp = StorePath::from_base_name(from_utf8(&rest[..end]).ok()?).ok()?;
         Some((STORE_DIR.len() + 1 + end, self.get(&sp)?))
     }
 
@@ -287,8 +301,7 @@ macro_rules! bail {
     };
 }
 pub(crate) use bail;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 pub const DEFAULT_SYSTEM: &str = "x86_64-linux";
 
@@ -306,15 +319,15 @@ pub struct EvalConfig {
     system: &'static str,
     pure: bool,
     project_root: Option<Vec<u8>>,
-    session: std::sync::Arc<crate::session::Session>,
+    session: Arc<Session>,
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
-    lints: crate::lint::Config,
-    ir_cache: Option<std::sync::Arc<crate::compile::cache::IrCache>>,
+    lints: lint::Config,
+    ir_cache: Option<Arc<IrCache>>,
     keep_aterm: bool,
     keep_site: bool,
-    dump_dir: Option<std::path::PathBuf>,
+    dump_dir: Option<PathBuf>,
     trace: bool,
-    trace_store: Option<crate::trace::store::Store>,
+    trace_store: Option<store::Store>,
 }
 
 impl Default for EvalConfig {
@@ -324,7 +337,7 @@ impl Default for EvalConfig {
             system: DEFAULT_SYSTEM,
             pure: false,
             project_root: None,
-            session: crate::session::Session::current(),
+            session: Session::current(),
             search_path: Vec::new(),
             lints: Default::default(),
             ir_cache: None,
@@ -371,7 +384,7 @@ impl EvalConfig {
 
     /// A host that keeps one session per evaluator needs no thread-local
     /// at all (docs/reference/library.md).
-    pub fn session(mut self, session: std::sync::Arc<crate::session::Session>) -> EvalConfig {
+    pub fn session(mut self, session: Arc<Session>) -> EvalConfig {
         self.session = session;
         self
     }
@@ -382,7 +395,7 @@ impl EvalConfig {
         self
     }
 
-    pub fn lints(mut self, config: crate::lint::Config) -> EvalConfig {
+    pub fn lints(mut self, config: lint::Config) -> EvalConfig {
         self.lints = config;
         self
     }
@@ -393,10 +406,7 @@ impl EvalConfig {
     }
 
     /// Compiled-IR cache for imported files; `None` when disabled.
-    pub fn ir_cache(
-        mut self,
-        cache: Option<std::sync::Arc<crate::compile::cache::IrCache>>,
-    ) -> EvalConfig {
+    pub fn ir_cache(mut self, cache: Option<Arc<IrCache>>) -> EvalConfig {
         self.ir_cache = cache;
         self
     }
@@ -419,7 +429,7 @@ impl EvalConfig {
 
     /// `iets eval --dump-drvs DIR`: every created derivation is written as
     /// `DIR/<drv basename>` in ATerm form.
-    pub fn dump_dir(mut self, dir: std::path::PathBuf) -> EvalConfig {
+    pub fn dump_dir(mut self, dir: PathBuf) -> EvalConfig {
         self.dump_dir = Some(dir);
         self
     }
@@ -432,7 +442,7 @@ impl EvalConfig {
 
     /// `trace` for a run that has an entry in `store`. The store also
     /// keeps what follows from a revision (`source::scm::rev_count`).
-    pub fn trace_in(mut self, store: Option<&crate::trace::store::Store>) -> EvalConfig {
+    pub fn trace_in(mut self, store: Option<&store::Store>) -> EvalConfig {
         self.trace = store.is_some();
         self.trace_store = store.cloned();
         self
@@ -493,24 +503,20 @@ impl EvalConfig {
             nr_thunks: 0,
             nr_function_calls: 0,
             nr_store_adds: 0,
-            t_compile: std::time::Duration::ZERO,
+            t_compile: Duration::ZERO,
             totals: Default::default(),
-            fold_arenas: crate::session::Session::current().settings().stats >= 1,
-            sym_strings: crate::parallel::shared::SymWords::new(),
+            fold_arenas: Session::current().settings().stats >= 1,
+            sym_strings: SymWords::new(),
             src_to_store: Default::default(),
             known: Default::default(),
             input_names: Default::default(),
             lint_config: self.lints,
             lints: Default::default(),
-            drv: crate::builtins::derivation::DrvState::new(
-                self.keep_aterm,
-                self.keep_site,
-                self.dump_dir,
-            ),
+            drv: DrvState::new(self.keep_aterm, self.keep_site, self.dump_dir),
             par: Default::default(),
             prof: Default::default(),
             trace: if self.trace {
-                crate::trace::Trace::enabled_in(self.trace_store)
+                Trace::enabled_in(self.trace_store)
             } else {
                 Default::default()
             },
@@ -520,7 +526,7 @@ impl EvalConfig {
             project_root: self.project_root,
             session: self.session,
         };
-        crate::builtins::install(&mut ev);
+        builtins::install(&mut ev);
         if ev.session.profile.on() {
             ev.session.profile.names(&ev.files, &ev.interner);
         }
@@ -555,7 +561,7 @@ impl Evaluator {
     }
 
     #[inline]
-    pub fn session(&self) -> &std::sync::Arc<crate::session::Session> {
+    pub fn session(&self) -> &Arc<Session> {
         &self.session
     }
 
@@ -565,17 +571,17 @@ impl Evaluator {
     }
 
     #[inline]
-    pub fn lint_config(&self) -> &crate::lint::Config {
+    pub fn lint_config(&self) -> &lint::Config {
         &self.lint_config
     }
 
     #[inline]
-    pub fn trace(&self) -> &crate::trace::Trace {
+    pub fn trace(&self) -> &Trace {
         &self.trace
     }
 
     #[inline]
-    pub fn ir_cache(&self) -> Option<&std::sync::Arc<crate::compile::cache::IrCache>> {
+    pub fn ir_cache(&self) -> Option<&Arc<IrCache>> {
         self.ir_cache.as_ref()
     }
 
@@ -629,13 +635,13 @@ impl Evaluator {
         base_dir: &[u8],
         extra_scope: Option<&[Sym]>,
         lint: bool,
-    ) -> EvalResult<(IrRef, bool, Vec<crate::lint::Diag>)> {
+    ) -> EvalResult<(IrRef, bool, Vec<Diag>)> {
         let file = self.add_file(path, &src);
         let base = self.files[file.0 as usize].base;
-        let ast = crate::syntax::parse(&src, file, &mut self.interner)
+        let ast = syntax::parse(&src, file, &mut self.interner)
             .map_err(|e| Error::boxed(ErrorKind::Parse, e.msg, Pos(base + e.span.start)))?;
         self.files[file.0 as usize].set_allows(ast.allows.clone());
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let before = self.arena.bytes_allocated;
         let lints = lint.then(|| self.config_for_file(path));
         let mut c = Compiler::new(
@@ -649,7 +655,7 @@ impl Evaluator {
         );
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
-        let diags = std::mem::take(&mut c.diags);
+        let diags = mem::take(&mut c.diags);
         self.arena
             .stats
             .note(Stat::Ir, self.arena.bytes_allocated - before);
@@ -691,7 +697,7 @@ impl Evaluator {
         if src.len() < cache.min_size {
             return self.compile_source(path, src, base_dir, None);
         }
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let lint_key = self.config_for_file(path).compile_key();
         let key = cache.key(
             path,
@@ -706,7 +712,7 @@ impl Evaluator {
         if let Some(bytes) = cache.read(&key) {
             let before = self.arena.bytes_allocated;
             let span = u32::try_from(src.len()).unwrap_or(u32::MAX);
-            let loaded = crate::compile::cache::deserialize(self, &bytes, base, span, cache.stats);
+            let loaded = cache::deserialize(self, &bytes, base, span, cache.stats);
             self.arena
                 .stats
                 .note(Stat::Ir, self.arena.bytes_allocated - before);
@@ -717,7 +723,7 @@ impl Evaluator {
                 self.files[file.0 as usize].set_allows(allows);
                 self.report_diags(&diags);
                 if cache.stats {
-                    crate::errln!(
+                    errln!(
                         "ir-cache load {} {} {}us",
                         String::from_utf8_lossy(path),
                         src.len(),
@@ -728,15 +734,13 @@ impl Evaluator {
             }
         }
         let (ir, used_home, diags) = self.compile_source_inner(path, src, base_dir, None, true)?;
-        let t1 = std::time::Instant::now();
+        let t1 = Instant::now();
         let allows = self.files[file.0 as usize].allows();
-        if !used_home
-            && let Some(bytes) = crate::compile::cache::serialize(self, ir, base, &diags, allows)
-        {
+        if !used_home && let Some(bytes) = cache::serialize(self, ir, base, &diags, allows) {
             cache.write(&key, &bytes);
         }
         if cache.stats {
-            crate::errln!(
+            errln!(
                 "ir-cache store {} {}us (write {}us)",
                 String::from_utf8_lossy(path),
                 (t1 - t0).as_micros(),
@@ -748,12 +752,8 @@ impl Evaluator {
 
     /// Evaluate a string expression (`-E`), in `crate::argv`'s encoding.
     pub fn eval_string(&mut self, src: &str, base_dir: &[u8]) -> EvalResult<Word> {
-        let ir = self.compile_source(
-            b"\xc2\xabstring\xc2\xbb",
-            crate::argv::bytes(src),
-            base_dir,
-            None,
-        )?;
+        let ir =
+            self.compile_source(b"\xc2\xabstring\xc2\xbb", argv::bytes(src), base_dir, None)?;
         let root = self.root_env;
         self.eval(root, ir)
     }
@@ -765,7 +765,7 @@ impl Evaluator {
         let w = match self.import_cache.get(&resolved) {
             Some(w) => w,
             None => {
-                let t = crate::parallel::import_thunk(self, &resolved, pos);
+                let t = parallel::import_thunk(self, &resolved, pos);
                 self.import_cache.get_or_insert(resolved, t)
             }
         };
@@ -797,18 +797,18 @@ impl Evaluator {
         if p.starts_with(CorePkgs::PREFIX) {
             return Ok(p);
         }
-        let mut at = crate::builtins::store_hooks::open(self, &p, pos)?;
-        crate::lint::coerce::read_through_copy(self, &p, pos)?;
+        let mut at = store_hooks::open(self, &p, pos)?;
+        read_through_copy(self, &p, pos)?;
         // eval.cc:resolveExprPath follows a symlink on the last component,
         // so a relative path in the file resolves against the directory of
         // the target. The `lstat` is what it costs; a path inside a copied
         // tree keeps `store_hooks`' own resolution.
         if let Some(local) = at.local()
-            && std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_symlink())
-            && crate::builtins::store_hooks::locate(self, &p).is_none()
+            && fs::symlink_metadata(&local).is_ok_and(|m| m.is_symlink())
+            && store_hooks::locate(self, &p).is_none()
         {
             for _ in 0..1024 {
-                let Ok(target) = std::fs::read_link(std::ffi::OsStr::from_bytes(&p)) else {
+                let Ok(target) = fs::read_link(OsStr::from_bytes(&p)) else {
                     break;
                 };
                 let t = target.into_os_string().into_vec();
@@ -820,12 +820,12 @@ impl Evaluator {
                     d.extend_from_slice(&t);
                     d
                 };
-                p = crate::compile::canon_path(&joined);
+                p = compile::canon_path(&joined);
             }
-            let full = std::fs::canonicalize(&local);
+            let full = fs::canonicalize(&local);
             self.trace()
                 .canon(local.as_os_str().as_bytes(), full.ok().as_deref());
-            at = crate::builtins::store_hooks::open(self, &p, pos)?;
+            at = store_hooks::open(self, &p, pos)?;
         }
         match at.is_dir(self) {
             Ok(true) => p.extend_from_slice(b"/default.nix"),
@@ -857,20 +857,20 @@ impl Evaluator {
                 continue;
             }
             let suffix = &name[if sep { n + 1 } else { n }..];
-            crate::builtins::store_hooks::open(self, path, pos)?;
+            store_hooks::open(self, path, pos)?;
             let mut candidate = path.clone();
             if !suffix.is_empty() {
                 candidate.push(b'/');
                 candidate.extend_from_slice(suffix);
             }
-            let cp = crate::compile::canon_path(&candidate);
-            let kind = crate::builtins::store_hooks::stat(self, &cp, true);
-            if kind != crate::trace::Kind::Missing {
+            let cp = compile::canon_path(&candidate);
+            let kind = store_hooks::stat(self, &cp, true);
+            if kind != trace::Kind::Missing {
                 return Ok(cp);
             }
         }
         if let Some(rest) = name.strip_prefix(b"nix/".as_slice())
-            && crate::builtins::corepkgs(rest).is_some()
+            && builtins::corepkgs(rest).is_some()
         {
             let mut p = CorePkgs::PREFIX.to_vec();
             p.extend_from_slice(rest);
@@ -894,11 +894,11 @@ impl Evaluator {
 
     pub(crate) fn read_source(&self, resolved: &[u8], pos: Pos) -> EvalResult<Vec<u8>> {
         if let Some(rest) = resolved.strip_prefix(CorePkgs::PREFIX)
-            && let Some(src) = crate::builtins::corepkgs(rest)
+            && let Some(src) = builtins::corepkgs(rest)
         {
             return Ok(src.to_vec());
         }
-        match crate::builtins::store_hooks::resolve(self, resolved).read(self, false) {
+        match store_hooks::resolve(self, resolved).read(self, false) {
             Ok(s) => Ok(s),
             Err((_, e)) => bail!(
                 ErrorKind::Io,
@@ -938,7 +938,7 @@ impl Evaluator {
 
     fn force_thunk(&mut self, w: Word) -> EvalResult<Word> {
         if self.par.on {
-            return crate::parallel::force_thunk(self, w); // parallel: claim protocol
+            return parallel::force_thunk(self, w); // parallel: claim protocol
         }
         let state = w.thunk_state_cell();
         let st = state.get();
@@ -1142,19 +1142,15 @@ impl Evaluator {
     /// Recursively force lists and attrs (`--strict`).
     pub fn force_deep(&mut self, w: Word) -> EvalResult<Word> {
         if self.par.on {
-            return crate::parallel::force_deep(self, w); // parallel: fan-out walk
+            return parallel::force_deep(self, w); // parallel: fan-out walk
         }
-        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut seen: HashSet<u64> = HashSet::new();
         let w = self.force(w)?;
         self.force_deep_inner(w, &mut seen)?;
         Ok(w)
     }
 
-    fn force_deep_inner(
-        &mut self,
-        w: Word,
-        seen: &mut std::collections::HashSet<u64>,
-    ) -> EvalResult<()> {
+    fn force_deep_inner(&mut self, w: Word, seen: &mut HashSet<u64>) -> EvalResult<()> {
         match w.view() {
             Value::Attrs(a) => {
                 if !seen.insert(w.bits()) {
@@ -1414,16 +1410,16 @@ impl Evaluator {
     #[inline]
     fn prof_enter(&mut self, pos: Pos, name: Option<Sym>) -> usize {
         let d = self.prof.depth();
-        self.prof.enter(crate::profile::frame(pos, name));
+        self.prof.enter(profile::frame(pos, name));
         self.prof_take();
         d
     }
 
     /// Enters a frame for a call of the builtin `sym` at `pos`.
     #[inline]
-    fn prof_enter_op(&mut self, pos: Pos, sym: crate::syntax::symbol::Sym) -> usize {
+    fn prof_enter_op(&mut self, pos: Pos, sym: Sym) -> usize {
         let d = self.prof.depth();
-        self.prof.enter(crate::profile::primop_frame(pos, sym));
+        self.prof.enter(profile::primop_frame(pos, sym));
         self.prof_take();
         d
     }
@@ -1908,7 +1904,7 @@ impl Evaluator {
                     Some(a) => a,
                     None => {
                         if v.as_attrs().is_none() {
-                            crate::lint::coerce::or_non_attrs(self, v, pos)?;
+                            or_non_attrs(self, v, pos)?;
                         }
                         return self.eval(env, d);
                     }
@@ -1956,12 +1952,12 @@ impl Evaluator {
                     bail!(ErrorKind::MissingAttr, s.pos, "attribute '{name}' missing");
                 };
                 if v.as_attrs().is_none() {
-                    crate::lint::coerce::or_non_attrs(self, v, s.pos)?;
+                    or_non_attrs(self, v, s.pos)?;
                 }
                 return self.eval(env, d);
             };
             let read = match name == self.s.rev_count {
-                true => crate::lint::purity::count_read(self, &a.cell, s.pos),
+                true => purity::count_read(self, &a.cell, s.pos),
                 false => self.force_cell(&a.cell),
             };
             v = read.map_err(|mut e| {
@@ -1988,7 +1984,7 @@ impl Evaluator {
                 Some(a) => a,
                 None => {
                     if v.as_attrs().is_none() {
-                        crate::lint::coerce::or_non_attrs(self, v, pos)?;
+                        or_non_attrs(self, v, pos)?;
                     }
                     return self.eval(env, d);
                 }
@@ -2289,7 +2285,7 @@ impl Evaluator {
                     );
                 }
                 let joined = pieces.concat();
-                Ok(self.arena.mk_path(&crate::compile::canon_path(&joined)))
+                Ok(self.arena.mk_path(&compile::canon_path(&joined)))
             }
             _ => {
                 let i = self.arena.intern_concat(pieces);
@@ -2330,9 +2326,9 @@ impl Evaluator {
         let (mut i, mut j, mut common) = (0, 0, 0);
         while i < aa.len() && j < bb.len() {
             match aa[i].sym.cmp(&bb[j].sym) {
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => j += 1,
-                std::cmp::Ordering::Equal => {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
                     common += 1;
                     i += 1;
                     j += 1;
@@ -2345,15 +2341,15 @@ impl Evaluator {
         let (mut i, mut j, mut k) = (0, 0, 0);
         while i < aa.len() && j < bb.len() {
             match aa[i].sym.cmp(&bb[j].sym) {
-                std::cmp::Ordering::Less => {
+                Ordering::Less => {
                     out.init_from(k, &aa[i]);
                     i += 1;
                 }
-                std::cmp::Ordering::Greater => {
+                Ordering::Greater => {
                     out.init_from(k, &bb[j]);
                     j += 1;
                 }
-                std::cmp::Ordering::Equal => {
+                Ordering::Equal => {
                     out.init_from(k, &bb[j]);
                     i += 1;
                     j += 1;
@@ -2566,9 +2562,9 @@ impl Evaluator {
     /// Thunks, calls, derivations and compile time of the whole run: this
     /// fiber's own counters plus every fiber that folded into the totals.
     /// Read it, not the fields, to report a number.
-    pub fn counts(&self) -> crate::parallel::shared::Counts {
+    pub fn counts(&self) -> Counts {
         let t = self.totals.get();
-        crate::parallel::shared::Counts {
+        Counts {
             thunks: t.thunks + self.nr_thunks,
             calls: t.calls + self.nr_function_calls,
             derivations: t.derivations + self.drv.nr_derivations,
@@ -2589,11 +2585,7 @@ impl Evaluator {
         pos: Pos,
     ) {
         self.nr_store_adds += 1;
-        let Some(mut r) = self
-            .session
-            .events
-            .rec(crate::events::Group::Store, "store-add")
-        else {
+        let Some(mut r) = self.session.events.rec(Group::Store, "store-add") else {
             return;
         };
         r.set("path", sp)
@@ -2618,13 +2610,13 @@ impl Evaluator {
     /// Arena use of the whole run: every arena that has folded, plus what
     /// the one this fiber holds has allocated since. Read it, not
     /// `self.arena`, which is this worker's share alone.
-    pub fn arena_use(&mut self) -> crate::parallel::shared::ArenaUse {
+    pub fn arena_use(&mut self) -> ArenaUse {
         let mut u = self.totals.arena();
         let mine = self.arena.take_unfolded();
         self.totals.add_arena(&mine);
         u.bytes += mine.bytes;
         u.mapped += mine.mapped;
-        for i in 0..crate::runtime::arena::NSTATS {
+        for i in 0..arena::NSTATS {
             u.counts[i] += mine.counts[i];
             u.kind_bytes[i] += mine.kind_bytes[i];
         }
@@ -2635,7 +2627,7 @@ impl Evaluator {
     /// run reads them, and the scheduler calls this on every fiber switch,
     /// so the flag is the whole reason it costs a run nothing.
     #[inline]
-    pub fn fold_arena(&self, arena: &mut crate::runtime::arena::Arena) {
+    pub fn fold_arena(&self, arena: &mut arena::Arena) {
         if !self.fold_arenas || !arena.allocated_since_fold() {
             return;
         }
@@ -2647,7 +2639,7 @@ impl Evaluator {
     /// calls it when a fiber finishes a task, which is why the counters
     /// themselves need no atomics.
     pub fn fold_counters(&mut self) {
-        self.totals.add(crate::parallel::shared::Counts {
+        self.totals.add(Counts {
             thunks: self.nr_thunks,
             calls: self.nr_function_calls,
             derivations: self.drv.nr_derivations,
@@ -2658,7 +2650,7 @@ impl Evaluator {
         self.nr_function_calls = 0;
         self.nr_store_adds = 0;
         self.drv.nr_derivations = 0;
-        self.t_compile = std::time::Duration::ZERO;
+        self.t_compile = Duration::ZERO;
     }
 
     /// `IETS_STATS=1`: allocation and phase counters on stderr. The arena
@@ -2667,7 +2659,7 @@ impl Evaluator {
     pub fn print_stats(&mut self) {
         let a = self.arena_use();
         let c = self.counts();
-        crate::errln!(
+        errln!(
             "files={} thunks={} calls={} drvs={} store_adds={} arena_bytes={} arena_mapped={} rss_kb={} compile={:?} ir_size={}",
             self.files.len(),
             c.thunks,
@@ -2684,7 +2676,7 @@ impl Evaluator {
             size_of::<Ir>()
         );
         for (i, name) in STAT_NAMES.iter().enumerate() {
-            crate::errln!(
+            errln!(
                 "{name:>12} count={:>9} bytes={:>11} ({:.1} MiB)",
                 a.counts[i],
                 a.kind_bytes[i],
@@ -2707,7 +2699,7 @@ impl Evaluator {
             drvs += 1;
             aterm_bytes += d.aterm.as_ref().map_or(0, |a| a.len());
         }
-        crate::errln!(
+        errln!(
             "non-arena: line_tables={line_table} file_paths={file_paths} symbols={} (name bytes {sym_bytes}, map entries ~{}) import_cache={} drvs={drvs} (aterm bytes {aterm_bytes}) regex_cache={}",
             self.interner.len(),
             self.interner.len() * 32,
@@ -2726,7 +2718,7 @@ impl Evaluator {
                 self.session.log.err(out.as_bytes());
             }
             #[cfg(not(feature = "stats2"))]
-            crate::errln!("census: build with --features stats2");
+            errln!("census: build with --features stats2");
         }
     }
 }

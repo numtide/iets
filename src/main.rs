@@ -1,4 +1,7 @@
+use std::env;
+use std::path::Path;
 use std::process::exit;
+use std::thread::Builder;
 
 use iets::cli::{self, help};
 
@@ -15,17 +18,14 @@ fn restore_sigpipe() {
 
 /// The classic Nix name this process was invoked under, if any.
 fn classic_name() -> Option<String> {
-    let argv0 = std::env::args_os().next()?;
-    let base = std::path::Path::new(&argv0)
-        .file_name()?
-        .to_str()?
-        .to_string();
+    let argv0 = env::args_os().next()?;
+    let base = Path::new(&argv0).file_name()?.to_str()?.to_string();
     cli::classic::NAMES.contains(&base.as_str()).then_some(base)
 }
 
 /// Classic commands need the evaluator's stack, like the subcommands below.
 fn on_big_stack(f: impl FnOnce() -> i32 + Send + 'static) -> i32 {
-    std::thread::Builder::new()
+    Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(iets::session::bind(f))
         .expect("spawn evaluator thread")
@@ -40,10 +40,7 @@ fn main() {
     // to whatever sink its host set, or to none (docs/reference/library.md)
     session.log.write_to_stderr();
     let _entered = session.enter();
-    let argv: Vec<String> = std::env::args_os()
-        .skip(1)
-        .map(iets::argv::encode)
-        .collect();
+    let argv: Vec<String> = env::args_os().skip(1).map(iets::argv::encode).collect();
     // `--iets-option` is ours, so it leaves the argv here: a classic fallback
     // execs the real nix with what is left (docs/reference/settings.md).
     let (argv, options) = match iets::settings::take_options(&argv) {

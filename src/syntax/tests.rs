@@ -1,13 +1,14 @@
-use super::ast::Expr;
-use super::ast::FileId;
-use super::ast::Note;
-use super::ast::StrPart;
-use super::dump::dump;
+use super::ast::{Ast, Expr, ExprId, FileId, Note, StrPart};
+use super::dump::{dump, json, tree};
 use super::symbol::Interner;
 use super::{line_col, parse};
 use crate::lint::LintId;
 use crate::lint::allow::bit;
 use serde_json::Value;
+
+use std::fs;
+use std::process::Command;
+use std::thread::Builder;
 
 fn dump_src(src: &str) -> String {
     let mut interner = Interner::new();
@@ -60,13 +61,13 @@ fn lang_corpus() {
     let mut okay = 0;
     let mut failed = 0;
     let mut problems = Vec::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
+    for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
         if !name.ends_with(".nix") {
             continue;
         }
-        let src = std::fs::read(&path).unwrap();
+        let src = fs::read(&path).unwrap();
         let mut interner = Interner::new();
         let result = parse(&src, FileId(0), &mut interner);
         let must_fail = (name.starts_with("parse-fail-")
@@ -375,7 +376,7 @@ fn spans_cover_tokens() {
 }
 
 /// Value of a parsed string whose interpolations are all literal strings.
-fn literal_value(ast: &super::ast::Ast, id: super::ast::ExprId) -> Option<Vec<u8>> {
+fn literal_value(ast: &Ast, id: ExprId) -> Option<Vec<u8>> {
     let Expr::Str(parts) = ast.expr(id) else {
         return None;
     };
@@ -390,7 +391,7 @@ fn literal_value(ast: &super::ast::Ast, id: super::ast::ExprId) -> Option<Vec<u8
 }
 
 fn nix_eval_raw(expr: &str) -> Option<Vec<u8>> {
-    let out = std::process::Command::new("nix")
+    let out = Command::new("nix")
         .args([
             "eval",
             "--extra-experimental-features",
@@ -547,7 +548,7 @@ fn json_gives_every_node_its_kind_and_span() {
         let mut interner = Interner::new();
         let ast = parse(src.as_bytes(), FileId(0), &mut interner).unwrap();
         let mut out = String::new();
-        super::dump::json(&super::dump::tree(&ast, &interner), &mut out);
+        json(&tree(&ast, &interner), &mut out);
         out
     };
     assert_eq!(
@@ -591,7 +592,7 @@ fn json_gives_every_node_its_kind_and_span() {
 /// parse runs on a big stack like `main.rs` gives it.
 #[test]
 fn deep_nesting_ends_with_an_error() {
-    std::thread::Builder::new()
+    Builder::new()
         .stack_size(1 << 30)
         .spawn(deep_nesting_cases)
         .unwrap()

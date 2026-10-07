@@ -8,20 +8,22 @@
 //! directory under the path given). Prints one `op path runs best_ms mean_ms
 //! MB/s` line so `bench/nar.nu` can parse it.
 
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
+use std::{env, process};
 
 use iets::store::hash::HashAlgo;
 use iets::store::nar;
 
 fn die(msg: &str) -> ! {
     eprintln!("nar_bench: {msg}");
-    std::process::exit(2);
+    process::exit(2);
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = env::args().skip(1).collect();
     if args.len() < 2 {
         die("usage: nar_bench <hash|flat|dump|parse|restore> <path> [runs]");
     }
@@ -51,7 +53,7 @@ fn main() {
                 if i == 0 {
                     println!("# {}", h.to_sri());
                 }
-                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                fs::metadata(path).map(|m| m.len()).unwrap_or(0)
             }
             "dump" => {
                 let mut sink = Counter(0);
@@ -60,7 +62,7 @@ fn main() {
                 sink.0
             }
             "parse" => {
-                let mut f = std::fs::File::open(path).unwrap_or_else(|e| die(&format!("{e}")));
+                let mut f = File::open(path).unwrap_or_else(|e| die(&format!("{e}")));
                 let n = nar::parse_length(&mut f).unwrap_or_else(|e| die(&format!("{e}")));
                 if i == 0 {
                     println!("# parsed {n} bytes");
@@ -72,8 +74,8 @@ fn main() {
                     die("restore takes one run");
                 }
                 let dest = path.join("restored");
-                let _ = std::fs::remove_dir_all(&dest);
-                let _ = std::fs::remove_file(&dest);
+                let _ = fs::remove_dir_all(&dest);
+                let _ = fs::remove_file(&dest);
                 let mut stdin = io::stdin().lock();
                 nar::restore_path(&mut stdin, &dest).unwrap_or_else(|e| die(&format!("{e}")));
                 0

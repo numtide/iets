@@ -6,11 +6,11 @@
 //! IR cache.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::cachefs;
-use std::io::Read;
+use crate::trace::wire;
 
 /// The one file of an entry directory.
 pub const ENTRY: &str = "entry";
@@ -127,7 +127,7 @@ impl Store {
     /// no home is known.
     pub fn locate(override_dir: Option<&str>) -> Option<Store> {
         Some(Store {
-            root: crate::cachefs::root(override_dir)?.join("trace"),
+            root: cachefs::root(override_dir)?.join("trace"),
         })
     }
 
@@ -206,7 +206,7 @@ impl Store {
     /// An entry that holds an answer and an empty read set: the answer
     /// follows from the key, so nothing can make it stale.
     pub fn keep(&self, key: &str, answer: &[u8]) {
-        let none = crate::trace::wire::encode_readset(&[]);
+        let none = wire::encode_readset(&[]);
         let _ = self.publish(key, &[(Part::Result, answer), (Part::Readset, &none)]);
     }
 
@@ -241,9 +241,10 @@ impl Store {
 mod tests {
     use super::*;
 
+    use std::env;
+
     fn store(name: &str) -> Store {
-        let root =
-            std::env::temp_dir().join(format!("iets-trace-store-{name}-{}", std::process::id()));
+        let root = env::temp_dir().join(format!("iets-trace-store-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         assert!(cachefs::prepare(&root, cachefs::Shape::Dirs, false));
         Store { root }

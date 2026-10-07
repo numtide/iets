@@ -23,24 +23,27 @@ pub mod fixhash;
 pub mod render;
 pub mod upload;
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, Builder, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
+use crate::log::{self, SessionOut};
 use crate::provenance::Provenance;
 use crate::remote::event::Event;
 use crate::remote::plan::Plan;
-use crate::remote::worker::{Options, Transport};
+use crate::remote::worker::{Missing, Options, Transport};
+use crate::session;
 use crate::store::path::StorePath;
 
-use crate::store::drv::Derivation;
-use crate::store::drv::DerivationOutput;
-use crate::store::hash::Hash;
-use crate::store::hash::HashFormat;
+use crate::store::drv::{Derivation, DerivationOutput};
+use crate::store::hash::{Hash, HashFormat};
 use backend::Backend;
 use event::{BuildEvent, Kind};
 use render::{Renderer, Style};
@@ -94,21 +97,21 @@ pub struct Outcome {
 /// a stalled build gets escalated even while the client sits in a read.
 struct Heartbeat {
     stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl Heartbeat {
     fn start(render: Arc<Mutex<Renderer>>) -> Heartbeat {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let handle = std::thread::Builder::new()
+        let handle = Builder::new()
             .name("build-heartbeat".into())
-            .spawn(crate::session::bind(move || {
+            .spawn(session::bind(move || {
                 // parked, not asleep: `drop` unparks it, so a build that
                 // took 10 ms does not wait a tick for this thread to exit
                 let mut last = Instant::now();
                 while !flag.load(Ordering::Relaxed) {
-                    std::thread::park_timeout(render::HEARTBEAT.saturating_sub(last.elapsed()));
+                    thread::park_timeout(render::HEARTBEAT.saturating_sub(last.elapsed()));
                     if !flag.load(Ordering::Relaxed) && last.elapsed() >= render::HEARTBEAT {
                         last = Instant::now();
                         render.lock().unwrap().heartbeat();
@@ -139,7 +142,7 @@ pub struct Reporter {
 
 impl Reporter {
     pub fn new(style: Style) -> Reporter {
-        Reporter::with_output(style, Box::new(crate::log::SessionOut::default()))
+        Reporter::with_output(style, Box::new(SessionOut::default()))
     }
 
     /// The same, writing the progress somewhere else than stderr.
@@ -249,7 +252,7 @@ impl Dispatcher {
             return Ok(Vec::new());
         }
         let out = self.submit_once(up, &batch)?;
-        self.exit = (out.iter()).fold(self.exit, |e, o| crate::log::combine_exit(e, o.exit));
+        self.exit = (out.iter()).fold(self.exit, |e, o| log::combine_exit(e, o.exit));
         Ok(out)
     }
 
@@ -322,8 +325,8 @@ impl Dispatcher {
                     let tail = self.reporter.tail(&drv);
                     // The daemon's message is several coloured lines; the
                     // records want one plain one, the log tail has the rest.
-                    let reason = crate::log::strip_ansi(&self.prov.rewrite_str(&s.reason));
-                    let reason = crate::log::reason_line(&reason);
+                    let reason = log::strip_ansi(&self.prov.rewrite_str(&s.reason));
+                    let reason = log::reason_line(&reason);
                     self.reporter.emit(&names.event(
                         &drv,
                         Kind::Failed {
@@ -333,7 +336,7 @@ impl Dispatcher {
                         elapsed,
                     ));
                     let full = self.prov.rewrite_str(&s.reason);
-                    crate::log::build_failed(names.pos(&drv), &full, s.exit, None);
+                    log::build_failed(names.pos(&drv), &full, s.exit, None);
                     out.push(Outcome {
                         attr: t.attr.clone(),
                         drv: t.drv.clone(),
@@ -377,15 +380,15 @@ impl Dispatcher {
         // closure, from the daemon; anything else that prints the words is
         // dropped. Nix's worker sets the hash-mismatch flag for the whole run,
         // so a root whose dependency mismatched exits 102 as well.
-        let planned = std::cell::OnceCell::new();
+        let planned = OnceCell::new();
         let closure = &*up;
-        let kept = crate::log::resolve_mismatches(&|specified| {
+        let kept = log::resolve_mismatches(&|specified| {
             (planned.get_or_init(|| closure.drvs(&roots, true).unwrap_or_default()))
                 .iter()
                 .any(|d| has_output_hash(d, specified))
         });
         if kept > 0 {
-            self.exit = crate::log::combine_exit(self.exit, 102);
+            self.exit = log::combine_exit(self.exit, 102);
         }
         self.reporter.release();
         Ok(out)
@@ -404,11 +407,7 @@ impl Dispatcher {
 
     /// `--dry-run`: register the closure, then ask what building `targets`
     /// takes.
-    pub fn missing(
-        &mut self,
-        up: &mut dyn Uploader,
-        targets: &[Target],
-    ) -> Result<crate::remote::worker::Missing> {
+    pub fn missing(&mut self, up: &mut dyn Uploader, targets: &[Target]) -> Result<Missing> {
         let roots: Vec<StorePath> = targets.iter().map(|t| t.drv.clone()).collect();
         self.upload_only(up, &roots)?;
         let jobs: Vec<backend::Job> = targets.iter().map(backend::Job::from).collect();
@@ -430,12 +429,12 @@ impl Dispatcher {
 
     /// Restores one output of a remote store into `dir`.
     pub fn fetch(&mut self, store_path: &str, dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(dir)
+        fs::create_dir_all(dir)
             .map_err(|e| Error::io(format!("cannot create {}", dir.display()), e))?;
         let sp = StorePath::parse(store_path)?;
         // symlink_metadata: a dangling symlink is a path that is there, and
         // the restore must not write through it
-        if std::fs::symlink_metadata(dir.join(sp.base_name())).is_ok() {
+        if fs::symlink_metadata(dir.join(sp.base_name())).is_ok() {
             return Err(Error::Usage(format!(
                 "fetch: '{}' already exists",
                 dir.join(sp.base_name()).display()
@@ -570,8 +569,11 @@ fn strip_hash(drv_path: &str) -> &str {
 mod tests {
     use super::render::tests::Sink;
     use super::*;
-    use crate::remote::event::Log;
-    use crate::remote::event::Started;
+    use crate::remote::event::{Log, Started};
+    use crate::remote::plan::Object;
+
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc::Sender;
 
     pub(super) fn drv(name: &str) -> StorePath {
         StorePath::parse(&format!(
@@ -623,7 +625,7 @@ mod tests {
 
         fn add_objects(
             &mut self,
-            _objects: &[&crate::remote::plan::Object],
+            _objects: &[&Object],
             _on_event: &mut dyn FnMut(Event),
         ) -> Result<u64> {
             Ok(0)
@@ -634,11 +636,11 @@ mod tests {
             batch: &backend::Batch<'_>,
             on_event: &mut dyn FnMut(Event),
         ) -> Result<HashMap<String, backend::Status>> {
-            let live = std::sync::atomic::AtomicUsize::new(0);
+            let live = AtomicUsize::new(0);
             let over = self.peak.clone();
             let limit = self.limit;
             let jobs = batch.jobs;
-            let build = |i: usize, tx: &std::sync::mpsc::Sender<Event>| -> bool {
+            let build = |i: usize, tx: &Sender<Event>| -> bool {
                 let drv = jobs[i].drv.to_string();
                 if live.fetch_add(1, Ordering::SeqCst) + 1 > limit {
                     over.store(true, Ordering::SeqCst);
@@ -651,7 +653,7 @@ mod tests {
                         drv_path: drv.clone(),
                         line: format!("{} line {n}", jobs[i].drv.name()).into_bytes(),
                     }));
-                    std::thread::sleep(Duration::from_millis(2));
+                    thread::sleep(Duration::from_millis(2));
                 }
                 live.fetch_sub(1, Ordering::SeqCst);
                 true

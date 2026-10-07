@@ -13,12 +13,15 @@
 //! smaller. The checksum covers the index; a payload is trusted because the
 //! tree it belongs to was hashed against the lock before anything named it.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+use crate::cachefs;
 
 pub const PACKS: &str = "packs";
 
@@ -185,9 +188,9 @@ impl Pack {
         while lo < hi {
             let mid = (lo + hi) / 2;
             match ids(mid).cmp(&id[..]) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Some(self.entry(mid).1),
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => return Some(self.entry(mid).1),
             }
         }
         None
@@ -265,7 +268,7 @@ pub struct PackWriter {
 
 impl PackWriter {
     pub fn new(dir: &Path) -> io::Result<PackWriter> {
-        crate::cachefs::create_dir(dir)?;
+        cachefs::create_dir(dir)?;
         let tmp = dir.join(format!(
             ".pack.{}.{}.tmp",
             std::process::id(),
@@ -328,7 +331,7 @@ impl PackWriter {
     /// checksum of its index. `None` when it holds nothing: no file is left.
     pub fn finish(mut self) -> io::Result<Option<PathBuf>> {
         if self.entries.is_empty() {
-            let _ = std::fs::remove_file(&self.tmp);
+            let _ = fs::remove_file(&self.tmp);
             return Ok(None);
         }
         self.entries.sort_unstable_by_key(|e| e.0);
@@ -365,14 +368,14 @@ impl PackWriter {
             .map(|b| format!("{b:02x}"))
             .collect();
         let path = self.dir.join(format!("{name}.pack"));
-        std::fs::rename(&self.tmp, &path)?;
+        fs::rename(&self.tmp, &path)?;
         Ok(Some(path))
     }
 }
 
 impl Drop for PackWriter {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.tmp);
+        let _ = fs::remove_file(&self.tmp);
     }
 }
 
@@ -386,7 +389,7 @@ impl PackSet {
     /// a cache file, and its objects come back with the inputs that need them.
     pub fn load(dir: &Path) -> PackSet {
         let mut packs = Vec::new();
-        let Ok(rd) = std::fs::read_dir(dir) else {
+        let Ok(rd) = fs::read_dir(dir) else {
             return PackSet::default();
         };
         for e in rd.flatten() {
@@ -397,7 +400,7 @@ impl PackSet {
             match Pack::open(&path) {
                 Ok(Some(p)) => packs.push(Arc::new(p)),
                 Ok(None) => {
-                    let _ = std::fs::remove_file(&path);
+                    let _ = fs::remove_file(&path);
                 }
                 Err(_) => {}
             }
@@ -496,7 +499,7 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
             out.removed += 1;
             out.freed += pack.file_len();
             if !dry_run {
-                std::fs::remove_file(pack.path())?;
+                fs::remove_file(pack.path())?;
             }
         } else if dead > keep {
             out.rewritten += 1;
@@ -508,7 +511,7 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
                 }
                 let new = w.finish()?;
                 if new.as_deref() != Some(pack.path()) {
-                    std::fs::remove_file(pack.path())?;
+                    fs::remove_file(pack.path())?;
                 }
             }
         }
@@ -520,10 +523,12 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
 mod tests {
     use super::*;
 
+    use std::env;
+
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("iets-pack-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = env::temp_dir().join(format!("iets-pack-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
         d
     }
 
@@ -552,7 +557,7 @@ mod tests {
         assert!(p.find(&id_of(b"absent")).is_none());
         let a = p.find(&id_of(&vec![b'a'; 4096])).unwrap();
         assert!(a.stored < a.raw, "a repetitive payload is compressed");
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -560,7 +565,7 @@ mod tests {
         let d = tmp("empty");
         assert!(PackWriter::new(&d).unwrap().finish().unwrap().is_none());
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -571,20 +576,20 @@ mod tests {
             w.add(id_of(&o), &o).unwrap();
         }
         let path = w.finish().unwrap().unwrap();
-        let good = std::fs::read(&path).unwrap();
+        let good = fs::read(&path).unwrap();
         let start = good.len() - TAIL - objects().len() * ENTRY;
         for i in (start..good.len()).step_by(7) {
             let mut bad = good.clone();
             bad[i] ^= 1;
-            std::fs::write(&path, &bad).unwrap();
+            fs::write(&path, &bad).unwrap();
             assert!(
                 Pack::open(&path).unwrap().is_none(),
                 "byte {i} was believed"
             );
         }
-        std::fs::write(&path, &good[..good.len() - 1]).unwrap();
+        fs::write(&path, &good[..good.len() - 1]).unwrap();
         assert!(Pack::open(&path).unwrap().is_none(), "a truncated pack");
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -596,14 +601,14 @@ mod tests {
         let mut b = PackWriter::new(&d).unwrap();
         b.add(id_of(b"two"), b"two").unwrap();
         b.finish().unwrap();
-        std::fs::write(d.join("junk.pack"), b"not a pack").unwrap();
+        fs::write(d.join("junk.pack"), b"not a pack").unwrap();
         let packs = Packs::open(&d);
         assert_eq!(packs.read(&id_of(b"one")).unwrap(), b"one");
         assert_eq!(packs.read(&id_of(b"two")).unwrap(), b"two");
         assert!(!d.join("junk.pack").exists());
         let err = packs.read(&id_of(b"three")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -614,7 +619,7 @@ mod tests {
         w.add(id_of(b"late"), b"late").unwrap();
         w.finish().unwrap();
         assert_eq!(packs.read(&id_of(b"late")).unwrap(), b"late");
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -655,6 +660,6 @@ mod tests {
             "from the new pack"
         );
         assert!(reader.read(&id_of(&drop)).is_err());
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 }

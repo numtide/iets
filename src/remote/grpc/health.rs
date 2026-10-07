@@ -8,7 +8,7 @@
 //! client concludes nothing.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// Consecutive bounces before an address is refused. One decides nothing: a
@@ -65,7 +65,7 @@ fn cooldown(n: u32) -> Duration {
     Duration::from_secs((1u64 << n.min(5)).min(30))
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 

@@ -4,13 +4,15 @@
 //! checks that only refuse invalid input are left out (docs/reference/divergences.md).
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::{fmt, mem};
 
 use crate::error::{Error, Result as R};
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::runtime::{Value, Word};
 use crate::source::{AttrVal, Attrs, str_attr};
 use crate::store::hash::{Hash, HashAlgo};
+
+use super::{eval_error, is_indirect};
 
 fn fail<T>(m: impl Into<String>) -> R<T> {
     Err(Error::Flake(m.into()))
@@ -242,7 +244,7 @@ fn input_from_url(mut url: Url) -> R<Attrs> {
         (Some("git"), _) | (_, "git") => {
             // git.cc:inputFromURL, then fixGitURL drops the `git+`
             a.insert("type".into(), st("git"));
-            for (k, v) in std::mem::take(&mut url.query) {
+            for (k, v) in mem::take(&mut url.query) {
                 if listed(GIT_FLAGS, &k) {
                     a.insert(k, AttrVal::Bool(v == "1"));
                 } else if listed("rev ref keytype publicKey publicKeys", &k) {
@@ -346,7 +348,7 @@ pub struct Parsed {
 /// flakeref.cc:parseFlakeRefWithFragment without a base directory.
 pub fn parse(s: &str) -> R<Parsed> {
     let (loc, frag) = s.split_once('#').unwrap_or((s, ""));
-    let id = !loc.starts_with("flake:") && super::is_indirect(loc);
+    let id = !loc.starts_with("flake:") && is_indirect(loc);
     let bare = !id && !s.split_once(':').is_some_and(|(sc, _)| is_scheme(sc));
     let (input, dir, fragment) = if id {
         let path: Vec<&str> = loc.split('/').filter(|s| !s.is_empty()).collect();
@@ -359,7 +361,7 @@ pub fn parse(s: &str) -> R<Parsed> {
     } else {
         let mut url = parse_url(s)?;
         let dir = url.query.remove("dir").unwrap_or_default();
-        let fragment = std::mem::take(&mut url.fragment);
+        let fragment = mem::take(&mut url.fragment);
         (input_from_url(url)?, dir, fragment)
     };
     Ok(Parsed {
@@ -399,7 +401,7 @@ pub(super) fn attrs_to_string(mut a: Attrs) -> R<String> {
 pub fn parse_flake_ref(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let what = "while evaluating the argument passed to builtins.parseFlakeRef";
     let s = String::from_utf8_lossy(ev.force_string_no_ctx(args[0], pos, what)?).into_owned();
-    let mut p = parse_absolute(&s).map_err(|e| super::eval_error(e, pos))?;
+    let mut p = parse_absolute(&s).map_err(|e| eval_error(e, pos))?;
     if !p.dir.is_empty() {
         p.input.insert("dir".into(), AttrVal::Str(p.dir));
     }
@@ -434,7 +436,7 @@ pub fn flake_ref_to_string(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalR
         };
         attrs.insert(name, val);
     }
-    let s = attrs_to_string(attrs).map_err(|e| super::eval_error(e, pos))?;
+    let s = attrs_to_string(attrs).map_err(|e| eval_error(e, pos))?;
     Ok(ev.mk_string(s.as_bytes()))
 }
 

@@ -21,18 +21,22 @@
 //! `import` included, comes back out of those packs instead of out of
 //! `/nix/store` (docs/reference/flakes.md).
 
-use std::fs::File;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{env, result, str};
 
 use crate::error::{Error, Result};
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar::{FileType, NAR_MAX_DEPTH, PathFilter, TreeWriter};
 use crate::treestore::pack::{Id, Packs};
-use std::os::unix::fs::OpenOptionsExt;
+
+use super::unpack;
 
 /// One directory's entries, in the byte order a NAR wants them. A sorted vector,
 /// not a map: a full nixpkgs holds 38 000 directories of two or three entries
@@ -143,7 +147,7 @@ fn show(parts: &[Vec<u8>]) -> String {
 /// the open is exclusive, so a name another user can guess cannot make this
 /// truncate and write a file of theirs.
 pub fn scratch(tag: &str) -> Result<File> {
-    let dir = std::env::temp_dir();
+    let dir = env::temp_dir();
     let mut last = None;
     for _ in 0..8 {
         let path = dir.join(format!("iets-spool-{tag}-{:016x}", random_u64()));
@@ -155,7 +159,7 @@ pub fn scratch(tag: &str) -> Result<File> {
             .open(&path)
         {
             Ok(file) => {
-                std::fs::remove_file(&path)
+                fs::remove_file(&path)
                     .map_err(|e| Error::io(format!("cannot unlink {}", path.display()), e))?;
                 return Ok(file);
             }
@@ -180,7 +184,7 @@ fn parts_of(rel: &Path) -> Parts {
         .collect()
 }
 
-fn find(d: &Dir, name: &[u8]) -> std::result::Result<usize, usize> {
+fn find(d: &Dir, name: &[u8]) -> result::Result<usize, usize> {
     d.binary_search_by(|(k, _)| k.as_slice().cmp(name))
 }
 
@@ -241,7 +245,7 @@ impl Tree {
     /// a sparse member expands to must fit in it together.
     pub fn index(spool: File, max_size: u64) -> Result<Tree> {
         let mut root = Dir::new();
-        let mut links: std::collections::BTreeMap<Parts, Parts> = Default::default();
+        let mut links: BTreeMap<Parts, Parts> = Default::default();
         let mut sparse: Option<File> = None;
         let mut sparse_at = 0u64;
         let mut room = max_size.saturating_sub(
@@ -268,7 +272,7 @@ impl Tree {
                 }
                 let pax = pax_sparse(&mut entry)?;
                 let name = member_name(&pax, &entry)?;
-                let parts = parts_of(&super::unpack::member_path(&name));
+                let parts = parts_of(&unpack::member_path(&name));
                 if parts.is_empty() {
                     continue;
                 }
@@ -285,8 +289,7 @@ impl Tree {
                     insert(&mut root, &parts, Node::Symlink(target), true);
                 } else if kind.is_hard_link() {
                     let target = link_target(&mut entry, &parts, "link")?;
-                    let target =
-                        super::unpack::member_path(Path::new(std::ffi::OsStr::from_bytes(&target)));
+                    let target = unpack::member_path(Path::new(OsStr::from_bytes(&target)));
                     links.insert(parts, parts_of(&target));
                 } else {
                     // libarchive gives every other type flag AE_IFREG (tarfile.cc:224)
@@ -373,7 +376,7 @@ impl Tree {
 
     /// Every file's blob, once: a hard link shares its target's.
     pub fn files(&self) -> Vec<Blob> {
-        fn walk(n: &Node, seen: &mut std::collections::HashSet<Blob>, out: &mut Vec<Blob>) {
+        fn walk(n: &Node, seen: &mut HashSet<Blob>, out: &mut Vec<Blob>) {
             match n {
                 Node::File { at, .. } => {
                     if seen.insert(*at) {
@@ -391,8 +394,8 @@ impl Tree {
 
     /// The same tree with every file named by the id of its bytes, which `ids`
     /// holds for every blob [`Tree::files`] gave.
-    pub fn with_ids(&self, ids: &std::collections::HashMap<Blob, Id>) -> Node {
-        fn walk(n: &Node, ids: &std::collections::HashMap<Blob, Id>) -> Node {
+    pub fn with_ids(&self, ids: &HashMap<Blob, Id>) -> Node {
+        fn walk(n: &Node, ids: &HashMap<Blob, Id>) -> Node {
             match n {
                 Node::File { at, exec } => Node::File {
                     at: Blob::Object {
@@ -578,7 +581,7 @@ impl Tree {
                     let below = match shown {
                         None => None,
                         Some(p) => {
-                            let at = p.join(std::ffi::OsStr::from_bytes(name));
+                            let at = p.join(OsStr::from_bytes(name));
                             if !filter(&at, child.file_type()) {
                                 continue;
                             }
@@ -623,7 +626,7 @@ pub fn decode_index(bytes: &[u8]) -> Option<(Node, Hash, u64)> {
     if d.u8()? != INDEX_VERSION {
         return None;
     }
-    let algo = HashAlgo::parse(std::str::from_utf8(&d.bytes()?).ok()?)?;
+    let algo = HashAlgo::parse(str::from_utf8(&d.bytes()?).ok()?)?;
     let nar_hash = Hash::from_bytes(algo, &d.bytes()?).ok()?;
     let nar_size = d.u64()?;
     let root = get_node(&mut d, 0)?;
@@ -780,16 +783,16 @@ pub(super) struct Sparse {
 }
 
 fn number(v: &[u8]) -> Option<u64> {
-    std::str::from_utf8(v).ok()?.parse().ok()
+    str::from_utf8(v).ok()?.parse().ok()
 }
 
 /// The name the pax sparse records give the member, else the header's.
 pub(super) fn member_name(
     pax: &Option<Sparse>,
     entry: &tar::Entry<'_, impl Read>,
-) -> Result<std::path::PathBuf> {
+) -> Result<PathBuf> {
     match pax.as_ref().and_then(|s| s.name.clone()) {
-        Some(n) => Ok(std::ffi::OsString::from_vec(n).into()),
+        Some(n) => Ok(OsString::from_vec(n).into()),
         None => Ok(entry
             .path()
             .map_err(|e| Error::io("cannot read a tarball member name", e))?
@@ -999,6 +1002,13 @@ impl Read for Bytes<'_> {
 mod tests {
     use super::*;
 
+    use std::os::unix::fs::symlink;
+
+    use crate::fetch::http;
+    use crate::store::hash::Hasher;
+    use crate::store::nar;
+    use crate::treestore::pack::{self, PackWriter};
+
     const DIR: tar::EntryType = tar::EntryType::Directory;
     const REG: tar::EntryType = tar::EntryType::Regular;
     const SYM: tar::EntryType = tar::EntryType::Symlink;
@@ -1013,7 +1023,7 @@ mod tests {
             h.set_mode(*mode);
             h.set_size(if carries { data.len() as u64 } else { 0 });
             if *kind == SYM || *kind == HARD {
-                h.set_link_name(std::str::from_utf8(data).unwrap()).unwrap();
+                h.set_link_name(str::from_utf8(data).unwrap()).unwrap();
             }
             // `set_path` refuses a `..`, which is a member name a tarball may
             // hold; the field is 100 bytes and these names are short
@@ -1025,14 +1035,14 @@ mod tests {
         }
         let tar = b.into_inner().unwrap();
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        io::Write::write_all(&mut gz, &tar).unwrap();
         gz.finish().unwrap()
     }
 
     /// The NAR the spool writes for `bytes`, and the NAR the tree path writes
     /// for the same archive.
     fn both(tag: &str, bytes: Vec<u8>) -> (Result<Vec<u8>>, Result<Vec<u8>>) {
-        let plain = crate::fetch::http::decompress(bytes.clone()).unwrap();
+        let plain = http::decompress(bytes.clone()).unwrap();
         let mut spool = scratch(tag).unwrap();
         spool.write_all(&plain).unwrap();
         let streamed = Tree::index(spool, u64::MAX).and_then(|t| {
@@ -1042,16 +1052,15 @@ mod tests {
             Ok(nar)
         });
 
-        let dest =
-            std::env::temp_dir().join(format!("iets-spool-tree-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dest);
-        let tree = crate::fetch::unpack::unpack(plain, &dest).and_then(|root| {
+        let dest = env::temp_dir().join(format!("iets-spool-tree-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        let tree = unpack::unpack(plain, &dest).and_then(|root| {
             let mut nar = Vec::new();
-            crate::store::nar::dump_path(&root, &mut nar, &mut |_, _| true)
+            nar::dump_path(&root, &mut nar, &mut |_, _| true)
                 .map_err(|e| Error::io("cannot dump the tree", e))?;
             Ok(nar)
         });
-        let _ = std::fs::remove_dir_all(&dest);
+        let _ = fs::remove_dir_all(&dest);
         (streamed, tree)
     }
 
@@ -1113,13 +1122,13 @@ mod tests {
     #[test]
     fn an_empty_archive_is_an_empty_directory() {
         let nar = same("empty", &[]);
-        let dest = std::env::temp_dir().join(format!("iets-spool-bare-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dest);
-        std::fs::create_dir_all(&dest).unwrap();
+        let dest = env::temp_dir().join(format!("iets-spool-bare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        fs::create_dir_all(&dest).unwrap();
         let mut want = Vec::new();
-        crate::store::nar::dump_path(&dest, &mut want, &mut |_, _| true).unwrap();
+        nar::dump_path(&dest, &mut want, &mut |_, _| true).unwrap();
         assert_eq!(nar, want);
-        std::fs::remove_dir_all(&dest).unwrap();
+        fs::remove_dir_all(&dest).unwrap();
     }
 
     /// The same errors as the tree path, for the same archives.
@@ -1207,17 +1216,17 @@ mod tests {
     /// The tree as the store keeps it: its files as objects in a pack under
     /// `dir`, and the index naming them.
     fn stored(dir: &Path, tree: &Tree) -> (Tree, Vec<u8>) {
-        let mut w = crate::treestore::pack::PackWriter::new(dir).unwrap();
-        let mut ids = std::collections::HashMap::new();
+        let mut w = PackWriter::new(dir).unwrap();
+        let mut ids = HashMap::new();
         for at in tree.files() {
             let bytes = tree.read(&at).unwrap();
-            let id = crate::treestore::pack::id_of(&bytes);
+            let id = pack::id_of(&bytes);
             w.add(id, &bytes).unwrap();
             ids.insert(at, id);
         }
         let root = tree.with_ids(&ids);
         w.finish().unwrap();
-        let mut h = crate::store::hash::Hasher::new(HashAlgo::Sha256);
+        let mut h = Hasher::new(HashAlgo::Sha256);
         tree.dump(&mut h).unwrap();
         let (size, hash) = (h.bytes_written(), h.finish());
         let index = encode_index(&root, (&hash, size));
@@ -1226,16 +1235,16 @@ mod tests {
     }
 
     fn spooled(entries: &[(&str, tar::EntryType, u32, &[u8])]) -> Tree {
-        let plain = crate::fetch::http::decompress(tar_gz(entries)).unwrap();
+        let plain = http::decompress(tar_gz(entries)).unwrap();
         let mut spool = scratch("test").unwrap();
         spool.write_all(&plain).unwrap();
         Tree::index(spool, u64::MAX).unwrap()
     }
 
-    fn tmp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("iets-spool-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn tmp_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("iets-spool-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -1264,7 +1273,7 @@ mod tests {
             panic!("the symlink resolves to a file")
         };
         assert_eq!(back.read(at).unwrap(), b"same");
-        let mut ids = std::collections::HashSet::new();
+        let mut ids = HashSet::new();
         let (root, _, _) = decode_index(&index).expect("the index decodes");
         object_ids(&root, &mut ids);
         assert_eq!(
@@ -1272,7 +1281,7 @@ mod tests {
             3,
             "\"same\" twice, the long file and the empty one"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// No byte of a stored index is believed on its own: one flipped byte is a
@@ -1292,7 +1301,7 @@ mod tests {
             broken[i] ^= 0xff;
             assert!(decode_index(&broken).is_none(), "byte {i} was believed");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A hard link fills a name no member claimed, and it may name a link whose
@@ -1343,17 +1352,17 @@ mod tests {
     /// not follow it.
     #[test]
     fn the_scratch_file_never_follows_a_symlink() {
-        let dir = std::env::temp_dir();
+        let dir = env::temp_dir();
         let victim = dir.join(format!("iets-spool-victim-{}", std::process::id()));
-        std::fs::write(&victim, b"precious").unwrap();
+        fs::write(&victim, b"precious").unwrap();
         let bait = dir.join(format!("iets-spool-{}-bait", std::process::id()));
-        let _ = std::fs::remove_file(&bait);
-        std::os::unix::fs::symlink(&victim, &bait).unwrap();
+        let _ = fs::remove_file(&bait);
+        symlink(&victim, &bait).unwrap();
         let mut file = scratch("bait").unwrap();
         file.write_all(b"the archive").unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
-        std::fs::remove_file(&bait).unwrap();
-        std::fs::remove_file(&victim).unwrap();
+        fs::remove_file(&bait).unwrap();
+        fs::remove_file(&victim).unwrap();
     }
 
     /// One pax local extended header and the member it belongs to.
@@ -1478,18 +1487,17 @@ mod tests {
     /// The fixture whose `narHash` a lock file records, hashed out of the spool.
     #[test]
     fn nar_hash_of_the_fixture() {
-        let bytes = std::fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/tree.tar.gz"),
-        )
-        .unwrap();
+        let bytes =
+            fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/tree.tar.gz"))
+                .unwrap();
         let (streamed, tree) = both("golden", bytes);
         let streamed = streamed.unwrap();
         assert_eq!(streamed, tree.unwrap());
-        let want = std::fs::read_to_string(
+        let want = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/narHash"),
         )
         .unwrap();
-        let mut h = crate::store::hash::Hasher::new(crate::store::hash::HashAlgo::Sha256);
+        let mut h = Hasher::new(HashAlgo::Sha256);
         h.write_all(&streamed).unwrap();
         assert_eq!(h.finish().to_sri(), want.trim());
     }

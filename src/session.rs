@@ -9,33 +9,40 @@
 //! [`bind`]. docs/reference/library.md says what a host owns.
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
+use crate::events::Events;
+use crate::ignored::Ignored;
+use crate::jobs::Run;
 use crate::log::Log;
+use crate::profile::Profile;
+use crate::provenance::SourceMap;
 use crate::settings::Settings;
+use crate::{config, error, treestore};
 
 #[derive(Default)]
 pub struct Session {
     pub log: Log,
     /// This run's sampled flame graph (`crate::profile`).
-    pub profile: crate::profile::Profile,
+    pub profile: Profile,
     /// Where this run's instrumentation events go (`crate::events`).
-    pub events: crate::events::Events,
-    settings: std::sync::OnceLock<Settings>,
+    pub events: Events,
+    settings: OnceLock<Settings>,
     /// What this run was asked for and does not do (`crate::ignored`).
-    pub ignored: crate::ignored::Ignored,
+    pub ignored: Ignored,
     /// The local tree store this run reads fetched trees from
     /// (`crate::treestore`).
-    pub trees: crate::treestore::Store,
+    pub trees: treestore::Store,
     /// The `eval-jobs` walk of this run (`crate::jobs`).
-    pub jobs: crate::jobs::Run,
+    pub jobs: Run,
     /// nix.conf, read once per run: it cannot change under an evaluation.
-    pub nix_conf: std::sync::OnceLock<crate::config::Config>,
+    pub nix_conf: OnceLock<config::Config>,
     /// Store path to local tree, for the commands that build the map while
     /// the evaluation is live (`crate::provenance`).
-    pub source_map: std::sync::OnceLock<crate::provenance::SourceMap>,
+    pub source_map: OnceLock<SourceMap>,
     /// The `parse-toml-timestamps` experimental feature.
-    pub toml_timestamps: std::sync::atomic::AtomicBool,
+    pub toml_timestamps: AtomicBool,
 }
 
 thread_local! {
@@ -45,7 +52,7 @@ thread_local! {
 /// The session of a thread that entered none: everything the library does
 /// before a host makes one of its own. It writes nowhere.
 fn fallback() -> Arc<Session> {
-    static D: std::sync::OnceLock<Arc<Session>> = std::sync::OnceLock::new();
+    static D: OnceLock<Arc<Session>> = OnceLock::new();
     D.get_or_init(|| Arc::new(Session::default())).clone()
 }
 
@@ -75,7 +82,7 @@ impl Session {
 
     /// Reads the `iets.toml` settings files and applies the `--iets-option` pairs.
     /// Call it once, on an entered session, before anything reads a setting.
-    pub fn load_settings(&self, options: &[(String, String)]) -> crate::error::Result<()> {
+    pub fn load_settings(&self, options: &[(String, String)]) -> error::Result<()> {
         let s = Settings::load(options)?;
         let _ = self.settings.set(s);
         Ok(())
@@ -104,6 +111,8 @@ pub fn bind<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
 mod tests {
     use super::*;
 
+    use crate::log;
+
     #[test]
     fn two_sessions_share_no_state() {
         let line = format!(
@@ -113,8 +122,8 @@ mod tests {
         let (a, b) = (Session::new(), Session::new());
         {
             let _entered = a.enter();
-            crate::log::note_mismatch(&line);
-            crate::log::resolve_mismatches(&|_| true);
+            log::note_mismatch(&line);
+            log::resolve_mismatches(&|_| true);
         }
         {
             let _entered = b.enter();

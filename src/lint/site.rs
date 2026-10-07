@@ -84,11 +84,12 @@ pub fn finding(src: &[u8], ast: &Ast, id: LintId, off: u32) -> Option<(Span, Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax;
     use crate::syntax::ast::FileId;
     use crate::syntax::symbol::Interner;
 
     fn at(src: &str, id: LintId, site: &str) -> Option<(String, Option<String>)> {
-        let ast = crate::syntax::parse(src.as_bytes(), FileId(0), &mut Interner::new()).unwrap();
+        let ast = syntax::parse(src.as_bytes(), FileId(0), &mut Interner::new()).unwrap();
         let off = src.find(site).unwrap() as u32;
         let (s, edit) = finding(src.as_bytes(), &ast, id, off)?;
         Some((src[s.start as usize..s.end as usize].to_string(), edit))

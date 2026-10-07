@@ -3,9 +3,14 @@
 //! Selected for a watcher that compares modification times, which is all a
 //! file watcher has. A consumer that can do better picks by `kind`.
 
-use super::Obs;
+use super::{Filtered, Kind, Obs};
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use crate::source::scm;
 
 /// A watcher stats every path it holds, and a caller that writes them into
 /// an environment has a size limit, so the list has a bound.
@@ -27,9 +32,9 @@ pub struct Watched {
 /// its members follow. An outermost tree is the flake's source, which every
 /// edit changes and few shells depend on: only what the run read out of it
 /// is watched. Environment variables and resolved links have no file.
-pub fn watched(obs: &[super::Obs], skip: &[&Path]) -> Vec<Watched> {
+pub fn watched(obs: &[Obs], skip: &[&Path]) -> Vec<Watched> {
     let kept = |b: &[u8]| {
-        let p = PathBuf::from(std::ffi::OsStr::from_bytes(b));
+        let p = PathBuf::from(OsStr::from_bytes(b));
         (!skip.iter().any(|s| p.starts_with(s))).then_some(p)
     };
     let mut out: Vec<(PathBuf, &'static str)> = Vec::new();
@@ -43,7 +48,7 @@ pub fn watched(obs: &[super::Obs], skip: &[&Path]) -> Vec<Watched> {
             // directory. A `Missing` path has no mtime to churn, and its
             // creation is the change it looks like.
             Obs::Stat { path: p, kind, .. } => {
-                if *kind == super::Kind::Missing {
+                if *kind == Kind::Missing {
                     out.extend(kept(p).map(|p| (p, "absent")))
                 }
             }
@@ -51,7 +56,7 @@ pub fn watched(obs: &[super::Obs], skip: &[&Path]) -> Vec<Watched> {
                 trees.extend(kept(root).map(|r| (r, filtered.as_ref())))
             }
             o => {
-                if let Some((scm, dir)) = crate::source::scm::owner(o) {
+                if let Some((scm, dir)) = scm::owner(o) {
                     out.extend(kept(dir).and_then(|d| scm.watch(&d)).map(|p| (p, "scm")))
                 }
             }
@@ -62,7 +67,7 @@ pub fn watched(obs: &[super::Obs], skip: &[&Path]) -> Vec<Watched> {
             members(root, *filtered, &mut out);
         }
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     out.retain(|(p, _)| seen.insert(p.clone()));
     out.into_iter()
         .filter_map(|(p, kind)| {
@@ -76,7 +81,7 @@ pub fn watched(obs: &[super::Obs], skip: &[&Path]) -> Vec<Watched> {
 
 /// `p` and what the copy took below it; the directories too, because an
 /// entry that comes or goes changes the copy.
-fn members(p: &Path, filtered: Option<&super::Filtered>, out: &mut Vec<(PathBuf, &'static str)>) {
+fn members(p: &Path, filtered: Option<&Filtered>, out: &mut Vec<(PathBuf, &'static str)>) {
     if out.len() > MAX {
         return;
     }
@@ -84,7 +89,7 @@ fn members(p: &Path, filtered: Option<&super::Filtered>, out: &mut Vec<(PathBuf,
     if !p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
         return;
     }
-    let mut kids: Vec<PathBuf> = std::fs::read_dir(p)
+    let mut kids: Vec<PathBuf> = fs::read_dir(p)
         .into_iter()
         .flatten()
         .flatten()
@@ -104,15 +109,17 @@ mod tests {
     use super::*;
     use crate::trace::Filtered;
 
+    use std::env;
+
     #[test]
     fn only_the_paths_an_mtime_can_speak_for() {
-        let d = std::env::temp_dir().join(format!("iets-watch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = env::temp_dir().join(format!("iets-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
         for sub in [".git", "src/keep", "src/drop"] {
-            std::fs::create_dir_all(d.join(sub)).unwrap();
+            fs::create_dir_all(d.join(sub)).unwrap();
         }
         for f in ["hook.sh", "src/keep/a", "src/drop/b"] {
-            std::fs::write(d.join(f), "").unwrap();
+            fs::write(d.join(f), "").unwrap();
         }
         let b = |p: &str| d.join(p).into_os_string().into_encoded_bytes();
         let file = |path: Vec<u8>| Obs::File {
@@ -186,6 +193,6 @@ mod tests {
             "src/keep/a",
         ];
         assert_eq!(got, want.map(|p| d.join(p).to_str().unwrap().to_string()));
-        let _ = std::fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d);
     }
 }

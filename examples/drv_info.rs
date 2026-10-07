@@ -7,13 +7,16 @@
 
 use iets::api::{self, EvalArgs, Input};
 
-fn main() -> std::process::ExitCode {
+use std::env;
+use std::process::{self, ExitCode};
+
+fn main() -> ExitCode {
     // a frontend owns the run state and says where messages go
     let session = iets::session::Session::new();
     session.log.write_to_stderr();
     let _entered = session.enter();
     let mut a = EvalArgs::new();
-    let mut argv = std::env::args().skip(1);
+    let mut argv = env::args().skip(1);
     while let Some(arg) = argv.next() {
         let mut next = || {
             argv.next()
@@ -33,7 +36,7 @@ fn main() -> std::process::ExitCode {
 
     // a setting that does not resolve is reported already
     let Ok(run) = iets::api::run::Run::new(&a) else {
-        return std::process::ExitCode::from(1);
+        return ExitCode::from(1);
     };
     let r = run.go(move |ev, _| {
         let target = a.attr.clone();
@@ -80,15 +83,15 @@ fn main() -> std::process::ExitCode {
         0
     });
     match r {
-        Ok(c) => std::process::ExitCode::from(c),
+        Ok(c) => ExitCode::from(c),
         Err(e) => {
             eprintln!("error: {e}");
-            std::process::ExitCode::from(1)
+            ExitCode::from(1)
         }
     }
 }
 
 fn die(msg: &str) -> ! {
     eprintln!("usage: drv_info [-I prefix=path]... [-A attr] (-E EXPR | FILE): {msg}");
-    std::process::exit(2)
+    process::exit(2)
 }

@@ -6,9 +6,9 @@
 //! no answer comes from a command.
 
 use std::ffi::OsStr;
-use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use super::{Scm, Snapshot};
 use crate::trace::{Kind, Obs, Trace};
@@ -18,7 +18,7 @@ pub struct Ledger;
 const ENTRIES: [&str; 3] = ["/.ledger/tracked", "/.ledger/head", "/.ledger/dirty"];
 
 fn read(trace: &Trace, p: &Path) -> Result<String, String> {
-    let err = |e: std::io::Error| format!("ledger: {}: {e}", p.display());
+    let err = |e: io::Error| format!("ledger: {}: {e}", p.display());
     let meta = fs::metadata(p).map_err(err)?;
     let bytes = fs::read(p).map_err(err)?;
     trace.file(p.as_os_str().as_bytes(), &meta, &bytes);
@@ -89,18 +89,24 @@ mod tests {
     use super::*;
     use crate::builtins::store_hooks::open;
     use crate::eval::{EvalConfig, Evaluator, Pos};
-    use crate::flake::{fetch::emit_tree_attrs, parse_flake_ref};
+    use crate::flake::fetch::emit_tree_attrs;
+    use crate::flake::parse_flake_ref;
     use crate::runtime::{Ctx, Taint, Word};
     use crate::source::scm::{count_key, rev_count};
     use crate::source::{AttrVal, Attrs, SourceRef, Tree, tree};
+    use crate::store::nar;
+    use crate::trace::store;
     use crate::trace::validate::validate;
+    use crate::trace::watch::watched;
+
+    use std::env;
 
     const FLAKE: &str = "{ outputs = _: { }; }\n";
 
     /// A working tree with three tracked files, one untracked file and the
     /// revision `r12`; `plain` holds the tracked files and nothing else.
     fn fixture(tag: &str) -> (PathBuf, PathBuf) {
-        let d = std::env::temp_dir().join(format!("iets-ledger-{}-{tag}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-ledger-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let (root, plain) = (d.join("tree"), d.join("plain"));
         for top in [&root, &plain] {
@@ -160,7 +166,7 @@ mod tests {
     #[test]
     fn the_tracked_files_and_the_metadata_are_the_tree() {
         let (root, plain) = fixture("tree");
-        let hash = |d: &Path| crate::store::nar::nar_hash(d).unwrap().to_sri();
+        let hash = |d: &Path| nar::nar_hash(d).unwrap().to_sri();
         let t = read_tree(&mut Evaluator::new(), &root);
         assert_eq!(t.subdir, "sub");
         let clean = [
@@ -225,7 +231,7 @@ mod tests {
     fn the_count_is_lazy_and_kept_by_revision() {
         let (root, _) = fixture("count");
         fs::write(root.join(".ledger/head"), "x12 1700000000\n").unwrap();
-        let store = crate::trace::store::Store::locate(root.parent().unwrap().to_str()).unwrap();
+        let store = store::Store::locate(root.parent().unwrap().to_str()).unwrap();
         assert!(crate::cachefs::prepare(
             store.root(),
             crate::cachefs::Shape::Dirs,
@@ -288,10 +294,7 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["file", "stat", "file", "stat", "tree"]);
         assert_eq!(validate(&mut obs, 2).unwrap().entries, 5);
-        let watched: Vec<String> = crate::trace::watch::watched(&obs, &[])
-            .into_iter()
-            .map(|w| w.path)
-            .collect();
+        let watched: Vec<String> = watched(&obs, &[]).into_iter().map(|w| w.path).collect();
         let want = ENTRIES.map(|e| format!("{}{e}", root.display()));
         assert_eq!(watched, want);
 

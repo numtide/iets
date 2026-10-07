@@ -5,8 +5,8 @@
 //! See docs/reference/commands.md.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use crate::error::{Error, Result};
 use crate::store::drv::{
@@ -14,8 +14,7 @@ use crate::store::drv::{
 };
 use crate::store::hash::{HashAlgo, hash_bytes};
 use crate::store::path::{StorePath, make_text_path};
-use serde_json::Map;
-use serde_json::Value as J;
+use serde_json::{Map, Value as J};
 
 /// src/nix/get-env.sh, verbatim: the builder script of the `-env` derivation. Nix embeds
 /// the file through `get-env.sh.gen.hh`, a raw string literal whose opening delimiter is
@@ -424,7 +423,7 @@ pub fn make_rc_script(
 
     let mut files = Vec::new();
     if let Some((json, sh)) = &env.structured_attrs {
-        std::fs::create_dir_all(attrs_dir)
+        fs::create_dir_all(attrs_dir)
             .map_err(|e| Error::io(format!("cannot create '{}'", attrs_dir.display()), e))?;
         for (ext, var, content) in [
             ("sh", "NIX_ATTRS_SH_FILE", sh),
@@ -452,9 +451,9 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         path.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id()
     ));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
     })
 }
 
@@ -508,9 +507,10 @@ impl CachedResult {
 mod tests {
     use super::*;
     use crate::store::drv::load_derivation_from_store;
+    use crate::store::nar::tests::fixture_tree;
 
     fn fixture(name: &str) -> String {
-        std::fs::read_to_string(
+        fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/drv")
                 .join(name),
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn rc_script_rewrites_outputs_and_writes_attrs() {
-        let dir = crate::store::nar::tests::fixture_tree("devenv-rc");
+        let dir = fixture_tree("devenv-rc");
         let json: serde_json::Value = serde_json::from_str(
             r#"{
               "bashFunctions": {},

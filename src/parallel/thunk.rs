@@ -3,8 +3,10 @@
 //! protocol".
 
 use std::collections::HashMap;
+use std::hint;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use super::fiber;
 use super::sched::{Runtime, Slot};
@@ -102,7 +104,7 @@ pub fn wait(slot: &mut Slot, cell: &Cell, cur: Word) -> Result<(), Cancelled> {
         if cell.get().bits() & !WAITERS_BIT != base {
             return Ok(());
         }
-        std::hint::spin_loop();
+        hint::spin_loop();
     }
     let me = slot as *mut Slot;
     let rt: &Runtime = slot.runtime();
@@ -138,7 +140,7 @@ pub fn wait(slot: &mut Slot, cell: &Cell, cur: Word) -> Result<(), Cancelled> {
         }
     }
     rt.stat_fiber_parks.fetch_add(1, Ordering::Relaxed);
-    let t0 = slot.is_main.then(std::time::Instant::now);
+    let t0 = slot.is_main.then(Instant::now);
     // SAFETY: we are on this slot's fiber stack.
     unsafe { slot.park() };
     if let Some(t0) = t0 {
@@ -193,6 +195,7 @@ mod tests {
     use super::*;
     use crate::parallel::sched::{Driver, Task, Worker};
     use std::sync::atomic::AtomicUsize;
+    use std::{ptr, thread};
 
     /// A synthetic thunk: value = 1 + sum of dependency values.
     struct Node {
@@ -223,7 +226,7 @@ mod tests {
                             .wrapping_mul(6364136223846793005)
                             .wrapping_add(1442695040888963407);
                     }
-                    std::hint::black_box(x);
+                    hint::black_box(x);
                     let mut v = 1;
                     for &d in &g.nodes[i].deps {
                         v += force(g, slot, d);
@@ -243,7 +246,7 @@ mod tests {
 
     impl Driver for GraphDriver {
         fn new_user(&self, _rt: &Runtime) -> *mut () {
-            std::ptr::null_mut()
+            ptr::null_mut()
         }
         fn run_task(&self, _rt: &Runtime, slot: &mut Slot) {
             let t = slot.task;
@@ -270,7 +273,7 @@ mod tests {
 
     impl Driver for PairDriver {
         fn new_user(&self, _rt: &Runtime) -> *mut () {
-            std::ptr::null_mut()
+            ptr::null_mut()
         }
         fn run_task(&self, _rt: &Runtime, slot: &mut Slot) {
             let p = self.0;
@@ -280,10 +283,10 @@ mod tests {
                 panic!("cell already claimed")
             };
             // Let the other task claim its cell before we look at it.
-            let t0 = std::time::Instant::now();
+            let t0 = Instant::now();
             while p.cells[other].get() == Word::EMPTY {
                 assert!(t0.elapsed().as_secs() < 10, "peer never claimed");
-                std::thread::yield_now();
+                thread::yield_now();
             }
             loop {
                 match try_claim(&p.cells[other], slot.id, |w| w == Word::EMPTY) {
@@ -325,7 +328,7 @@ mod tests {
         let rt = Runtime::start(3, Box::new(PairDriver(p)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
                 for i in 0..2 {
@@ -340,10 +343,10 @@ mod tests {
                 // Once both helpers hold their claims, main parks on cell 0
                 // like a demand fiber would; the cancelled helper resets it
                 // and main re-claims.
-                let t0 = std::time::Instant::now();
+                let t0 = Instant::now();
                 while p.cells.iter().any(|c| c.get() == Word::EMPTY) {
                     assert!(t0.elapsed().as_secs() < HANG, "timeout");
-                    std::thread::yield_now();
+                    thread::yield_now();
                 }
                 loop {
                     assert!(t0.elapsed().as_secs() < HANG, "timeout");
@@ -361,7 +364,7 @@ mod tests {
                 }
                 while p.done.load(Ordering::Acquire) < 2 {
                     assert!(t0.elapsed().as_secs() < HANG, "timeout");
-                    std::thread::yield_now();
+                    thread::yield_now();
                 }
             }),
         );
@@ -430,7 +433,7 @@ mod tests {
         let rt = Runtime::start(8, Box::new(GraphDriver(g)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
                 let mut ntasks = 0;
@@ -446,12 +449,12 @@ mod tests {
                     assert!(rt.submit_urgent(slot.worker(), t));
                     ntasks += 1;
                 }
-                let t0 = std::time::Instant::now();
+                let t0 = Instant::now();
                 while g.done.load(Ordering::Acquire) < ntasks {
                     assert!(t0.elapsed().as_secs() < 30, "timeout");
                     // Main also forces roots, so it parks and migrates.
                     force(g, slot, N - 1);
-                    std::thread::yield_now();
+                    thread::yield_now();
                 }
             }),
         );

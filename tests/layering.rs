@@ -12,6 +12,7 @@
 //! new entry needs the constant raised, which is a line in a diff to argue
 //! about.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The layers a porcelain command may not name. `crate::api` is the way in.
@@ -92,7 +93,7 @@ fn porcelain_names_no_layer_below_the_api() {
     let mut found: Vec<(String, Vec<String>)> = Vec::new();
     for file in cli_files() {
         let rel = rel(&file);
-        let text = strip_comments(&std::fs::read_to_string(&file).unwrap());
+        let text = strip_comments(&fs::read_to_string(&file).unwrap());
         let mut named: Vec<String> = LAYERS
             .iter()
             .filter(|l| names_layer(&text, l))
@@ -164,7 +165,7 @@ fn porcelain_names_no_layer_below_the_api() {
 fn porcelain_signatures_name_no_evaluator_value() {
     let mut found: Vec<String> = Vec::new();
     for file in cli_files() {
-        let text = strip_comments(&std::fs::read_to_string(&file).unwrap());
+        let text = strip_comments(&fs::read_to_string(&file).unwrap());
         if signatures(&text).iter().any(|s| has_word(s, "Word")) {
             found.push(rel(&file));
         }
@@ -212,7 +213,7 @@ fn cli_files() -> Vec<PathBuf> {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    for e in std::fs::read_dir(dir).unwrap() {
+    for e in fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         if p.is_dir() {
             walk(&p, out);

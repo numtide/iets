@@ -11,16 +11,22 @@
 //! the decompressor, and both ends stop when the other does.
 
 use std::cell::Cell;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::future::Future;
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{mem, result, thread};
 
+use crate::config;
 use crate::error::{Error, Result};
-use crate::log::ACT_FILE_TRANSFER;
-use crate::log::Activity;
-use crate::log::LVL_TALKATIVE;
-use crate::log::RES_PROGRESS;
+use crate::log::{self, ACT_FILE_TRANSFER, Activity, LVL_TALKATIVE, RES_PROGRESS};
+use crate::remote::worker;
+use crate::session::Session;
+use crate::store::hash;
 use http_body_util::BodyExt;
 
 /// filetransfer.cc:CURLOPT_MAXREDIRS.
@@ -53,7 +59,7 @@ pub struct Limits {
 
 impl Limits {
     /// The nix.conf timeouts with filetransfer.hh's defaults, 15 s and 300 s.
-    pub fn new(cfg: &crate::config::Config) -> Result<Limits> {
+    pub fn new(cfg: &config::Config) -> Result<Limits> {
         let secs = |name: &str, default: u64| -> Result<Option<Duration>> {
             let s = cfg.int(name)?.unwrap_or(default);
             Ok((s > 0).then(|| Duration::from_secs(s)))
@@ -61,7 +67,7 @@ impl Limits {
         Ok(Limits {
             connect: secs("connect-timeout", 15)?,
             stall: secs("stalled-download-timeout", 300)?,
-            max_size: crate::session::Session::current().settings().fetch_max_size,
+            max_size: Session::current().settings().fetch_max_size,
         })
     }
 }
@@ -70,7 +76,7 @@ impl Limits {
 async fn within<T>(
     limit: Option<Duration>,
     why: impl FnOnce() -> Error,
-    fut: impl std::future::Future<Output = Result<T>>,
+    fut: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     match limit {
         None => fut.await,
@@ -124,7 +130,7 @@ impl Url {
             None => (rest, ""),
         };
         let (userinfo, authority) = match authority.rsplit_once('@') {
-            Some((u, h)) => (Some(crate::remote::worker::percent_decode(u)), h),
+            Some((u, h)) => (Some(worker::percent_decode(u)), h),
             None => (None, authority),
         };
         let (host, port) = match authority.rsplit_once(':') {
@@ -154,7 +160,7 @@ impl Url {
     /// default `CURLOPT_HTTPAUTH`).
     fn basic(&self) -> Option<(String, String)> {
         let u = self.userinfo.as_ref()?;
-        let b64 = crate::store::hash::base64_encode(u.as_bytes());
+        let b64 = hash::base64_encode(u.as_bytes());
         Some(("Authorization".into(), format!("Basic {b64}")))
     }
 
@@ -175,7 +181,7 @@ impl Url {
 /// `CURLOPT_UNRESTRICTED_AUTH`. iets's headers are all credentials, so the rule
 /// covers `Private-token` too. An https-to-http redirect is refused: libcurl
 /// allows it, but it drops TLS from a download nothing has verified yet.
-fn redirect(first: &Url, from: &Url, to: &Url) -> std::result::Result<bool, &'static str> {
+fn redirect(first: &Url, from: &Url, to: &Url) -> result::Result<bool, &'static str> {
     if from.https && !to.https {
         return Err("refusing a redirect from https to http");
     }
@@ -250,7 +256,7 @@ fn resolve(base: &str, location: &str) -> String {
 /// what curl uses too. Process-wide on purpose: it is immutable, costly to
 /// build, and holds no run state, so two sessions may share it.
 fn tls() -> Result<Arc<rustls::ClientConfig>> {
-    static TLS: OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
+    static TLS: OnceLock<result::Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
     TLS.get_or_init(|| {
         let mut roots = rustls::RootCertStore::empty();
         let found = rustls_native_certs::load_native_certs();
@@ -311,24 +317,22 @@ pub fn get(
             Ok(r)
         }
     };
-    if crate::session::Session::current().settings().offline {
+    if Session::current().settings().offline {
         return Err(Error::Usage(format!(
             "cannot fetch '{url}': IETS_OFFLINE is set"
         )));
     }
     let read_in = Rc::new(Cell::new(0));
     if let Some(path) = file_path(url) {
-        let path =
-            crate::remote::worker::percent_decode(path.split(['?', '#']).next().unwrap_or(path));
-        let file = std::fs::File::open(&path)
-            .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
+        let path = worker::percent_decode(path.split(['?', '#']).next().unwrap_or(path));
+        let file = File::open(&path).map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
         let raw = Counted(Box::new(file), read_in.clone());
         return drain(url, undo(Box::new(raw))?, &read_in, limits, sink);
     }
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
     let target = url.to_string();
     let sent = headers.to_vec();
-    let download = std::thread::spawn(move || -> Result<()> {
+    let download = thread::spawn(move || -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -350,17 +354,17 @@ pub fn get(
 
 /// The reading half of the queue: hyper's frames, one after the other.
 struct Queued {
-    rx: tokio::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    rx: tokio::sync::mpsc::Receiver<result::Result<Vec<u8>, String>>,
     at: Vec<u8>,
     pos: usize,
 }
 
 impl Read for Queued {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while self.pos == self.at.len() {
             match self.rx.blocking_recv() {
                 None => return Ok(0),
-                Some(Err(e)) => return Err(std::io::Error::other(e)),
+                Some(Err(e)) => return Err(io::Error::other(e)),
                 Some(Ok(chunk)) => {
                     self.at = chunk;
                     self.pos = 0;
@@ -379,7 +383,7 @@ impl Read for Queued {
 struct Counted(Box<dyn Read>, Rc<Cell<u64>>);
 
 impl Read for Counted {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.0.read(buf)?;
         self.1.set(self.1.get() + n as u64);
         Ok(n)
@@ -403,12 +407,12 @@ fn drain(
         &format!("downloading '{shown}'"),
         vec![shown.as_str().into()],
     );
-    let mut told = std::time::Instant::now() - Duration::from_millis(100);
+    let mut told = Instant::now() - Duration::from_millis(100);
     let mut buf = vec![0; 64 << 10];
     let mut out = 0u64;
     loop {
         if told.elapsed() >= Duration::from_millis(100) {
-            told = std::time::Instant::now();
+            told = Instant::now();
             act.result(
                 RES_PROGRESS,
                 vec![read_in.get().into(), 0.into(), 0.into(), 0.into()],
@@ -417,7 +421,7 @@ fn drain(
         let n = match read.read(&mut buf) {
             Ok(0) => return Ok(out),
             Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(Error::io("cannot read the download", e)),
         };
         out += n as u64;
@@ -439,7 +443,7 @@ async fn stream(
     url: &str,
     headers: &[(String, String)],
     limits: Limits,
-    tx: tokio::sync::mpsc::Sender<std::result::Result<Vec<u8>, String>>,
+    tx: tokio::sync::mpsc::Sender<result::Result<Vec<u8>, String>>,
 ) -> Result<()> {
     let first = Url::parse(url)?;
     let mut sent = headers.to_vec();
@@ -501,7 +505,7 @@ async fn stream(
                     return Err(bad(&current, &format!("HTTP status {other}")));
                 };
                 let ms = base << (attempt - 1);
-                crate::log::line(&format!(
+                log::line(&format!(
                     "warning: unable to download '{}': HTTP error {other}; \
                      retrying in {ms} ms (attempt {attempt}/{TRIES})",
                     shown(&current)
@@ -529,7 +533,7 @@ type Started = (
     u16,
     Option<String>,
     hyper::body::Incoming,
-    tokio::task::JoinHandle<std::result::Result<(), hyper::Error>>,
+    tokio::task::JoinHandle<result::Result<(), hyper::Error>>,
 );
 
 /// One request: the status, the `Location` header, the body not yet read, and
@@ -630,7 +634,7 @@ struct Sniffed {
 }
 
 impl Read for Sniffed {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.pos < self.head.len() {
             let n = buf.len().min(self.head.len() - self.pos);
             buf[..n].copy_from_slice(&self.head[self.pos..self.pos + n]);
@@ -646,21 +650,21 @@ impl Read for Sniffed {
 /// libarchive's filter bids on the bytes and, finding no filter, hands the rest
 /// to the tar reader, which stops at its own end-of-archive marker.
 struct MultiGz {
-    at: flate2::bufread::GzDecoder<std::io::BufReader<Box<dyn Read>>>,
+    at: flate2::bufread::GzDecoder<BufReader<Box<dyn Read>>>,
 }
 
 impl Read for MultiGz {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.at.read(buf)? {
                 0 => {}
                 n => return Ok(n),
             }
             let rest = self.at.get_mut();
-            if !std::io::BufRead::fill_buf(rest)?.starts_with(&[0x1f, 0x8b]) {
+            if !BufRead::fill_buf(rest)?.starts_with(&[0x1f, 0x8b]) {
                 return Ok(0);
             }
-            let inner = std::mem::replace(rest, std::io::BufReader::new(Box::new(&[][..])));
+            let inner = mem::replace(rest, BufReader::new(Box::new(&[][..])));
             self.at = flate2::bufread::GzDecoder::new(inner);
         }
     }
@@ -683,7 +687,7 @@ pub fn decompress_reader(read: Box<dyn Read>) -> Result<Box<dyn Read>> {
             match read.read(&mut head[n..]) {
                 Ok(0) => break,
                 Ok(k) => n += k,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(Error::io("cannot read the archive", e)),
             }
         }
@@ -696,7 +700,7 @@ pub fn decompress_reader(read: Box<dyn Read>) -> Result<Box<dyn Read>> {
         read = match kind {
             Compression::None => return Ok(src),
             Compression::Gzip => Box::new(MultiGz {
-                at: flate2::bufread::GzDecoder::new(std::io::BufReader::new(src)),
+                at: flate2::bufread::GzDecoder::new(BufReader::new(src)),
             }),
             Compression::Xz => Box::new(lzma_rust2::XzReader::new(src, true)),
             Compression::Zstd => Box::new(
@@ -715,7 +719,7 @@ pub fn decompress_reader(read: Box<dyn Read>) -> Result<Box<dyn Read>> {
 /// `bytes` with the compression it announces undone.
 pub fn decompress(bytes: Vec<u8>) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    decompress_reader(Box::new(std::io::Cursor::new(bytes)))?
+    decompress_reader(Box::new(Cursor::new(bytes)))?
         .read_to_end(&mut out)
         .map_err(|e| Error::io("cannot decompress the stream", e))?;
     Ok(out)
@@ -724,6 +728,11 @@ pub fn decompress(bytes: Vec<u8>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver};
+    use std::{env, fs};
 
     #[test]
     fn urls_split() {
@@ -846,12 +855,12 @@ mod tests {
     /// answers each; the lowercased request heads come out of the receiver.
     fn serve(
         n: usize,
-        reply: impl Fn(&str, &mut std::net::TcpStream) + Send + 'static,
-    ) -> (u16, std::sync::mpsc::Receiver<String>) {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        reply: impl Fn(&str, &mut TcpStream) + Send + 'static,
+    ) -> (u16, Receiver<String>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
             for c in l.incoming().take(n) {
                 let mut c = c.unwrap();
                 let mut head = Vec::new();
@@ -867,7 +876,7 @@ mod tests {
         (port, rx)
     }
 
-    fn respond(c: &mut std::net::TcpStream, status: &str, extra: &str, body: &[u8]) {
+    fn respond(c: &mut TcpStream, status: &str, extra: &str, body: &[u8]) {
         let len = body.len();
         let head = format!("HTTP/1.1 {status}\r\n{extra}content-length: {len}\r\n\r\n");
         let _ = c.write_all(head.as_bytes());
@@ -942,7 +951,7 @@ mod tests {
         // loaded machine and a short hold lets the server's close win the race
         let (port, _) = serve(1, |_, c| {
             let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nhalf");
-            std::thread::sleep(Duration::from_secs(3600));
+            thread::sleep(Duration::from_secs(3600));
         });
         let l = Limits {
             stall: Some(Duration::from_secs(1)),
@@ -954,8 +963,8 @@ mod tests {
     }
 
     fn file_url(name: &str, bytes: &[u8]) -> String {
-        let f = std::env::temp_dir().join(format!("iets-http-{}-{name}", std::process::id()));
-        std::fs::write(&f, bytes).unwrap();
+        let f = env::temp_dir().join(format!("iets-http-{}-{name}", std::process::id()));
+        fs::write(&f, bytes).unwrap();
         format!("file://{}", f.display())
     }
 
@@ -1010,9 +1019,9 @@ mod tests {
     /// filetransfer.cc retries a 5xx and gives up on a 404.
     #[test]
     fn a_transient_status_is_retried() {
-        let n = std::sync::atomic::AtomicUsize::new(0);
+        let n = AtomicUsize::new(0);
         let (port, _) = serve(3, move |_, c| {
-            let i = n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let i = n.fetch_add(1, Ordering::Relaxed);
             if i < 2 {
                 respond(c, "503 Service Unavailable", "", b"");
             } else {
@@ -1035,7 +1044,7 @@ mod tests {
     fn a_decompression_bomb_is_refused() {
         let bomb = zstd::encode_all(&vec![0u8; 64 << 20][..], 19).unwrap();
         let url = file_url("bomb.zst", &bomb);
-        let e = get_decompressed(&url, &[], limits(), &mut std::io::sink()).unwrap_err();
+        let e = get_decompressed(&url, &[], limits(), &mut io::sink()).unwrap_err();
         assert!(e.to_string().contains("times its size"), "{e}");
     }
 }

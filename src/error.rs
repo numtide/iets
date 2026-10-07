@@ -1,8 +1,14 @@
 //! The one error type for everything outside the evaluator. `src/eval/error.rs`
 //! keeps its own: eval errors carry a source position and a trace.
 
-use std::fmt;
-use std::io;
+use std::error::Error as StdError;
+use std::{fmt, io, result};
+
+use crate::eval::error;
+use crate::log;
+use crate::store::drv::DrvError;
+use crate::store::hash::HashError;
+use crate::store::path::StorePathError;
 
 #[derive(Debug)]
 pub enum Error {
@@ -21,7 +27,7 @@ pub enum Error {
     /// Something Nix does that iets does not, such as a flake registry
     /// lookup: classic mode falls back on it (`ErrorKind::Unsupported`).
     Unsupported(String),
-    Eval(Box<crate::eval::error::Error>),
+    Eval(Box<error::Error>),
     /// Bad command-line input.
     Usage(String),
     /// nix.conf: a syntax error, a missing include, or a bad setting value.
@@ -30,7 +36,7 @@ pub enum Error {
     Hint(Box<Error>, String),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = result::Result<T, Error>;
 
 /// `strerror` text without Rust's " (os error N)" suffix, as Nix shows it.
 pub fn io_text(e: &io::Error) -> String {
@@ -66,15 +72,15 @@ impl Error {
         }
     }
 
-    pub fn to_report(&self) -> crate::log::Report {
+    pub fn to_report(&self) -> log::Report {
         let hint = match self {
             Error::Eval(e) => e.hint.clone(),
             Error::Hint(_, h) => Some(h.clone()),
             _ => None,
         };
-        crate::log::Report {
+        log::Report {
             hint,
-            ..crate::log::Report::new(self.code(), self.to_string())
+            ..log::Report::new(self.code(), self.to_string())
         }
     }
 
@@ -103,8 +109,8 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Error::Io { source, .. } => Some(source),
             _ => None,
@@ -121,26 +127,26 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<Box<crate::eval::error::Error>> for Error {
-    fn from(e: Box<crate::eval::error::Error>) -> Error {
+impl From<Box<error::Error>> for Error {
+    fn from(e: Box<error::Error>) -> Error {
         Error::Eval(e)
     }
 }
 
-impl From<crate::store::path::StorePathError> for Error {
-    fn from(e: crate::store::path::StorePathError) -> Error {
+impl From<StorePathError> for Error {
+    fn from(e: StorePathError) -> Error {
         Error::Store(e.0)
     }
 }
 
-impl From<crate::store::drv::DrvError> for Error {
-    fn from(e: crate::store::drv::DrvError) -> Error {
+impl From<DrvError> for Error {
+    fn from(e: DrvError) -> Error {
         Error::Store(e.0)
     }
 }
 
-impl From<crate::store::hash::HashError> for Error {
-    fn from(e: crate::store::hash::HashError) -> Error {
+impl From<HashError> for Error {
+    fn from(e: HashError) -> Error {
         Error::Store(e.0)
     }
 }

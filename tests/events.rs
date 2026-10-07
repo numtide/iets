@@ -2,6 +2,7 @@
 //! and silence when nobody asked for it.
 
 use std::process::{Command, Output};
+use std::{env, fs};
 
 /// `groups` is `IETS_EVENTS`; the sink stays stderr, which is its default.
 fn eval(expr: &str, groups: Option<&str>) -> Output {
@@ -76,8 +77,8 @@ fn a_group_that_does_not_exist_is_a_settings_error() {
 
 #[test]
 fn the_sink_is_its_own_knob() {
-    let dir = std::env::temp_dir().join(format!("iets-events-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dir = env::temp_dir().join(format!("iets-events-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("e.jsonl");
     let o = Command::new(env!("CARGO_BIN_EXE_iets"))
         .args(["eval", "--no-cache", "--raw", "-E", TO_FILE])
@@ -92,7 +93,7 @@ fn the_sink_is_its_own_knob() {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    let written = std::fs::read_to_string(&file).expect("the events file");
+    let written = fs::read_to_string(&file).expect("the events file");
     assert!(written.contains(r#""event":"store-add""#), "{written}");
-    std::fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&dir).ok();
 }

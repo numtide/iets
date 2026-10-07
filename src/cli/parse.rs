@@ -1,8 +1,13 @@
 //! `iets parse`: the parser run over whole trees.
 
+use crate::cli::{help, render};
 use crate::syntax::ast::FileId;
 use crate::syntax::symbol::Interner;
 use crate::syntax::{dump, line_col, parse};
+use crate::{error, log};
+
+use std::time::Instant;
+use std::{fs, io};
 
 /// What `iets parse` prints for a file that parses.
 #[derive(Clone, Copy, PartialEq)]
@@ -28,19 +33,19 @@ pub fn main(argv: &[String]) -> i32 {
             "--json" => form = Form::Json,
             "--log-format" => {
                 i += 1;
-                let f = crate::cli::help::value(argv, i, s);
-                if let Err(m) = crate::log::set_format(f) {
-                    crate::cli::help::arg_error(m)
+                let f = help::value(argv, i, s);
+                if let Err(m) = log::set_format(f) {
+                    help::arg_error(m)
                 }
             }
-            _ if s.starts_with('-') && s != "-" => crate::cli::help::unknown_flag(s),
+            _ if s.starts_with('-') && s != "-" => help::unknown_flag(s),
             _ => names.push(s.to_string()),
         }
         i += 1;
     }
     let files: Vec<String> = match names.as_slice() {
-        [] => crate::cli::help::arg_error("parse needs FILE... or - to read them from stdin"),
-        [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())
+        [] => help::arg_error("parse needs FILE... or - to read them from stdin"),
+        [dash] if dash == "-" => io::read_to_string(io::stdin())
             .unwrap_or_default()
             .lines()
             .map(str::to_owned)
@@ -56,12 +61,12 @@ pub fn cmd_parse(files: &[String], form: Form) -> i32 {
     let mut interner = Interner::new();
     let mut errors = 0usize;
     let mut bytes = 0usize;
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     for (i, file) in files.iter().enumerate() {
-        let src = match std::fs::read(file) {
+        let src = match fs::read(file) {
             Ok(s) => s,
             Err(e) => {
-                crate::error::Error::io(format!("cannot read {file}"), e).report();
+                error::Error::io(format!("cannot read {file}"), e).report();
                 errors += 1;
                 continue;
             }
@@ -69,21 +74,21 @@ pub fn cmd_parse(files: &[String], form: Form) -> i32 {
         bytes += src.len();
         match parse(&src, FileId(i as u32), &mut interner) {
             Ok(ast) => match form {
-                Form::Text => crate::cli::render::bytes(
-                    format!("{}\n", dump::dump(&ast, &interner)).as_bytes(),
-                ),
+                Form::Text => {
+                    render::bytes(format!("{}\n", dump::dump(&ast, &interner)).as_bytes())
+                }
                 Form::Json => {
                     let mut line = format!("{{\"file\":{},\"root\":", serde_json::json!(file));
                     dump::json(&dump::tree(&ast, &interner), &mut line);
-                    crate::cli::render::bytes(format!("{line}}}\n").as_bytes());
+                    render::bytes(format!("{line}}}\n").as_bytes());
                 }
                 Form::Quiet => {}
             },
             Err(e) => {
                 let (line, col) = line_col(&src, e.span.start);
-                crate::log::Report {
+                log::Report {
                     pos: Some(format!("{file}:{line}:{col}")),
-                    ..crate::log::Report::new("parse", e.msg)
+                    ..log::Report::new("parse", e.msg)
                 }
                 .emit();
                 errors += 1;

@@ -7,15 +7,23 @@
 //! The state is a [`Log`], which a [`crate::session::Session`] owns: the
 //! functions here act on the one this thread entered.
 
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::{self, SystemTime};
+use std::{env, mem, process};
 
 use serde_json::{Value, json};
 
+use crate::cli::help;
+use crate::eval::{Error, Pos};
+use crate::progress::{Board, Mode};
 use crate::session::Session;
-use std::os::unix::fs::FileTypeExt;
-use std::os::unix::fs::OpenOptionsExt;
+use crate::{config, error};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 
 /// Where one session's messages go and what it saw on the way.
 #[derive(Default)]
@@ -36,7 +44,7 @@ pub struct Log {
     /// Where messages go. `None` writes nowhere: a library says nothing
     /// unless the host asked for it. `iets` points it at stderr.
     err: Mutex<Out>,
-    pub progress: crate::progress::Board,
+    pub progress: Board,
 }
 
 #[derive(Default)]
@@ -84,7 +92,7 @@ impl Out {
 /// `line` cut to the terminal's width: a status line that wraps cannot be
 /// taken down with one carriage return.
 fn fit(line: &str) -> String {
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let mut ws: libc::winsize = unsafe { mem::zeroed() };
     let cols = match unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut ws) } {
         0 if ws.ws_col > 1 => usize::from(ws.ws_col),
         _ => 80,
@@ -98,7 +106,7 @@ impl Log {
         self.writer().w = Some(w);
     }
 
-    fn writer(&self) -> std::sync::MutexGuard<'_, Out> {
+    fn writer(&self) -> MutexGuard<'_, Out> {
         self.err.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -115,7 +123,7 @@ impl Log {
     /// What `iets` itself does, and what a host that wants Nix's own
     /// behaviour does.
     pub fn write_to_stderr(&self) {
-        self.write_to(Box::new(std::io::stderr()));
+        self.write_to(Box::new(io::stderr()));
     }
 
     /// `bytes` as they are, for output a caller already formatted.
@@ -144,12 +152,12 @@ impl Default for SessionOut {
 }
 
 impl Write for SessionOut {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.log.err(bytes);
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -161,11 +169,11 @@ pub fn set_format(f: &str) -> Result<(), String> {
     match f {
         "raw" | "raw-with-logs" => {
             s.log.json.store(false, Ordering::Relaxed);
-            s.log.progress.set_mode(crate::progress::Mode::Lines);
+            s.log.progress.set_mode(Mode::Lines);
         }
         "bar" | "bar-with-logs" => {
             s.log.json.store(false, Ordering::Relaxed);
-            s.log.progress.set_mode(crate::progress::Mode::Bar);
+            s.log.progress.set_mode(Mode::Bar);
         }
         "internal-json" => s.log.json.store(true, Ordering::Relaxed),
         _ => return Err(format!("option 'log-format' has an invalid value '{f}'")),
@@ -212,18 +220,18 @@ pub fn session_id() -> String {
 impl Log {
     fn sid(&self) -> &str {
         self.sid.get_or_init(|| {
-            std::env::var("IETS_SESSION_ID")
+            env::var("IETS_SESSION_ID")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| uuid_v7(std::time::SystemTime::now()))
+                .unwrap_or_else(|| uuid_v7(SystemTime::now()))
         })
     }
 }
 
 /// RFC 9562 version 7: 48 bits of Unix milliseconds, then random bits.
-fn uuid_v7(now: std::time::SystemTime) -> String {
+fn uuid_v7(now: SystemTime) -> String {
     let ms = now
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
     let mut b = [0u8; 16];
     b[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
@@ -266,13 +274,13 @@ impl Log {
         self.sink
             .get_or_init(|| {
                 let path = self.json_log_path.get().cloned().or_else(|| {
-                    let c = crate::config::Config::read(&[]).ok()?;
+                    let c = config::Config::read(&[]).ok()?;
                     c.str("json-log-path").map(str::to_string)
                 })?;
-                match open_sink(std::path::Path::new(&path)) {
+                match open_sink(Path::new(&path)) {
                     Ok(w) => Some(Mutex::new(w)),
                     Err(e) => {
-                        let e = crate::error::io_text(&e);
+                        let e = error::io_text(&e);
                         self.errln(&format!(
                             "error (ignored): opening log file \"{path}\": {e}"
                         ));
@@ -284,11 +292,11 @@ impl Log {
     }
 }
 
-pub(crate) fn open_sink(path: &std::path::Path) -> std::io::Result<Box<dyn Write + Send>> {
-    if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
-        return Ok(Box::new(std::os::unix::net::UnixStream::connect(path)?));
+pub(crate) fn open_sink(path: &Path) -> io::Result<Box<dyn Write + Send>> {
+    if fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+        return Ok(Box::new(UnixStream::connect(path)?));
     }
-    let f = std::fs::OpenOptions::new()
+    let f = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o644)
@@ -343,25 +351,25 @@ fn records(s: &Session) -> bool {
 
 /// Not under internal-json: its records carry the progress.
 fn drawn(s: &Session) -> bool {
-    s.log.progress.mode() != crate::progress::Mode::Off && !s.log.json.load(Ordering::Relaxed)
+    s.log.progress.mode() != Mode::Off && !s.log.json.load(Ordering::Relaxed)
 }
 
 /// loggers.cc:makeDefaultLogger, unless `--log-format` chose.
 pub fn show_progress() {
     let s = cur();
-    if s.log.progress.mode() != crate::progress::Mode::Off {
+    if s.log.progress.mode() != Mode::Off {
         return;
     }
-    let tty = stderr_is_tty() && std::env::var("TERM").is_ok_and(|t| t != "dumb");
+    let tty = stderr_is_tty() && env::var("TERM").is_ok_and(|t| t != "dumb");
     s.log.progress.set_mode(match tty {
-        true => crate::progress::Mode::Bar,
-        false => crate::progress::Mode::Lines,
+        true => Mode::Bar,
+        false => Mode::Lines,
     });
 }
 
 /// logging.cc:Activity: the pid in the high half, a counter below.
 pub fn activity_id() -> u64 {
-    cur().log.next_activity.fetch_add(1, Ordering::Relaxed) + (u64::from(std::process::id()) << 32)
+    cur().log.next_activity.fetch_add(1, Ordering::Relaxed) + (u64::from(process::id()) << 32)
 }
 
 fn fields(mut v: Value, f: Vec<Value>) -> Value {
@@ -601,12 +609,12 @@ impl Report {
     /// An evaluation error; `at` names a position, `msg` is the message
     /// and `rewrite` maps a trace message as the caller maps `msg`.
     pub fn eval(
-        e: &crate::eval::Error,
+        e: &Error,
         msg: &str,
-        at: &dyn Fn(crate::eval::Pos) -> String,
+        at: &dyn Fn(Pos) -> String,
         rewrite: &dyn Fn(&str) -> String,
     ) -> Report {
-        let at = |p: crate::eval::Pos| (!p.is_none()).then(|| at(p));
+        let at = |p: Pos| (!p.is_none()).then(|| at(p));
         Report {
             pos: at(e.pos),
             trace: e.trace.iter().map(|(p, m)| (rewrite(m), at(*p))).collect(),
@@ -671,7 +679,7 @@ impl Report {
     pub fn emit(&self) -> i32 {
         let text = self.text();
         out(&self.record(&text), Some(&text));
-        if self.code == "usage" && crate::cli::help::command().is_some() {
+        if self.code == "usage" && help::command().is_some() {
             2
         } else {
             1
@@ -779,7 +787,7 @@ fn push_mismatch(log: &Log, m: (String, String)) {
 /// Returns how many were kept.
 pub fn resolve_mismatches(planned: &dyn Fn(&str) -> bool) -> usize {
     let log = &cur().log;
-    let candidates = std::mem::take(&mut *log.pending.lock().unwrap_or_else(|e| e.into_inner()));
+    let candidates = mem::take(&mut *log.pending.lock().unwrap_or_else(|e| e.into_inner()));
     let mut kept = 0;
     let mut v = log.mismatches.lock().unwrap_or_else(|e| e.into_inner());
     for m in candidates {
@@ -796,7 +804,7 @@ pub fn resolve_mismatches(planned: &dyn Fn(&str) -> bool) -> usize {
 /// The `(specified, got)` pairs of the hash mismatches reported since the
 /// last call.
 pub fn take_mismatches() -> Vec<(String, String)> {
-    std::mem::take(
+    mem::take(
         &mut cur()
             .log
             .mismatches
@@ -1018,6 +1026,8 @@ pub fn filter_ansi(s: &str, filter_all: bool) -> String {
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
     #[test]
     fn ansi_stripping() {
         assert_eq!(strip_ansi("\x1b[1;32mgreen\x1b[0m"), "green");
@@ -1051,7 +1061,7 @@ mod tests {
 
     #[test]
     fn a_session_id_is_a_uuid_v7() {
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(0x019e_037b_f603);
+        let t = time::UNIX_EPOCH + Duration::from_millis(0x019e_037b_f603);
         let (a, b) = (uuid_v7(t), uuid_v7(t));
         assert!(a.starts_with("019e037b-f603-7"), "{a}");
         assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"), "{a}");

@@ -13,16 +13,24 @@ pub mod run;
 pub mod value;
 pub mod watch;
 
-use crate::eval::{Error, EvalConfig, Evaluator, Pos};
-use crate::provenance::describe_pos;
-use crate::provenance::rewrite_msg;
+use crate::builtins::text;
+use crate::compile::cache::IrCache;
+use crate::eval::{self, Error, ErrorKind, EvalConfig, Evaluator, Pos};
+use crate::flake::{eval_flake, eval_flake_value, parse_flake_ref};
+use crate::lint::{self, Level, Scope};
+use crate::provenance::{describe_pos, rewrite_msg};
 use crate::runtime::Word;
+use crate::session::Session;
 use crate::store::path::StorePath;
-use crate::trace::key::Key;
-use crate::trace::key::has_relative_path;
+use crate::trace::key::{Key, has_relative_path};
 use crate::trace::run::Cache;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::ffi::OsStringExt;
+use crate::{argv, compile, error, log, parallel, project};
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::{env, fs};
 
 /// Everything one evaluation needs. `EvalArgs::new()` holds the defaults;
 /// `crate::cli::parse_eval_args` fills it from a command line.
@@ -37,11 +45,11 @@ pub struct EvalArgs {
     pub attr: Option<String>,
     /// `--lint SELECTOR=LEVEL` in order; applied after `iets.toml` and
     /// `IETS_LINT` (docs/reference/lints.md).
-    pub lints: Vec<(String, crate::lint::Level)>,
+    pub lints: Vec<(String, Level)>,
     /// `--lint-root DIR`: lint roots after the entry directory.
     pub lint_roots: Vec<String>,
     /// `--lint-scope root|all`; `None` keeps `iets.toml`'s or the default.
-    pub lint_scope: Option<crate::lint::Scope>,
+    pub lint_scope: Option<Scope>,
     pub xp_features: Vec<String>,
     pub workers: usize,
     pub timings: bool,
@@ -63,7 +71,7 @@ pub struct EvalArgs {
 
 impl Default for EvalArgs {
     fn default() -> EvalArgs {
-        let cache = crate::session::Session::current().settings().cache;
+        let cache = Session::current().settings().cache;
         EvalArgs {
             strict: false,
             json: false,
@@ -77,7 +85,7 @@ impl Default for EvalArgs {
             lint_roots: Vec::new(),
             lint_scope: None,
             xp_features: Vec::new(),
-            workers: crate::parallel::default_workers(),
+            workers: parallel::default_workers(),
             timings: false,
             no_tracing_cache: !cache,
             no_ir_cache: !cache,
@@ -102,7 +110,7 @@ impl EvalArgs {
             .iter()
             .any(|f| f == "parse-toml-timestamps")
         {
-            crate::builtins::text::set_parse_toml_timestamps(true);
+            text::set_parse_toml_timestamps(true);
         }
         let c = base
             .lints(lint_config(self)?)
@@ -111,9 +119,9 @@ impl EvalArgs {
         let Some(dir) = &self.dump_drvs else {
             return Ok(c);
         };
-        std::fs::create_dir_all(dir).map_err(|e| {
+        fs::create_dir_all(dir).map_err(|e| {
             Error::boxed(
-                crate::eval::ErrorKind::Io,
+                ErrorKind::Io,
                 format!("cannot create '{dir}': {e}"),
                 Pos::NONE,
             )
@@ -123,12 +131,11 @@ impl EvalArgs {
 
     /// The compiled-file cache of `--no-ir-cache` and `--cache-dir`
     /// (docs/explanation/caching.md).
-    pub fn ir_cache(&self) -> Option<std::sync::Arc<crate::compile::cache::IrCache>> {
+    pub fn ir_cache(&self) -> Option<Arc<IrCache>> {
         if self.no_ir_cache {
             return None;
         }
-        crate::compile::cache::IrCache::locate(self.cache_dir.as_deref(), self.timings)
-            .map(std::sync::Arc::new)
+        IrCache::locate(self.cache_dir.as_deref(), self.timings).map(Arc::new)
     }
 }
 
@@ -149,33 +156,33 @@ pub enum Input {
 /// A `-I prefix=path` (or `-I path`) entry as an absolute pair.
 pub fn parse_include(s: &str) -> (Vec<u8>, Vec<u8>) {
     let (prefix, path) = s.split_once('=').unwrap_or(("", s));
-    (crate::argv::bytes(prefix), abs_path(path, &cwd()))
+    (argv::bytes(prefix), abs_path(path, &cwd()))
 }
 
 fn home() -> Option<Vec<u8>> {
-    std::env::var_os("HOME").map(|h| h.into_encoded_bytes())
+    env::var_os("HOME").map(|h| h.into_encoded_bytes())
 }
 
-pub fn flake_ref(f: &str, cwd: &[u8]) -> crate::error::Result<flake::FlakeRef> {
-    crate::flake::parse_flake_ref(f, cwd, home().as_deref())
+pub fn flake_ref(f: &str, cwd: &[u8]) -> error::Result<flake::FlakeRef> {
+    parse_flake_ref(f, cwd, home().as_deref())
 }
 
 /// An evaluation error as a value a host can render itself. Positions and
 /// the store paths inside the messages name the local file the source was
 /// copied from, when one is known (docs/explanation/provenance.md).
-pub fn report_of(ev: &Evaluator, e: &Error) -> crate::log::Report {
+pub fn report_of(ev: &Evaluator, e: &Error) -> log::Report {
     let at = |pos: Pos| describe_pos(ev, pos).unwrap_or_else(|| ev.describe_pos(pos));
     ev.lints.flush();
     // a lint message resolves its own paths (lint::Evaluator::lint_shown_path)
-    let msg = if e.kind == crate::eval::ErrorKind::Lint {
+    let msg = if e.kind == ErrorKind::Lint {
         e.msg.clone()
     } else {
         rewrite_msg(ev, &e.msg)
     };
     // "iets: " marks what classic mode falls back on; here it only doubles "error: "
     let msg = msg.strip_prefix("iets: ").unwrap_or(&msg);
-    let mut r = crate::log::Report::eval(e, msg, &at, &|m| rewrite_msg(ev, m));
-    if e.kind == crate::eval::ErrorKind::Lint {
+    let mut r = log::Report::eval(e, msg, &at, &|m| rewrite_msg(ev, m));
+    if e.kind == ErrorKind::Lint {
         r.site = ev.lint_site_of_error(e);
     }
     r
@@ -188,17 +195,17 @@ pub fn report(ev: &Evaluator, e: &Error) -> i32 {
 
 /// The directory the `iets.toml` walk starts from: the entry file's
 /// directory, the flake directory, or cwd for an expression.
-pub fn entry_dir(a: &EvalArgs) -> std::path::PathBuf {
+pub fn entry_dir(a: &EvalArgs) -> PathBuf {
     let cwd = cwd();
     let bytes = match &a.input {
-        Some(Input::File(f)) => crate::eval::dir_of(&abs_path(f, &cwd)).to_vec(),
+        Some(Input::File(f)) => eval::dir_of(&abs_path(f, &cwd)).to_vec(),
         Some(Input::Flake(f)) => match flake_ref(f, &cwd) {
             Ok(fr) => return fr.dir,
             Err(_) => cwd,
         },
         _ => cwd,
     };
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
+    PathBuf::from(OsStr::from_bytes(&bytes))
 }
 
 /// The project this run's sources belong to: the root at or above
@@ -216,16 +223,16 @@ pub fn project_root(a: &EvalArgs) -> Option<Vec<u8>> {
         return None;
     }
     let dir = entry_dir(a);
-    let root = crate::project::find(&dir).unwrap_or(dir);
+    let root = project::find(&dir).unwrap_or(dir);
     Some(root.into_os_string().into_vec())
 }
 
 /// The lint configuration of a run (docs/reference/lints.md).
-pub fn lint_config(a: &EvalArgs) -> Result<crate::lint::Config, Box<Error>> {
+pub fn lint_config(a: &EvalArgs) -> Result<lint::Config, Box<Error>> {
     let cwd = cwd();
     let roots: Vec<Vec<u8>> = a.lint_roots.iter().map(|r| abs_path(r, &cwd)).collect();
-    crate::lint::Config::resolve(Some(&entry_dir(a)), &a.lints, &roots, a.lint_scope)
-        .map_err(|m| Error::boxed(crate::eval::ErrorKind::Eval, m, Pos::NONE))
+    lint::Config::resolve(Some(&entry_dir(a)), &a.lints, &roots, a.lint_scope)
+        .map_err(|m| Error::boxed(ErrorKind::Eval, m, Pos::NONE))
 }
 
 /// Evaluates the input, `--arg`s and `-A` included. The settings of `a` are
@@ -239,8 +246,8 @@ pub fn evaluate(ev: &mut Evaluator, a: EvalArgs) -> Result<Word, Box<Error>> {
         Some(Input::Flake(f)) => {
             let mut fr = flake_ref(&f, &cwd).map_err(|m| {
                 let kind = match m {
-                    crate::error::Error::Unsupported(_) => crate::eval::ErrorKind::Unsupported,
-                    _ => crate::eval::ErrorKind::Eval,
+                    error::Error::Unsupported(_) => ErrorKind::Unsupported,
+                    _ => ErrorKind::Eval,
                 };
                 Error::boxed(kind, m.to_string(), Pos::NONE)
             })?;
@@ -249,14 +256,14 @@ pub fn evaluate(ev: &mut Evaluator, a: EvalArgs) -> Result<Word, Box<Error>> {
                 .as_deref()
                 .map(|p| abs_pathbuf(p, &cwd));
             if a.flake_whole && fr.attr.is_empty() {
-                crate::flake::eval_flake_value(ev, &fr)?
+                eval_flake_value(ev, &fr)?
             } else {
-                crate::flake::eval_flake(ev, &fr)?
+                eval_flake(ev, &fr)?
             }
         }
         None => {
             return Err(Error::boxed(
-                crate::eval::ErrorKind::Eval,
+                ErrorKind::Eval,
                 "nothing to evaluate: no expression, file or flake",
                 Pos::NONE,
             ));
@@ -282,19 +289,18 @@ pub fn auto_args(
     let mut entries = Vec::new();
     // common-eval-args.cc keeps autoArgs in a map and insert_or_assign's into
     // it, so the last `--arg`/`--argstr` of a name is the one that is used
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut last: Vec<&(String, ArgKind)> =
         args.iter().rev().filter(|(n, _)| seen.insert(n)).collect();
     last.reverse();
     for (name, kind) in last {
         let w = match kind {
             ArgKind::Expr(e) => {
-                let ir =
-                    ev.compile_source(b"\xc2\xabarg\xc2\xbb", crate::argv::bytes(e), cwd, None)?;
+                let ir = ev.compile_source(b"\xc2\xabarg\xc2\xbb", argv::bytes(e), cwd, None)?;
                 let root = ev.root_env;
                 ev.arena.mk_thunk(root, ir)
             }
-            ArgKind::Str(s) => ev.mk_string(&crate::argv::bytes(s)),
+            ArgKind::Str(s) => ev.mk_string(&argv::bytes(s)),
         };
         let sym = ev.sym(name.as_bytes());
         entries.push((sym, Pos::NONE, w));
@@ -303,38 +309,38 @@ pub fn auto_args(
 }
 
 pub fn cwd() -> Vec<u8> {
-    std::env::current_dir()
+    env::current_dir()
         .map(|p| p.into_os_string().into_encoded_bytes())
         .unwrap_or_else(|_| b"/".to_vec())
 }
 
 /// [`abs_path`] as a path.
-pub fn abs_pathbuf(f: &str, cwd: &[u8]) -> std::path::PathBuf {
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&abs_path(f, cwd)))
+pub fn abs_pathbuf(f: &str, cwd: &[u8]) -> PathBuf {
+    PathBuf::from(OsStr::from_bytes(&abs_path(f, cwd)))
 }
 
 /// `f` is in `crate::argv`'s encoding.
 pub fn abs_path(f: &str, cwd: &[u8]) -> Vec<u8> {
-    let p = crate::argv::bytes(f);
+    let p = argv::bytes(f);
     if p.starts_with(b"/") {
         return p;
     }
     let mut full = cwd.to_vec();
     full.push(b'/');
     full.extend_from_slice(&p);
-    crate::compile::canon_path(&full)
+    compile::canon_path(&full)
 }
 
 /// `-I` entries first, then `NIX_PATH`, then the `nix-path` setting of the
 /// nix.conf this run loaded, as absolute `(prefix, path)` pairs. Nix's channel
 /// defaults are not here.
 pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let session = crate::session::Session::current();
+    let session = Session::current();
     let (replaces, setting) = session
         .nix_conf
         .get()
         .map_or((false, Vec::new()), |c| c.nix_path());
-    let env = std::env::var("NIX_PATH").ok().filter(|_| !replaces);
+    let env = env::var("NIX_PATH").ok().filter(|_| !replaces);
     let env = env
         .iter()
         .flat_map(|np| np.split(':'))

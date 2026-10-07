@@ -3,6 +3,7 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::syntax;
 use crate::syntax::ast::{Expr, FileId, PathKind};
 use crate::syntax::symbol::Interner;
 
@@ -47,7 +48,7 @@ impl Key {
 /// then includes cwd, which is harmless).
 pub fn has_relative_path(src: &str) -> bool {
     let mut interner = Interner::new();
-    match crate::syntax::parse(src.as_bytes(), FileId(0), &mut interner) {
+    match syntax::parse(src.as_bytes(), FileId(0), &mut interner) {
         Ok(ast) => ast
             .exprs
             .iter()

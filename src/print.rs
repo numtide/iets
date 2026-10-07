@@ -2,8 +2,10 @@
 //! JSON (`printValueAsJSON`), and short forms for error messages.
 
 use std::collections::HashSet;
+use std::str;
 
-use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::parallel::{self, thunk};
 use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
 
 /// C's `%g` with precision 6, as `std::ostream << double` prints.
@@ -125,7 +127,7 @@ pub fn print_ambiguous(
     seen: &mut HashSet<u64>,
     depth: usize,
 ) -> EvalResult<()> {
-    if depth > crate::eval::MAX_CALL_DEPTH as usize {
+    if depth > eval::MAX_CALL_DEPTH as usize {
         return Err(Error::stack_overflow(Pos::NONE));
     }
     if w.is_thunk() {
@@ -133,7 +135,7 @@ pub fn print_ambiguous(
         if st.is_blackhole() {
             // only this fiber's own claim is the program's recursion; a
             // helper's claim is work the program never asked for
-            if crate::parallel::thunk::claimer(st) == ev.par.id {
+            if thunk::claimer(st) == ev.par.id {
                 out.extend_from_slice("«potential infinite recursion»".as_bytes());
             } else {
                 out.extend_from_slice(b"<CODE>");
@@ -289,7 +291,7 @@ pub fn ctx_display(c: &Ctx) -> String {
 }
 
 pub fn json_escape(out: &mut Vec<u8>, s: &[u8]) -> EvalResult<()> {
-    let st = std::str::from_utf8(s).map_err(|_| {
+    let st = str::from_utf8(s).map_err(|_| {
         Error::boxed(
             ErrorKind::Eval,
             "JSON serialization error: invalid UTF-8 byte in string",
@@ -401,7 +403,7 @@ fn print_json_inner(
                 return print_json(ev, o.cell.get(), out, ctx, strict, o.pos);
             }
             if strict {
-                crate::parallel::fanout_attrs_coerce(ev, a); // parallel
+                parallel::fanout_attrs_coerce(ev, a); // parallel
             }
             out.push(b'{');
             let mut first = true;
@@ -427,7 +429,7 @@ fn print_json_inner(
         }
         Value::List(l) => {
             if strict {
-                crate::parallel::fanout_list_coerce(ev, l); // parallel
+                parallel::fanout_list_coerce(ev, l); // parallel
             }
             out.push(b'[');
             for (i, c) in l.cells().iter().enumerate() {

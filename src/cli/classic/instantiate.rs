@@ -3,18 +3,24 @@
 //! the value with `--eval`.
 
 use std::collections::HashSet;
+use std::path::Path;
+use std::slice;
 use std::sync::Arc;
 
-use super::{Argv, Common, common_flag, fallback};
-use crate::api::build::{self as apibuild, Dispatch, Root};
-use crate::api::installable;
+use super::{
+    Argv, Common, common_flag, eval_config, eval_input, fallback, local, shell_settings,
+    store_given,
+};
+use crate::api::build::{Dispatch, Root};
+use crate::api::{build as apibuild, installable};
 use crate::build::render::Style;
-use crate::cli::{Outcome, abs_path, auto_args, cwd};
+use crate::cli::{self, Outcome, Run, abs_path, auto_args, cwd, render};
 use crate::eval::{Error, Evaluator, Pos};
 use crate::provenance::Provenance;
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
 use crate::runtime::Word;
+use crate::{error, log, print};
 
 const NAME: &str = "nix-instantiate";
 
@@ -106,18 +112,18 @@ pub fn main(argv: &[String]) -> i32 {
     };
     // `nix-instantiate` builds nothing: the drvs, their sources and the
     // `--add-root` links belong to the local store whatever `builder` says.
-    let (cfg, store, options) = match super::shell_settings(&i.c) {
+    let (cfg, store, options) = match shell_settings(&i.c) {
         Ok(t) => t,
         Err(reason) => fallback(NAME, argv, &reason),
     };
-    let transport = super::local();
-    if !i.readonly && super::store_given(&i.c) && store != transport {
+    let transport = local();
+    if !i.readonly && store_given(&i.c) && store != transport {
         fallback(NAME, argv, "'--store' is not the local daemon");
     }
-    let ec = super::eval_config(&i.c, &cfg);
+    let ec = eval_config(&i.c, &cfg);
     let i = Arc::new(i);
     let inst = Arc::clone(&i);
-    match crate::cli::run_reported(crate::cli::Run::on(ec), move |ev, _| run(ev, &inst)) {
+    match cli::run_reported(Run::on(ec), move |ev, _| run(ev, &inst)) {
         Outcome::Failed(code) => code,
         Outcome::Unsupported(reason) => fallback(NAME, argv, &reason),
         Outcome::Ok(Made::Values) => 0,
@@ -127,23 +133,23 @@ pub fn main(argv: &[String]) -> i32 {
     }
 }
 
-fn run(ev: &mut Evaluator, i: &Inst) -> crate::error::Result<Made> {
+fn run(ev: &mut Evaluator, i: &Inst) -> error::Result<Made> {
     let cwd = cwd();
     let mut roots: Vec<Root> = Vec::new();
     let args = auto_args(ev, &i.c.flags.args, &cwd)?;
     let has_args = !i.c.flags.args.is_empty();
     let mut warned = false;
     for file in &i.c.files {
-        let root = super::eval_input(ev, &i.c, file, &cwd)?;
+        let root = eval_input(ev, &i.c, file, &cwd)?;
         for attr in &i.c.flags.attrs {
-            let v = crate::api::installable::find_along_attr_path(ev, root, attr, args)?;
+            let v = installable::find_along_attr_path(ev, root, attr, args)?;
             if i.eval_only {
                 let v = if has_args { ev.auto_call(v, args)? } else { v };
                 // nix-instantiate.cc writes each value as it has it, so what
                 // ran before a failing expression is on stdout already
                 let mut text: Vec<u8> = Vec::new();
                 print_value(ev, v, i, &mut text)?;
-                crate::cli::render::bytes_lossy(&text);
+                render::bytes_lossy(&text);
             } else {
                 // nix-instantiate.cc: one `getDerivations` per attribute path,
                 // so two of them that name one derivation give two roots
@@ -151,7 +157,7 @@ fn run(ev: &mut Evaluator, i: &Inst) -> crate::error::Result<Made> {
                 installable::get_drvs_at(ev, v, args, &mut roots, &mut seen, attr)?;
                 if !warned && !roots.is_empty() && i.add_root.is_none() && i.gc_warning {
                     warned = true;
-                    crate::log::line(GC_WARNING);
+                    log::line(GC_WARNING);
                 }
             }
         }
@@ -183,7 +189,7 @@ fn print_value(ev: &mut Evaluator, v: Word, i: &Inst, out: &mut Vec<u8>) -> Resu
         }
         Output::Json => {
             let mut ctx = Vec::new();
-            crate::print::print_json(ev, v, out, &mut ctx, i.strict, Pos::NONE)?;
+            print::print_json(ev, v, out, &mut ctx, i.strict, Pos::NONE)?;
             out.push(b'\n');
         }
         Output::Plain => {
@@ -193,7 +199,7 @@ fn print_value(ev: &mut Evaluator, v: Word, i: &Inst, out: &mut Vec<u8>) -> Resu
                 ev.force(v)?
             };
             let mut seen = HashSet::new();
-            crate::print::print_ambiguous(ev, v, 1, out, &mut seen, 0)?;
+            print::print_ambiguous(ev, v, 1, out, &mut seen, 0)?;
             out.push(b'\n');
         }
     }
@@ -217,7 +223,7 @@ fn finish(
         };
         let r =
             Dispatch::open(transport, options, plan, Provenance::off(), style).and_then(|mut d| {
-                d.upload_only(std::slice::from_ref(&roots[0].drv))?;
+                d.upload_only(slice::from_ref(&roots[0].drv))?;
                 Ok(d)
             });
         match r {
@@ -236,9 +242,7 @@ fn finish(
                 if root_nr > 1 {
                     name.push_str(&format!("-{root_nr}"));
                 }
-                if let Err(e) =
-                    d.d.out_link(&r.drv.to_string(), std::path::Path::new(&name))
-                {
+                if let Err(e) = d.d.out_link(&r.drv.to_string(), Path::new(&name)) {
                     return e.report();
                 }
                 name
@@ -252,6 +256,6 @@ fn finish(
         }
         out.push('\n');
     }
-    crate::cli::render::bytes_lossy(out.as_bytes());
+    render::bytes_lossy(out.as_bytes());
     0
 }

@@ -7,12 +7,16 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str;
 
-use super::{Argv, Common, fallback};
-use crate::api::build::{Dispatch, Options, Plan, Root, Style, Transport};
+use super::{Argv, Common, eval_config, fallback, local, nix};
+use crate::api::build::{self, Dispatch, Options, Plan, Root, Style, Transport};
+use crate::api::flake::{self, FlakeRef};
 use crate::api::installable::{self, Prefixes, Want};
-use crate::cli::{EvalArgs, Input, Outcome, Run, cwd};
+use crate::cli::{self, EvalArgs, Input, Outcome, Run, cwd, devenv};
 use crate::eval::Evaluator;
+use crate::provenance::Provenance;
+use crate::{argv, cachefs, error, log};
 
 const NAME: &str = "nix";
 
@@ -32,7 +36,7 @@ struct Built {
 
 impl Built {
     fn decode(bytes: &[u8]) -> Option<Built> {
-        let text = std::str::from_utf8(bytes).ok()?;
+        let text = str::from_utf8(bytes).ok()?;
         let mut lines = text.lines();
         Some(Built {
             out_path: lines.next()?.to_string(),
@@ -57,7 +61,7 @@ fn parse(argv: &[String]) -> Result<Fmt, String> {
         if !dash_dash && s == "--" {
             dash_dash = true;
         } else if !dash_dash && s.starts_with('-') {
-            if !super::nix::global_flag(&mut f.c, &mut a, &s)? {
+            if !nix::global_flag(&mut f.c, &mut a, &s)? {
                 return Err(format!("'{s}' is not implemented"));
             }
         } else {
@@ -76,13 +80,13 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
     };
     // the builder builds it and the out-link brings the closure back, so the
     // formatter runs from the local store (docs/reference/classic.md)
-    let (cfg, transport, options) = match super::nix::nix_settings(&mut f.c, false, true) {
+    let (cfg, transport, options) = match nix::nix_settings(&mut f.c, false, true) {
         Ok(t) => t,
         Err(reason) => fallback(NAME, argv, &reason),
     };
     let cwd = cwd();
     // formatter.cc: the installable is always `.`, never an argument
-    let fr = match crate::cli::flake_ref(".", &cwd) {
+    let fr = match cli::flake_ref(".", &cwd) {
         Ok(fr) => fr,
         Err(e) => fallback(NAME, argv, &e.to_string()),
     };
@@ -94,7 +98,7 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
     a.attr = Some(attr.clone());
     a.includes = f.c.flags.includes.clone();
     a.pure = f.c.flags.pure;
-    let ec = super::eval_config(&f.c, &cfg);
+    let ec = eval_config(&f.c, &cfg);
     let run = Run::on(ec).cached(&a, "fmt");
 
     if let Some(hit) = run.hit_result().as_deref().and_then(Built::decode)
@@ -105,7 +109,7 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
     }
 
     let flake = fr.clone();
-    let r = match crate::cli::run_reported(run, move |ev, cache| {
+    let r = match cli::run_reported(run, move |ev, cache| {
         let r = resolve(ev, &flake, &attr)?;
         if let Some(c) = cache {
             c.write(ev, &remembered(&r.app), false);
@@ -132,7 +136,7 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
 /// flakes on one machine keep two roots. `None` when no home is known, which
 /// costs the root and nothing else.
 fn out_link(dir: &Path, attr: &str) -> Option<PathBuf> {
-    crate::cachefs::root_link(None, &[b"fmt", dir.as_os_str().as_bytes(), attr.as_bytes()])
+    cachefs::root_link(None, &[b"fmt", dir.as_os_str().as_bytes(), attr.as_bytes()])
 }
 
 /// A cache hit is usable while the program is still there. A cache directory
@@ -141,8 +145,7 @@ fn out_link(dir: &Path, attr: &str) -> Option<PathBuf> {
 /// the store directory: a planted entry can then point `nix fmt` at no file of
 /// its choosing. What the store holds under that name is the daemon's to say.
 fn usable(hit: &Built) -> bool {
-    crate::cachefs::program_of_output(&hit.out_path, &hit.program)
-        && Path::new(&hit.program).exists()
+    cachefs::program_of_output(&hit.out_path, &hit.program) && Path::new(&hit.program).exists()
 }
 
 /// Links `out_path` in the roots store and registers the link with the local
@@ -151,23 +154,22 @@ fn usable(hit: &Built) -> bool {
 /// daemon will not take one, the formatter still runs, so this warns.
 fn keep(link: Option<&Path>, out_path: &str) {
     let Some(l) = link else { return };
-    let done = link_dir(l)
-        .and_then(|()| crate::cli::devenv::ensure_gc_root(&super::local(), l, out_path, None));
+    let done = link_dir(l).and_then(|()| devenv::ensure_gc_root(&local(), l, out_path, None));
     match done {
-        Ok(()) => crate::cachefs::touch_link(l),
-        Err(e) => crate::log::line(&format!(
+        Ok(()) => cachefs::touch_link(l),
+        Err(e) => log::line(&format!(
             "warning: no GC root on the formatter ({}): {e}",
             l.display()
         )),
     }
 }
 
-fn link_dir(link: &Path) -> crate::error::Result<()> {
+fn link_dir(link: &Path) -> error::Result<()> {
     let Some(dir) = link.parent() else {
         return Ok(());
     };
-    crate::cachefs::create_dir(dir)
-        .map_err(|e| crate::error::Error::io(format!("cannot create {}", dir.display()), e))
+    cachefs::create_dir(dir)
+        .map_err(|e| error::Error::io(format!("cannot create {}", dir.display()), e))
 }
 
 /// What the evaluation produced: the app and the plan its derivation needs.
@@ -177,16 +179,12 @@ struct Resolved {
 }
 
 /// Evaluates `formatter.<system>` and turns it into an app and a build plan.
-fn resolve(
-    ev: &mut Evaluator,
-    fr: &crate::api::flake::FlakeRef,
-    attr: &str,
-) -> crate::error::Result<Resolved> {
-    let outputs = crate::api::flake::outputs(ev, fr)?;
+fn resolve(ev: &mut Evaluator, fr: &FlakeRef, attr: &str) -> error::Result<Resolved> {
+    let outputs = flake::outputs(ev, fr)?;
     let mut found = installable::from_outputs(
         ev,
         outputs,
-        &crate::api::flake::url(fr),
+        &flake::url(fr),
         Prefixes::Package,
         &format!(".{attr}"),
         Want::First,
@@ -196,7 +194,7 @@ fn resolve(
         drv: app.drv.clone(),
         output: app.output.clone(),
     }];
-    let plan = crate::api::build::plan(ev, &Root::paths(&roots))?;
+    let plan = build::plan(ev, &Root::paths(&roots))?;
     Ok(Resolved {
         app,
         plan: Box::new(plan),
@@ -211,7 +209,7 @@ fn realise(
     plan: Plan,
     transport: &Transport,
     options: &Options,
-) -> crate::error::Result<i32> {
+) -> error::Result<i32> {
     let roots = vec![Root {
         drv: app.drv.clone(),
         output: app.output.clone(),
@@ -220,13 +218,7 @@ fn realise(
         quiet: true,
         ..Style::detect()
     };
-    let mut d = Dispatch::open(
-        transport,
-        options,
-        plan,
-        crate::provenance::Provenance::off(),
-        style,
-    )?;
+    let mut d = Dispatch::open(transport, options, plan, Provenance::off(), style)?;
     d.realise(&roots, &|p| p.name().to_string())?;
     if d.d.exit != 0 {
         return Ok(1);
@@ -240,9 +232,9 @@ fn realise(
 fn exec(program: &str, args: &[String], flake_dir: &Path) -> i32 {
     let e = Command::new(program)
         .arg0(program)
-        .args(args.iter().map(|a| crate::argv::os(a)))
+        .args(args.iter().map(|a| argv::os(a)))
         .env("PRJ_ROOT", flake_dir)
         .exec();
-    crate::log::line(&format!("error: unable to execute '{program}': {e}"));
+    log::line(&format!("error: unable to execute '{program}': {e}"));
     1
 }

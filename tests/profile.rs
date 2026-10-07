@@ -2,6 +2,7 @@
 //! folded lines when it can.
 
 use std::process::{Command, Output};
+use std::{env, fs};
 
 fn eval(expr: &str, env: &[(&str, &str)]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_iets"));
@@ -19,8 +20,8 @@ fn eval(expr: &str, env: &[(&str, &str)]) -> Output {
 /// The folded lines of a `kind` profile of `expr`, and the run. `tag` keeps the
 /// files of concurrent tests apart.
 fn profile(tag: &str, kind: &str, expr: &str) -> (String, Output) {
-    let dir = std::env::temp_dir().join(format!("iets-profile-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dir = env::temp_dir().join(format!("iets-profile-{tag}-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp dir");
     let out = dir.join("p.folded");
     let o = eval(
         expr,
@@ -37,8 +38,8 @@ fn profile(tag: &str, kind: &str, expr: &str) -> (String, Output) {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    let folded = std::fs::read_to_string(&out).expect("the profile file");
-    let _ = std::fs::remove_dir_all(&dir);
+    let folded = fs::read_to_string(&out).expect("the profile file");
+    let _ = fs::remove_dir_all(&dir);
     (folded, o)
 }
 

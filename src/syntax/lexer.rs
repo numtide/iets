@@ -7,6 +7,8 @@
 use super::ParseError;
 use super::ast::Span;
 
+use std::mem;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {
     Id,
@@ -244,7 +246,7 @@ impl<'a> Lexer<'a> {
     /// comment's end (an own-line comment at the end of the file covers
     /// nothing).
     pub fn take_allows(&mut self) -> Vec<Allow> {
-        let raw = std::mem::take(&mut self.allows);
+        let raw = mem::take(&mut self.allows);
         raw.into_iter()
             .filter_map(|(start, end)| {
                 let text = Span {

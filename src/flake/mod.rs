@@ -9,12 +9,16 @@ pub mod fetch;
 pub mod flakeref;
 
 use std::path::{Path, PathBuf};
+use std::{fs, io, mem};
 
 use crate::builtins::store_hooks::locate;
+use crate::compile;
 use crate::error::{Error, Result};
 use crate::eval::{Error as EvalError, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::flake::fetch::fetch_tree;
 use crate::runtime::Word;
 use crate::source::{self, SourceRef, lock};
+use crate::store::path::StorePath;
 
 pub const CALL_FLAKE: &str = include_str!("call-flake.nix");
 pub const LOCK_ERROR: &str = "iets: flake.lock missing or incomplete, run nix flake lock";
@@ -105,7 +109,7 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
 /// The flake in directory `full`: a `path:` input, or unless `explicit_path`
 /// the input of the working tree holding it (`git+file:`).
 fn local_flake(full: &[u8], explicit_path: bool, attr: Vec<String>) -> Result<FlakeRef> {
-    let full = crate::compile::canon_path(full);
+    let full = compile::canon_path(full);
     let dir = PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&full));
     if !dir.is_dir() {
         return Err(Error::Flake(format!(
@@ -124,7 +128,7 @@ fn local_flake(full: &[u8], explicit_path: bool, attr: Vec<String>) -> Result<Fl
     } else {
         // git.cc opens the repository, which resolves the directory: a link to
         // a working tree is that tree, not a copy of the link object
-        let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let real = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         source::scm::detect(&real).map_or_else(
             || SourceRef::Path(dir.clone()),
             |(scm, root)| SourceRef::Tracked {
@@ -153,7 +157,7 @@ pub fn parse_attr_path(s: &str) -> Result<Vec<String>> {
     let mut it = s.chars();
     while let Some(c) = it.next() {
         match c {
-            '.' => res.push(std::mem::take(&mut cur)),
+            '.' => res.push(mem::take(&mut cur)),
             '"' => loop {
                 match it.next() {
                     None => {
@@ -174,9 +178,9 @@ pub fn parse_attr_path(s: &str) -> Result<Vec<String>> {
     Ok(res)
 }
 
-fn read_traced(ev: &Evaluator, p: &Path) -> std::io::Result<Vec<u8>> {
-    let meta = std::fs::metadata(p)?;
-    let bytes = std::fs::read(p)?;
+fn read_traced(ev: &Evaluator, p: &Path) -> io::Result<Vec<u8>> {
+    let meta = fs::metadata(p)?;
+    let bytes = fs::read(p)?;
     ev.trace().file(
         <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str()),
         &meta,
@@ -236,7 +240,7 @@ pub fn eval_flake_value(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
             .bytes
             .to_vec()
     };
-    if let Ok(sp) = crate::store::path::StorePath::parse(&String::from_utf8_lossy(&out_path)) {
+    if let Ok(sp) = StorePath::parse(&String::from_utf8_lossy(&out_path)) {
         ev.known.name_flake(&sp, lock.root.clone());
     }
     let mut flake_dir = out_path.clone();
@@ -262,9 +266,7 @@ pub fn eval_flake_value(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
     // one is there only with `fetch-tree` or `flakes` (`builtins::exposed`),
     // and `call-flake.nix` needs it either way
     let fetch_sym = ev.sym(b"fetchTree");
-    let fetch_tree = ev
-        .arena
-        .mk_primop("fetchTree", 1, crate::flake::fetch::fetch_tree, fetch_sym);
+    let fetch_tree = ev.arena.mk_primop("fetchTree", 1, fetch_tree, fetch_sym);
     ev.apply(call_flake, &[lock_str, overrides, fetch_tree], pos)
 }
 
@@ -418,6 +420,8 @@ fn check_declared_inputs(
 mod tests {
     use super::*;
 
+    use crate::store::nar::tests::fixture_tree;
+
     #[test]
     fn attr_paths() {
         assert_eq!(
@@ -434,10 +438,10 @@ mod tests {
 
     #[test]
     fn refs_resolve_against_cwd_and_home() {
-        let d = crate::store::nar::tests::fixture_tree("flakeref");
-        std::fs::write(d.join("flake.nix"), b"{ outputs = _: {}; }").unwrap();
-        std::fs::create_dir_all(d.join("sub")).unwrap();
-        std::fs::write(d.join("sub/flake.nix"), b"{ outputs = _: {}; }").unwrap();
+        let d = fixture_tree("flakeref");
+        fs::write(d.join("flake.nix"), b"{ outputs = _: {}; }").unwrap();
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("sub/flake.nix"), b"{ outputs = _: {}; }").unwrap();
         let cwd = d.as_os_str().as_encoded_bytes();
         let r = parse_flake_ref(".#a.b", cwd, None).unwrap();
         assert_eq!(r.dir, d);

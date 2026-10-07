@@ -2,27 +2,29 @@
 
 use std::process::exit;
 
-use crate::cli::help::{arg_error, value};
+use crate::cli::help::{self, arg_error, value};
 use crate::cli::{
-    EvalArgs, Input, abs_path, auto_args, cwd, evaluate, parse_eval_args, report, run_for,
+    self, EvalArgs, Input, abs_path, auto_args, cwd, evaluate, parse_eval_args, render, report,
+    run_for,
 };
-use crate::error::Error as CrateError;
+use crate::error::{self, Error as CrateError};
 use crate::eval::{Error, Evaluator, Pos};
-use crate::jobs::Line;
 use crate::jobs::cache::Resolver;
-use crate::jobs::collector::Out;
-use crate::jobs::collector::Sink;
-use crate::jobs::collector::run_collector;
-use crate::jobs::collector::run_worker;
-use crate::jobs::collector::write_out;
+use crate::jobs::collector::{Out, Sink, run_collector, run_worker, write_out};
 use crate::jobs::emit::Emitter;
-use crate::jobs::instantiate::Instantiator;
-use crate::jobs::instantiate::Store;
-use crate::remote::worker::Connection;
+use crate::jobs::instantiate::{self, Instantiator, Store};
+use crate::jobs::{self, Line, Opts};
+use crate::remote::worker::{Connection, Transport};
 use crate::runtime::Word;
-use std::sync::Arc;
-use std::sync::Mutex;
+use crate::session::{self, Session};
+use crate::{config, ignored, log};
+use std::fs;
+use std::io::{self, BufWriter};
+use std::path::PathBuf;
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
+use std::thread::Builder;
+use std::time::Instant;
 
 /// nix-eval-jobs's `MyArgs::DEFAULT_MAX_MEMORY_SIZE` (eval-args.hh:18): an
 /// arena without a GC cannot shed a walked subtree, so the default needs
@@ -31,9 +33,9 @@ const DEFAULT_MAX_MEMORY_MB: u64 = 4096;
 
 /// `iets eval-jobs`'s own flags; everything else goes to `parse_eval_args`.
 struct JobsArgs {
-    opts: crate::jobs::Opts,
+    opts: Opts,
     check_cache_status: bool,
-    gc_roots_dir: Option<std::path::PathBuf>,
+    gc_roots_dir: Option<PathBuf>,
     eval_store: String,
     apply: Option<String>,
     select: Option<String>,
@@ -51,7 +53,7 @@ struct JobsArgs {
 
 fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
     let mut j = JobsArgs {
-        opts: crate::jobs::Opts {
+        opts: Opts {
             force_recurse: false,
             meta: false,
             show_input_drvs: false,
@@ -112,7 +114,7 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             "--gc-roots-dir" => {
                 let d = arg(&mut i);
                 let cwd = cwd();
-                j.gc_roots_dir = Some(std::path::PathBuf::from(
+                j.gc_roots_dir = Some(PathBuf::from(
                     <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&abs_path(
                         &d, &cwd,
                     )),
@@ -128,7 +130,7 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             "--impure" => j.impure = true,
             "--worker" => j.worker = true,
             "--quiet" => j.quiet = true,
-            "--verbose" | "--debug" => crate::ignored::flag(s, crate::ignored::ONE_LOG_LEVEL),
+            "--verbose" | "--debug" => ignored::flag(s, ignored::ONE_LOG_LEVEL),
             "--override-input" | "--override-flake" => unsupported(
                 s,
                 "iets evaluates locked flakes only; an override makes the lock file incomplete",
@@ -137,14 +139,14 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             "--arg-from-file" => {
                 let name = arg(&mut i);
                 let path = arg(&mut i);
-                let contents = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                let contents = fs::read_to_string(&path).unwrap_or_else(|e| {
                     exit(CrateError::io(format!("cannot read '{path}'"), e).report())
                 });
                 rest.extend(["--argstr".to_string(), name, contents]);
             }
             "--arg-from-stdin" => {
                 let name = arg(&mut i);
-                let contents = std::io::read_to_string(std::io::stdin())
+                let contents = io::read_to_string(io::stdin())
                     .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
                 rest.extend(["--argstr".to_string(), name.clone(), contents.clone()]);
                 j.stdin_args.push((name, contents));
@@ -166,7 +168,7 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
 fn worker_argv(argv: &[String], j: &JobsArgs) -> Vec<String> {
     // `--iets-option` left `argv` before this command saw it, and a worker
     // reads its own settings, so the triples go back on here
-    let mut out: Vec<String> = crate::session::Session::current().settings().option_argv();
+    let mut out: Vec<String> = Session::current().settings().option_argv();
     let mut read = j.stdin_args.iter();
     let mut i = 0;
     while i < argv.len() {
@@ -184,7 +186,7 @@ fn worker_argv(argv: &[String], j: &JobsArgs) -> Vec<String> {
 }
 
 /// nix-eval-jobs.cc:validateIncompatibleFlags.
-fn check_jobs_args(j: &JobsArgs) -> crate::error::Result<crate::remote::worker::Transport> {
+fn check_jobs_args(j: &JobsArgs) -> error::Result<Transport> {
     if j.opts.chunk >= j.opts.chunks {
         return Err(CrateError::Usage("--chunk must be below --chunks".into()));
     }
@@ -206,7 +208,7 @@ fn check_jobs_args(j: &JobsArgs) -> crate::error::Result<crate::remote::worker::
             )));
         }
     }
-    crate::remote::worker::Transport::parse(&j.eval_store).ok_or_else(|| {
+    Transport::parse(&j.eval_store).ok_or_else(|| {
         CrateError::Usage(format!(
             "--eval-store '{}': eval-jobs needs a Nix daemon: daemon, unix:///path or ssh-ng://host",
             j.eval_store
@@ -221,7 +223,7 @@ fn check_jobs_args(j: &JobsArgs) -> crate::error::Result<crate::remote::worker::
 pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     let (j, rest) = parse_jobs_args(argv);
     if j.worker {
-        crate::ignored::hush();
+        ignored::hush();
     }
     let mut a = parse_eval_args(&rest);
     a.no_tracing_cache = true;
@@ -245,7 +247,7 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     } else if j.flake {
         a.pure = Some(true);
     } else if a.pure.is_none() {
-        a.pure = crate::config::Config::load(&[])
+        a.pure = config::Config::load(&[])
             .ok()
             .and_then(|c| c.bool("pure-eval").ok().flatten());
     }
@@ -253,7 +255,7 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
         Ok(t) => t,
         Err(e) => return e.report(),
     };
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     // the process model is this command's own: the collector evaluates
     // nothing itself, and a worker is one evaluator thread with no cache
     if !j.worker && j.max_memory > 0 {
@@ -264,9 +266,9 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     run.cfg = run.cfg.keep_site(j.opts.provenance);
     if j.worker {
         let run = run.workers(1);
-        return crate::cli::run_parallel(run, move |ev, _| jobs_worker(ev, a, &j, &transport));
+        return cli::run_parallel(run, move |ev, _| jobs_worker(ev, a, &j, &transport));
     }
-    crate::cli::run_parallel(run, move |ev, _| jobs_single(ev, a, &j, &transport, t0))
+    cli::run_parallel(run, move |ev, _| jobs_single(ev, a, &j, &transport, t0))
 }
 
 /// worker.cc:initializeRootValue: the root, auto-called with the
@@ -278,7 +280,7 @@ fn jobs_root(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs) -> Result<Word, Box<
         Some(e) => Some(ev.eval_string(e, &cwd)?),
         None => None,
     };
-    crate::jobs::configure(ev, j.opts, args, apply);
+    jobs::configure(ev, j.opts, args, apply);
     let root = evaluate(
         ev,
         EvalArgs {
@@ -300,14 +302,9 @@ fn jobs_root(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs) -> Result<Word, Box<
     Ok(v)
 }
 
-fn jobs_summary(
-    j: &JobsArgs,
-    stats: crate::jobs::Stats,
-    inst: Option<crate::jobs::instantiate::Stats>,
-    t0: std::time::Instant,
-) {
+fn jobs_summary(j: &JobsArgs, stats: jobs::Stats, inst: Option<instantiate::Stats>, t0: Instant) {
     // the real nix-eval-jobs says nothing, so the classic name says nothing
-    if j.quiet || crate::cli::help::command().is_none() {
+    if j.quiet || help::command().is_none() {
         return;
     }
     let mut s = format!(
@@ -346,17 +343,17 @@ fn jobs_summary(
             i.upload.time.as_secs_f64()
         ));
     }
-    crate::cli::render::status(&s);
+    render::status(&s);
 }
 
 /// The tail every role shares: the emitter's `finish` when a connection is
 /// there for it, the summary line, and the exit code.
 fn jobs_finish(
-    emitter: &std::sync::Mutex<crate::jobs::emit::Emitter>,
+    emitter: &Mutex<Emitter>,
     j: &JobsArgs,
-    conn: Option<&mut crate::remote::worker::Connection>,
-    inst: Option<crate::jobs::instantiate::Stats>,
-    t0: std::time::Instant,
+    conn: Option<&mut Connection>,
+    inst: Option<instantiate::Stats>,
+    t0: Instant,
 ) -> i32 {
     if let Some(conn) = conn
         && let Err(e) = emitter
@@ -381,20 +378,20 @@ fn jobs_single(
     ev: &mut Evaluator,
     a: EvalArgs,
     j: &JobsArgs,
-    transport: &crate::remote::worker::Transport,
-    t0: std::time::Instant,
+    transport: &Transport,
+    t0: Instant,
 ) -> i32 {
     let root = match jobs_root(ev, a, j) {
         Ok(r) => r,
         Err(e) => return report(ev, &e),
     };
-    let stdout = Box::new(std::io::BufWriter::new(std::io::stdout()));
+    let stdout = Box::new(BufWriter::new(io::stdout()));
     let emitter = Arc::new(Mutex::new(Emitter::new(stdout, j.opts.constituents)));
     let mut inst_stats = None;
     let mut conn = None;
     if j.opts.no_instantiate {
         let em = emitter.clone();
-        crate::jobs::run(ev, root, &mut |line| em.lock().unwrap().emit(line));
+        jobs::run(ev, root, &mut |line| em.lock().unwrap().emit(line));
         if ev.session().settings().stats >= 1 {
             ev.print_stats();
         }
@@ -431,7 +428,7 @@ fn jobs_single(
                 Ok(())
             }),
         );
-        crate::jobs::run(ev, root, &mut |line| inst.push(line));
+        jobs::run(ev, root, &mut |line| inst.push(line));
         let store = match inst.finish() {
             Ok(r) => r,
             Err(e) => return e.report(),
@@ -444,14 +441,9 @@ fn jobs_single(
 
 /// A worker process under `--max-memory-size`: the root once, then
 /// `do` requests from the collector until `exit` or the limit.
-fn jobs_worker(
-    ev: &mut Evaluator,
-    a: EvalArgs,
-    j: &JobsArgs,
-    transport: &crate::remote::worker::Transport,
-) -> i32 {
-    let out: Out = Arc::new(Mutex::new(Box::new(std::io::stdout())));
-    let fail = |out: &Out, r: crate::log::Report| -> i32 {
+fn jobs_worker(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs, transport: &Transport) -> i32 {
+    let out: Out = Arc::new(Mutex::new(Box::new(io::stdout())));
+    let fail = |out: &Out, r: log::Report| -> i32 {
         let (msg, code) = (r.text(), r.emit());
         write_out(
             out,
@@ -465,7 +457,7 @@ fn jobs_worker(
     };
     let root = match jobs_root(ev, a, j) {
         Ok(r) => r,
-        Err(e) => return fail(&out, crate::jobs::error_report(ev, &e)),
+        Err(e) => return fail(&out, jobs::error_report(ev, &e)),
     };
     let inst = if j.opts.no_instantiate {
         None
@@ -503,10 +495,10 @@ fn jobs_collector(
     argv: &[String],
     workers: usize,
     j: &JobsArgs,
-    transport: &crate::remote::worker::Transport,
-    t0: std::time::Instant,
+    transport: &Transport,
+    t0: Instant,
 ) -> i32 {
-    let stdout = Box::new(std::io::BufWriter::new(std::io::stdout()));
+    let stdout = Box::new(BufWriter::new(io::stdout()));
     let emitter = Arc::new(Mutex::new(Emitter::new(stdout, j.opts.constituents)));
     let (tx, rx) = channel::<Line>();
     let resolver_thread = if j.check_cache_status {
@@ -516,10 +508,10 @@ fn jobs_collector(
         };
         let em = emitter.clone();
         Some(
-            std::thread::Builder::new()
+            Builder::new()
                 .name("cache-status".into())
                 .stack_size(64 << 20)
-                .spawn(crate::session::bind(move || -> crate::error::Result<()> {
+                .spawn(session::bind(move || -> error::Result<()> {
                     while let Ok(first) = rx.recv() {
                         let mut batch = vec![first];
                         while let Ok(l) = rx.try_recv() {

@@ -2,17 +2,25 @@
 //! make, the lookup, and the entry it writes.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::thread;
+use std::time::Instant;
 
+use crate::builtins::derivation::DrvInfo;
+use crate::cachefs::{self, Shape};
 use crate::eval::Evaluator;
+use crate::log;
+use crate::session::Session;
 use crate::store::path::StorePath;
+use crate::store::source::SourceOrigin;
 use crate::trace::key::Key;
-use crate::trace::store::{Entry, Opened, Part};
-use crate::trace::wire;
+use crate::trace::store::{self, Entry, Opened, Part};
+use crate::trace::{validate, wire};
 
 /// The tracing cache for one run: where the entry lives and its key. See docs/explanation/caching.md.
 pub struct Cache {
-    pub store: crate::trace::store::Store,
+    pub store: store::Store,
     pub key: String,
     timings: bool,
     /// The generation of the entry this run reads, opened once. Everything a
@@ -25,12 +33,12 @@ impl Cache {
     /// `None` when no cache store can be located, or when its directory is
     /// not iets's to write in.
     pub fn open(cache_dir: Option<&str>, key: Key, timings: bool) -> Option<Cache> {
-        let store = crate::trace::store::Store::locate(cache_dir)?;
-        if !crate::cachefs::prepare(store.root(), crate::cachefs::Shape::Dirs, timings) {
+        let store = store::Store::locate(cache_dir)?;
+        if !cachefs::prepare(store.root(), Shape::Dirs, timings) {
             return None;
         }
         // before any evaluation records an `Env` observation
-        crate::cachefs::use_env_key(store.root());
+        cachefs::use_env_key(store.root());
         Some(Cache {
             store,
             key: key.finish(),
@@ -54,10 +62,8 @@ impl Cache {
     /// Where this run's entry lives, for a caller that hands the entry to
     /// `iets cache paths` instead of deriving the key again. The file need
     /// not exist yet: a first run names the entry it is about to write.
-    pub fn entry_path(&self) -> std::path::PathBuf {
-        self.store
-            .entry_dir(&self.key)
-            .join(crate::trace::store::ENTRY)
+    pub fn entry_path(&self) -> PathBuf {
+        self.store.entry_dir(&self.key).join(store::ENTRY)
     }
 
     /// Validates the stored read set; true on a hit. A hit that refreshed
@@ -68,18 +74,18 @@ impl Cache {
     /// The entry is opened once per [`Cache`], as one run looks its key up
     /// once: everything this run replays comes from that one generation.
     pub fn lookup(&self) -> bool {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let bad = || {
             self.store.discard(&self.key);
             if self.timings {
-                crate::errln!("cache: miss (unreadable entry, discarded)");
+                errln!("cache: miss (unreadable entry, discarded)");
             }
             false
         };
         let entry = match self.opened() {
             Opened::None => {
                 if self.timings {
-                    crate::errln!("cache: miss (no entry)");
+                    errln!("cache: miss (no entry)");
                 }
                 return false;
             }
@@ -89,20 +95,20 @@ impl Cache {
         let Some(bytes) = entry.part(Part::Readset) else {
             return bad();
         };
-        let Some(mut obs) = crate::trace::wire::decode_readset(&bytes) else {
+        let Some(mut obs) = wire::decode_readset(&bytes) else {
             return bad();
         };
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+        let threads = thread::available_parallelism().map_or(1, |n| n.get().min(4));
         let t_load = t0.elapsed();
-        match crate::trace::validate::validate(&mut obs, threads) {
+        match validate::validate(&mut obs, threads) {
             Ok(r) => {
                 if r.refreshed > 0 {
-                    self.republish(entry, &crate::trace::wire::encode_readset(&obs));
+                    self.republish(entry, &wire::encode_readset(&obs));
                 } else {
                     self.store.touch(&self.key);
                 }
                 if self.timings {
-                    crate::errln!(
+                    errln!(
                         "cache: hit, {} entries validated, {} rehashed, load {:.3}s, validate {:.3}s",
                         r.entries,
                         r.rehashed,
@@ -113,9 +119,9 @@ impl Cache {
                 true
             }
             Err(m) => {
-                crate::log::invalidated(m.0.clone());
+                log::invalidated(m.0.clone());
                 if self.timings {
-                    crate::errln!(
+                    errln!(
                         "cache: miss ({}), {} entries, {:.3}s",
                         m.0,
                         obs.len(),
@@ -146,11 +152,11 @@ impl Cache {
     pub fn write(&self, ev: &Evaluator, result: &[u8], tables: bool) {
         if !ev.trace().is_cacheable() {
             if self.timings {
-                crate::errln!("cache: not written (uncacheable run)");
+                errln!("cache: not written (uncacheable run)");
             }
             return;
         }
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let obs = ev.trace().take();
         let mut warnings = Vec::new();
         for w in ev.lints.records() {
@@ -180,36 +186,34 @@ impl Cache {
             Ok(wrote) => {
                 if self.timings {
                     if wrote && !obs.is_empty() {
-                        crate::errln!(
+                        errln!(
                             "cache: wrote {} entries, {:.3}s",
                             obs.len(),
                             t0.elapsed().as_secs_f64()
                         );
                     } else if !wrote {
-                        crate::errln!("cache: not written (a sibling holds the store lock)");
+                        errln!("cache: not written (a sibling holds the store lock)");
                     }
                 }
             }
-            Err(e) => crate::log::line(&format!(
+            Err(e) => log::line(&format!(
                 "warning: cannot write cache entry {}: {e}",
                 self.store.entry_dir(&self.key).display()
             )),
         }
-        crate::cachefs::maybe_sweep(self.store.root(), crate::cachefs::Shape::Dirs, self.timings);
+        cachefs::maybe_sweep(self.store.root(), Shape::Dirs, self.timings);
     }
 
     /// [`Cache::write`] for a command that builds: `roots` is the result, and
     /// the tables go with it, for [`Cache::read_build`].
     pub fn write_build(&self, ev: &Evaluator, roots: &[(StorePath, Option<String>)]) {
-        self.write(ev, &crate::trace::wire::encode_roots(roots), true);
+        self.write(ev, &wire::encode_roots(roots), true);
     }
 
     /// On a hit: the lint warnings the recorded run printed, to stderr.
     pub fn replay_warnings(&self) {
         if let Some(bytes) = self.part(Part::Warnings) {
-            crate::session::Session::current()
-                .log
-                .err(&crate::log::replay_lints(&bytes));
+            Session::current().log.err(&log::replay_lints(&bytes));
         }
     }
 
@@ -218,9 +222,9 @@ impl Cache {
     pub fn read_build(
         &self,
     ) -> Option<(
-        Vec<(crate::store::path::StorePath, Option<String>)>,
-        HashMap<crate::store::path::StorePath, crate::builtins::derivation::DrvInfo>,
-        HashMap<crate::store::path::StorePath, crate::store::source::SourceOrigin>,
+        Vec<(StorePath, Option<String>)>,
+        HashMap<StorePath, DrvInfo>,
+        HashMap<StorePath, SourceOrigin>,
     )> {
         let tables = (|| {
             let roots = wire::decode_roots(&self.part(Part::Result)?)?;
@@ -231,7 +235,7 @@ impl Cache {
         if tables.is_none() {
             self.store.discard(&self.key);
             if self.timings {
-                crate::errln!("cache: miss (unreadable tables, discarded)");
+                errln!("cache: miss (unreadable tables, discarded)");
             }
         }
         tables

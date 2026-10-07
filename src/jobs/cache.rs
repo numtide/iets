@@ -6,6 +6,7 @@
 //! `QuerySubstitutablePathInfos` round trip per pass over the pending jobs.
 
 use std::collections::{BTreeSet, HashMap};
+use std::mem;
 
 use super::line::{Job, Line, json_str, json_str_list};
 use crate::error::{Error, Result};
@@ -101,7 +102,7 @@ impl Resolver {
     /// everything the last pass asked for.
     fn resolve_wanted(&mut self) -> Result<()> {
         if !self.wanted_valid.is_empty() {
-            let batch = std::mem::take(&mut self.wanted_valid);
+            let batch = mem::take(&mut self.wanted_valid);
             let paths: Vec<String> = batch.iter().map(|p| p.to_string()).collect();
             let valid: BTreeSet<String> = self
                 .conn
@@ -117,7 +118,7 @@ impl Resolver {
         if self.wanted.is_empty() {
             return Ok(());
         }
-        let batch = std::mem::take(&mut self.wanted);
+        let batch = mem::take(&mut self.wanted);
         let paths: Vec<String> = batch.iter().map(|p| p.to_string()).collect();
         // Unreachable substituters count as misses.
         let infos: BTreeSet<String> = self

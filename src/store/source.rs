@@ -10,6 +10,8 @@ use super::hash::Hash;
 use super::path::StorePath;
 use std::os::unix::ffi::OsStrExt;
 
+use crate::events::{self, Field};
+
 /// The entries a tree filter kept, `None` for no filter.
 pub type Accepted = Option<Arc<HashSet<PathBuf>>>;
 
@@ -132,11 +134,11 @@ pub struct SourceOrigin {
     pub nar: Option<(Hash, u64)>,
 }
 
-impl crate::events::Field for &SrcPath {
+impl Field for &SrcPath {
     fn write(self, out: &mut Vec<u8>) {
         let start = out.len();
         self.describe_into(out);
-        crate::events::quote_in_place(out, start);
+        events::quote_in_place(out, start);
     }
 }
 

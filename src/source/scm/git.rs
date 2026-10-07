@@ -6,8 +6,10 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use super::{Scm, Snapshot};
 use crate::trace::{Kind, Obs, Query, Trace};
@@ -122,14 +124,14 @@ impl Scm for Git {
     }
 
     fn untracked(&self, root: &Path, rel: &OsStr) -> Option<String> {
-        let tracked = std::process::Command::new("git")
+        let tracked = Command::new("git")
             .arg("--no-optional-locks")
             .arg("-C")
             .arg(root)
             .args(["ls-files", "--error-unmatch", "--"])
             .arg(rel)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .ok()?;
         (!tracked.success()).then(|| {
@@ -156,7 +158,7 @@ impl Scm for Git {
         if dot.is_dir() {
             return Some(dot.join("index"));
         }
-        let text = std::fs::read_to_string(&dot).ok()?;
+        let text = fs::read_to_string(&dot).ok()?;
         Some(
             root.join(text.strip_prefix("gitdir: ")?.trim_end())
                 .join("index"),
@@ -168,12 +170,15 @@ impl Scm for Git {
 mod tests {
     use crate::flake::parse_flake_ref;
     use crate::source::SourceRef;
+    use crate::store::nar::tests::fixture_tree;
+
+    use std::fs;
 
     #[test]
     fn a_directory_in_a_repository_is_found() {
-        let d = crate::store::nar::tests::fixture_tree("git-root");
-        std::fs::write(d.join("sub/flake.nix"), b"{ outputs = _: {}; }").unwrap();
-        std::fs::create_dir_all(d.join(".git")).unwrap();
+        let d = fixture_tree("git-root");
+        fs::write(d.join("sub/flake.nix"), b"{ outputs = _: {}; }").unwrap();
+        fs::create_dir_all(d.join(".git")).unwrap();
         let r = parse_flake_ref(&format!("{}/sub#x", d.display()), b"/", None).unwrap();
         let url = format!("git+file://{}?dir=sub", d.display());
         assert_eq!(crate::api::flake::url(&r), url);

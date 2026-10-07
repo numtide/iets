@@ -3,10 +3,14 @@
 //! non-attrset. Hook: the evaluator, at the coercion site.
 
 use super::{LintId, Where};
+use crate::builtins::store_hooks;
 use crate::eval::{EvalResult, Evaluator, Pos};
-use crate::runtime::{Value, ValueType, Word};
+use crate::runtime::{AttrsObj, Value, ValueType, Word};
+use crate::trace;
 
-fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
+use std::borrow::Cow;
+
+fn lossy(b: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 
@@ -20,7 +24,7 @@ pub fn path_copy(ev: &mut Evaluator, path: &[u8], store_path: &[u8], pos: Pos) -
     let shown = ev.lint_shown_path(path);
     if ev.flake_tree_of(path).is_some() {
         if !ev.lint_on(LintId::DirCopyFlake)
-            || crate::builtins::store_hooks::stat(ev, path, true) != crate::trace::Kind::Directory
+            || store_hooks::stat(ev, path, true) != trace::Kind::Directory
         {
             return Ok(());
         }
@@ -103,12 +107,7 @@ pub fn read_through_copy(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalResul
 /// position lies in a lint root; `Pos::NONE` when none does. The
 /// evaluator keeps no call trace, so a derivation whose attribute set
 /// holds no position from the root (a nixpkgs fetcher call) stays silent.
-pub fn drv_fallback(
-    ev: &mut Evaluator,
-    attrs: &'static crate::runtime::AttrsObj,
-    pos: Pos,
-    name_pos: Pos,
-) -> Pos {
+pub fn drv_fallback(ev: &mut Evaluator, attrs: &'static AttrsObj, pos: Pos, name_pos: Pos) -> Pos {
     if !ev.lint_config().scoped() {
         return Pos::NONE;
     }

@@ -3,9 +3,14 @@
 //! two frontends can emit belongs here; how a terminal shows it belongs in
 //! `crate::cli::render` (docs/explanation/plumbing-and-porcelain.md).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{Value, json};
+
+use crate::build::Outcome;
+use crate::remote::plan::Plan;
+use crate::remote::worker;
+use crate::store::drvdiff::Diff;
 
 /// A value an operation produced. `json` is the contract in docs/reference/plumbing.md.
 pub trait Report {
@@ -26,8 +31,8 @@ impl Missing {
     /// The dispatcher's answer ordered: `willBuild` in the plan's order,
     /// references first, as Nix's reversed topoSortPaths gives it, and
     /// `willSubstitute` by the name part of the store path.
-    pub fn of(m: &crate::remote::worker::Missing, plan: &crate::remote::plan::Plan) -> Missing {
-        let at: std::collections::HashMap<String, usize> = (plan.drvs.iter().enumerate())
+    pub fn of(m: &worker::Missing, plan: &Plan) -> Missing {
+        let at: HashMap<String, usize> = (plan.drvs.iter().enumerate())
             .map(|(i, o)| (o.store_path().to_string(), i))
             .collect();
         let mut will_build = m.will_build.clone();
@@ -57,7 +62,7 @@ impl Report for Missing {
 }
 
 /// What became of every root: `plumbing build`, and `iets build --json`.
-pub struct Outcomes<'a>(pub &'a [crate::build::Outcome]);
+pub struct Outcomes<'a>(pub &'a [Outcome]);
 
 impl Report for Outcomes<'_> {
     fn json(&self) -> Value {
@@ -154,7 +159,7 @@ impl Report for Fetched {
 
 /// `plumbing drv-diff`, and `iets diff --json`. Only the root carries
 /// `equal`; an input derivation under it is [`node`]'s shape.
-impl Report for crate::store::drvdiff::Diff {
+impl Report for Diff {
     fn json(&self) -> Value {
         let mut v = node(self);
         v["equal"] = self.is_empty().into();
@@ -164,7 +169,7 @@ impl Report for crate::store::drvdiff::Diff {
 
 /// One node of the walk: what differs here, then the input derivations that
 /// differ, and why the walk stopped.
-fn node(d: &crate::store::drvdiff::Diff) -> Value {
+fn node(d: &Diff) -> Value {
     let items: Vec<Value> = (d.items.iter())
         .map(|i| json!({"what": i.what, "key": i.key, "a": i.a, "b": i.b}))
         .collect();

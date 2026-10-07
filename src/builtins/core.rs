@@ -1,9 +1,11 @@
 //! Import, types, control flow, errors, tracing, and introspection.
 
-use super::Registry;
+use super::{Registry, derivation, paths};
 use crate::compile::ir::ParamIr;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::lint::purity;
 use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
+use crate::{log, parallel, print};
 
 pub fn register(r: &mut Registry) {
     r.op("import", 1, import);
@@ -49,8 +51,8 @@ fn import_path(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<Vec<u8>> {
     match w.view() {
         Value::Path(p) => Ok(p.path.to_vec()),
         Value::String(s) => {
-            crate::lint::purity::ifd(ev, s.ctx, pos)?;
-            super::paths::realise_path(ev, w, pos)
+            purity::ifd(ev, s.ctx, pos)?;
+            paths::realise_path(ev, w, pos)
         }
         // eval.cc:coerceToString tries `tryAttrsToString` before `outPath`
         Value::Attrs(a) => {
@@ -84,7 +86,7 @@ fn import_path(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<Vec<u8>> {
 
 fn import(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let p = import_path(ev, args[0], pos)?;
-    if let Some(w) = super::derivation::import_derivation(ev, &p, pos)? {
+    if let Some(w) = derivation::import_derivation(ev, &p, pos)? {
         return Ok(w);
     }
     ev.eval_file(&p, pos)
@@ -191,9 +193,9 @@ fn throw(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 
 fn say(ev: &mut Evaluator, line: String) {
     // parallel: helpers journal, the demand path prints
-    if !crate::parallel::journal(ev, line.clone()) {
+    if !parallel::journal(ev, line.clone()) {
         ev.lints.flush();
-        crate::log::line(&line);
+        log::line(&line);
     }
 }
 
@@ -201,7 +203,7 @@ fn trace(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
     let w = ev.force(args[0])?;
     let msg = match w.view() {
         Value::String(s) => String::from_utf8_lossy(s.bytes).into_owned(),
-        _ => crate::print::show_value_short(ev, w),
+        _ => print::show_value_short(ev, w),
     };
     say(ev, format!("trace: {msg}"));
     ev.force(args[1])

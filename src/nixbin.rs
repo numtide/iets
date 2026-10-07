@@ -1,15 +1,19 @@
 //! The real Nix binaries. Under the classic symlink farm, `nix` on `PATH` is
 //! iets itself, so every subprocess and the fallback resolve past it.
 
+use std::ffi::OsStr;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
+
+use crate::session::Session;
 
 /// Written by the farm derivation next to its `bin/`: the directory that
 /// holds the nix the farm shadows.
 const REAL_DIR_FILE: &str = "share/iets/real-nix-bin";
 
 fn executable(p: &Path) -> bool {
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
+    fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
 }
 
 /// The bin directory a farm entry points at: every hop of the symlink chain
@@ -21,10 +25,10 @@ fn farm_real_dir(p: &Path) -> Option<PathBuf> {
     for _ in 0..16 {
         let dir = cur.parent()?;
         let marker = dir.join("..").join(REAL_DIR_FILE);
-        if let Ok(s) = std::fs::read_to_string(&marker) {
+        if let Ok(s) = fs::read_to_string(&marker) {
             return Some(PathBuf::from(s.trim()));
         }
-        let target = std::fs::read_link(&cur).ok()?;
+        let target = fs::read_link(&cur).ok()?;
         cur = if target.is_absolute() {
             target
         } else {
@@ -39,7 +43,7 @@ fn farm_real_dir(p: &Path) -> Option<PathBuf> {
 /// builds of the same source, and a farm made by one of them points at its
 /// own `bin/iets`, which is not `/proc/self/exe`.
 fn is_iets(canonical: &Path, me: Option<&Path>) -> bool {
-    Some(canonical) == me || canonical.file_name() == Some(std::ffi::OsStr::new("iets"))
+    Some(canonical) == me || canonical.file_name() == Some(OsStr::new("iets"))
 }
 
 /// `dir/<name>` as a real nix: the file itself when it is not iets, else the
@@ -52,7 +56,7 @@ fn candidate(dir: &Path, name: &str, me: Option<&Path>) -> Option<PathBuf> {
     if !executable(&p) {
         return None;
     }
-    if !std::fs::canonicalize(&p).is_ok_and(|c| is_iets(&c, me)) {
+    if !fs::canonicalize(&p).is_ok_and(|c| is_iets(&c, me)) {
         return Some(p);
     }
     let r = farm_real_dir(&p)?.join(name);
@@ -70,28 +74,28 @@ fn on_path(name: &str, dirs: impl Iterator<Item = PathBuf>, me: Option<&Path>) -
 /// the bin directory the farm on `PATH` was built for, else the first
 /// `<name>` on `PATH` that is not iets.
 pub fn real(name: &str) -> Option<PathBuf> {
-    let me = std::fs::canonicalize("/proc/self/exe").ok();
-    if let Some(dir) = &crate::session::Session::current().settings().nix_bin_dir
+    let me = fs::canonicalize("/proc/self/exe").ok();
+    if let Some(dir) = &Session::current().settings().nix_bin_dir
         && let Some(p) = candidate(dir, name, me.as_deref())
     {
         return Some(p);
     }
-    let dirs = std::env::split_paths(&std::env::var_os("PATH")?).collect::<Vec<_>>();
+    let dirs = env::split_paths(&env::var_os("PATH")?).collect::<Vec<_>>();
     on_path(name, dirs.into_iter(), me.as_deref()).or_else(|| sibling(name))
 }
 
 /// The farm never shadows `nix-store`, so its real location names the nix
 /// installation even on a system path built without the marker.
 fn sibling(name: &str) -> Option<PathBuf> {
-    let me = std::fs::canonicalize("/proc/self/exe").ok();
-    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
+    let me = fs::canonicalize("/proc/self/exe").ok();
+    for dir in env::split_paths(&env::var_os("PATH")?) {
         let probe = dir.join("nix-store");
         if !executable(&probe) {
             continue;
         }
-        let real = std::fs::canonicalize(&probe).ok()?;
+        let real = fs::canonicalize(&probe).ok()?;
         let p = real.parent()?.join(name);
-        if executable(&p) && !std::fs::canonicalize(&p).is_ok_and(|c| is_iets(&c, me.as_deref())) {
+        if executable(&p) && !fs::canonicalize(&p).is_ok_and(|c| is_iets(&c, me.as_deref())) {
             return Some(p);
         }
     }
@@ -107,43 +111,44 @@ pub fn nix() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::fs::Permissions;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]
     fn farm_marker_is_found_through_two_hops() {
-        let tmp = std::env::temp_dir().join(format!("iets-nixbin-{}", std::process::id()));
+        let tmp = env::temp_dir().join(format!("iets-nixbin-{}", std::process::id()));
         let farm = tmp.join("farm");
         let sys = tmp.join("sys");
-        std::fs::create_dir_all(farm.join("bin")).unwrap();
-        std::fs::create_dir_all(farm.join("share/iets")).unwrap();
-        std::fs::create_dir_all(sys.join("bin")).unwrap();
-        std::fs::write(farm.join(REAL_DIR_FILE), "/real/bin\n").unwrap();
-        std::os::unix::fs::symlink("/proc/self/exe", farm.join("bin/nix")).unwrap();
-        std::os::unix::fs::symlink(farm.join("bin/nix"), sys.join("bin/nix")).unwrap();
+        fs::create_dir_all(farm.join("bin")).unwrap();
+        fs::create_dir_all(farm.join("share/iets")).unwrap();
+        fs::create_dir_all(sys.join("bin")).unwrap();
+        fs::write(farm.join(REAL_DIR_FILE), "/real/bin\n").unwrap();
+        symlink("/proc/self/exe", farm.join("bin/nix")).unwrap();
+        symlink(farm.join("bin/nix"), sys.join("bin/nix")).unwrap();
         assert_eq!(
             farm_real_dir(&sys.join("bin/nix")),
             Some(PathBuf::from("/real/bin"))
         );
         assert_eq!(farm_real_dir(&sys.join("bin/other")), None);
-        std::fs::remove_dir_all(&tmp).unwrap();
+        fs::remove_dir_all(&tmp).unwrap();
     }
 
     /// Two builds of iets on `PATH`, both shadowing `nix`: neither is the
     /// real nix, whichever one is running.
     #[test]
     fn every_iets_build_is_skipped() {
-        let tmp = std::env::temp_dir().join(format!("iets-nixbin-two-{}", std::process::id()));
+        let tmp = env::temp_dir().join(format!("iets-nixbin-two-{}", std::process::id()));
         let (x, y, real) = (tmp.join("x"), tmp.join("y"), tmp.join("real"));
         let exe = |p: &Path| {
-            std::fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(p, Permissions::from_mode(0o755)).unwrap();
         };
         for d in [&x, &y, &real] {
-            std::fs::create_dir_all(d).unwrap();
+            fs::create_dir_all(d).unwrap();
         }
         for d in [&x, &y] {
             exe(&d.join("iets"));
-            std::os::unix::fs::symlink(d.join("iets"), d.join("nix")).unwrap();
+            symlink(d.join("iets"), d.join("nix")).unwrap();
         }
         let nix = real.join("nix");
         exe(&nix);
@@ -162,6 +167,6 @@ mod tests {
         assert_eq!(candidate(&real, "nix", None), Some(nix));
         assert_eq!(candidate(&real, "nix-build", None), None);
 
-        std::fs::remove_dir_all(&tmp).unwrap();
+        fs::remove_dir_all(&tmp).unwrap();
     }
 }

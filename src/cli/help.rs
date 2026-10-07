@@ -4,7 +4,8 @@
 use std::process::exit;
 use std::sync::RwLock;
 
-use crate::cli::docs;
+use crate::cli::{classic, docs, plumbing, prefetch, render};
+use crate::log;
 
 pub const OVERVIEW: &str = "\
 usage: iets COMMAND [ARGS...]
@@ -250,8 +251,8 @@ fn parts(cmd: Option<&str>) -> Option<[&'static str; 2]> {
         "diff" => [DIFF, ""],
         "eval-jobs" => [EVAL_JOBS, ""],
         "print-dev-env" => [PRINT_DEV_ENV, ""],
-        "prefetch" => [crate::cli::prefetch::HELP, INPUT],
-        "plumbing" => [crate::cli::plumbing::HELP, INPUT],
+        "prefetch" => [prefetch::HELP, INPUT],
+        "plumbing" => [plumbing::HELP, INPUT],
         "lint" => [LINT, ""],
         "parse" => [PARSE, ""],
         "cache" | "cache-dump" => [CACHE, ""],
@@ -261,7 +262,7 @@ fn parts(cmd: Option<&str>) -> Option<[&'static str; 2]> {
 
 /// Help text on stdout, through the one writer that reports a write error.
 pub fn out(text: &str) {
-    crate::cli::render::bytes(text.as_bytes());
+    render::bytes(text.as_bytes());
 }
 
 /// `iets help [COMMAND | TOPIC]`, and `iets COMMAND --help`. A name that
@@ -336,14 +337,14 @@ pub fn suggest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) ->
 /// answers to, and the two that are not commands.
 fn command_words() -> Vec<&'static str> {
     (COMMANDS.split(' '))
-        .chain(crate::cli::classic::NAMES.iter().copied())
+        .chain(classic::NAMES.iter().copied())
         .chain(["help", "version"])
         .collect()
 }
 
 /// The report of a bad command line under `cmd` ("iets" before the command
 /// word, `None` under a classic name).
-pub fn usage(cmd: Option<&str>, msg: &str, maybe: Option<&str>) -> crate::log::Report {
+pub fn usage(cmd: Option<&str>, msg: &str, maybe: Option<&str>) -> log::Report {
     let maybe = maybe.map(|m| format!("did you mean '{m}'?"));
     let help = match cmd {
         Some("iets") => Some("run 'iets --help' for the commands".to_string()),
@@ -351,9 +352,9 @@ pub fn usage(cmd: Option<&str>, msg: &str, maybe: Option<&str>) -> crate::log::R
         None => None,
     };
     let hint: Vec<String> = maybe.into_iter().chain(help).collect();
-    crate::log::Report {
+    log::Report {
         hint: (!hint.is_empty()).then(|| hint.join("\n")),
-        ..crate::log::Report::new("usage", msg)
+        ..log::Report::new("usage", msg)
     }
 }
 

@@ -6,14 +6,17 @@
 //! line that keeps its job fields.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::{fs, result};
 
 use super::line::{Job, Line, json_str};
 use crate::error::{Error, Result};
+use crate::log;
 use crate::remote::plan::Object;
 use crate::remote::worker::Connection;
-use crate::remote::worker::wire::write_object;
+use crate::remote::worker::wire::{self, write_object};
 use crate::store::drv::{
     DerivationOutput, DrvHashCache, InputNode, finalize_input_addressed_outputs,
     load_derivation_from_store,
@@ -155,7 +158,7 @@ fn resolve_named(jobs: &Jobs) -> BTreeMap<String, Aggregate> {
         let mut results = BTreeSet::new();
         let is_broken = |broken: &mut BTreeMap<String, String>, child: &str, e: &Entry| -> bool {
             if let Some(err) = &e.error {
-                crate::log::line(&format!(
+                log::line(&format!(
                     "error: aggregate job '{name}' references broken job '{child}': {err}"
                 ));
                 broken.insert(child.to_string(), err.clone());
@@ -171,7 +174,7 @@ fn resolve_named(jobs: &Jobs) -> BTreeMap<String, Aggregate> {
                     }
                 }
                 None if !job.glob_constituents => {
-                    crate::log::line(&format!(
+                    log::line(&format!(
                         "error: aggregate job '{name}' references non-existent job '{child}'"
                     ));
                     broken.insert(child.clone(), "does not exist".into());
@@ -190,7 +193,7 @@ fn resolve_named(jobs: &Jobs) -> BTreeMap<String, Aggregate> {
                         }
                     }
                     if !found {
-                        crate::log::line(&format!(
+                        log::line(&format!(
                             "warning: aggregate job '{name}' references constituent glob pattern '{child}' with no matches"
                         ));
                         broken.insert(
@@ -215,7 +218,7 @@ fn resolve_named(jobs: &Jobs) -> BTreeMap<String, Aggregate> {
 
 /// constituents.cc:topoSort: dependencies first; a cycle names the two
 /// jobs and every aggregate not yet erased.
-fn topo_sort(mut dict: BTreeMap<String, Aggregate>) -> std::result::Result<Vec<Aggregate>, Cycle> {
+fn topo_sort(mut dict: BTreeMap<String, Aggregate>) -> result::Result<Vec<Aggregate>, Cycle> {
     fn visit(
         dict: &mut BTreeMap<String, Aggregate>,
         visited: &mut BTreeSet<String>,
@@ -223,7 +226,7 @@ fn topo_sort(mut dict: BTreeMap<String, Aggregate>) -> std::result::Result<Vec<A
         sorted: &mut Vec<Aggregate>,
         path: &str,
         parent: Option<&str>,
-    ) -> std::result::Result<(), Cycle> {
+    ) -> result::Result<(), Cycle> {
         if parents.contains(path) {
             dict.remove(path);
             let parent = parent.unwrap_or_default();
@@ -274,7 +277,7 @@ pub fn rewrite(
         Ok(s) => s,
         Err(cycle) => {
             let msg = format!("Dependency cycle: {} <-> {}", cycle.a, cycle.b);
-            crate::log::line(&format!(
+            log::line(&format!(
                 "error: Found dependency cycle between jobs '{}' and '{}'",
                 cycle.a, cycle.b
             ));
@@ -332,17 +335,17 @@ pub fn rewrite(
                 if valid.is_empty() {
                     let mut references = drv.input_srcs.clone();
                     references.extend(drv.input_drvs.keys().cloned());
-                    let aterm = std::sync::Arc::new(text);
+                    let aterm = Arc::new(text);
                     let object = Object::drv(new_path.clone(), aterm, references);
-                    let mut body = |w: &mut dyn Write| -> std::io::Result<()> {
-                        crate::remote::worker::wire::write_u64(w, 1)?;
+                    let mut body = |w: &mut dyn Write| -> io::Result<()> {
+                        wire::write_u64(w, 1)?;
                         write_object(w, &object)
                     };
                     conn.add_multiple_to_store(false, &mut body, &mut |_| {})?;
                 }
                 if let Some(dir) = gc_roots_dir {
                     let root = dir.join(new_path.base_name());
-                    if std::fs::symlink_metadata(&root).is_err() {
+                    if fs::symlink_metadata(&root).is_err() {
                         conn.add_perm_root(&new_path.to_string(), &root)?;
                     }
                 }

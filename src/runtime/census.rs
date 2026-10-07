@@ -3,9 +3,10 @@
 //! and which objects were never read. Every hook is `cfg(feature)` so the
 //! default build carries none of it (docs/explanation/evaluation.md).
 
+use std::cmp::Reverse;
 use std::collections::HashSet;
 
-use super::value::{AttrsObj, EnvObj, ListObj, StringObj};
+use super::value::{AttrsObj, Ctx, EnvObj, ListObj, StringObj};
 use crate::syntax::symbol::fx_bytes;
 use std::fmt::Write;
 
@@ -164,7 +165,7 @@ impl Census {
             self.str_dup_bytes += bytes.len() as u64;
         }
         if ctx_bytes > 0 {
-            let n = ctx_bytes / size_of::<super::value::Ctx>();
+            let n = ctx_bytes / size_of::<Ctx>();
             let cb = size_bucket(n);
             self.ctx_len_hist[cb].0 += 1;
             self.ctx_len_hist[cb].1 += ctx_bytes as u64;
@@ -172,28 +173,28 @@ impl Census {
         self.strings.push(s);
     }
 
-    pub(crate) fn note_ctx(&mut self, ctx: &[super::value::Ctx]) {
+    pub(crate) fn note_ctx(&mut self, ctx: &[Ctx]) {
         if ctx.is_empty() {
             return;
         }
         let mut key: Vec<u8> = Vec::new();
         for c in ctx {
             match c {
-                super::value::Ctx::Opaque(p) => {
+                Ctx::Opaque(p) => {
                     key.push(1);
                     key.extend_from_slice(p);
                 }
-                super::value::Ctx::DrvDeep(p) => {
+                Ctx::DrvDeep(p) => {
                     key.push(2);
                     key.extend_from_slice(p);
                 }
-                super::value::Ctx::Built { drv, output } => {
+                Ctx::Built { drv, output } => {
                     key.push(3);
                     key.extend_from_slice(drv);
                     key.push(0);
                     key.extend_from_slice(output);
                 }
-                super::value::Ctx::Impure(p) => {
+                Ctx::Impure(p) => {
                     key.push(4);
                     key.extend_from_slice(p.bytes());
                 }
@@ -418,7 +419,7 @@ impl Census {
             j[0], j[1], j[2], j[3]
         );
         let mut files: Vec<(u32, u64)> = self.ir_by_file.clone();
-        files.sort_by_key(|f| std::cmp::Reverse(f.1));
+        files.sort_by_key(|f| Reverse(f.1));
         let total: u64 = files.iter().map(|f| f.1).sum();
         let _ = writeln!(
             out,

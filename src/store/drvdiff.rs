@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use super::drv::{DerivationOutput, DrvError, DrvLoader, InputNode};
+use super::drv::{Derivation, DerivationOutput, DrvError, DrvLoader, InputNode};
 use super::path::StorePath;
 
 /// One local difference. `what` names the part, `key` the entry inside it
@@ -84,9 +84,8 @@ fn walk(
     // the env entry named after an output holds that output's path, which
     // differs whenever anything else does (nix-diff leaves it out too), and
     // `env name` is the derivation's own name, which the `name` item said
-    let echoes_name = |d: &super::drv::Derivation| {
-        (d.env.iter()).any(|(k, v)| k == "name" && *v == d.name.as_bytes())
-    };
+    let echoes_name =
+        |d: &Derivation| (d.env.iter()).any(|(k, v)| k == "name" && *v == d.name.as_bytes());
     let hide_name = echoes_name(&a) && echoes_name(&b);
     let keep = |(k, _): &&(String, Vec<u8>)| {
         (!a.outputs.contains_key(k) || !b.outputs.contains_key(k)) && !(hide_name && k == "name")
@@ -233,8 +232,7 @@ mod tests {
     use crate::api::render::Report;
     use crate::cli::render::Text;
     use crate::store::drv::Derivation;
-    use crate::store::hash::HashAlgo;
-    use crate::store::hash::hash_bytes;
+    use crate::store::hash::{HashAlgo, hash_bytes};
     use crate::store::path::IngestionMethod;
 
     /// The loader a test uses: the derivations it made, by path.

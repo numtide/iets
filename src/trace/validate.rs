@@ -4,18 +4,23 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs;
+use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{fs, thread};
 
-use super::{DirBuf, Kind, Obs, dir_hash, mtime_ns, stat_kind};
+use super::{
+    Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
+    mtime_ns, run_query, stat_kind, tree_fingerprint, tree_rehash,
+};
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
-use crate::store::hash::HashAlgo;
-use crate::store::hash::Hasher;
+use crate::source::scm;
+use crate::store::hash::{HashAlgo, Hasher};
+use crate::{session, treestore};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -49,8 +54,8 @@ fn lossy(p: &[u8]) -> String {
 
 /// Why a path no longer reads: it is not there, or it is there and the read
 /// failed. The message says which, because the two need different fixes.
-fn unreadable(path: &[u8], e: &std::io::Error) -> Outcome {
-    let what = if e.kind() == std::io::ErrorKind::NotFound {
+fn unreadable(path: &[u8], e: &io::Error) -> Outcome {
+    let what = if e.kind() == ErrorKind::NotFound {
         "is gone"
     } else {
         "cannot be read"
@@ -71,10 +76,10 @@ fn kind_name(k: Kind) -> &'static str {
 
 /// sha256 of a file's bytes without holding them: a rehash pass over a big `nixpkgs` file
 /// would otherwise allocate the whole file to read it once.
-fn file_sha256(p: &Path) -> std::io::Result<super::Digest32> {
+fn file_sha256(p: &Path) -> io::Result<Digest32> {
     let mut h = Hasher::new(HashAlgo::Sha256);
-    std::io::copy(&mut fs::File::open(p)?, &mut h)?;
-    Ok(super::hash_to_digest(&h.finish()))
+    io::copy(&mut fs::File::open(p)?, &mut h)?;
+    Ok(hash_to_digest(&h.finish()))
 }
 
 fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
@@ -101,7 +106,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             }
             if m.len() == *size
                 && mtime_ns(&m) == *mt
-                && super::ctime_ns(&m) == *ct
+                && ctime_ns(&m) == *ct
                 && m.dev() == *dev
                 && m.ino() == *ino
             {
@@ -115,7 +120,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             if now != *hash {
                 return Outcome::Changed(format!("{} changed", lossy(path)));
             }
-            Outcome::Refresh(super::file_obs(path, &m, *hash))
+            Outcome::Refresh(file_obs(path, &m, *hash))
         }
         Obs::Dir { path, hash } => match dir_hash(os(path), dirs) {
             Ok(now) => {
@@ -155,13 +160,13 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                     .collect()
             });
             let root_p = os(root);
-            match super::tree_fingerprint(root_p, accepted.as_ref()) {
+            match tree_fingerprint(root_p, accepted.as_ref()) {
                 Ok((sh, _)) if sh == *stat_hash => return Outcome::Same,
                 Ok(_) => {}
                 Err(e) => return unreadable(root, &e),
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let (nar, seen, sh, now) = match super::tree_rehash(root_p, accepted.as_ref()) {
+            let (nar, seen, sh, now) = match tree_rehash(root_p, accepted.as_ref()) {
                 Ok(t) => t,
                 Err(e) => return unreadable(root, &e),
             };
@@ -197,7 +202,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             }
         }
         Obs::Env { name, value } => {
-            let now = super::env_hash(name);
+            let now = env_hash(name);
             let what = match (&now, value) {
                 _ if now == *value => return Outcome::Same,
                 (Some(_), None) => "is now set",
@@ -206,8 +211,8 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             };
             Outcome::Changed(format!("environment variable ${} {what}", lossy(name)))
         }
-        Obs::Cmd { dir, query, hash } => match super::run_query(os(dir), *query) {
-            Ok((status, out)) if super::cmd_hash(status, &out) == *hash => Outcome::Same,
+        Obs::Cmd { dir, query, hash } => match run_query(os(dir), *query) {
+            Ok((status, out)) if cmd_hash(status, &out) == *hash => Outcome::Same,
             _ => Outcome::Changed(format!(
                 "the output of `{}` in {} changed",
                 query.argv().join(" "),
@@ -217,7 +222,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
         // One `stat` per entry, no bytes: the name is the content address, so an
         // entry that is still there still holds what the run read.
         Obs::Input { entry, version } => {
-            if crate::treestore::has(entry, *version) {
+            if treestore::has(entry, *version) {
                 Outcome::Same
             } else {
                 Outcome::Changed(format!("input store entry {} is gone", lossy(entry)))
@@ -241,9 +246,9 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
     let first: Mutex<Option<(usize, String)>> = Mutex::new(None);
     let refreshes: Mutex<Vec<(usize, Obs)>> = Mutex::new(Vec::new());
     let threads = threads.clamp(1, obs.len().max(1));
-    std::thread::scope(|s| {
+    thread::scope(|s| {
         for _ in 0..threads {
-            s.spawn(crate::session::bind(|| {
+            s.spawn(session::bind(|| {
                 let mut mine = Vec::new();
                 let mut dirs = DirBuf::default();
                 loop {
@@ -258,7 +263,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
                         Outcome::Same => {}
                         Outcome::Refresh(o) => mine.push((i, o)),
                         Outcome::Changed(why) => {
-                            let why = crate::source::scm::changed(&obs[i]).unwrap_or(why);
+                            let why = scm::changed(&obs[i]).unwrap_or(why);
                             failed.store(true, Ordering::Relaxed);
                             let mut lowest = first.lock().unwrap();
                             if lowest.as_ref().is_none_or(|(j, _)| i < *j) {
@@ -294,8 +299,11 @@ mod tests {
     use super::super::sha256;
     use super::*;
 
+    use std::env;
+    use std::time::{self, Duration, SystemTime};
+
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("iets-trace-{name}-{}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-trace-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -313,7 +321,7 @@ mod tests {
         assert_eq!((r.rehashed, r.refreshed), (0, 0));
 
         // same content, new mtime: rehash once, refresh
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        let later = SystemTime::now() + Duration::from_secs(5);
         fs::File::open(&f).unwrap().set_modified(later).unwrap();
         let r = validate(&mut obs, 2).unwrap();
         assert_eq!((r.rehashed, r.refreshed), (1, 1));
@@ -334,7 +342,7 @@ mod tests {
         let other = d.join("b.nix");
         fs::write(&f, b"AAAA").unwrap();
         fs::write(&other, b"BBBB").unwrap();
-        let fixed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let fixed = time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
         for p in [&f, &other] {
             fs::File::open(p).unwrap().set_modified(fixed).unwrap();
         }
@@ -347,12 +355,12 @@ mod tests {
         // milliseconds, so wait until a write can get a new one
         while {
             fs::File::open(&other).unwrap().set_modified(fixed).unwrap();
-            super::super::ctime_ns(&fs::metadata(&other).unwrap()) == super::super::ctime_ns(&m)
+            ctime_ns(&fs::metadata(&other).unwrap()) == ctime_ns(&m)
         } {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            thread::sleep(Duration::from_millis(1));
         }
         let mut bytes = fs::File::create(&f).unwrap();
-        std::io::Write::write_all(&mut bytes, b"BBBB").unwrap();
+        io::Write::write_all(&mut bytes, b"BBBB").unwrap();
         drop(bytes);
         fs::File::open(&f).unwrap().set_modified(fixed).unwrap();
         let now = fs::metadata(&f).unwrap();
@@ -416,14 +424,16 @@ mod tests {
 #[cfg(test)]
 mod dir_hash_tests {
     use super::super::{DirBuf, dir_hash, dir_listing_hash, read_dir_kinds};
-    use std::fs;
+    use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    use std::{env, fs};
 
     /// The buffered hash must answer exactly what the allocating one does, or
     /// a cache entry written by one generation is unreadable by the next.
     #[test]
     fn dir_hash_agrees_with_dir_listing_hash() {
-        let d = std::env::temp_dir().join(format!("iets-dirhash-{}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-dirhash-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         // names that exercise the ordering: sorts differ for case, digits,
@@ -443,15 +453,15 @@ mod dir_hash_tests {
             fs::write(d.join(n), b"x").unwrap();
         }
         fs::create_dir(d.join("adir")).unwrap();
-        std::os::unix::fs::symlink("a", d.join("alink")).unwrap();
-        fs::write(d.join(std::ffi::OsStr::from_bytes(b"non\xffutf8")), b"x").unwrap();
+        symlink("a", d.join("alink")).unwrap();
+        fs::write(d.join(OsStr::from_bytes(b"non\xffutf8")), b"x").unwrap();
 
         let mut entries = read_dir_kinds(&d).unwrap();
         let want = dir_listing_hash(&mut entries);
         let mut buf = DirBuf::default();
         assert_eq!(dir_hash(&d, &mut buf).unwrap(), want);
         // the buffer is reused, so a second directory must not see the first
-        let e = std::env::temp_dir().join(format!("iets-dirhash-e-{}", std::process::id()));
+        let e = env::temp_dir().join(format!("iets-dirhash-e-{}", std::process::id()));
         let _ = fs::remove_dir_all(&e);
         fs::create_dir_all(&e).unwrap();
         let mut none = read_dir_kinds(&e).unwrap();

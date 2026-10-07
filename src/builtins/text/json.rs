@@ -2,8 +2,12 @@
 //! parser with nlohmann::json's acceptance rules (`json-to-value.cc`).
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::print;
 use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
+use crate::syntax::lexer;
 use crate::syntax::symbol::Sym;
+
+use std::str;
 
 /// A recursive-descent limit iets needs and nlohmann does not: the parser
 /// recurses, and a fiber stack is 256 MiB.
@@ -12,7 +16,7 @@ const MAX_JSON_DEPTH: u32 = 100_000;
 pub fn to_json(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let mut out: Vec<u8> = Vec::new();
     let mut ctx: Vec<Ctx> = Vec::new();
-    crate::print::print_json(ev, args[0], &mut out, &mut ctx, true, pos)?;
+    print::print_json(ev, args[0], &mut out, &mut ctx, true, pos)?;
     let ctx = ctx_to_arena(&mut ev.arena, ctx);
     Ok(ev.arena.mk_string_shared(&out, ctx))
 }
@@ -55,7 +59,7 @@ pub fn canonical_structured_attrs(
         Value::Attrs(_) => {
             let mut out = Vec::new();
             let mut ctx = Vec::new();
-            crate::print::print_json(ev, v, &mut out, &mut ctx, true, pos)?;
+            print::print_json(ev, v, &mut out, &mut ctx, true, pos)?;
             return Ok(String::from_utf8(out).expect("print_json writes utf-8"));
         }
         Value::Null => "null",
@@ -325,7 +329,7 @@ impl Parser<'_> {
                         _ => return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte"),
                     };
                     if start + len > self.s.len()
-                        || std::str::from_utf8(&self.s[start..start + len]).is_err()
+                        || str::from_utf8(&self.s[start..start + len]).is_err()
                     {
                         return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte");
                     }
@@ -336,7 +340,7 @@ impl Parser<'_> {
             }
         }
         // json-to-value.cc checks each key and string value once it is whole
-        if let Err(msg) = crate::syntax::lexer::no_nul(&out) {
+        if let Err(msg) = lexer::no_nul(&out) {
             bail!(ErrorKind::Eval, Pos::NONE, "{}", msg);
         }
         Ok(out)
@@ -387,7 +391,7 @@ impl Parser<'_> {
                 self.i += 1;
             }
         }
-        let text = std::str::from_utf8(&self.s[start..self.i]).expect("ascii");
+        let text = str::from_utf8(&self.s[start..self.i]).expect("ascii");
         if !is_float {
             if neg {
                 if let Ok(i) = text.parse::<i64>() {

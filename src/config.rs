@@ -6,10 +6,14 @@
 //! specialisations do. Settings this crate does not know are kept, not dropped
 //! (Nix warns about them and keeps them in `unknownSettings`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::env::{split_paths, var, var_os};
 use std::path::{Path, PathBuf};
+use std::{fs, thread};
 
 use crate::error::{Error, Result};
+use crate::session::Session;
+use crate::{ignored, log};
 
 /// Settings whose values are whitespace-separated lists, so `extra-<name>`
 /// appends instead of replacing (configuration.cc:Config::set, `isAppendable`).
@@ -156,11 +160,7 @@ const UNIMPLEMENTED: &[(&str, &str, &str)] = &[
         "false",
         "builtins.warn never stops an evaluation",
     ),
-    (
-        "accept-flake-config",
-        "false",
-        crate::ignored::NO_NIX_CONFIG,
-    ),
+    ("accept-flake-config", "false", ignored::NO_NIX_CONFIG),
     (
         "allow-dirty",
         "true",
@@ -259,7 +259,7 @@ const CLIENT: &[&str] = &[
     "warn-dirty",
 ];
 fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|s| !s.is_empty())
+    var(name).ok().filter(|s| !s.is_empty())
 }
 
 fn home() -> PathBuf {
@@ -292,8 +292,8 @@ pub fn conf_dir() -> PathBuf {
 /// A set but empty variable is an empty list, so no user file is read at all:
 /// globals.cc:167 tests `has_value()`, not the text.
 pub fn user_conf_files() -> Vec<PathBuf> {
-    if let Some(files) = std::env::var_os("NIX_USER_CONF_FILES") {
-        return std::env::split_paths(&files)
+    if let Some(files) = var_os("NIX_USER_CONF_FILES") {
+        return split_paths(&files)
             .filter(|p| !p.as_os_str().is_empty())
             .collect();
     }
@@ -312,7 +312,7 @@ pub fn user_conf_files() -> Vec<PathBuf> {
 /// (docs/reference/divergences.md). Before the settings are read nothing is on,
 /// which is Nix's own default.
 pub fn xp_on(feature: &str) -> bool {
-    crate::session::Session::current()
+    Session::current()
         .nix_conf
         .get()
         .is_some_and(|c| (c.list("experimental-features").iter()).any(|f| f == feature))
@@ -375,9 +375,9 @@ pub struct Config {
     settings: BTreeMap<String, String>,
     /// Set by anything but `$NIX_CONF_DIR/nix.conf`: what a Nix client sends
     /// to the daemon (globals.cc:loadConfFile, `resetOverridden`).
-    overridden: std::collections::BTreeSet<String>,
+    overridden: BTreeSet<String>,
     /// List settings that only ever got `extra-` values.
-    extra_only: std::collections::BTreeSet<String>,
+    extra_only: BTreeSet<String>,
 }
 
 fn is_known(name: &str) -> bool {
@@ -406,7 +406,7 @@ pub fn note_unsent(overrides: &[(String, String)], applied: &[&str], why: &str) 
         let name = canonical(name);
         if acts_in_store(name) && !applied.contains(&name) {
             let raw = format!("setting '{name}' is ignored: {why}");
-            crate::ignored::note("ignored-setting", name, raw);
+            ignored::note("ignored-setting", name, raw);
         }
     }
 }
@@ -415,7 +415,7 @@ pub fn note_unsent(overrides: &[(String, String)], applied: &[&str], why: &str) 
 pub fn note_grpc(overrides: &[(String, String)]) {
     let why = "a grpc:// builder takes no settings; its URL has 'max-builds'";
     note_unsent(overrides, &["store", "system"], why);
-    crate::ignored::flush();
+    ignored::flush();
 }
 
 fn unimplemented(name: &str) -> Option<(&'static str, &'static str)> {
@@ -452,12 +452,10 @@ impl Config {
     pub fn announce(&self) {
         self.note_ignored();
         if self.bool("show-trace").ok().flatten() == Some(true) {
-            crate::log::set_show_trace();
+            log::set_show_trace();
         }
-        let _ = crate::session::Session::current()
-            .nix_conf
-            .set(self.clone());
-        crate::ignored::flush();
+        let _ = Session::current().nix_conf.set(self.clone());
+        ignored::flush();
     }
 
     /// The first `UNIMPLEMENTED` setting with a value of its own that is a
@@ -476,12 +474,12 @@ impl Config {
         for (name, value) in &self.settings {
             if !is_known(name) {
                 let raw = format!("unknown setting '{name}'");
-                crate::ignored::note("unknown-setting", name, raw);
+                ignored::note("unknown-setting", name, raw);
             } else if let Some((default, why)) = unimplemented(name)
                 && !same_value(value, default)
             {
                 let raw = format!("setting '{name}' is ignored: {why}");
-                crate::ignored::note("ignored-setting", name, raw);
+                ignored::note("ignored-setting", name, raw);
             }
         }
     }
@@ -514,7 +512,7 @@ impl Config {
 
     /// An unreadable file is skipped, as loadConfFile's `catch (SystemError &)` does.
     fn apply_file_if_present(&mut self, path: &Path) -> Result<()> {
-        match std::fs::read_to_string(path) {
+        match fs::read_to_string(path) {
             Ok(text) => self.apply(&text, path),
             Err(_) => Ok(()),
         }
@@ -524,7 +522,7 @@ impl Config {
         for e in parse(text, origin)? {
             // NIX_PATH, even an empty one, must override the setting
             // (configuration.cc:192)
-            let set = std::env::var_os("NIX_PATH").is_some();
+            let set = var_os("NIX_PATH").is_some();
             if (e.name == "nix-path" || e.name == "extra-nix-path") && set {
                 continue;
             }
@@ -667,7 +665,7 @@ pub const DEFAULT_SYSTEM: &str = "x86_64-darwin";
 pub const DEFAULT_SYSTEM: &str = "aarch64-darwin";
 
 fn cpus() -> u64 {
-    std::thread::available_parallelism().map_or(1, |n| n.get() as u64)
+    thread::available_parallelism().map_or(1, |n| n.get() as u64)
 }
 
 /// One `name = value` line, with the file and line it came from so a reader
@@ -728,7 +726,7 @@ fn parse_into(text: &str, origin: &Path, out: &mut Vec<Entry>, depth: usize) -> 
             if path.exists() {
                 // An existing but unreadable include is ignored, as Nix's
                 // `catch (SystemError &)` around the read does.
-                if let Ok(included) = std::fs::read_to_string(&path) {
+                if let Ok(included) = fs::read_to_string(&path) {
                     parse_into(&included, &path, out, depth + 1)?;
                 }
             } else if !ignore_missing {
@@ -781,7 +779,7 @@ mod tests {
 
     fn load(name: &str) -> Config {
         let path = fixtures().join(name);
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
         from_str(&text, &path).unwrap()
     }
 
@@ -873,10 +871,10 @@ mod tests {
         let text = "no-such-setting-a = 1\nextra-no-such-b = 1\ntrace-verbose = true\n\
                     max-call-depth = 10000\nallow-dirty = yes\nsandbox = false\neval-cache = false\n";
         from_str(text, "t").unwrap().note_ignored();
-        let unknown = crate::ignored::noted("unknown-setting");
+        let unknown = ignored::noted("unknown-setting");
         assert!(unknown.iter().any(|n| n == "no-such-setting-a"));
         assert!(unknown.iter().any(|n| n == "extra-no-such-b"));
-        let ignored = crate::ignored::noted("ignored-setting");
+        let ignored = ignored::noted("ignored-setting");
         assert!(ignored.iter().any(|n| n == "trace-verbose"));
         for quiet in ["max-call-depth", "allow-dirty", "sandbox", "eval-cache"] {
             assert!(!ignored.iter().any(|n| n == quiet), "{quiet}");
@@ -888,7 +886,7 @@ mod tests {
             "why",
         );
         note_unsent(&[o("nix-path"), o("no-such-setting-c")], &[], "why");
-        let ignored = crate::ignored::noted("ignored-setting");
+        let ignored = ignored::noted("ignored-setting");
         assert!(ignored.iter().any(|n| n == "sandbox"));
         assert!(ignored.iter().any(|n| n == "keep-outputs"));
         for quiet in ["system", "nix-path", "no-such-setting-c"] {

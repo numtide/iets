@@ -3,10 +3,10 @@
 //!
 //! Every test skips itself when `nix` is not on `PATH`; `nix develop` has it.
 
-use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fs};
 
 use iets::store::nar;
 
@@ -18,7 +18,7 @@ fn have_nix() -> bool {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("iets-narparity-{}-{tag}", std::process::id()));
+    let d = env::temp_dir().join(format!("iets-narparity-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).expect("temp dir");
     d

@@ -14,8 +14,10 @@ pub mod proto {
     tonic::include_proto!("nix.remote");
 }
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use std::{error, fs, result, thread};
 
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
@@ -24,6 +26,8 @@ use crate::error::{Error, Result};
 
 use proto::nix_remote_client::NixRemoteClient;
 use proto::scheduler_client::SchedulerClient;
+
+use super::worker;
 
 /// The `grpc://` query parameters, with the same names and defaults as
 /// nix-grpc-store's `GrpcStoreConfig` settings (src/client/store.hh).
@@ -98,7 +102,7 @@ impl GrpcConfig {
         };
         for kv in query.split('&').filter(|s| !s.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, "1"));
-            let v = super::worker::percent_decode(v);
+            let v = worker::percent_decode(v);
             let num = |what: &str| -> Result<u64> {
                 v.parse::<u64>().map_err(|_| {
                     Error::Usage(format!("grpc://: '{what}' wants a number, got '{v}'"))
@@ -196,7 +200,7 @@ impl GrpcConfig {
 
 /// `tonic::transport::Error` prints only "transport error"; the reason (a TLS
 /// alert, a refused connection) is in its source chain.
-fn causes(e: &dyn std::error::Error) -> String {
+fn causes(e: &dyn error::Error) -> String {
     let mut s = e.to_string();
     let mut src = e.source();
     while let Some(e) = src {
@@ -210,8 +214,8 @@ fn causes(e: &dyn std::error::Error) -> String {
     s
 }
 
-fn read(p: &std::path::Path) -> Result<Vec<u8>> {
-    std::fs::read(p).map_err(|e| Error::io(format!("cannot read '{}'", p.display()), e))
+fn read(p: &Path) -> Result<Vec<u8>> {
+    fs::read(p).map_err(|e| Error::io(format!("cannot read '{}'", p.display()), e))
 }
 
 /// What `StoreInfo` reported.
@@ -270,9 +274,9 @@ impl Client {
     pub fn call<T, F, Fut>(&mut self, what: &str, mut attempt: F) -> Result<T>
     where
         F: FnMut(NixRemoteClient<Channel>, Headers) -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+        Fut: Future<Output = result::Result<tonic::Response<T>, tonic::Status>>,
     {
-        let deadline = std::time::Instant::now() + Duration::from_secs(self.cfg.connect_timeout);
+        let deadline = Instant::now() + Duration::from_secs(self.cfg.connect_timeout);
         let mut pause = Duration::from_millis(500);
         loop {
             let stub = self.stub.clone();
@@ -281,15 +285,15 @@ impl Client {
             match r {
                 Ok(resp) => return Ok(resp.into_inner()),
                 Err(s) => {
-                    if !gone_away(&s) || std::time::Instant::now() + pause > deadline {
+                    if !gone_away(&s) || Instant::now() + pause > deadline {
                         return Err(self.status_error(&s, what));
                     }
-                    crate::errln!(
+                    errln!(
                         "{}: {}, retrying",
                         self.cfg.authority,
                         first_line(s.message())
                     );
-                    std::thread::sleep(pause);
+                    thread::sleep(pause);
                     pause = (pause * 2).min(Duration::from_secs(4));
                 }
             }

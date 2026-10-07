@@ -3,6 +3,7 @@
 //! `unsafeDiscard*` primops live in `core`.
 
 use std::collections::BTreeMap;
+use std::str;
 
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
@@ -92,7 +93,7 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
     let mut ctx: Vec<Ctx> = orig.ctx.to_vec();
     for a in attrs.iter() {
         let name: Vec<u8> = ev.interner.name(a.sym).to_vec();
-        let sp = std::str::from_utf8(&name)
+        let sp = str::from_utf8(&name)
             .ok()
             .and_then(|n| StorePath::parse(n).ok());
         let Some(sp) = sp else {

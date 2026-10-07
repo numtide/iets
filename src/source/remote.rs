@@ -7,14 +7,26 @@
 //! The `narHash` is known before the fetch, so the tree names itself and the
 //! input store refuses anything that does not hash to it.
 
-use std::io::Read;
+use std::collections::HashMap;
+use std::io::{self, BufReader, Read};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::{result, slice, thread};
 
 use super::{AttrVal, Attrs, Tree, parse_nar_hash, str_attr, to_url};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::fetch::http::{self, Limits};
+use crate::fetch::spool;
+use crate::log::{self, Activity};
+use crate::progress::Mode;
+use crate::remote::event;
 use crate::remote::worker::{Connection, Transport};
+use crate::session::Session;
 use crate::store::path::StorePath;
 use crate::store::source::{SourceOrigin, SrcPath};
+use crate::treestore::{self, Rejected, StoredTree};
+use crate::{config, nixbin, trace};
 use serde_json::Value;
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
@@ -38,7 +50,7 @@ pub fn locked(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
         parse_nar_hash(nar_hash).map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     let mut attrs = attrs.clone();
     attrs.insert("narHash".into(), AttrVal::Str(hash.to_sri()));
-    let path = crate::treestore::store_path("source", &hash)
+    let path = treestore::store_path("source", &hash)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     ensure_readable(ev, &path, &attrs, pos)?;
     Ok(Tree {
@@ -112,7 +124,7 @@ impl LazyStore {
     fn get(&mut self) -> Option<&mut Connection> {
         if !self.tried {
             self.tried = true;
-            let session = crate::session::Session::current();
+            let session = Session::current();
             match Transport::parse(&nix_conf(&session).store()) {
                 Some(Transport::Grpc(_)) | None => {}
                 // a missing daemon is not an error: the input store holds the
@@ -141,15 +153,15 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
         return false;
     };
     // the daemon's own lines, such as a substituter it retries
-    let mut said = |e: crate::remote::event::Event| {
-        if let crate::remote::event::Event::Log(l) = e {
-            crate::log::line(&String::from_utf8_lossy(&l.line));
+    let mut said = |e: event::Event| {
+        if let event::Event::Log(l) = e {
+            log::line(&String::from_utf8_lossy(&l.line));
         }
     };
-    match conn.substitute_paths(std::slice::from_ref(&store_path.to_string()), &mut said) {
+    match conn.substitute_paths(slice::from_ref(&store_path.to_string()), &mut said) {
         Ok(valid) => valid.iter().any(|p| p == store_path),
         Err(e) => {
-            crate::log::line(&format!("iets: cannot substitute '{store_path}': {e}"));
+            log::line(&format!("iets: cannot substitute '{store_path}': {e}"));
             false
         }
     }
@@ -172,22 +184,22 @@ pub fn ensure_readable(
 ) -> EvalResult<()> {
     ev.known.lock().entry(sp.clone()).or_default();
     let full = sp.to_full_string();
-    let on_disk = crate::trace::stat_kind(Path::new(&full), true);
-    if on_disk != crate::trace::Kind::Missing {
+    let on_disk = trace::stat_kind(Path::new(&full), true);
+    if on_disk != trace::Kind::Missing {
         ev.trace().stat(full.as_bytes(), true, on_disk);
         return Ok(());
     }
-    if let Some(entry) = crate::treestore::get(sp.base_name()) {
+    if let Some(entry) = treestore::get(sp.base_name()) {
         adopt(ev, sp, &entry);
         return Ok(());
     }
     let name = input_name(ev, attrs);
-    crate::log::line(&format!(
+    log::line(&format!(
         "iets: input '{name}' is not in the store ({full}), fetching it"
     ));
     if substitute(ev, &full) {
         ev.trace()
-            .stat(full.as_bytes(), true, crate::trace::Kind::Directory);
+            .stat(full.as_bytes(), true, trace::Kind::Directory);
         return Ok(());
     }
     if is_tarball_type(attrs) {
@@ -196,7 +208,7 @@ pub fn ensure_readable(
         return Ok(());
     }
     fetch_with_nix(&full, &name, attrs, pos)?;
-    if ev.trace().stat_now(full.as_bytes(), true) == crate::trace::Kind::Missing {
+    if ev.trace().stat_now(full.as_bytes(), true) == trace::Kind::Missing {
         bail!(
             ErrorKind::Io,
             pos,
@@ -208,7 +220,7 @@ pub fn ensure_readable(
 
 /// Points every read of `sp` at the input store entry, and records the entry in
 /// the read set (`crate::treestore::record`).
-fn adopt(ev: &mut Evaluator, sp: &StorePath, entry: &crate::treestore::StoredTree) {
+fn adopt(ev: &mut Evaluator, sp: &StorePath, entry: &StoredTree) {
     ev.known.add(
         sp.clone(),
         SourceOrigin::tree(
@@ -217,15 +229,14 @@ fn adopt(ev: &mut Evaluator, sp: &StorePath, entry: &crate::treestore::StoredTre
             entry.nar_size(),
         ),
     );
-    crate::treestore::record(ev, entry, sp.base_name());
+    treestore::record(ev, entry, sp.base_name());
 }
 
 /// nix.conf, read once: `store` for the eval store and `access-tokens` for the
 /// forge headers. The file cannot change under a running evaluation.
-fn nix_conf(s: &crate::session::Session) -> &crate::config::Config {
-    s.nix_conf.get_or_init(|| {
-        crate::config::Config::read(&[]).unwrap_or_else(|_| crate::config::Config::empty())
-    })
+fn nix_conf(s: &Session) -> &config::Config {
+    s.nix_conf
+        .get_or_init(|| config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty()))
 }
 
 /// The types whose fetch is "download one archive and unpack it"
@@ -243,7 +254,7 @@ fn is_tarball_type(attrs: &Attrs) -> bool {
 
 /// github.cc:getAccessToken: the longest `access-tokens` key that is a prefix of
 /// `host/owner/repo` and ends on a path segment, else the entry for the host.
-fn access_token(cfg: &crate::config::Config, host: &str, host_and_path: &str) -> Option<String> {
+fn access_token(cfg: &config::Config, host: &str, host_and_path: &str) -> Option<String> {
     let mut best: Option<(usize, String)> = None;
     let mut for_host = None;
     for entry in cfg.list("access-tokens") {
@@ -281,9 +292,9 @@ fn access_header(ty: &str, token: &str) -> (String, String) {
 /// github.cc:getDownloadUrl and tarball.cc: the URL and headers Nix downloads a
 /// locked archive input from. The `rev` is the 40 hex digits the lock holds.
 fn tarball_url(
-    cfg: &crate::config::Config,
+    cfg: &config::Config,
     attrs: &Attrs,
-) -> std::result::Result<(String, Vec<(String, String)>), String> {
+) -> result::Result<(String, Vec<(String, String)>), String> {
     let ty = str_attr(attrs, "type").unwrap_or("");
     if ty == "tarball" {
         let url = str_attr(attrs, "url").ok_or("the lock has no 'url'")?;
@@ -331,7 +342,7 @@ fn fetch_tarball(
     sp: &StorePath,
     attrs: &Attrs,
     pos: Pos,
-) -> EvalResult<std::sync::Arc<crate::treestore::StoredTree>> {
+) -> EvalResult<Arc<StoredTree>> {
     let name = input_name(ev, attrs);
     let fail = |e: String| Error::boxed(ErrorKind::Eval, e, pos);
     let (url, headers) = tarball_url(nix_conf(ev.session()), attrs)
@@ -340,32 +351,32 @@ fn fetch_tarball(
         .and_then(|h| parse_nar_hash(h).ok())
         .ok_or_else(|| fail(format!("iets: input '{name}' has no usable 'narHash'")))?;
 
-    let _fetching = crate::treestore::fetch_lock(sp.base_name(), || {
-        crate::log::line(&format!(
+    let _fetching = treestore::fetch_lock(sp.base_name(), || {
+        log::line(&format!(
             "iets: waiting for another process to fetch input '{name}'"
         ))
     });
-    if let Some(entry) = crate::treestore::reopen(sp.base_name()) {
+    if let Some(entry) = treestore::reopen(sp.base_name()) {
         return Ok(entry);
     }
-    let staged = crate::treestore::stage(sp.base_name()).ok_or_else(|| {
+    let staged = treestore::stage(sp.base_name()).ok_or_else(|| {
         fail(format!(
             "iets: cannot fetch input '{name}': no cache directory to hold it"
         ))
     })?;
-    let mut spool = crate::fetch::spool::spool_file(staged.dir())
+    let mut spool = spool::spool_file(staged.dir())
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    let limits = crate::fetch::http::Limits::new(nix_conf(ev.session()))
+    let limits = Limits::new(nix_conf(ev.session()))
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    crate::fetch::http::get_decompressed(&url, &headers, limits, &mut spool)
+    http::get_decompressed(&url, &headers, limits, &mut spool)
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    let tree = crate::fetch::spool::Tree::index(spool, limits.max_size)
+    let tree = spool::Tree::index(spool, limits.max_size)
         .map_err(|e| fail(format!("iets: cannot unpack input '{name}': {e}")))?;
 
     // the store verifies the tree against the lock's hash and names it by
     // what it hashes to, so a wrong tree is never named, read or uploaded
-    crate::treestore::put(sp.name(), &expected, staged, tree).map_err(|e| match e {
-        crate::treestore::Rejected::Mismatch(got) => {
+    treestore::put(sp.name(), &expected, staged, tree).map_err(|e| match e {
+        Rejected::Mismatch(got) => {
             let msg = format!(
                 "iets: NAR hash mismatch in input '{name}' ({}): expected '{}' \
                  but the tree iets fetched hashes to '{}'",
@@ -375,12 +386,12 @@ fn fetch_tarball(
             );
             Error::hash_mismatch(msg, &got, None, pos)
         }
-        crate::treestore::Rejected::Io(e) => Error::boxed(
+        Rejected::Io(e) => Error::boxed(
             ErrorKind::Io,
             format!("iets: cannot hash the tree of input '{name}': {e}"),
             pos,
         ),
-        crate::treestore::Rejected::Unstorable => fail(format!(
+        Rejected::Unstorable => fail(format!(
             "iets: cannot keep the fetched input '{name}' in the input store"
         )),
     })
@@ -390,14 +401,14 @@ fn fetch_tarball(
 /// cannot clone yet, so its locked attrs go to Nix's own `fetchTree` and the
 /// store path Nix reports must be the one the lock implies.
 fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
-    if crate::session::Session::current().settings().fetching {
+    if Session::current().settings().fetching {
         bail!(
             ErrorKind::Eval,
             pos,
             "iets: recursive fetch of input '{name}': the nix on PATH is iets itself"
         );
     }
-    let Some(nix) = crate::nixbin::real("nix") else {
+    let Some(nix) = nixbin::real("nix") else {
         bail!(
             ErrorKind::Eval,
             pos,
@@ -410,13 +421,13 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
         "(builtins.fetchTree (builtins.fromJSON {})).outPath",
         nix_string_literal(&attrs_to_json(attrs))
     );
-    let act = crate::log::Activity::new(
-        crate::log::LVL_TALKATIVE,
-        crate::log::ACT_FETCH_TREE,
+    let act = Activity::new(
+        log::LVL_TALKATIVE,
+        log::ACT_FETCH_TREE,
         &format!("fetching input '{name}' with nix"),
         vec![],
     );
-    let cannot = |e: std::io::Error| {
+    let cannot = |e: io::Error| {
         Error::boxed(
             ErrorKind::Io,
             format!("iets: cannot run nix to fetch input '{name}': {e}"),
@@ -424,8 +435,8 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
         )
     };
     // git may ask for credentials on the terminal, as under Nix
-    let suspended = crate::log::suspend();
-    let mut child = std::process::Command::new(&nix)
+    let suspended = log::suspend();
+    let mut child = Command::new(&nix)
         .env("IETS_FETCHING", "1")
         .args([
             "--extra-experimental-features",
@@ -438,13 +449,13 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
             "--expr",
             &expr,
         ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(cannot)?;
     let mut stdout = child.stdout.take().expect("piped");
-    let read_out = std::thread::spawn(move || {
+    let read_out = thread::spawn(move || {
         let mut v = Vec::new();
         stdout.read_to_end(&mut v).map(|_| v)
     });
@@ -452,7 +463,7 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
     let status = child.wait().map_err(cannot)?;
     let stdout = read_out
         .join()
-        .unwrap_or_else(|_| Err(std::io::Error::other("the reader panicked")))
+        .unwrap_or_else(|_| Err(io::Error::other("the reader panicked")))
         .map_err(cannot)?;
     drop((act, suspended));
     if !status.success() {
@@ -487,13 +498,13 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
 /// Nix's records go under `act`; git's `\r` redraws go to a terminal as they
 /// are, as under Nix, or into `act`'s detail. Returns the text, for the
 /// hash mismatch check.
-fn relay(from: impl Read, act: &crate::log::Activity) -> String {
-    let session = crate::session::Session::current();
-    let terminal = session.log.progress.mode() == crate::progress::Mode::Bar && !crate::log::json();
+fn relay(from: impl Read, act: &Activity) -> String {
+    let session = Session::current();
+    let terminal = session.log.progress.mode() == Mode::Bar && !log::json();
     let mut said = String::new();
-    let mut ids = std::collections::HashMap::new();
+    let mut ids = HashMap::new();
     let mut seg = Vec::new();
-    for b in std::io::BufReader::new(from).bytes() {
+    for b in BufReader::new(from).bytes() {
         let Ok(b) = b else { break };
         if b != b'\n' && b != b'\r' {
             seg.push(b);
@@ -504,7 +515,7 @@ fn relay(from: impl Read, act: &crate::log::Activity) -> String {
         if b == b'\r' {
             match terminal {
                 true => session.log.err(format!("{text}\r").as_bytes()),
-                false => crate::log::detail(act.0, text.trim()),
+                false => log::detail(act.0, text.trim()),
             }
             continue;
         }
@@ -513,7 +524,7 @@ fn relay(from: impl Read, act: &crate::log::Activity) -> String {
             .and_then(|j| serde_json::from_str::<Value>(j).ok())
         else {
             if !text.is_empty() {
-                crate::log::line(&text);
+                log::line(&text);
                 said.push_str(&text);
                 said.push('\n');
             }
@@ -523,25 +534,25 @@ fn relay(from: impl Read, act: &crate::log::Activity) -> String {
         let fields = || v["fields"].as_array().cloned().unwrap_or_default();
         match v["action"].as_str() {
             Some("start") => {
-                let id = crate::log::activity_id();
+                let id = log::activity_id();
                 ids.insert(n("id"), id);
                 let up = ids.get(&n("parent")).copied().unwrap_or(act.0);
                 let text = v["text"].as_str().unwrap_or("");
-                crate::log::start(id, n("level"), n("type"), text, fields(), up);
+                log::start(id, n("level"), n("type"), text, fields(), up);
             }
             Some("stop") => {
                 if let Some(id) = ids.remove(&n("id")) {
-                    crate::log::stop(id);
+                    log::stop(id);
                 }
             }
             Some("result") => {
                 if let Some(&id) = ids.get(&n("id")) {
-                    crate::log::result(id, n("type"), fields());
+                    log::result(id, n("type"), fields());
                 }
             }
             Some("msg") => {
                 let msg = v["msg"].as_str().unwrap_or("");
-                crate::log::line(msg);
+                log::line(msg);
                 said.push_str(msg);
                 said.push('\n');
             }
@@ -549,7 +560,7 @@ fn relay(from: impl Read, act: &crate::log::Activity) -> String {
         }
     }
     for (_, id) in ids {
-        crate::log::stop(id);
+        log::stop(id);
     }
     said
 }
@@ -557,6 +568,8 @@ fn relay(from: impl Read, act: &crate::log::Activity) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Instant;
 
     #[test]
     fn nix_literal_escapes() {
@@ -573,9 +586,9 @@ mod tests {
             .collect()
     }
 
-    fn conf(text: &str) -> crate::config::Config {
-        let mut c = crate::config::Config::empty();
-        c.apply(text, std::path::Path::new("test")).unwrap();
+    fn conf(text: &str) -> config::Config {
+        let mut c = config::Config::empty();
+        c.apply(text, Path::new("test")).unwrap();
         c
     }
 
@@ -693,19 +706,19 @@ mod tests {
     fn substitution_costs_less_than_the_subprocess() {
         let path = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-source";
         let mut store = LazyStore::default();
-        let t = std::time::Instant::now();
+        let t = Instant::now();
         let conn = store.get().expect("a daemon");
         let connect = t.elapsed();
-        let t = std::time::Instant::now();
+        let t = Instant::now();
         let valid = conn
             .substitute_paths(&[path.to_string()], &mut |_| {})
             .unwrap();
         let op = t.elapsed();
         assert!(valid.is_empty());
 
-        let nix = crate::nixbin::real("nix").expect("a nix");
-        let t = std::time::Instant::now();
-        let status = std::process::Command::new(&nix)
+        let nix = nixbin::real("nix").expect("a nix");
+        let t = Instant::now();
+        let status = Command::new(&nix)
             .args([
                 "--extra-experimental-features",
                 "nix-command flakes",
@@ -713,14 +726,14 @@ mod tests {
                 "--no-link",
                 path,
             ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .unwrap();
         let subprocess = t.elapsed();
         assert!(!status.success());
-        crate::errln!(
+        errln!(
             "connect: {:.3}s, QueryValidPaths(substitute): {:.3}s, nix build --no-link: {:.3}s",
             connect.as_secs_f64(),
             op.as_secs_f64(),

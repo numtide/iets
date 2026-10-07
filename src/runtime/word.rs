@@ -23,6 +23,7 @@
 //! address; the two raw-bit entries are `from_bits`, which is `unsafe`,
 //! and `imm_from_bits`, which admits immediates only.
 
+use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::value::{LambdaObj, MapDesc, ThunkApp2Obj, ThunkAppObj, ThunkObj};
@@ -303,8 +304,8 @@ impl Cell {
     }
 }
 
-impl std::fmt::Debug for Word {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Word {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self.tag() {
             TAG_INT => write!(f, "Int({})", self.imm_int_value()),
             TAG_THUNK => write!(f, "Thunk({:#x})", self.0),

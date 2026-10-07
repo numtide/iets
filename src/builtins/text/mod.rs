@@ -9,9 +9,15 @@ mod xml;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::time::{self, SystemTime};
+use std::{env, str};
 
 use super::Registry;
+use crate::builtins::paths;
+use crate::builtins::store_hooks::{self, Follow};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::lint::{coerce, purity};
+use crate::log;
 use crate::runtime::{Ctx, ListObj, StringObj, Word, ctx_to_arena};
 use crate::store::hash::{Hash, HashAlgo, HashFormat, hash_bytes};
 
@@ -39,8 +45,8 @@ pub fn register(r: &mut Registry) {
 /// uncacheable only when a program forces it.
 pub(super) fn current_time(ev: &mut Evaluator, _args: &[Word], _pos: Pos) -> EvalResult<Word> {
     ev.trace().mark_uncacheable();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     Ok(Word::imm_int(now))
@@ -248,7 +254,7 @@ fn replace_strings(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
 
 fn parse_algo(ev: &mut Evaluator, w: Word, pos: Pos, ctx: &str) -> EvalResult<HashAlgo> {
     let name = ev.force_string_no_ctx(w, pos, ctx)?;
-    match std::str::from_utf8(name).ok().and_then(HashAlgo::parse) {
+    match str::from_utf8(name).ok().and_then(HashAlgo::parse) {
         Some(a) => Ok(a),
         None => bail!(
             ErrorKind::Eval,
@@ -282,11 +288,11 @@ fn hash_file(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the first argument passed to builtins.hashFile",
     )?;
-    let path = crate::builtins::paths::realise_path(ev, args[1], pos)?;
-    let follow = crate::builtins::store_hooks::Follow::Full;
-    let (path, at) = crate::builtins::store_hooks::located(ev, path, follow, pos)?;
-    let at = crate::builtins::store_hooks::check(ev, at, &path, pos)?;
-    crate::lint::coerce::read_through_copy(ev, &path, pos)?;
+    let path = paths::realise_path(ev, args[1], pos)?;
+    let follow = Follow::Full;
+    let (path, at) = store_hooks::located(ev, path, follow, pos)?;
+    let at = store_hooks::check(ev, at, &path, pos)?;
+    coerce::read_through_copy(ev, &path, pos)?;
     let data = match at.read(ev, true) {
         Ok(d) => d,
         Err((_, e)) => bail!(
@@ -344,9 +350,7 @@ fn convert_hash(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
         b"base16" => HashFormat::Base16,
         b"nix32" => HashFormat::Nix32,
         b"base32" => {
-            crate::log::line(
-                "warning: \"base32\" is a deprecated alias for hash format \"nix32\".",
-            );
+            log::line("warning: \"base32\" is a deprecated alias for hash format \"nix32\".");
             HashFormat::Nix32
         }
         b"base64" => HashFormat::Base64,
@@ -520,13 +524,13 @@ fn get_env(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the first argument passed to builtins.getEnv",
     )?;
-    crate::lint::purity::get_env(ev, name, pos)?;
+    purity::get_env(ev, name, pos)?;
     if ev.pure() {
         return Ok(ev.mk_string(b""));
     }
     let os = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name);
     ev.trace().env(name);
-    let v = std::env::var_os(os).unwrap_or_default();
+    let v = env::var_os(os).unwrap_or_default();
     let bytes = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(&v);
     Ok(ev.mk_string(bytes))
 }

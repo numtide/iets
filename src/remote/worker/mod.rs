@@ -6,16 +6,22 @@ pub mod wire;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::{env, fs, mem, str, thread};
 
 use serde_json::Value;
 
+use super::super::store::path;
 use super::event::{Event, Failed, Log, Phase, Started, Stopped};
-use crate::config::Config;
-use crate::error::{Error, Result};
-use crate::log::{ACT_BUILD, LVL_INFO, RES_BUILD_LOG_LINE, RES_SET_PHASE};
+use super::grpc::GrpcConfig;
+use super::grpc::drvwire::PathInfo;
+use crate::config::{self, Config};
+use crate::error::{self, Error, Result};
+use crate::log::{self, ACT_BUILD, LVL_INFO, RES_BUILD_LOG_LINE, RES_SET_PHASE};
+use crate::store::path::StorePath;
 use wire::{Counting, FramedSink};
 
 /// What `SetOptions` sends (remote-store.cc:setOptions). `Default` is the
@@ -42,7 +48,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
-            max_jobs: std::thread::available_parallelism().map_or(1, |n| n.get() as u64),
+            max_jobs: thread::available_parallelism().map_or(1, |n| n.get() as u64),
             cores: 0,
             keep_going: false,
             keep_failed: false,
@@ -118,7 +124,7 @@ pub enum Transport {
     Unix(PathBuf),
     /// nix-grpc-store, which does not speak the worker protocol; see
     /// `crate::remote::grpc`.
-    Grpc(Box<super::grpc::GrpcConfig>),
+    Grpc(Box<GrpcConfig>),
     Ssh {
         user: Option<String>,
         host: String,
@@ -139,16 +145,13 @@ impl Transport {
     /// `grpc://host:port[?…]`. `None` for every other scheme. A malformed
     /// `grpc://` URL is `None` too; `parse_checked` reports why.
     pub fn parse(url: &str) -> Option<Transport> {
-        Transport::parse_checked(url, crate::config::DEFAULT_SYSTEM).ok()?
+        Transport::parse_checked(url, config::DEFAULT_SYSTEM).ok()?
     }
 
     /// `parse` with the `grpc://` parameter errors kept, and the `system=`
     /// default the caller's `system` setting implies.
-    pub fn parse_checked(
-        url: &str,
-        default_system: &str,
-    ) -> crate::error::Result<Option<Transport>> {
-        if let Some(cfg) = super::grpc::GrpcConfig::parse(url, default_system) {
+    pub fn parse_checked(url: &str, default_system: &str) -> error::Result<Option<Transport>> {
+        if let Some(cfg) = GrpcConfig::parse(url, default_system) {
             return Ok(Some(Transport::Grpc(Box::new(cfg?))));
         }
         Transport::parse_worker(url)
@@ -282,7 +285,7 @@ fn ssh_args(t: &Transport) -> Result<Vec<String>> {
     args.push("-x".to_string());
     // the same knob Nix's ssh.cc reads, so ControlMaster and friends can be
     // set per run
-    if let Ok(opts) = std::env::var("NIX_SSHOPTS") {
+    if let Ok(opts) = env::var("NIX_SSHOPTS") {
         args.extend(shell_split(&opts)?);
     }
     if let Some(k) = key {
@@ -340,7 +343,7 @@ pub fn shell_split(s: &str) -> Result<Vec<String>> {
                 '\\' => escaping = true,
                 ' ' | '\t' => {
                     if started {
-                        out.push(std::mem::take(&mut cur));
+                        out.push(mem::take(&mut cur));
                         started = false;
                     }
                 }
@@ -373,7 +376,7 @@ pub fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         let hex = if b[i] == b'%' && i + 2 < b.len() {
-            std::str::from_utf8(&b[i + 1..i + 3])
+            str::from_utf8(&b[i + 1..i + 3])
                 .ok()
                 .and_then(|h| u8::from_str_radix(h, 16).ok())
         } else {
@@ -485,12 +488,12 @@ impl Drop for Connection {
     fn drop(&mut self) {
         // a daemon that went away mid-op never stopped these
         for (_, id) in self.ids.drain() {
-            crate::log::stop(id);
+            log::stop(id);
         }
         let _ = self.to.flush();
         if let Some(mut c) = self.child.take() {
             let sink: Box<dyn Write + Send> = Box::new(io::sink());
-            drop(std::mem::replace(
+            drop(mem::replace(
                 &mut self.to,
                 BufWriter::new(Counting {
                     inner: sink,
@@ -690,11 +693,11 @@ impl Connection {
                     let parent = read_u64(self.r())?;
                     // worker-protocol-connection.cc:processStderr hands these to
                     // the client's logger; fresh ids keep two connections apart
-                    if crate::log::activities() {
-                        let id = crate::log::activity_id();
+                    if log::activities() {
+                        let id = log::activity_id();
                         self.ids.insert(act, id);
                         let up = self.ids.get(&parent).copied().unwrap_or(0);
-                        crate::log::start(id, lvl, ty, &s, fields.clone(), up);
+                        log::start(id, lvl, ty, &s, fields.clone(), up);
                     }
                     if ty == ACT_BUILD
                         && let Some(Value::String(drv)) = fields.first()
@@ -713,7 +716,7 @@ impl Connection {
                 STDERR_STOP_ACTIVITY => {
                     let act = read_u64(self.r())?;
                     if let Some(id) = self.ids.remove(&act) {
-                        crate::log::stop(id);
+                        log::stop(id);
                     }
                     self.parents.remove(&act);
                     if let Some(drv) = self.activities.remove(&act) {
@@ -725,7 +728,7 @@ impl Connection {
                     let ty = read_u64(self.r())?;
                     let fields = self.read_fields()?;
                     if let Some(&id) = self.ids.get(&act) {
-                        crate::log::result(id, ty, fields.clone());
+                        log::result(id, ty, fields.clone());
                     }
                     if matches!(ty, RES_BUILD_LOG_LINE | RES_POST_BUILD_LOG_LINE)
                         && let Some(Value::String(line)) = fields.first()
@@ -856,14 +859,14 @@ impl Connection {
         &mut self,
         path: &str,
         on_event: &mut dyn FnMut(Event),
-    ) -> Result<Option<super::grpc::drvwire::PathInfo>> {
+    ) -> Result<Option<PathInfo>> {
         self.op(Op::QueryPathInfo)?;
         write_str(self.w(), path.as_bytes())?;
         self.process_stderr(on_event)?;
         if read_u64(self.r())? == 0 {
             return Ok(None);
         }
-        Ok(Some(super::grpc::drvwire::PathInfo::read(path, self.r())?))
+        Ok(Some(PathInfo::read(path, self.r())?))
     }
 
     /// `AddMultipleToStore`: `body` writes the count, then each `ValidPathInfo` followed by its
@@ -963,7 +966,7 @@ impl Connection {
             }
             // the answer names paths this client later hands to the user and
             // to `nix build -o`: a store that says /etc/passwd is broken
-            crate::store::path::StorePath::parse(&path).map_err(|e| {
+            StorePath::parse(&path).map_err(|e| {
                 Error::Protocol(format!(
                     "the daemon named an output that is not a store path: {e}"
                 ))
@@ -1014,7 +1017,7 @@ impl Connection {
     /// indirect-root-store.cc:addPermRoot: a symlink at `root` to
     /// `store_path`, then `AddIndirectRoot`.
     pub fn add_perm_root(&mut self, store_path: &str, root: &Path) -> Result<()> {
-        if root.starts_with(super::super::store::path::STORE_DIR) {
+        if root.starts_with(path::STORE_DIR) {
             return Err(Error::Protocol(format!(
                 "creating a garbage collector root ({}) in the Nix store is forbidden",
                 root.display()
@@ -1047,11 +1050,11 @@ impl Connection {
 /// indirect-root-store.cc:addPermRoot: a root replaces nothing but a symlink
 /// that already points into the store. Everything else stays as it is.
 pub fn free_for_a_root(root: &Path) -> Result<()> {
-    let Ok(m) = std::fs::symlink_metadata(root) else {
+    let Ok(m) = fs::symlink_metadata(root) else {
         return Ok(());
     };
     let into_store = m.file_type().is_symlink()
-        && std::fs::read_link(root).is_ok_and(|t| {
+        && fs::read_link(root).is_ok_and(|t| {
             t.to_string_lossy()
                 .starts_with(&format!("{}/", super::super::store::path::STORE_DIR))
         });
@@ -1067,17 +1070,17 @@ pub fn free_for_a_root(root: &Path) -> Result<()> {
 /// file-system.cc:replaceSymlink: a temporary link renamed over `link`.
 pub fn replace_symlink(target: &str, link: &Path) -> io::Result<()> {
     let parent = link.parent().unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(parent)?;
+    fs::create_dir_all(parent)?;
     let name = link.file_name().unwrap_or_default().to_string_lossy();
     for n in 0.. {
         let tmp = parent.join(format!(".{n}_{name}"));
-        match std::os::unix::fs::symlink(target, &tmp) {
+        match symlink(target, &tmp) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
-        return std::fs::rename(&tmp, link).inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
+        return fs::rename(&tmp, link).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
         });
     }
     unreachable!()

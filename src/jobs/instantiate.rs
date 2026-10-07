@@ -7,8 +7,9 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
-use std::thread::JoinHandle;
+use std::thread::{Builder, JoinHandle};
 use std::time::Instant;
+use std::{fs, mem};
 
 use super::line::{Job, Line};
 use crate::build::backend::{Backend, Worker};
@@ -18,6 +19,7 @@ use crate::error::{Error, Result};
 use crate::eval::Known;
 use crate::parallel::shared::SharedMap;
 use crate::remote::worker::{Connection, Options, Transport};
+use crate::session;
 use crate::store::path::StorePath;
 
 /// Jobs per daemon round trip.
@@ -47,7 +49,7 @@ impl Store {
     ) -> Result<Store> {
         let worker = Worker::open(transport, &Options::default(), &mut |_| {})?;
         if let Some(dir) = &gc_roots_dir {
-            std::fs::create_dir_all(dir)
+            fs::create_dir_all(dir)
                 .map_err(|e| Error::io(format!("cannot create '{}'", dir.display()), e))?;
         }
         Ok(Store {
@@ -67,7 +69,7 @@ impl Store {
         if let Some(dir) = &self.gc_roots_dir {
             for j in jobs {
                 let root = dir.join(j.drv_path.base_name());
-                if std::fs::symlink_metadata(&root).is_ok() {
+                if fs::symlink_metadata(&root).is_ok() {
                     continue;
                 }
                 self.worker.add_root(&j.drv_path.to_string(), &root)?;
@@ -95,10 +97,10 @@ impl Instantiator {
         mut sink: Box<dyn FnMut(Vec<Line>) -> Result<()> + Send>,
     ) -> Instantiator {
         let (tx, rx) = channel::<Line>();
-        let thread = std::thread::Builder::new()
+        let thread = Builder::new()
             .name("instantiate".into())
             .stack_size(64 << 20)
-            .spawn(crate::session::bind(move || {
+            .spawn(session::bind(move || {
                 let mut pending: Vec<Line> = Vec::new();
                 let mut njobs = 0usize;
                 let mut flush = |store: &mut Store, pending: &mut Vec<Line>| -> Result<()> {
@@ -112,7 +114,7 @@ impl Instantiator {
                     if !jobs.is_empty() {
                         store.instantiate(&jobs)?;
                     }
-                    sink(std::mem::take(pending))
+                    sink(mem::take(pending))
                 };
                 for line in rx {
                     if matches!(line, Line::Job(_)) {

@@ -21,8 +21,14 @@ pub mod search;
 
 use help::{arg_error, each_arg};
 
+use crate::api::{self, flake};
 use crate::eval::{Error, Evaluator};
+use crate::lint::{self, Level, Scope};
+use crate::log::{self, Activity};
+use crate::parallel::fiber::StackError;
 use crate::runtime::Word;
+use crate::session::Session;
+use crate::{config, error, ignored};
 
 pub use crate::api::run::{Outcome, Run};
 pub use crate::api::{
@@ -30,6 +36,8 @@ pub use crate::api::{
     parse_include, report,
 };
 use crate::trace::run::Cache;
+
+use std::process;
 
 /// The evaluation input flags every command line shares (common-eval-args.cc).
 #[derive(Default)]
@@ -68,17 +76,17 @@ pub fn eval_flag(
         "--option" => {
             let (name, v) = (next()?, next()?);
             if name == "pure-eval" {
-                let b = crate::config::parse_bool(&name, &v).map_err(|e| e.to_string())?;
+                let b = config::parse_bool(&name, &v).map_err(|e| e.to_string())?;
                 f.pure = Some(b);
             } else if name == "json-log-path" {
-                crate::log::set_json_log_path(v);
+                log::set_json_log_path(v);
             } else {
                 f.overrides.push((name, v));
             }
         }
-        "--log-format" => crate::log::set_format(&next()?)?,
-        "--show-trace" => crate::log::set_show_trace(),
-        "--json-log-path" => crate::log::set_json_log_path(next()?),
+        "--log-format" => log::set_format(&next()?)?,
+        "--show-trace" => log::set_show_trace(),
+        "--json-log-path" => log::set_json_log_path(next()?),
         "--pure-eval" => f.pure = Some(true),
         "--no-pure-eval" | "--impure" => f.pure = Some(false),
         // args.cc reads flags in order, so a `--help` a flag before it asked
@@ -107,12 +115,7 @@ pub fn cache_flag(a: &mut EvalArgs, s: &str, mut next: impl FnMut() -> String) -
                 });
             // the settings path pins this too; here is where a flag would
             // override it (docs/reference/profile.md)
-            if n != 1
-                && crate::session::Session::current()
-                    .settings()
-                    .profile
-                    .is_some()
-            {
+            if n != 1 && Session::current().settings().profile.is_some() {
                 arg_error(format!(
                     "a profile needs one worker, so --workers must be 1, not {n}"
                 ))
@@ -149,7 +152,7 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
             | "--lint-short-path-literals"
             | "--lint-url-literals" => {
                 let v = next();
-                let Some(level) = crate::lint::Level::parse(&v) else {
+                let Some(level) = Level::parse(&v) else {
                     arg_error(format!("invalid lint mode '{v}'"))
                 };
                 a.lints.push((s[2..].to_string(), level));
@@ -157,7 +160,7 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
             // `eval` and `plumbing` write to no store, so it holds for them
             "--readonly-mode" => {
                 if !matches!(help::command(), Some("eval" | "plumbing" | "prefetch")) {
-                    crate::ignored::flag(
+                    ignored::flag(
                         s,
                         "this command writes to the store; 'eval' and 'eval-jobs --no-instantiate' do not",
                     )
@@ -181,10 +184,10 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
         }
     });
     // for its warnings, and for the session's copy that the fetcher reads
-    if let Err(e) = crate::config::Config::load_native(&f.overrides) {
-        std::process::exit(e.report())
+    if let Err(e) = config::Config::load_native(&f.overrides) {
+        process::exit(e.report())
     }
-    crate::ignored::flush();
+    ignored::flush();
     (a.includes, a.args, a.pure) = (f.includes, f.args, f.pure);
     a.attr = f.attrs.pop();
     a
@@ -193,7 +196,7 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
 /// The input a positional argument (or `-f`) names: a flake reference when
 /// it looks like one, else a file.
 fn set_positional(a: &mut EvalArgs, s: &str) {
-    if crate::api::flake::is_flake_ref(s) {
+    if flake::is_flake_ref(s) {
         set_input(a, Input::Flake(s.to_string()))
     } else {
         set_input(a, Input::File(s.to_string()))
@@ -213,22 +216,21 @@ fn set_input(a: &mut EvalArgs, input: Input) {
 
 /// `--lint SELECTOR=LEVEL`: the selector is checked against the registry
 /// now, so a typo is a usage error before anything runs.
-pub fn parse_lint_flag(v: &str) -> (String, crate::lint::Level) {
-    let mut probe = crate::lint::Config::default();
+pub fn parse_lint_flag(v: &str) -> (String, Level) {
+    let mut probe = lint::Config::default();
     if let Err(m) = probe.set_pair(v) {
         arg_error(format!("--lint {v}: {m}"))
     }
     let (name, level) = v.split_once('=').expect("set_pair accepted the pair");
     (
         name.trim().to_string(),
-        crate::lint::Level::parse(level.trim()).expect("set_pair accepted the level"),
+        Level::parse(level.trim()).expect("set_pair accepted the level"),
     )
 }
 
 /// `--lint-scope root|all`.
-pub fn parse_lint_scope(v: &str) -> crate::lint::Scope {
-    crate::lint::Scope::parse(v)
-        .unwrap_or_else(|| arg_error(format!("--lint-scope {v}: use root or all")))
+pub fn parse_lint_scope(v: &str) -> Scope {
+    Scope::parse(v).unwrap_or_else(|| arg_error(format!("--lint-scope {v}: use root or all")))
 }
 
 /// `iets lint list [--lint SELECTOR=LEVEL]... [--lint-root DIR]...
@@ -247,12 +249,12 @@ pub fn cmd_lint(argv: &[String]) -> i32 {
         s if s.starts_with('-') => help::unknown_flag(s),
         s => a.input = Some(Input::File(s.to_string())),
     });
-    match crate::api::lint_config(&a) {
+    match api::lint_config(&a) {
         Ok(c) => {
-            render::bytes(crate::lint::list(&c).as_bytes());
+            render::bytes(lint::list(&c).as_bytes());
             0
         }
-        Err(e) => crate::error::Error::Eval(e).report(),
+        Err(e) => error::Error::Eval(e).report(),
     }
 }
 
@@ -261,7 +263,7 @@ pub fn cmd_lint(argv: &[String]) -> i32 {
 pub fn run_for(a: &EvalArgs) -> Run {
     match Run::new(a) {
         Ok(r) => r,
-        Err(code) => std::process::exit(code),
+        Err(code) => process::exit(code),
     }
 }
 
@@ -277,14 +279,14 @@ pub fn run_parallel<R: Send + 'static>(
 /// The same for `api::Run::eval`.
 pub fn run_reported<T: Send + 'static>(
     run: Run,
-    f: impl FnOnce(&mut Evaluator, Option<Cache>) -> crate::error::Result<T> + Send + 'static,
+    f: impl FnOnce(&mut Evaluator, Option<Cache>) -> error::Result<T> + Send + 'static,
 ) -> Outcome<T> {
     run.eval(f).unwrap_or_else(stacks)
 }
 
-fn stacks<R>(e: crate::parallel::fiber::StackError) -> R {
-    crate::log::line(&format!("iets: {e}"));
-    std::process::exit(1)
+fn stacks<R>(e: StackError) -> R {
+    log::line(&format!("iets: {e}"));
+    process::exit(1)
 }
 
 /// `api::evaluate`, with a missing input reported as a usage error.
@@ -292,11 +294,11 @@ pub fn evaluate(ev: &mut Evaluator, a: EvalArgs) -> Result<Word, Box<Error>> {
     if a.input.is_none() {
         arg_error("nothing to evaluate: give -E EXPR or FILE")
     }
-    crate::api::evaluate(ev, a)
+    api::evaluate(ev, a)
 }
 
 /// Nix has no activity for evaluation, so this is `actUnknown`.
-pub fn evaluating(a: &EvalArgs) -> crate::log::Activity {
+pub fn evaluating(a: &EvalArgs) -> Activity {
     let what = match &a.input {
         Some(Input::Flake(f) | Input::File(f)) => format!("'{f}'"),
         Some(Input::Expr(_)) => "the expression".into(),
@@ -307,9 +309,9 @@ pub fn evaluating(a: &EvalArgs) -> crate::log::Activity {
         .as_ref()
         .map(|p| format!(" -A {p}"))
         .unwrap_or_default();
-    crate::log::Activity::new(
-        crate::log::LVL_TALKATIVE,
-        crate::log::ACT_UNKNOWN,
+    Activity::new(
+        log::LVL_TALKATIVE,
+        log::ACT_UNKNOWN,
         &format!("evaluating {what}{attr}"),
         vec![],
     )

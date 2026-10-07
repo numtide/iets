@@ -1,21 +1,34 @@
 //! `iets build`: evaluate to derivations and build them through a daemon.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use crate::api;
 use crate::api::build as apibuild;
+use crate::api::build::Dispatch;
 use crate::api::installable::roots_of;
-use crate::api::render::Report;
-use crate::build::Target;
+use crate::api::render::{Outcomes, Report};
 use crate::build::fixhash::{self, Answer};
 use crate::build::render::Style;
+use crate::build::{Outcome, Target};
 use crate::cli::help::{arg_error, each_arg};
-use crate::cli::{EvalArgs, Input, Run, build_targets, evaluate, parse_eval_args, report, run_for};
+use crate::cli::render::{self, text};
+use crate::cli::{
+    self, EvalArgs, Input, Run, build_targets, devenv, evaluate, parse_eval_args, report, run_for,
+};
 use crate::error::Error as CrateError;
-use crate::eval::Evaluator;
+use crate::eval::{self, Evaluator};
+use crate::log;
+use crate::provenance::{self, Provenance, SourceMap};
+use crate::remote::plan::{Inputs, Plan};
+use crate::remote::worker::{self, Missing};
+use crate::session::Session;
 use crate::settings::FixHashes;
 use crate::store::path::StorePath;
 use crate::trace::run::Cache;
+use crate::trace::wire;
 
 struct BuildArgs {
     url: Option<String>,
@@ -24,9 +37,9 @@ struct BuildArgs {
     dry_run: bool,
     json: bool,
     keep_going: bool,
-    fetch_to: Option<std::path::PathBuf>,
+    fetch_to: Option<PathBuf>,
     outputs: Vec<String>,
-    sources: HashMap<String, std::path::PathBuf>,
+    sources: HashMap<String, PathBuf>,
     /// What names this run's roots in the roots store ([`keep_outputs`]).
     root_key: Vec<Vec<u8>>,
 }
@@ -35,7 +48,7 @@ struct BuildArgs {
 /// take a `.drv` path and read its closure from `/nix/store`. A fixed-output
 /// build that fails on its hash gets it fixed per the `fix-hashes` setting.
 pub fn cmd_build(argv: &[String]) -> i32 {
-    let mut ask = match crate::session::Session::current().settings().fix_hashes {
+    let mut ask = match Session::current().settings().fix_hashes {
         FixHashes::Never => return build_once(argv),
         FixHashes::Ask if !fixhash::interactive() => return build_once(argv),
         FixHashes::Ask => true,
@@ -44,7 +57,7 @@ pub fn cmd_build(argv: &[String]) -> i32 {
     let mut wrote: Vec<String> = Vec::new();
     loop {
         let code = build_once(argv);
-        let mismatches = crate::log::take_mismatches();
+        let mismatches = log::take_mismatches();
         if code == 0 || mismatches.is_empty() {
             return code;
         }
@@ -52,7 +65,7 @@ pub fn cmd_build(argv: &[String]) -> i32 {
         let mut fixed = false;
         for (specified, got) in mismatches {
             if wrote.contains(&specified) {
-                crate::log::line(&format!(
+                log::line(&format!(
                     "warning: fix-hashes: the hash changed again, from '{specified}' to '{got}': the output is not reproducible"
                 ));
                 return code;
@@ -60,7 +73,7 @@ pub fn cmd_build(argv: &[String]) -> i32 {
             let fix = match fixhash::locate(&files, &specified, &got) {
                 Ok(f) => f,
                 Err(why) => {
-                    crate::log::line(&format!("warning: fix-hashes: {why}"));
+                    log::line(&format!("warning: fix-hashes: {why}"));
                     continue;
                 }
             };
@@ -72,10 +85,10 @@ pub fn cmd_build(argv: &[String]) -> i32 {
                 }
             }
             if let Err(e) = fix.write() {
-                crate::log::line(&format!("warning: fix-hashes: {e}"));
+                log::line(&format!("warning: fix-hashes: {e}"));
                 continue;
             }
-            crate::log::fixed(&fix.pos(), fix.at, &fix.old, &fix.new);
+            log::fixed(&fix.pos(), fix.at, &fix.old, &fix.new);
             wrote.push(got);
             fixed = true;
         }
@@ -150,7 +163,7 @@ fn local_files(argv: &[String]) -> Vec<PathBuf> {
     let Ok(run) = Run::new(&a) else {
         return Vec::new();
     };
-    crate::cli::run_parallel(run, move |ev, _| {
+    cli::run_parallel(run, move |ev, _| {
         let _ = resolve(ev, a);
         fixhash::local_files(ev)
     })
@@ -164,7 +177,7 @@ fn build_once(argv: &[String]) -> i32 {
         return build_drv_file(&b, f);
     }
 
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     let a = EvalArgs {
         timings: a.timings || b.timings,
         ..a
@@ -182,10 +195,8 @@ fn build_once(argv: &[String]) -> i32 {
             );
         }
         let (root_paths, outputs) = build_targets(&b.outputs, &roots);
-        let prov = crate::provenance::Provenance::from_map(
-            crate::provenance::SourceMap::from_sources(&sources),
-        );
-        let inputs = crate::remote::plan::Inputs {
+        let prov = Provenance::from_map(SourceMap::from_sources(&sources));
+        let inputs = Inputs {
             drvs: &drvs,
             sources: &sources,
         };
@@ -194,14 +205,14 @@ fn build_once(argv: &[String]) -> i32 {
         return code;
     }
     // parallel: eval and build run as the main fiber
-    crate::cli::run_parallel(run, move |ev, cache| build_eval(ev, &b, a, t0, cache))
+    cli::run_parallel(run, move |ev, cache| build_eval(ev, &b, a, t0, cache))
 }
 
-type Roots = Vec<(crate::store::path::StorePath, Option<String>)>;
+type Roots = Vec<(StorePath, Option<String>)>;
 
 /// The roots of the installable, each named by the attribute it was reached
 /// by: the walk names a tree's members, the installable names the rest.
-fn resolve(ev: &mut Evaluator, a: EvalArgs) -> Result<Roots, Box<crate::eval::Error>> {
+fn resolve(ev: &mut Evaluator, a: EvalArgs) -> Result<Roots, Box<eval::Error>> {
     let target = a.attr.clone().or_else(|| match &a.input {
         Some(Input::Flake(f)) => f.split_once('#').map(|(_, frag)| frag.to_string()),
         _ => None,
@@ -209,7 +220,7 @@ fn resolve(ev: &mut Evaluator, a: EvalArgs) -> Result<Roots, Box<crate::eval::Er
     let target = target.unwrap_or_default();
     let args = a.args.clone();
     let v = evaluate(ev, a)?;
-    let args = crate::cli::auto_args(ev, &args, &crate::cli::cwd())?;
+    let args = cli::auto_args(ev, &args, &cli::cwd())?;
     let mut roots = Vec::new();
     roots_of(ev, v, args, &target, &mut roots)?;
     for (p, _) in &roots {
@@ -222,10 +233,10 @@ fn build_eval(
     ev: &mut Evaluator,
     b: &BuildArgs,
     a: EvalArgs,
-    t0: std::time::Instant,
+    t0: Instant,
     cache: Option<Cache>,
 ) -> i32 {
-    let evaluating = crate::cli::evaluating(&a);
+    let evaluating = cli::evaluating(&a);
     let roots = match resolve(ev, a) {
         Ok(r) => r,
         Err(e) => return report(ev, &e),
@@ -241,13 +252,13 @@ fn build_eval(
         );
     }
     if let Some(c) = &cache {
-        c.write(ev, &crate::trace::wire::encode_roots(&roots), true);
+        c.write(ev, &wire::encode_roots(&roots), true);
     }
     let (root_paths, outputs) = build_targets(&b.outputs, &roots);
-    let prov = crate::provenance::Provenance::snapshot(ev);
+    let prov = Provenance::snapshot(ev);
     let drvs = ev.drv.drvs.lock();
     let sources = ev.known.origins();
-    let inputs = crate::remote::plan::Inputs {
+    let inputs = Inputs {
         drvs: &drvs,
         sources: &sources,
     };
@@ -257,7 +268,7 @@ fn build_eval(
 /// Legacy mode: `DRV` is a `.drv` store path, or a copy of the file named
 /// `<hash>-<name>.drv`; its closure is read from `/nix/store`.
 fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
-    let base = std::path::Path::new(root_arg)
+    let base = Path::new(root_arg)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -269,26 +280,24 @@ fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
         Err(e) => return CrateError::from(e).report(),
     };
     // The root may be a copy outside the store; its inputs are read from `/nix/store`.
-    let info = std::fs::read(root_arg)
+    let info = fs::read(root_arg)
         .map_err(CrateError::from)
-        .and_then(|text| crate::api::build::drv_info(&root, text));
+        .and_then(|text| apibuild::drv_info(&root, text));
     let info = match info {
         Ok(i) => i,
         Err(e) => {
             let msg = format!("cannot read derivation '{root_arg}': {e}");
-            return crate::log::Report::new(e.code(), msg).emit();
+            return log::Report::new(e.code(), msg).emit();
         }
     };
     let drvs = HashMap::from([(root.clone(), info)]);
     let sources = HashMap::new();
-    let prov = crate::provenance::Provenance::from_map(crate::provenance::SourceMap::from_sources(
-        &sources,
-    ));
+    let prov = Provenance::from_map(SourceMap::from_sources(&sources));
     build_roots(
         b,
         &[root],
         &b.outputs,
-        crate::remote::plan::Inputs {
+        Inputs {
             drvs: &drvs,
             sources: &sources,
         },
@@ -298,10 +307,10 @@ fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
 
 fn build_roots(
     b: &BuildArgs,
-    roots: &[crate::store::path::StorePath],
+    roots: &[StorePath],
     outputs: &[String],
-    inputs: crate::remote::plan::Inputs<'_>,
-    prov: &crate::provenance::Provenance,
+    inputs: Inputs<'_>,
+    prov: &Provenance,
 ) -> i32 {
     if roots.is_empty() {
         return no_output("nothing to build: the expression has no derivation in it");
@@ -311,7 +320,7 @@ fn build_roots(
         Ok(t) => t,
         Err(e) => return e.report(),
     };
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     let plan = match apibuild::plan_with(roots, inputs.drvs, inputs.sources) {
         Ok(p) => p,
         Err(e) => return e.report(),
@@ -323,17 +332,16 @@ fn build_roots(
             plan.store_drvs
         );
     }
-    let opts = crate::remote::worker::Options {
+    let opts = worker::Options {
         // one root is one question, and its first failure answers it; several
         // roots are several questions, and each one gets its verdict
         keep_going: b.keep_going || roots.len() > 1,
         ..Default::default()
     };
-    let mut d =
-        match apibuild::Dispatch::open(&transport, &opts, plan, prov.clone(), Style::detect()) {
-            Ok(d) => d.overrides(b.sources.clone()),
-            Err(e) => return e.report(),
-        };
+    let mut d = match Dispatch::open(&transport, &opts, plan, prov.clone(), Style::detect()) {
+        Ok(d) => d.overrides(b.sources.clone()),
+        Err(e) => return e.report(),
+    };
 
     if b.no_build {
         if let Err(e) = d.upload_only(&roots[..1]) {
@@ -349,7 +357,7 @@ fn build_roots(
             // The bare attribute: the dispatcher adds the position, once.
             let name = (inputs.drvs.get(r))
                 .and_then(|i| i.attr.clone())
-                .unwrap_or_else(|| crate::provenance::drv_name(&r.to_string()));
+                .unwrap_or_else(|| provenance::drv_name(&r.to_string()));
             Target::new(&name, r.clone(), outputs.to_vec())
         })
         .collect();
@@ -383,16 +391,16 @@ fn build_roots(
                     .map(|(name, path)| (format!("{}!{name}", o.attr), path.clone()))
             })
             .collect();
-        crate::cli::devenv::keep_outputs(&transport, &b.root_key, &outputs);
+        devenv::keep_outputs(&transport, &b.root_key, &outputs);
     }
     timings(b, &d, plan_time);
-    let report = crate::api::render::Outcomes(&outcomes);
+    let report = Outcomes(&outcomes);
     if outcomes.len() > 1 {
-        crate::cli::render::text::built(&report);
+        text::built(&report);
     }
-    crate::cli::render::emit(&report, b.json);
+    render::emit(&report, b.json);
     match silence(&outcomes, outputs) {
-        Some(why) => crate::log::combine_exit(d.d.exit, no_output(&why)),
+        Some(why) => log::combine_exit(d.d.exit, no_output(&why)),
         None => d.d.exit,
     }
 }
@@ -403,13 +411,13 @@ fn build_roots(
 const NO_OUTPUT: &str = "no-output";
 
 fn no_output(why: &str) -> i32 {
-    crate::log::Report::new(NO_OUTPUT, why).emit()
+    log::Report::new(NO_OUTPUT, why).emit()
 }
 
 /// The stdout contract, checked: why a target put no store path on stdout, or
 /// `None` when every target did. A build that failed reported itself already
 /// and its exit code carries it, so it is not named again here.
-fn silence(outcomes: &[crate::build::Outcome], wanted: &[String]) -> Option<String> {
+fn silence(outcomes: &[Outcome], wanted: &[String]) -> Option<String> {
     if outcomes.is_empty() {
         return Some("the builder returned no build result".to_string());
     }
@@ -439,21 +447,17 @@ fn silence(outcomes: &[crate::build::Outcome], wanted: &[String]) -> Option<Stri
 
 /// `--dry-run`: the sets as log records, as shared.cc:printMissing writes
 /// them, and with `--json` the contract shape beside them on stdout.
-fn print_missing(
-    m: &crate::remote::worker::Missing,
-    plan: &crate::remote::plan::Plan,
-    json: bool,
-) -> i32 {
-    let m = crate::api::render::Missing::of(m, plan);
-    crate::cli::render::text::missing(&m);
+fn print_missing(m: &Missing, plan: &Plan, json: bool) -> i32 {
+    let m = api::render::Missing::of(m, plan);
+    text::missing(&m);
     if json {
-        crate::cli::render::bytes(&crate::cli::render::json(&m.json(), false));
+        render::bytes(&render::json(&m.json(), false));
     }
     0
 }
 
 /// `--timings`: one line per phase of the flow, as the backend measured it.
-fn timings(b: &BuildArgs, d: &crate::api::build::Dispatch, plan_time: std::time::Duration) {
+fn timings(b: &BuildArgs, d: &Dispatch, plan_time: Duration) {
     if b.timings {
         eprintln!("{}", d.d.report(d.plan(), plan_time));
     }

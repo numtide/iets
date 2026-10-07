@@ -13,6 +13,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{fs, io};
 
 use super::scm::Scm;
 use super::{AttrVal, Attrs, Tree};
@@ -21,6 +22,8 @@ use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar;
 use crate::store::path::StorePath;
 use crate::store::source::{SourceOrigin, SrcPath};
+use crate::trace::{self, TreeFp};
+use crate::treestore;
 
 /// A directory copied whole, as a `path:` input.
 pub fn path_source(ev: &mut Evaluator, dir: &Path, pos: Pos) -> EvalResult<Tree> {
@@ -33,7 +36,7 @@ pub fn path_source(ev: &mut Evaluator, dir: &Path, pos: Pos) -> EvalResult<Tree>
     );
     attrs.insert("narHash".into(), AttrVal::Str(hash.to_sri()));
     attrs.insert("lastModified".into(), AttrVal::Int(mtime.max(0) as u64));
-    let path = crate::treestore::store_path("source", &hash)
+    let path = treestore::store_path("source", &hash)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     Ok(Tree {
         path,
@@ -46,7 +49,7 @@ pub fn path_source(ev: &mut Evaluator, dir: &Path, pos: Pos) -> EvalResult<Tree>
 /// NAR hash of a whole directory and the newest `lstat` mtime in it, like
 /// `dumpPathAndGetMtime`.
 pub fn path_tree(ev: &mut Evaluator, dir: &Path, pos: Pos) -> EvalResult<(Hash, i64)> {
-    let io = |e: std::io::Error| {
+    let io = |e: io::Error| {
         Error::boxed(
             ErrorKind::Io,
             format!("copying '{}' to the store: {e}", dir.display()),
@@ -56,16 +59,13 @@ pub fn path_tree(ev: &mut Evaluator, dir: &Path, pos: Pos) -> EvalResult<(Hash, 
     let mut fp = ev.trace().fp(dir);
     let (hash, nar_size, mtime) = dump_and_max_mtime(dir, &mut fp).map_err(io)?;
     if names_its_content(dir, &hash) {
-        ev.trace().stat(
-            dir.as_os_str().as_bytes(),
-            false,
-            crate::trace::Kind::Directory,
-        );
+        ev.trace()
+            .stat(dir.as_os_str().as_bytes(), false, trace::Kind::Directory);
     } else {
         ev.trace()
-            .tree_dated(dir, crate::trace::hash_to_digest(&hash), mtime, fp);
+            .tree_dated(dir, trace::hash_to_digest(&hash), mtime, fp);
     }
-    let sp = crate::treestore::store_path("source", &hash)
+    let sp = treestore::store_path("source", &hash)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     ev.known.add(
         sp,
@@ -83,19 +83,16 @@ fn names_its_content(dir: &Path, hash: &Hash) -> bool {
     let Some(p) = dir.to_str().and_then(|s| StorePath::parse(s).ok()) else {
         return false;
     };
-    crate::treestore::store_path(p.name(), hash).is_ok_and(|q| q == p)
+    treestore::store_path(p.name(), hash).is_ok_and(|q| q == p)
 }
 
 /// One walk for both answers, like `dumpPathAndGetMtime`: the dump already reaches every
 /// entry in the tree, so the newest `lstat` mtime comes from its filter callback instead of a
 /// second recursive `read_dir`.
-fn dump_and_max_mtime(
-    dir: &Path,
-    fp: &mut Option<crate::trace::TreeFp>,
-) -> std::io::Result<(Hash, u64, i64)> {
-    let mut mtime = std::fs::symlink_metadata(dir)?.mtime();
+fn dump_and_max_mtime(dir: &Path, fp: &mut Option<TreeFp>) -> io::Result<(Hash, u64, i64)> {
+    let mut mtime = fs::symlink_metadata(dir)?.mtime();
     let mut filter = |p: &Path, t: nar::FileType| {
-        if let Ok(st) = std::fs::symlink_metadata(p) {
+        if let Ok(st) = fs::symlink_metadata(p) {
             mtime = mtime.max(st.mtime());
         }
         if let Some(fp) = fp.as_mut() {
@@ -152,8 +149,8 @@ pub fn tracked_source(
             )
         })?;
     ev.trace()
-        .tree_external(root, crate::trace::hash_to_digest(&hash), &accepted, fp);
-    let path = crate::treestore::store_path("source", &hash)
+        .tree_external(root, trace::hash_to_digest(&hash), &accepted, fp);
+    let path = treestore::store_path("source", &hash)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     ev.known.add(
         path.clone(),
@@ -194,16 +191,20 @@ pub fn tracked_source(
 mod tests {
     use super::*;
 
+    use std::fs::File;
+    use std::time::{Duration, SystemTime};
+
+    use crate::store::hash;
+    use crate::store::nar::tests::fixture_tree;
+
     /// Only the fixed-output path of the hash itself skips the walk: another
     /// hash under the same name, another name, a path below it and a
     /// directory outside the store all keep their `Tree` observation.
     #[test]
     fn only_a_content_addressed_store_path_names_its_content() {
-        let hash = crate::store::hash::hash_bytes(HashAlgo::Sha256, b"a tree");
-        let other = crate::store::hash::hash_bytes(HashAlgo::Sha256, b"another tree");
-        let p = crate::treestore::store_path("source", &hash)
-            .unwrap()
-            .to_string();
+        let hash = hash::hash_bytes(HashAlgo::Sha256, b"a tree");
+        let other = hash::hash_bytes(HashAlgo::Sha256, b"another tree");
+        let p = treestore::store_path("source", &hash).unwrap().to_string();
         assert!(names_its_content(Path::new(&p), &hash));
         assert!(!names_its_content(Path::new(&p), &other));
         assert!(!names_its_content(Path::new(&format!("{p}x")), &hash));
@@ -223,15 +224,12 @@ mod tests {
 
     #[test]
     fn max_mtime_covers_root_and_children() {
-        let d = crate::store::nar::tests::fixture_tree("mtime");
+        let d = fixture_tree("mtime");
         let f = d.join("newest");
-        std::fs::write(&f, b"x").unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(1000);
-        std::fs::File::open(&f)
-            .unwrap()
-            .set_modified(later)
-            .unwrap();
-        let want = std::fs::metadata(&f).unwrap().mtime();
+        fs::write(&f, b"x").unwrap();
+        let later = SystemTime::now() + Duration::from_secs(1000);
+        File::open(&f).unwrap().set_modified(later).unwrap();
+        let want = fs::metadata(&f).unwrap().mtime();
         let (hash, size, mtime) = dump_and_max_mtime(&d, &mut None).unwrap();
         assert_eq!(mtime, want);
         assert_eq!(hash, nar::nar_hash(&d).unwrap());

@@ -9,11 +9,15 @@
 //! the running builds every `HEARTBEAT`, and a build silent for `STALL`
 //! switches to live streaming.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::env;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
 use super::event::{BuildEvent, Kind, fmt_duration};
+
+use crate::log::{json, note_mismatch, strip_ansi};
 
 /// Unfolded tail of a failure log.
 pub const FAILURE_TAIL: usize = 200;
@@ -53,7 +57,7 @@ impl Style {
     pub fn detect() -> Style {
         Style {
             mode: if is_tty() { Mode::Tty } else { Mode::Ci },
-            color: is_tty() && std::env::var_os("NO_COLOR").is_none() && !crate::log::json(),
+            color: is_tty() && env::var_os("NO_COLOR").is_none() && !json(),
             fold: actions_ci(),
             quiet: false,
         }
@@ -68,7 +72,7 @@ fn is_tty() -> bool {
 fn actions_ci() -> bool {
     ["GITHUB_ACTIONS", "GITEA_ACTIONS", "FORGEJO_ACTIONS"]
         .iter()
-        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
+        .any(|v| env::var_os(v).is_some_and(|s| !s.is_empty()))
 }
 
 /// One build's buffered output.
@@ -175,7 +179,7 @@ impl Renderer {
 
     /// What a build says; under internal-json its activity records say it.
     fn print(&mut self, lines: &[String]) {
-        if !crate::log::json() {
+        if !json() {
             self.write(lines);
         }
     }
@@ -273,7 +277,7 @@ impl Renderer {
         // the answer. The line may end up in a build's buffer, which
         // `log::format` never sees, so it is read off here.
         if e.drv.is_empty() {
-            crate::log::note_mismatch(&text);
+            note_mismatch(&text);
         }
         // A line the daemon did not attribute belongs to the running build
         // when there is exactly one: that is what a remote builder's own
@@ -282,7 +286,7 @@ impl Renderer {
         let key = match self.running.contains_key(&e.drv) {
             true => e.drv.clone(),
             false if self.running.len() == 1 => {
-                if daemon && crate::log::json() {
+                if daemon && json() {
                     self.note(&text);
                 }
                 self.running.keys().next().expect("one running").clone()
@@ -317,7 +321,7 @@ impl Renderer {
         if !text.contains("failed") && !text.contains("error") {
             return;
         }
-        for drv in drv_paths(&crate::log::strip_ansi(text)) {
+        for drv in drv_paths(&strip_ansi(text)) {
             self.failed.insert(drv);
         }
     }
@@ -525,7 +529,7 @@ impl Renderer {
                 )
             })
             .collect();
-        builds.sort_by_key(|b| std::cmp::Reverse(b.1));
+        builds.sort_by_key(|b| Reverse(b.1));
         let parts: Vec<String> = builds
             .iter()
             .map(|(label, el, phase, streaming)| {
@@ -611,18 +615,21 @@ fn drv_paths(text: &str) -> Vec<String> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use std::io;
     use std::sync::{Arc, Mutex};
+
+    use crate::session::Session;
 
     /// Somewhere to read the renderer's stderr back from.
     #[derive(Clone, Default)]
     pub struct Sink(pub Arc<Mutex<Vec<u8>>>);
 
     impl Write for Sink {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(b);
             Ok(b.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
@@ -882,7 +889,7 @@ pub(super) mod tests {
     /// prints the same words and means nothing.
     #[test]
     fn a_build_log_never_reports_a_mismatch() {
-        let s = crate::session::Session::new();
+        let s = Session::new();
         let _entered = s.enter();
         let line = format!(
             "{} 'x':\n  specified: sha256-AoAoAoAoAo=\n     got:    sha256-BoBoBoBoBo=",

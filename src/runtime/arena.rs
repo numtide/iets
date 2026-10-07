@@ -2,15 +2,20 @@
 //! until process exit, so every allocation hands out a `'static` reference.
 //! That is what makes graph sharing between cells trivially sound.
 
-use std::ptr;
+use std::time::{Duration, Instant};
+use std::{process, ptr, slice};
 
+#[cfg(feature = "stats2")]
+use super::census::Census;
+use super::value::Ctx;
 use super::word::Word;
+use crate::parallel::shared::ArenaUse;
 use crate::syntax::symbol::{FxHashMap, FxHashSet};
 
 const CHUNK: usize = 32 << 20;
 /// A 32 MiB chunk populates in ~1 ms with huge pages and ~16 ms with 4 KiB
 /// pages; anything slower than this is a compaction stall.
-const THP_STALL: std::time::Duration = std::time::Duration::from_millis(6);
+const THP_STALL: Duration = Duration::from_millis(6);
 
 pub struct Arena {
     ptr: *mut u8,
@@ -29,7 +34,7 @@ pub struct Arena {
     /// text millions of times (docs/explanation/evaluation.md).
     pub(crate) strings: FxHashMap<u64, StrEntry>,
     /// Context slices by content.
-    pub(crate) ctxs: FxHashSet<&'static [super::value::Ctx]>,
+    pub(crate) ctxs: FxHashSet<&'static [Ctx]>,
 }
 
 /// Position of the bump pointer, to give back the last allocation.
@@ -91,8 +96,8 @@ impl Arena {
     /// `release` and `shrink_last` give bytes back, so a total can fall below
     /// its own mark. The fold saturates there and keeps whatever it published,
     /// which overstates by the bytes given back since the last fold.
-    pub(crate) fn take_unfolded(&mut self) -> crate::parallel::shared::ArenaUse {
-        let mut u = crate::parallel::shared::ArenaUse {
+    pub(crate) fn take_unfolded(&mut self) -> ArenaUse {
+        let mut u = ArenaUse {
             bytes: self.bytes_allocated.saturating_sub(self.folded.bytes) as u64,
             mapped: self.mapped.saturating_sub(self.folded.mapped) as u64,
             ..Default::default()
@@ -172,7 +177,7 @@ impl Arena {
         // trap per page. The chunk is intentionally leaked.
         let base = unsafe {
             let p = libc::mmap(
-                std::ptr::null_mut(),
+                ptr::null_mut(),
                 chunk,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
@@ -182,10 +187,10 @@ impl Arena {
             if p == libc::MAP_FAILED {
                 // no unwinding from here: other fibers hold arena pointers,
                 // and Nix ends the same way on a heap it cannot grow
-                crate::errln!("error: out of memory");
-                std::process::exit(1);
+                errln!("error: out of memory");
+                process::exit(1);
             }
-            let t0 = std::time::Instant::now();
+            let t0 = Instant::now();
             if self.thp {
                 libc::madvise(p, chunk, libc::MADV_HUGEPAGE);
             }
@@ -223,7 +228,7 @@ impl Arena {
         // SAFETY: p is fresh and sized for items.len() elements of T.
         unsafe {
             ptr::copy_nonoverlapping(items.as_ptr(), p, items.len());
-            std::slice::from_raw_parts_mut(p, items.len())
+            slice::from_raw_parts_mut(p, items.len())
         }
     }
 
@@ -239,7 +244,7 @@ impl Arena {
             for (i, e) in v.into_iter().enumerate() {
                 p.add(i).write(e);
             }
-            std::slice::from_raw_parts(p, n)
+            slice::from_raw_parts(p, n)
         }
     }
 
@@ -262,7 +267,7 @@ impl Arena {
             off += part.len();
         }
         // SAFETY: fully initialised above.
-        unsafe { std::slice::from_raw_parts(p, len) }
+        unsafe { slice::from_raw_parts(p, len) }
     }
 }
 
@@ -366,7 +371,7 @@ pub struct Stats {
     pub counts: [u64; NSTATS],
     pub bytes: [u64; NSTATS],
     #[cfg(feature = "stats2")]
-    pub census: super::census::Census,
+    pub census: Census,
 }
 
 impl Stats {

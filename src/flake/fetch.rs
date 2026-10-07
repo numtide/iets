@@ -6,18 +6,21 @@
 
 use std::path::Path;
 
+use crate::builtins::{paths, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
-use crate::lint::Level;
-use crate::lint::LintId;
-use crate::lint::purity::tree_level;
+use crate::lint::purity::{self, tree_level};
+use crate::lint::{Level, LintId};
 use crate::runtime::{Ctx, Taint, Value, Word};
 use crate::source::{
-    AttrVal, Attrs, SourceRef, Tree, bool_attr, int_attr, last_modified_date, parse_nar_hash,
-    str_attr, to_url,
+    self, AttrVal, Attrs, SourceRef, Tree, bool_attr, int_attr, last_modified_date, parse_nar_hash,
+    scm, str_attr, to_url,
 };
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::path::IngestionMethod;
 use crate::syntax::symbol::Sym;
+use crate::{provenance, treestore};
+
+use super::flakeref;
 
 /// The attrs `fetchTree` accepts: strings and paths, booleans, non-negative
 /// integers (fetchTree.cc).
@@ -92,9 +95,7 @@ fn check_locked(attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     // fetchTree.cc only warns on a `narHash`
     let shown = match ty {
         _ if attrs.contains_key("narHash") => None,
-        "path" | "tarball" | "github" | "gitlab" => {
-            super::flakeref::attrs_to_string(attrs.clone()).ok()
-        }
+        "path" | "tarball" | "github" | "gitlab" => flakeref::attrs_to_string(attrs.clone()).ok(),
         _ => None,
     };
     match shown {
@@ -112,7 +113,7 @@ fn check_locked(attrs: &Attrs, pos: Pos) -> EvalResult<()> {
 }
 
 pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
-    crate::lint::purity::unhashed_fetch(ev, "fetchTree", args[0], pos)?;
+    purity::unhashed_fetch(ev, "fetchTree", args[0], pos)?;
     let mut attrs = collect_attrs(ev, args[0], pos)?;
     if ev.pure() {
         check_locked(&attrs, pos)?;
@@ -135,11 +136,11 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                     to_url(&attrs)
                 );
             }
-            let (hash, mtime) = match crate::builtins::store_hooks::locate(ev, path.as_bytes()) {
-                None => crate::source::path_tree(ev, Path::new(path), pos)?,
+            let (hash, mtime) = match store_hooks::locate(ev, path.as_bytes()) {
+                None => source::path_tree(ev, Path::new(path), pos)?,
                 // a store tree's mtimes are all 1, so that is its lastModified
                 Some(_) => {
-                    let sp = crate::builtins::paths::add_path(
+                    let sp = paths::add_path(
                         ev,
                         pos,
                         b"source",
@@ -170,7 +171,7 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                         .and_then(|a| a.get(sym))
                         .map(|a| a.pos);
                     let at = at.map(|p| {
-                        crate::provenance::describe_pos(ev, p).unwrap_or_else(|| ev.describe_pos(p))
+                        provenance::describe_pos(ev, p).unwrap_or_else(|| ev.describe_pos(p))
                     });
                     return Err(Error::hash_mismatch(msg, &hash, at, pos));
                 }
@@ -179,7 +180,7 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
             attrs
                 .entry("lastModified".into())
                 .or_insert(AttrVal::Int(mtime.max(0) as u64));
-            let path = crate::treestore::store_path("source", &hash)
+            let path = treestore::store_path("source", &hash)
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
             Tree {
                 path,
@@ -189,7 +190,7 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
             }
         }
         "github" | "gitlab" | "sourcehut" | "git" | "tarball" | "hg" => {
-            crate::source::tree(ev, &SourceRef::Locked(attrs), pos)?
+            source::tree(ev, &SourceRef::Locked(attrs), pos)?
         }
         other => bail!(
             ErrorKind::Unsupported,
@@ -209,7 +210,7 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
 /// path is known before the download, so it is the same fetch as a locked
 /// `tarball` input. Without one it is not, and the call is unsupported.
 pub fn fetch_tarball_builtin(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
-    crate::lint::purity::unhashed_fetch(ev, "fetchTarball", args[0], pos)?;
+    purity::unhashed_fetch(ev, "fetchTarball", args[0], pos)?;
     let w = ev.force(args[0])?;
     let (mut url, mut sha256, mut name) = (None, None, "source".to_string());
     if let Some(a) = w.as_attrs() {
@@ -264,14 +265,14 @@ pub fn fetch_tarball_builtin(ev: &mut Evaluator, args: &[Word], pos: Pos) -> Eva
     };
     // not `source::tree`: `fetchTarball` names the entry itself, and the
     // input store's entry names are what an upload looks up
-    let sp = crate::treestore::store_path(&name, &hash)
+    let sp = treestore::store_path(&name, &hash)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     let attrs = Attrs::from([
         ("type".into(), AttrVal::Str("tarball".into())),
         ("url".into(), AttrVal::Str(url)),
         ("narHash".into(), AttrVal::Str(hash.to_sri())),
     ]);
-    crate::source::ensure_readable(ev, &sp, &attrs, pos)?;
+    source::ensure_readable(ev, &sp, &attrs, pos)?;
     let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
     let ctx = ev.arena.alloc_slice(&[Ctx::Opaque(full)]);
     Ok(ev.arena.mk_string_static(full, ctx))
@@ -293,7 +294,7 @@ pub fn is_count(f: Word) -> bool {
 /// the revision.
 fn rev_count(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     if let Some(tree) = args[0].as_string() {
-        crate::lint::purity::rev_count(ev, &String::from_utf8_lossy(tree.bytes), pos)?;
+        purity::rev_count(ev, &String::from_utf8_lossy(tree.bytes), pos)?;
     }
     if args[1].as_int().is_some() {
         return Ok(args[1]);
@@ -303,11 +304,11 @@ fn rev_count(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         let s = ev.force_string(c.get(), pos, "")?;
         of.push(String::from_utf8_lossy(s.bytes).into_owned());
     }
-    let scm = of.first().and_then(|n| crate::source::scm::named(n));
+    let scm = of.first().and_then(|n| scm::named(n));
     let (Some(scm), [_, root, rev]) = (scm, of.as_slice()) else {
         bail!(ErrorKind::Eval, pos, "iets: revCount of an unknown tree");
     };
-    let n = crate::source::scm::rev_count(ev.trace(), scm, Path::new(root), rev)
+    let n = scm::rev_count(ev.trace(), scm, Path::new(root), rev)
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
     Ok(ev.mk_int(n as i64))
 }
@@ -389,10 +390,11 @@ pub fn emit_tree_attrs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::cache::deserialize;
-    use crate::compile::cache::serialize;
+    use crate::compile::cache::{deserialize, serialize};
     use crate::eval::EvalConfig;
     use crate::lint::Config;
+    use crate::lint::allow::Allows;
+    use crate::session::Session;
     use crate::store::path::StorePath;
 
     fn tree(ev: &mut Evaluator, source: &str) -> Word {
@@ -506,8 +508,7 @@ mod tests {
 
     fn toml(text: &str) -> Config {
         let mut c = Config::default();
-        c.apply_toml(text, std::path::Path::new("/r/iets.toml"))
-            .unwrap();
+        c.apply_toml(text, Path::new("/r/iets.toml")).unwrap();
         c
     }
 
@@ -528,7 +529,7 @@ mod tests {
 
     /// `found` after `f` read each tree of `sources`.
     fn reads(cfg: Config, sources: &[&str], f: &str) -> Vec<String> {
-        let session = crate::session::Session::new();
+        let session = Session::new();
         let _entered = session.enter();
         let mut ev = EvalConfig::new().lints(cfg).build();
         for s in sources {
@@ -636,7 +637,7 @@ mod tests {
 
     #[test]
     fn an_entry_of_the_compiled_file_cache_keeps_the_site() {
-        let session = crate::session::Session::new();
+        let session = Session::new();
         let _entered = session.enter();
         let mut ev = Evaluator::new();
         let src = "t:\n  { s = t; }.s.revCount + { inherit (t) revCount; }.revCount";
@@ -645,7 +646,7 @@ mod tests {
         let ir = ev
             .compile_source(b"/t/f.nix", src.into(), b"/t", None)
             .unwrap();
-        let allows = crate::lint::allow::Allows::default();
+        let allows = Allows::default();
         let entry = serialize(&ev, ir, base, &[], &allows).unwrap();
         let (ir, _, _) = deserialize(&mut ev, &entry, base, src.len() as u32, false).unwrap();
         assert_eq!(serialize(&ev, ir, base, &[], &allows), Some(entry));

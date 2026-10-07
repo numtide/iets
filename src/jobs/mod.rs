@@ -12,15 +12,19 @@ pub mod instantiate;
 pub mod line;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::iter;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, OnceLock};
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::force::{CellState, T_JOB, bail_requested, fanout_range, take_cell};
 use crate::print::{json_escape, lexicographic_order, print_json};
-use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
+use crate::runtime::{self, Attr, AttrsObj, Ctx, Value, Word};
+use crate::session::Session;
 use crate::store::drv::{Derivation, DerivationOutput, load_derivation_from_store};
 use crate::store::path::{STORE_DIR, StorePath};
 use crate::syntax::symbol::Sym;
+use crate::{log, provenance};
 
 pub use line::{ErrorLine, Job, Line};
 
@@ -79,11 +83,11 @@ pub struct Run {
     /// a helper handed a range of its cells can apply the chunk rule.
     sets: Mutex<Option<HashMap<u64, (u64, u32)>>>,
     /// Worker processes spawned so far: `--workers` plus one per restart.
-    pub spawned: std::sync::atomic::AtomicUsize,
+    pub spawned: AtomicUsize,
 }
 
 fn remember_set(a: &'static AttrsObj, hash: u64, depth: u32) {
-    crate::session::Session::current()
+    Session::current()
         .jobs
         .sets
         .lock()
@@ -93,7 +97,7 @@ fn remember_set(a: &'static AttrsObj, hash: u64, depth: u32) {
 }
 
 fn recall_set(a: &'static AttrsObj) -> Option<(u64, u32)> {
-    crate::session::Session::current()
+    Session::current()
         .jobs
         .sets
         .lock()
@@ -104,7 +108,7 @@ fn recall_set(a: &'static AttrsObj) -> Option<(u64, u32)> {
 
 /// A copy, not a reference: the callers hold it across a `&mut Evaluator`.
 fn config() -> Config {
-    *crate::session::Session::current()
+    *Session::current()
         .jobs
         .config
         .get()
@@ -138,7 +142,7 @@ pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<
         constituents: ev.sym(b"constituents"),
         glob_constituents: ev.sym(b"_hydraGlobConstituents"),
     };
-    let _ = crate::session::Session::current().jobs.config.set(Config {
+    let _ = Session::current().jobs.config.set(Config {
         opts,
         syms,
         auto_args,
@@ -242,8 +246,8 @@ pub fn attr_join(path: &[String]) -> String {
 }
 
 /// `api::report`'s report without the provenance rewrite.
-pub fn error_report(ev: &Evaluator, e: &Error) -> crate::log::Report {
-    crate::log::Report::eval(e, &e.msg, &|p| ev.describe_pos(p), &|m| m.to_string())
+pub fn error_report(ev: &Evaluator, e: &Error) -> log::Report {
+    log::Report::eval(e, &e.msg, &|p| ev.describe_pos(p), &|m| m.to_string())
 }
 
 pub const FNV_BASIS: u64 = 0xcbf29ce484222325;
@@ -251,7 +255,7 @@ pub const FNV_BASIS: u64 = 0xcbf29ce484222325;
 /// FNV-1a of one more path element (NUL-terminated) after `h`.
 pub fn fnv_step(h: u64, name: &[u8]) -> u64 {
     let mut h = h;
-    for b in name.iter().copied().chain(std::iter::once(0)) {
+    for b in name.iter().copied().chain(iter::once(0)) {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
@@ -600,7 +604,7 @@ fn extract_constituents(
     for e in ctx {
         if let Ctx::Built { drv, .. } = e {
             // the `.drv` at the bottom of the chain: what a build starts from
-            let (_, root) = crate::runtime::split_built(drv);
+            let (_, root) = runtime::split_built(drv);
             let p = StorePath::parse(&String::from_utf8_lossy(root))
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, c.pos))?;
             if drvs.last() != Some(&p) {
@@ -770,7 +774,7 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
     }
     if cfg.opts.provenance
         && let Some(pos) = ev.drv.drvs.get(&drv_path).and_then(|i| i.pos)
-        && let Some(s) = crate::provenance::describe_pos(ev, pos)
+        && let Some(s) = provenance::describe_pos(ev, pos)
     {
         extra.insert("pos".into(), line::json_str(&s));
     }

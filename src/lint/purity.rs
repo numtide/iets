@@ -6,9 +6,13 @@
 
 use super::{Level, LintId, Where};
 use crate::eval::{EvalResult, Evaluator, Pos};
-use crate::runtime::{Cell, Ctx, Kind, Taint, Value, Word};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::ffi::OsStringExt;
+use crate::flake::fetch;
+use crate::runtime::{self, Cell, Ctx, Kind, Taint, Value, Word};
+use crate::{compile, project, trace};
+use std::borrow::Cow;
+use std::ffi::OsStr;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::Path;
 
 /// The message for a reference to the global `name`, when it is `currentTime`.
 pub fn current_time(name: &[u8]) -> Option<String> {
@@ -57,7 +61,7 @@ pub fn ifd(ev: &mut Evaluator, ctx: &[Ctx], pos: Pos) -> EvalResult<()> {
     let drv = ctx.iter().find_map(|c| match c {
         Ctx::DrvDeep(d) => Some(*d),
         // the `.drv` at the bottom of the chain is the one to build first
-        Ctx::Built { drv: d, .. } => Some(crate::runtime::split_built(d).1),
+        Ctx::Built { drv: d, .. } => Some(runtime::split_built(d).1),
         Ctx::Opaque(_) | Ctx::Impure(_) => None,
     });
     let Some(drv) = drv else {
@@ -108,10 +112,10 @@ pub fn dir_copy_unfiltered(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalRes
 /// The nearest project root at or above `path` (`crate::project`). Every
 /// probe is a `Stat` observation, so a new marker is a cache miss.
 fn project_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
-    let dir = crate::compile::canon_path(path);
-    let at = std::path::Path::new(std::ffi::OsStr::from_bytes(&dir));
-    let root = crate::project::find_with(at, |m| {
-        ev.trace().stat_now(m.as_os_str().as_bytes(), true) != crate::trace::Kind::Missing
+    let dir = compile::canon_path(path);
+    let at = Path::new(OsStr::from_bytes(&dir));
+    let root = project::find_with(at, |m| {
+        ev.trace().stat_now(m.as_os_str().as_bytes(), true) != trace::Kind::Missing
     })?;
     Some(root.into_os_string().into_vec())
 }
@@ -186,7 +190,7 @@ pub fn count_read(ev: &mut Evaluator, cell: &Cell, pos: Pos) -> EvalResult<Word>
         // value in `code` after, so an unforced state proves the function
         let (f, of) = (t.code.get(), t.state.get());
         if w.thunk_unforced(of)
-            && crate::flake::fetch::is_count(f)
+            && fetch::is_count(f)
             && let Some(tree) = t.arg1.as_string()
         {
             rev_count(ev, &String::from_utf8_lossy(tree.bytes), pos)?;
@@ -225,8 +229,7 @@ pub fn marks_in_drv(
     metas.sort();
     metas.dedup();
     let id = LintId::TreeMetaInDrv;
-    let source =
-        |m: &std::borrow::Cow<str>| tree_level(ev, id, m.rsplit_once('.').map_or(m, |(s, _)| s));
+    let source = |m: &Cow<str>| tree_level(ev, id, m.rsplit_once('.').map_or(m, |(s, _)| s));
     let levels = metas.iter().map(source);
     let Some(level) = levels.max() else {
         return Ok(());

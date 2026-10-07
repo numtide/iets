@@ -3,12 +3,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::str;
 use std::sync::Arc;
 
-use super::{Digest32, Filtered, Kind, Obs};
+use super::{Digest32, Filtered, Kind, Obs, Query};
 use crate::builtins::derivation::DrvInfo;
+use crate::store::hash::{Hash, HashAlgo};
 use crate::store::path::StorePath;
-use crate::store::source::{SourceKind, SourceOrigin, Src, SrcPath};
+use crate::store::source::{Accepted, SourceKind, SourceOrigin, Src, SrcPath};
 
 const VERSION: u8 = 7;
 
@@ -311,7 +313,7 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
         },
         6 => Obs::Cmd {
             dir: d.vec()?,
-            query: super::Query::from_u8(d.u8()?).ok_or(())?,
+            query: Query::from_u8(d.u8()?).ok_or(())?,
             hash: d.digest()?,
         },
         7 => Obs::Input {
@@ -378,7 +380,7 @@ pub fn encode_drvs(drvs: &HashMap<StorePath, DrvInfo>) -> Vec<u8> {
 }
 
 fn store_path(b: &[u8]) -> R<StorePath> {
-    StorePath::from_base_name(std::str::from_utf8(b).map_err(|_| ())?).map_err(|_| ())
+    StorePath::from_base_name(str::from_utf8(b).map_err(|_| ())?).map_err(|_| ())
 }
 
 pub fn decode_drvs(b: &[u8]) -> Option<HashMap<StorePath, DrvInfo>> {
@@ -469,7 +471,7 @@ fn path_buf(b: &[u8]) -> PathBuf {
     PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b))
 }
 
-fn accepted_set(e: &mut Enc, accepted: &crate::store::source::Accepted) {
+fn accepted_set(e: &mut Enc, accepted: &Accepted) {
     match accepted {
         None => e.u8(0),
         Some(a) => {
@@ -484,7 +486,7 @@ fn accepted_set(e: &mut Enc, accepted: &crate::store::source::Accepted) {
     }
 }
 
-fn read_accepted(d: &mut Dec<'_>) -> Option<crate::store::source::Accepted> {
+fn read_accepted(d: &mut Dec<'_>) -> Option<Accepted> {
     match d.u8().ok()? {
         0 => Some(None),
         1 => Some(Some(Arc::new(
@@ -531,11 +533,7 @@ pub fn decode_sources(b: &[u8]) -> Option<HashMap<StorePath, SourceOrigin>> {
         let nar = match d.u8().ok()? {
             0 => None,
             1 => Some((
-                crate::store::hash::Hash::from_bytes(
-                    crate::store::hash::HashAlgo::Sha256,
-                    d.bytes().ok()?,
-                )
-                .ok()?,
+                Hash::from_bytes(HashAlgo::Sha256, d.bytes().ok()?).ok()?,
                 d.u64().ok()?,
             )),
             _ => return None,
@@ -575,6 +573,8 @@ pub fn decode_roots(b: &[u8]) -> Option<Vec<(StorePath, Option<String>)>> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    use crate::store::nar;
 
     #[test]
     fn readset_roundtrip() {
@@ -655,7 +655,7 @@ mod tests {
         assert_eq!(back[&p].references, [s.clone()].into());
 
         let i = StorePath::from_base_name("a3ck4d9zzk4l1r76rz5zv2wgycmpsy1y-input").unwrap();
-        let hash = crate::store::nar::nar_hash_of_string(b"x");
+        let hash = nar::nar_hash_of_string(b"x");
         let mut sources = HashMap::new();
         sources.insert(
             s.clone(),

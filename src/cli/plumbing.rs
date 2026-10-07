@@ -1,20 +1,30 @@
 //! `iets plumbing OP`: the machine-first commands. One operation each,
 //! JSON on stdout, a stable contract (docs/reference/plumbing.md).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io;
+use std::path::PathBuf;
 
-use crate::api::build::{self as apibuild, Dispatch};
+use crate::api::build::Dispatch;
+use crate::api::fetch::{drv_hash, url_hash};
 use crate::api::installable::{self, Prefixes, Want, drv_roots};
-use crate::api::render::Report;
+use crate::api::render::{Fetched, Missing, Outcomes, Report};
+use crate::api::{self, build as apibuild};
 use crate::build::Target;
 use crate::build::render::Style;
 use crate::cli::help::{self, arg_error, each_arg};
-use crate::cli::{EvalArgs, Input, evaluate, parse_eval_args, report, run_for};
-use crate::error::Error as CrateError;
+use crate::cli::{self, EvalArgs, Input, evaluate, parse_eval_args, render, report, run_for};
+use crate::error::{self, Error as CrateError};
 use crate::eval::{Error, Evaluator};
-use crate::jobs::line::Job;
-use crate::jobs::line::Line;
+use crate::jobs::cache::Resolver;
+use crate::jobs::line::{Job, Line};
+use crate::log;
+use crate::provenance::Provenance;
+use crate::remote::plan::Plan;
+use crate::remote::worker::{self, Transport};
 use crate::runtime::Word;
+use crate::store::drv;
+use crate::store::hash::HashAlgo;
 use crate::store::path::StorePath;
 
 pub const HELP: &str = "\
@@ -168,7 +178,7 @@ fn resolve(argv: &[String]) -> i32 {
     if a.input.is_none() {
         arg_error("nothing to resolve: give -E EXPR, FILE or FLAKEREF[#FRAGMENT]")
     }
-    crate::cli::run_parallel(run_for(&a), move |ev, _| match run(ev, a, o) {
+    cli::run_parallel(run_for(&a), move |ev, _| match run(ev, a, o) {
         Ok(()) => 0,
         Err(e) => report(ev, &e),
     })
@@ -187,7 +197,7 @@ fn run(ev: &mut Evaluator, a: EvalArgs, o: Opts) -> Result<(), Box<Error>> {
         _ => String::new(),
     };
     let is_flake = matches!(a.input, Some(Input::Flake(_)));
-    let args = crate::api::auto_args(ev, &a.args, &crate::api::cwd())?;
+    let args = api::auto_args(ev, &a.args, &api::cwd())?;
     let flake = match (&a.input, o.prefixes) {
         (Some(Input::Flake(f)), Some(p)) => {
             let (loc, frag) = f.split_once('#').unwrap_or((f.as_str(), ""));
@@ -216,7 +226,7 @@ fn run(ev: &mut Evaluator, a: EvalArgs, o: Opts) -> Result<(), Box<Error>> {
         }
     }
     let mut roots = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for (attr, v) in found {
         if !o.drvs {
             break;
@@ -254,7 +264,7 @@ fn run(ev: &mut Evaluator, a: EvalArgs, o: Opts) -> Result<(), Box<Error>> {
         // an op downstream reads the closure from there instead of /nix/store
         v["drvDir"] = dir.into();
     }
-    crate::cli::render::bytes(&crate::cli::render::json(&v, false));
+    render::bytes(&render::json(&v, false));
     Ok(())
 }
 
@@ -264,7 +274,7 @@ struct Roots {
     targets: Vec<Target>,
     /// `resolve --dump-drvs DIR`: the closure is read from there, not from
     /// `/nix/store`.
-    drv_dir: Option<std::path::PathBuf>,
+    drv_dir: Option<PathBuf>,
 }
 
 /// The roots an op works on, one target per derivation. An argument is `DRV`
@@ -272,7 +282,7 @@ struct Roots {
 /// `roots` of a `resolve` or the `drvs` of a `plan`, and its `drvDir` when it
 /// has one. No output name means every output, as `!*` does in the worker
 /// protocol.
-fn roots(args: &[String], stdin: bool, drvs: Option<std::path::PathBuf>) -> Roots {
+fn roots(args: &[String], stdin: bool, drvs: Option<PathBuf>) -> Roots {
     let mut drv_dir = drvs;
     let mut out: Vec<Target> = Vec::new();
     let mut add = |drv: &str, output: Option<&str>| {
@@ -297,7 +307,7 @@ fn roots(args: &[String], stdin: bool, drvs: Option<std::path::PathBuf>) -> Root
     };
     if stdin {
         let mut text = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+        io::Read::read_to_string(&mut io::stdin(), &mut text)
             .unwrap_or_else(|e| arg_error(format!("--roots -: cannot read stdin: {e}")));
         let v: serde_json::Value = serde_json::from_str(&text)
             .unwrap_or_else(|e| arg_error(format!("--roots -: not JSON: {e}")));
@@ -348,7 +358,7 @@ fn paths_of(targets: &[Target]) -> Vec<StorePath> {
 /// The plan of the roots: from the derivations `--dump-drvs` wrote when there
 /// are any, else from `/nix/store`. Sources come from the local store either
 /// way; nothing here evaluated.
-fn plan_of(r: &Roots) -> crate::error::Result<crate::remote::plan::Plan> {
+fn plan_of(r: &Roots) -> error::Result<Plan> {
     let drvs = match &r.drv_dir {
         Some(d) => apibuild::drvs_in_dir(d)?,
         None => HashMap::new(),
@@ -361,10 +371,10 @@ fn plan_of(r: &Roots) -> crate::error::Result<crate::remote::plan::Plan> {
 fn split_flags(
     argv: &[String],
     mut f: impl FnMut(&str, &mut dyn FnMut() -> String) -> bool,
-) -> (Vec<String>, bool, Option<std::path::PathBuf>) {
+) -> (Vec<String>, bool, Option<PathBuf>) {
     let mut rest: Vec<String> = Vec::new();
     let mut stdin = false;
-    let mut drvs: Option<std::path::PathBuf> = None;
+    let mut drvs: Option<PathBuf> = None;
     each_arg(argv, |s, next| {
         if s == "--roots" {
             if next() != "-" {
@@ -420,22 +430,22 @@ fn op_missing(argv: &[String]) -> i32 {
     let r = roots(&args, stdin, drvs);
     match missing(&r, url.as_deref(), status) {
         Ok(v) => {
-            crate::cli::render::bytes(&crate::cli::render::json(&v, false));
+            render::bytes(&render::json(&v, false));
             0
         }
         Err(e) => e.report(),
     }
 }
 
-fn missing(r: &Roots, url: Option<&str>, status: bool) -> crate::error::Result<serde_json::Value> {
+fn missing(r: &Roots, url: Option<&str>, status: bool) -> error::Result<serde_json::Value> {
     let cfg = apibuild::config();
     let transport = apibuild::transport(url, &cfg)?;
-    let opts = crate::remote::worker::Options::default();
+    let opts = worker::Options::default();
     let plan = plan_of(r)?;
-    let prov = crate::provenance::Provenance::off();
+    let prov = Provenance::off();
     let mut d = Dispatch::open(&transport, &opts, plan, prov, Style::detect())?;
     let m = d.missing(&r.targets)?;
-    let mut v = crate::api::render::Missing::of(&m, d.plan()).json();
+    let mut v = Missing::of(&m, d.plan()).json();
     if status {
         v["roots"] = serde_json::Value::Array(cache_status(&transport, &r.targets)?);
     }
@@ -445,14 +455,13 @@ fn missing(r: &Roots, url: Option<&str>, status: bool) -> crate::error::Result<s
 /// `--check-cache-status`, per root: the verdict `eval-jobs` reports, from the
 /// derivations in `/nix/store`.
 fn cache_status(
-    transport: &crate::remote::worker::Transport,
+    transport: &Transport,
     targets: &[Target],
-) -> crate::error::Result<Vec<serde_json::Value>> {
+) -> error::Result<Vec<serde_json::Value>> {
     let mut lines: Vec<Line> = Vec::new();
     for t in targets {
-        let drv = crate::store::drv::load_derivation_from_store(&t.drv)
-            .map_err(|e| CrateError::Store(e.0))?;
-        let mut outputs = std::collections::BTreeMap::new();
+        let drv = drv::load_derivation_from_store(&t.drv).map_err(|e| CrateError::Store(e.0))?;
+        let mut outputs = BTreeMap::new();
         for (name, o) in &drv.outputs {
             let p = o
                 .path(&drv.name, name)
@@ -467,10 +476,10 @@ fn cache_status(
             constituents: Vec::new(),
             named_constituents: None,
             glob_constituents: false,
-            extra: std::collections::BTreeMap::new(),
+            extra: BTreeMap::new(),
         }));
     }
-    crate::jobs::cache::Resolver::open(transport)?.resolve(&mut lines)?;
+    Resolver::open(transport)?.resolve(&mut lines)?;
     let raw = |j: &Job, k: &str| {
         (j.extra.get(k))
             .and_then(|b| serde_json::from_slice(b).ok())
@@ -493,9 +502,9 @@ fn cache_status(
 struct BuildOpts {
     url: Option<String>,
     outputs: Vec<String>,
-    sources: HashMap<String, std::path::PathBuf>,
-    fetch_to: Option<std::path::PathBuf>,
-    gc_root: Option<std::path::PathBuf>,
+    sources: HashMap<String, PathBuf>,
+    fetch_to: Option<PathBuf>,
+    gc_root: Option<PathBuf>,
     no_build: bool,
 }
 
@@ -553,12 +562,12 @@ fn op_build(argv: &[String]) -> i32 {
     }
 }
 
-fn build(o: &BuildOpts, r: Roots) -> crate::error::Result<i32> {
+fn build(o: &BuildOpts, r: Roots) -> error::Result<i32> {
     let cfg = apibuild::config();
     let transport = apibuild::transport(o.url.as_deref(), &cfg)?;
-    let opts = crate::remote::worker::Options::default();
+    let opts = worker::Options::default();
     let plan = plan_of(&r)?;
-    let prov = crate::provenance::Provenance::off();
+    let prov = Provenance::off();
     let mut d = Dispatch::open(&transport, &opts, plan, prov, Style::detect())?
         .overrides(o.sources.clone());
     if o.no_build {
@@ -589,7 +598,7 @@ fn build(o: &BuildOpts, r: Roots) -> crate::error::Result<i32> {
             .collect();
         d.d.out_links(&links)?;
     }
-    let mut v = crate::api::render::Outcomes(&outcomes).json();
+    let mut v = Outcomes(&outcomes).json();
     if o.gc_root.is_some() {
         v["gcRoots"] = serde_json::json!(roots);
     }
@@ -609,12 +618,12 @@ pub fn is_url(s: &str) -> bool {
 /// One line on stdout: the hash and where it came from, as JSON or as the
 /// hash alone.
 pub fn hash_line(json: bool, hash: &str, key: &'static str, value: &str) -> i32 {
-    let f = crate::api::render::Fetched {
+    let f = Fetched {
         hash: hash.to_string(),
         key,
         origin: value.to_string(),
     };
-    crate::cli::render::emit(&f, json);
+    render::emit(&f, json);
     0
 }
 
@@ -627,23 +636,23 @@ pub fn hash_of_drv(ev: &mut Evaluator, a: EvalArgs, json: bool) -> i32 {
     }
     let [(root, _)] = roots.as_slice() else {
         let msg = format!("fetch wants one derivation, got {}", roots.len());
-        return crate::log::Report::new("usage", msg).emit();
+        return log::Report::new("usage", msg).emit();
     };
-    match crate::api::fetch::drv_hash(ev, root) {
+    match drv_hash(ev, root) {
         Ok((got, p)) => hash_line(json, &got, "drvPath", &p.to_full_string()),
         Err(e) => e.report(),
     }
 }
 
 /// The flags `fetch` and `iets prefetch` share, and what is left of the argv.
-pub fn fetch_flags(argv: &[String]) -> (bool, crate::store::hash::HashAlgo, Vec<String>) {
-    let (mut unpack, mut algo) = (false, crate::store::hash::HashAlgo::Sha256);
+pub fn fetch_flags(argv: &[String]) -> (bool, HashAlgo, Vec<String>) {
+    let (mut unpack, mut algo) = (false, HashAlgo::Sha256);
     let mut rest: Vec<String> = Vec::new();
     each_arg(argv, |s, next| match s {
         "--unpack" => unpack = true,
         "--hash-type" => {
             let v = next();
-            algo = crate::store::hash::HashAlgo::parse(&v)
+            algo = HashAlgo::parse(&v)
                 .unwrap_or_else(|| arg_error(format!("unknown hash algorithm '{v}'")));
         }
         s => rest.push(s.to_string()),
@@ -653,12 +662,7 @@ pub fn fetch_flags(argv: &[String]) -> (bool, crate::store::hash::HashAlgo, Vec<
 
 /// A URL or an installable becomes a hash: the whole of both frontends past
 /// their own flags.
-pub fn fetch(
-    unpack: bool,
-    algo: crate::store::hash::HashAlgo,
-    rest: Vec<String>,
-    json: bool,
-) -> i32 {
+pub fn fetch(unpack: bool, algo: HashAlgo, rest: Vec<String>, json: bool) -> i32 {
     let Some(at) = rest.iter().position(|s| is_url(s)) else {
         if rest.is_empty() {
             arg_error("nothing to fetch: give a URL, -E EXPR, FILE or FLAKEREF#ATTR")
@@ -667,13 +671,13 @@ pub fn fetch(
             arg_error("--unpack applies to a URL; a derivation says how it is hashed")
         }
         let a = parse_eval_args(&rest);
-        return crate::cli::run_parallel(run_for(&a), move |ev, _| hash_of_drv(ev, a, json));
+        return cli::run_parallel(run_for(&a), move |ev, _| hash_of_drv(ev, a, json));
     };
     let mut rest = rest;
     let url = rest.remove(at);
     // what is left are flags only (--log-format, --show-trace, …)
     parse_eval_args(&rest);
-    match crate::api::fetch::url_hash(&url, unpack, algo) {
+    match url_hash(&url, unpack, algo) {
         Ok(h) => hash_line(json, &h.to_sri(), "url", &url),
         Err(e) => e.report(),
     }

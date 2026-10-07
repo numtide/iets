@@ -14,11 +14,14 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, exit};
 
-use crate::cli::{EvalFlags, abs_path, eval_flag, full_includes};
-use crate::config::Config;
-use crate::eval::{EvalConfig, EvalResult, Evaluator, Pos};
+use crate::cli::{EvalArgs, EvalFlags, abs_path, eval_flag, full_includes, jobs};
+use crate::config::{self, Config};
+use crate::eval::{self, EvalConfig, EvalResult, Evaluator, Pos};
 use crate::remote::worker::{DEFAULT_SOCKET, Options, Transport};
 use crate::runtime::Word;
+use crate::session::Session;
+use crate::settings::builders;
+use crate::{api, argv, ignored, lint, log, nixbin};
 
 /// The command names iets answers to when it is installed as classic Nix.
 pub const NAMES: &[&str] = &[
@@ -31,12 +34,12 @@ pub const NAMES: &[&str] = &[
 
 /// Runs the classic command `name`. `argv` is everything after argv[0].
 pub fn dispatch(name: &str, argv: &[String]) -> i32 {
-    crate::log::set_classic();
+    log::set_classic();
     match name {
         "nix-instantiate" => instantiate::main(argv),
         "nix-build" => build::main(argv),
         "nix-shell" => shell::main(argv),
-        "nix-eval-jobs" => crate::cli::jobs::cmd_eval_jobs(argv),
+        "nix-eval-jobs" => jobs::cmd_eval_jobs(argv),
         _ => nix::main(argv),
     }
 }
@@ -44,18 +47,18 @@ pub fn dispatch(name: &str, argv: &[String]) -> i32 {
 /// Execs the real `name` with the same arguments. `IETS_NO_FALLBACK=1` makes
 /// this an error instead, so a test can see which cases fall back.
 pub fn fallback(name: &str, argv: &[String], reason: &str) -> ! {
-    crate::log::line(&format!("iets: falling back to {name}: {reason}"));
-    if crate::session::Session::current().settings().no_fallback {
-        crate::log::line(&format!("iets: no-fallback is set, not running {name}"));
+    log::line(&format!("iets: falling back to {name}: {reason}"));
+    if Session::current().settings().no_fallback {
+        log::line(&format!("iets: no-fallback is set, not running {name}"));
         exit(1)
     }
-    let Some(real) = crate::nixbin::real(name) else {
+    let Some(real) = nixbin::real(name) else {
         eprintln!("iets: cannot fall back to {name}: not found on PATH");
         exit(1)
     };
     let e = Command::new(&real)
         .arg0(name)
-        .args(argv.iter().map(|a| crate::argv::os(a)))
+        .args(argv.iter().map(|a| argv::os(a)))
         .exec();
     eprintln!("iets: cannot exec '{}': {e}", real.display());
     exit(1)
@@ -92,7 +95,7 @@ impl Argv<'_> {
     /// integer in a 32-bit field, and `auto` for `max-jobs`.
     fn number(&mut self, flag: &str, setting: &str) -> Result<String, String> {
         let v = self.value(flag)?;
-        crate::config::check_value(setting, &v)
+        config::check_value(setting, &v)
             .map(|()| v.clone())
             .map_err(|e| e.to_string())
     }
@@ -112,7 +115,7 @@ pub fn common_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
         "-k" | "--keep-going" => set.push(("keep-going".into(), "true".into())),
         "-K" | "--keep-failed" => set.push(("keep-failed".into(), "true".into())),
         "--quiet" => c.quiet = true,
-        "-v" | "--verbose" => crate::ignored::flag("--verbose", crate::ignored::ONE_LOG_LEVEL),
+        "-v" | "--verbose" => ignored::flag("--verbose", ignored::ONE_LOG_LEVEL),
         // `--indirect` does nothing in Nix either (nix-build.cc: "obsolete").
         // Only nix-instantiate has the GC warning, and it takes that flag itself.
         "--no-gc-warning" | "--indirect" => {}
@@ -163,12 +166,12 @@ fn settings_with(c: &Common, use_builder: bool) -> Result<(Config, Transport, Op
         let flag = store_given(c).then(|| cfg.store());
         // A classic name addresses one store, as the tool it stands in for
         // does. Placing across several is `iets build`'s (docs/reference/classic.md).
-        let specs = crate::settings::builders(flag.as_deref(), &cfg);
+        let specs = builders(flag.as_deref(), &cfg);
         if let [first, rest @ ..] = specs.as_slice()
             && !rest.is_empty()
         {
             let names: Vec<&str> = rest.iter().map(|s| s.url.as_str()).collect();
-            crate::log::line(&format!(
+            log::line(&format!(
                 "warning: a classic name builds on one place: using '{}', ignoring {}",
                 first.url,
                 names.join(", ")
@@ -183,7 +186,7 @@ fn settings_with(c: &Common, use_builder: bool) -> Result<(Config, Transport, Op
     };
     let transport = transport_of(&url, &cfg.system())?;
     if matches!(transport, Transport::Grpc(_)) {
-        crate::config::note_grpc(&c.flags.overrides);
+        config::note_grpc(&c.flags.overrides);
     }
     let options = Options::try_from(&cfg).map_err(|e| e.to_string())?;
     Ok((cfg, transport, options))
@@ -209,9 +212,9 @@ pub fn eval_config(c: &Common, cfg: &Config) -> EvalConfig {
         .flags
         .pure
         .unwrap_or_else(|| cfg.bool("pure-eval").ok().flatten().unwrap_or(false));
-    let cwd = crate::api::cwd();
+    let cwd = api::cwd();
     let entry = match (c.from_args, c.files.first()) {
-        (false, Some(f)) => crate::eval::dir_of(&abs_path(f, &cwd)).to_vec(),
+        (false, Some(f)) => eval::dir_of(&abs_path(f, &cwd)).to_vec(),
         _ => cwd,
     };
     // the root alone feeds the provenance fallback
@@ -219,8 +222,8 @@ pub fn eval_config(c: &Common, cfg: &Config) -> EvalConfig {
         .system(&cfg.system())
         .pure(pure)
         .search_path(full_includes(&c.flags.includes))
-        .ir_cache(crate::cli::EvalArgs::new().ir_cache())
-        .lints(crate::lint::Config::off())
+        .ir_cache(EvalArgs::new().ir_cache())
+        .lints(lint::Config::off())
         .lint_root(&entry)
 }
 
@@ -270,7 +273,7 @@ mod tests {
         for f in ["-v", "--verbose", "--no-gc-warning", "--indirect"] {
             assert_eq!(common_flag(&mut Common::default(), &mut a, f), Ok(true));
         }
-        let noted = crate::ignored::noted("ignored-flag");
+        let noted = ignored::noted("ignored-flag");
         for f in ["--accept-flake-config", "--eval-store", "--verbose"] {
             assert_eq!(noted.iter().filter(|n| *n == f).count(), 1, "{f}");
         }

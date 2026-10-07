@@ -8,6 +8,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::log;
+use crate::session::Session;
+
 struct Note {
     code: &'static str,
     key: String,
@@ -25,13 +28,13 @@ pub struct Ignored {
 /// No warnings from this run: an `eval-jobs` worker, whose parent already
 /// gave them.
 pub fn hush() {
-    let s = crate::session::Session::current();
+    let s = Session::current();
     s.ignored.hushed.store(true, Ordering::Relaxed);
 }
 
 /// Remembers the warning `raw`, once per `code` and `key`.
 pub fn note(code: &'static str, key: &str, raw: String) {
-    let s = crate::session::Session::current();
+    let s = Session::current();
     let mut noted = s.ignored.noted.lock().unwrap_or_else(|e| e.into_inner());
     if !noted.iter().any(|n| n.code == code && n.key == key) {
         noted.push(Note {
@@ -50,13 +53,13 @@ pub fn flag(flag: &str, why: &str) {
 
 /// Every note not yet given, in the order they were made.
 pub fn flush() {
-    let s = crate::session::Session::current();
+    let s = Session::current();
     let hushed = s.ignored.hushed.load(Ordering::Relaxed);
     let mut noted = s.ignored.noted.lock().unwrap_or_else(|e| e.into_inner());
     for n in noted.iter_mut().filter(|n| !n.warned) {
         n.warned = true;
         if !hushed {
-            crate::log::warning(n.code, n.raw.clone());
+            log::warning(n.code, n.raw.clone());
         }
     }
 }
@@ -64,7 +67,7 @@ pub fn flush() {
 /// The keys noted under `code`, for the tests.
 #[cfg(test)]
 pub fn noted(code: &str) -> Vec<String> {
-    let s = crate::session::Session::current();
+    let s = Session::current();
     let noted = s.ignored.noted.lock().unwrap_or_else(|e| e.into_inner());
     let keys = noted.iter().filter(|n| n.code == code);
     keys.map(|n| n.key.clone()).collect()

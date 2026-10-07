@@ -1,3 +1,5 @@
+use crate::store::hash::Hash;
+
 /// Byte offset into the concatenation of all loaded sources; the evaluator
 /// maps it back to a file and a local offset. 4 bytes so `Attr` and every IR
 /// node stay small.
@@ -99,12 +101,7 @@ impl Error {
 
     /// A tree that hashes to `got`, not to what the call or the lock named;
     /// `at` is where the hash literal is, when that is known.
-    pub fn hash_mismatch(
-        msg: String,
-        got: &crate::store::hash::Hash,
-        at: Option<String>,
-        pos: Pos,
-    ) -> Box<Error> {
+    pub fn hash_mismatch(msg: String, got: &Hash, at: Option<String>, pos: Pos) -> Box<Error> {
         let mut e = Error::new(ErrorKind::HashMismatch, msg, pos);
         let at = at.map(|p| format!(" at {p}")).unwrap_or_default();
         e.hint = Some(format!("set narHash{at} to '{}'", got.to_sri()));

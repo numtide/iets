@@ -3,10 +3,10 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Sym(pub u32);
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub use crate::parallel::interner::Interner;
-use std::hash::Hasher;
+use std::hash::{BuildHasherDefault, Hasher};
 
 /// FxHash: one multiply per word. SipHash was 4% of the profile on the
 /// interner and the compiler's scope maps, whose keys are short.
@@ -22,7 +22,7 @@ impl FxHasher {
     }
 }
 
-impl std::hash::Hasher for FxHasher {
+impl Hasher for FxHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
         let mut b = bytes;
@@ -65,6 +65,6 @@ pub fn fx_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-pub type FxBuild = std::hash::BuildHasherDefault<FxHasher>;
+pub type FxBuild = BuildHasherDefault<FxHasher>;
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuild>;
-pub type FxHashSet<K> = std::collections::HashSet<K, FxBuild>;
+pub type FxHashSet<K> = HashSet<K, FxBuild>;

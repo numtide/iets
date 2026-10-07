@@ -2,39 +2,40 @@
 
 use std::sync::Arc;
 
-use crate::api::installable;
-use crate::api::installable::drv_roots;
-use crate::build::backend::Backend;
-use crate::build::backend::Batch;
-use crate::build::backend::Job;
-use crate::build::backend::Worker;
-use crate::build::upload::PlanUpload;
-use crate::build::upload::Uploader;
-use crate::builtins::derivation::DrvInfo;
-use crate::builtins::derivation::load_drv_traced;
+use crate::api::installable::{self, drv_roots};
+use crate::api::{self, build};
+use crate::build::backend::{Backend, Batch, Job, Worker};
+use crate::build::upload::{PlanUpload, Uploader};
+use crate::builtins::derivation::{DrvInfo, load_drv_traced};
 use crate::cli::help::{arg_error, each_arg};
-use crate::cli::{EvalArgs, Input, Run, abs_path, cwd, evaluate, parse_eval_args, report, run_for};
-use crate::devenv;
-use crate::error::Error as CrateError;
-use crate::eval::ErrorKind;
-use crate::eval::{Error, Evaluator, Pos};
+use crate::cli::{
+    self, EvalArgs, Input, Run, abs_path, cwd, evaluate, parse_eval_args, report, run_for,
+};
+use crate::devenv::{self, BuildEnvironment, CachedResult};
+use crate::error::{self, Error as CrateError};
+use crate::eval::{Error, ErrorKind, EvalConfig, Evaluator, Pos};
+use crate::provenance::Provenance;
 use crate::remote::event::Event;
-use crate::remote::worker::Connection;
-use crate::remote::worker::Transport;
-use crate::remote::worker::failed_event;
+use crate::remote::worker::{self, Connection, Transport, failed_event};
+use crate::session::Session;
 use crate::store::drv::Derivation;
-use crate::store::path::STORE_DIR;
-use crate::store::path::StorePath;
+use crate::store::nar;
+use crate::store::path::{STORE_DIR, StorePath};
 use crate::store::source::SourceOrigin;
 use crate::trace::run::Cache;
+use crate::trace::store::Part;
+use crate::{cachefs, config, log};
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use std::{env, fs, slice, str};
 
 struct DevEnvArgs {
-    transport: crate::remote::worker::Transport,
+    transport: Transport,
     /// `nix develop`'s `-j`, `--cores` and the rest; the defaults natively.
-    options: crate::remote::worker::Options,
+    options: worker::Options,
     gc_root: GcRoot,
 }
 
@@ -45,15 +46,15 @@ struct DevEnvArgs {
 pub enum GcRoot {
     None,
     /// `print-dev-env --gc-root PATH`, absolute.
-    Given(std::path::PathBuf),
+    Given(PathBuf),
     /// A link in iets's roots store, from [`shell_root`].
-    Store(std::path::PathBuf),
+    Store(PathBuf),
 }
 
 impl GcRoot {
     /// The path the caller named, which also holds the `-attrs` directory the
     /// rc script points at. A link in the roots store is not one.
-    fn given(&self) -> Option<&std::path::Path> {
+    fn given(&self) -> Option<&Path> {
         match self {
             GcRoot::Given(p) => Some(p),
             _ => None,
@@ -63,10 +64,10 @@ impl GcRoot {
     /// Points this run's root at `out_path`.
     fn register(
         &self,
-        transport: &crate::remote::worker::Transport,
+        transport: &Transport,
         out_path: &str,
-        conn: Option<&mut crate::remote::worker::Connection>,
-    ) -> crate::error::Result<()> {
+        conn: Option<&mut Connection>,
+    ) -> error::Result<()> {
         match self {
             GcRoot::None => Ok(()),
             GcRoot::Given(p) => ensure_gc_root(transport, p, out_path, conn),
@@ -85,8 +86,8 @@ impl GcRoot {
 /// flake keep two, and one shell replaces its own in place
 /// (`docs/explanation/caching.md`). `NIX_GCROOT` is not this root: that one
 /// holds the closure only while the shell runs, which is what nix does with it.
-pub fn flake_shell_root(f: &str, transport: &crate::remote::worker::Transport) -> GcRoot {
-    let Ok(fr) = crate::api::flake_ref(f, &cwd()) else {
+pub fn flake_shell_root(f: &str, transport: &Transport) -> GcRoot {
+    let Ok(fr) = api::flake_ref(f, &cwd()) else {
         return GcRoot::None;
     };
     let attr = fr.attr.join(".");
@@ -98,36 +99,27 @@ pub fn flake_shell_root(f: &str, transport: &crate::remote::worker::Transport) -
 /// `nix fmt`'s is (`src/cli/classic/fmt.rs`). `None` when the `shell-gc-root`
 /// setting is off, when the daemon is not local — only a local daemon takes a
 /// root — or when no cache root is known.
-pub(crate) fn shell_root(
-    transport: &crate::remote::worker::Transport,
-    parts: &[&[u8]],
-) -> Option<std::path::PathBuf> {
+pub(crate) fn shell_root(transport: &Transport, parts: &[&[u8]]) -> Option<PathBuf> {
     if !shell_roots(transport) {
         return None;
     }
-    crate::cachefs::root_link(None, parts)
+    cachefs::root_link(None, parts)
 }
 
 /// Whether a shell keeps a root of its own: the `shell-gc-root` setting
 /// (`docs/reference/settings.md`), and a local daemon, the only kind that takes
 /// one. Ask before doing the work a root needs.
-pub(crate) fn shell_roots(transport: &crate::remote::worker::Transport) -> bool {
-    own_root(
-        crate::session::Session::current().settings().shell_gc_root,
-        transport,
-    )
+pub(crate) fn shell_roots(transport: &Transport) -> bool {
+    own_root(Session::current().settings().shell_gc_root, transport)
 }
 
 /// The same question for a build's outputs, under `build-gc-root`.
-fn build_roots(transport: &crate::remote::worker::Transport) -> bool {
-    own_root(
-        crate::session::Session::current().settings().build_gc_root,
-        transport,
-    )
+fn build_roots(transport: &Transport) -> bool {
+    own_root(Session::current().settings().build_gc_root, transport)
 }
 
 /// `on` is the setting that allows the root; only a local daemon takes one.
-fn own_root(on: bool, transport: &crate::remote::worker::Transport) -> bool {
+fn own_root(on: bool, transport: &Transport) -> bool {
     on && matches!(transport, crate::remote::worker::Transport::Unix(_))
 }
 
@@ -137,21 +129,17 @@ fn own_root(on: bool, transport: &crate::remote::worker::Transport) -> bool {
 /// one run apart, so a second run of the same command replaces its own roots in
 /// place. A caller that named a path of its own does not come here: one root
 /// per thing (`docs/explanation/caching.md`).
-pub(crate) fn keep_outputs(
-    transport: &crate::remote::worker::Transport,
-    key: &[Vec<u8>],
-    outputs: &[(String, String)],
-) {
+pub(crate) fn keep_outputs(transport: &Transport, key: &[Vec<u8>], outputs: &[(String, String)]) {
     if outputs.is_empty() || !build_roots(transport) {
         return;
     }
-    let mut conn = crate::remote::worker::Connection::open(transport, &mut |_| {}).ok();
+    let mut conn = Connection::open(transport, &mut |_| {}).ok();
     let mut parts: Vec<&[u8]> = key.iter().map(|p| p.as_slice()).collect();
     parts.push(b"");
     for (name, path) in outputs {
         let last = parts.len() - 1;
         parts[last] = name.as_bytes();
-        let Some(link) = crate::cachefs::root_link(None, &parts) else {
+        let Some(link) = cachefs::root_link(None, &parts) else {
             return;
         };
         keep_root(transport, &link, path, conn.as_mut());
@@ -164,18 +152,18 @@ pub(crate) fn keep_outputs(
 /// what nix prints, byte for byte, so a root a daemon will not take costs the
 /// root and nothing else.
 pub(crate) fn keep_root(
-    transport: &crate::remote::worker::Transport,
-    link: &std::path::Path,
+    transport: &Transport,
+    link: &Path,
     out_path: &str,
-    conn: Option<&mut crate::remote::worker::Connection>,
+    conn: Option<&mut Connection>,
 ) {
     if let Some(dir) = link.parent()
-        && std::fs::create_dir_all(dir).is_err()
+        && fs::create_dir_all(dir).is_err()
     {
         return;
     }
     if ensure_gc_root(transport, link, out_path, conn).is_ok() {
-        crate::cachefs::touch_link(link);
+        cachefs::touch_link(link);
     }
 }
 
@@ -185,23 +173,23 @@ struct EventSink {
     live: bool,
     log: Vec<String>,
     failed: Option<String>,
-    prov: crate::provenance::Provenance,
+    prov: Provenance,
 }
 
 impl EventSink {
-    fn event(&mut self, e: crate::remote::event::Event) {
+    fn event(&mut self, e: Event) {
         match e {
             Event::Log(l) => {
                 let line = self.prov.rewrite_str(&String::from_utf8_lossy(&l.line));
                 if self.live {
-                    crate::log::line(&format!("iets: {line}"));
+                    log::line(&format!("iets: {line}"));
                 } else {
                     self.log.push(line);
                 }
             }
             Event::Started(s) if self.live => match self.prov.started(&s.drv_path) {
-                Some(l) => crate::log::line(&format!("iets: {l}")),
-                None => crate::log::line(&format!("iets: building {}", s.drv_path)),
+                Some(l) => log::line(&format!("iets: {l}")),
+                None => log::line(&format!("iets: building {}", s.drv_path)),
             },
             Event::Failed(f) => {
                 self.failed = Some(match self.prov.failed(&f.drv_path, &f.reason) {
@@ -219,7 +207,7 @@ impl EventSink {
 
     fn dump(&self) {
         for l in &self.log {
-            crate::log::line(&format!("iets: {l}"));
+            log::line(&format!("iets: {l}"));
         }
     }
 }
@@ -249,11 +237,11 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
     });
     let mut a = parse_eval_args(&rest);
     a.input = Some(Input::Flake(flake.unwrap_or_else(|| ".".into())));
-    let cfg = crate::config::Config::load(&[]).unwrap_or_else(|_| crate::config::Config::empty());
+    let cfg = config::Config::load(&[]).unwrap_or_else(|_| config::Config::empty());
     // the environment runs here, so its inputs belong in the local store:
     // the `builder` setting does not apply
     let url = url.unwrap_or_else(|| cfg.store());
-    let Some(transport) = crate::remote::worker::Transport::parse(&url) else {
+    let Some(transport) = Transport::parse(&url) else {
         return CrateError::Usage(
             "print-dev-env needs a Nix daemon: --builder daemon, unix:///path or ssh-ng://host"
                 .into(),
@@ -262,7 +250,7 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
     };
     let cwd = cwd();
     let gc_root = match gc_root {
-        Some(r) => GcRoot::Given(std::path::PathBuf::from(
+        Some(r) => GcRoot::Given(PathBuf::from(
             <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&abs_path(&r, &cwd)),
         )),
         None => GcRoot::None,
@@ -276,27 +264,27 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
         return CrateError::Usage("--gc-root needs a local daemon (daemon or unix://)".into())
             .report();
     }
-    let options = crate::remote::worker::Options::default();
+    let options = worker::Options::default();
     let d = DevEnvArgs {
         transport,
         options,
         gc_root,
     };
 
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     let run = run_for(&a).cached(&a, "print-dev-env");
     // the caller asked where this run's entry lives, so it can hand that to
     // `iets cache paths` instead of deriving the key a second time
     if let Some(f) = &entry_to {
         let path = run.cache.as_ref().map(|c| c.entry_path());
         let Some(path) = path else {
-            return crate::error::Error::Cache(
+            return error::Error::Cache(
                 "--entry-to needs the tracing cache, and this run has none".into(),
             )
             .report();
         };
-        if let Err(e) = std::fs::write(f, path.as_os_str().as_encoded_bytes()) {
-            return crate::error::Error::Io {
+        if let Err(e) = fs::write(f, path.as_os_str().as_encoded_bytes()) {
+            return error::Error::Io {
                 context: format!("--entry-to '{f}'"),
                 source: e,
             }
@@ -304,13 +292,13 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
         }
     }
     if let Some(code) = run.hit(|c| {
-        let bytes = c.part(crate::trace::store::Part::Result)?;
-        let hit = crate::devenv::CachedResult::decode(&bytes)?;
+        let bytes = c.part(Part::Result)?;
+        let hit = CachedResult::decode(&bytes)?;
         match dev_env_hit(&d, &hit) {
             Ok(true) => {
                 c.replay_warnings();
-                let _ = std::io::stdout().write_all(&hit.bytes);
-                let _ = std::io::stdout().flush();
+                let _ = io::stdout().write_all(&hit.bytes);
+                let _ = io::stdout().flush();
                 if a.timings {
                     eprintln!("total: {:.3}s", t0.elapsed().as_secs_f64());
                 }
@@ -328,18 +316,18 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
         return code;
     }
     // parallel: eval and the daemon flow run as the main fiber
-    crate::cli::run_parallel(run, move |ev, cache| dev_env_full(ev, a, &d, cache, t0))
+    cli::run_parallel(run, move |ev, cache| dev_env_full(ev, a, &d, cache, t0))
 }
 
 /// A cache hit is usable when the env output (and the files the script names) still exist;
 /// the GC root is refreshed when it does not point at the output.
-fn dev_env_hit(d: &DevEnvArgs, hit: &crate::devenv::CachedResult) -> crate::error::Result<bool> {
+fn dev_env_hit(d: &DevEnvArgs, hit: &CachedResult) -> error::Result<bool> {
     let present = match &d.transport {
-        Transport::Unix(_) => std::path::Path::new(&hit.out_path).exists(),
+        Transport::Unix(_) => Path::new(&hit.out_path).exists(),
         Transport::Ssh { .. } | Transport::Grpc(_) => {
             let mut conn = Connection::open(&d.transport, &mut |_| {})?;
             !conn
-                .query_valid_paths(std::slice::from_ref(&hit.out_path), &mut |_| {})?
+                .query_valid_paths(slice::from_ref(&hit.out_path), &mut |_| {})?
                 .is_empty()
         }
     };
@@ -353,12 +341,12 @@ fn dev_env_hit(d: &DevEnvArgs, hit: &crate::devenv::CachedResult) -> crate::erro
 /// indirect-root-store.cc:addPermRoot: a symlink at `root` to `out_path`, then
 /// `AddIndirectRoot`. Nothing happens when the link already points there.
 pub(crate) fn ensure_gc_root(
-    transport: &crate::remote::worker::Transport,
-    root: &std::path::Path,
+    transport: &Transport,
+    root: &Path,
     out_path: &str,
-    conn: Option<&mut crate::remote::worker::Connection>,
-) -> crate::error::Result<()> {
-    if std::fs::read_link(root).ok().as_deref() == Some(std::path::Path::new(out_path)) {
+    conn: Option<&mut Connection>,
+) -> error::Result<()> {
+    if fs::read_link(root).ok().as_deref() == Some(Path::new(out_path)) {
         return Ok(());
     }
     if root.starts_with(STORE_DIR) {
@@ -367,9 +355,9 @@ pub(crate) fn ensure_gc_root(
             root.display()
         )));
     }
-    if let Ok(m) = std::fs::symlink_metadata(root)
+    if let Ok(m) = fs::symlink_metadata(root)
         && (!m.file_type().is_symlink()
-            || !std::fs::read_link(root)
+            || !fs::read_link(root)
                 .map(|t| t.starts_with(STORE_DIR))
                 .unwrap_or(false))
     {
@@ -378,7 +366,7 @@ pub(crate) fn ensure_gc_root(
             root.display()
         )));
     }
-    crate::remote::worker::replace_symlink(out_path, root)
+    worker::replace_symlink(out_path, root)
         .map_err(|e| CrateError::io(format!("cannot create {}", root.display()), e))?;
     let root_s = root
         .to_str()
@@ -397,21 +385,21 @@ pub(crate) fn ensure_gc_root(
 /// What the `-env` build produced: the environment `get-env.sh` dumped, the output that
 /// holds it (`nix develop` makes it `NIX_GCROOT`), and the shell derivation's builder.
 pub struct DevEnv {
-    pub env: crate::devenv::BuildEnvironment,
+    pub env: BuildEnvironment,
     pub out_path: String,
     /// `<store path>/bin/bash`: the bash the shell was built with.
     pub builder: String,
     /// When the daemon phase started, for the caller's `--timings` line.
-    t1: std::time::Instant,
+    t1: Instant,
 }
 
 /// `print-dev-env` without the printing: the build environment of the flake installable
 /// `a.input` names, on `base`. `nix develop` (src/cli/classic/develop.rs) uses this.
 pub fn dev_env(
-    base: crate::eval::EvalConfig,
+    base: EvalConfig,
     a: EvalArgs,
-    transport: crate::remote::worker::Transport,
-    options: crate::remote::worker::Options,
+    transport: Transport,
+    options: worker::Options,
     gc_root: GcRoot,
 ) -> Result<DevEnv, i32> {
     let d = DevEnvArgs {
@@ -426,7 +414,7 @@ pub fn dev_env(
         run = run.cached(&a, "develop");
     }
     if let Some(env) = run.hit(|c| {
-        let env = remembered_env(&c.part(crate::trace::store::Part::Result)?)?;
+        let env = remembered_env(&c.part(Part::Result)?)?;
         c.replay_warnings();
         Some(env)
     }) {
@@ -435,7 +423,7 @@ pub fn dev_env(
             Err(e) => Err(e.report()),
         };
     }
-    crate::cli::run_parallel(run, move |ev, cache| {
+    cli::run_parallel(run, move |ev, cache| {
         let env = dev_env_build(ev, a, &d)?;
         if let Some(c) = cache {
             c.write(
@@ -452,14 +440,14 @@ pub fn dev_env(
 /// neither of which can hold a newline. The environment itself stays in the
 /// output: an output that is gone is a miss, and the run builds it again.
 fn remembered_env(result: &[u8]) -> Option<DevEnv> {
-    let text = std::str::from_utf8(result).ok()?;
+    let text = str::from_utf8(result).ok()?;
     let (out_path, builder) = text.split_once('\n')?;
-    let env = crate::devenv::BuildEnvironment::parse(&std::fs::read(out_path).ok()?).ok()?;
+    let env = BuildEnvironment::parse(&fs::read(out_path).ok()?).ok()?;
     Some(DevEnv {
         env,
         out_path: out_path.to_string(),
         builder: builder.to_string(),
-        t1: std::time::Instant::now(),
+        t1: Instant::now(),
     })
 }
 
@@ -470,7 +458,7 @@ fn dev_env_full(
     a: EvalArgs,
     d: &DevEnvArgs,
     cache: Option<Cache>,
-    t0: std::time::Instant,
+    t0: Instant,
 ) -> i32 {
     let (timings, json) = (a.timings, a.json);
     let cwd = cwd();
@@ -478,7 +466,7 @@ fn dev_env_full(
         Ok(b) => b,
         Err(code) => return code,
     };
-    let r = (|| -> crate::error::Result<Vec<u8>> {
+    let r = (|| -> error::Result<Vec<u8>> {
         let (mut output, files) = if json {
             (
                 serde_json::to_vec(&built.env.to_json())
@@ -487,21 +475,20 @@ fn dev_env_full(
             )
         } else {
             let attrs_dir = match d.gc_root.given() {
-                Some(r) => std::path::PathBuf::from(format!("{}-attrs", r.display())),
-                None => std::env::temp_dir().join(format!("iets-dev-env-{}", std::process::id())),
+                Some(r) => PathBuf::from(format!("{}-attrs", r.display())),
+                None => env::temp_dir().join(format!("iets-dev-env-{}", std::process::id())),
             };
-            let outputs_dir = std::path::Path::new(
-                <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&cwd),
-            )
-            .join("outputs");
-            let rc = crate::devenv::make_rc_script(&built.env, &attrs_dir, &outputs_dir)?;
+            let outputs_dir =
+                Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&cwd))
+                    .join("outputs");
+            let rc = devenv::make_rc_script(&built.env, &attrs_dir, &outputs_dir)?;
             (rc.script.into_bytes(), rc.files)
         };
         output.push(b'\n');
         if let Some(c) = &cache {
             c.write(
                 ev,
-                &crate::devenv::CachedResult {
+                &CachedResult {
                     out_path: built.out_path.clone(),
                     files,
                     bytes: output.clone(),
@@ -517,8 +504,8 @@ fn dev_env_full(
     })();
     match r {
         Ok(out) => {
-            let _ = std::io::stdout().write_all(&out);
-            let _ = std::io::stdout().flush();
+            let _ = io::stdout().write_all(&out);
+            let _ = io::stdout().flush();
             if timings {
                 eprintln!("total: {:.3}s", t0.elapsed().as_secs_f64());
             }
@@ -531,7 +518,7 @@ fn dev_env_full(
 /// Evaluates the shell, derives and builds its `-env` derivation through the daemon and
 /// reads the environment back. The error is already reported; `Err` is the exit code.
 fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevEnv, i32> {
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
     let timings = a.timings;
     let f = match &a.input {
         Some(Input::Flake(f)) => f.clone(),
@@ -570,7 +557,7 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
     let shell_path = roots[0].0.clone();
     let eval_time = t0.elapsed();
 
-    let r = (|| -> crate::error::Result<DevEnv> {
+    let r = (|| -> error::Result<DevEnv> {
         let shell = match ev.drv.drvs.get(&shell_path).and_then(|i| i.aterm) {
             Some(aterm) => Derivation::parse(&aterm, Derivation::name_from_path(&shell_path)?),
             None => load_drv_traced(ev.trace(), &shell_path),
@@ -616,24 +603,24 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
             );
         }
 
-        let t1 = std::time::Instant::now();
+        let t1 = Instant::now();
         let mut sink = EventSink {
             live: timings,
             log: Vec::new(),
             failed: None,
-            prov: crate::provenance::Provenance::snapshot(ev),
+            prov: Provenance::snapshot(ev),
         };
         let mut w = Worker::open(&d.transport, &d.options, &mut |e| sink.event(e))?;
         let valid = w
             .conn
             .query_valid_paths(&out_paths, &mut |e| sink.event(e))?;
         if valid.len() != out_paths.len() {
-            let t2 = std::time::Instant::now();
-            let plan = crate::api::build::plan(ev, std::slice::from_ref(&env_path))?;
+            let t2 = Instant::now();
+            let plan = build::plan(ev, slice::from_ref(&env_path))?;
             let plan_time = t2.elapsed();
-            PlanUpload::new(&plan, &crate::api::build::locate_store).upload(
+            PlanUpload::new(&plan, &build::locate_store).upload(
                 &mut w,
-                std::slice::from_ref(&env_path),
+                slice::from_ref(&env_path),
                 &mut |e| sink.event(e),
             )?;
             let job = Job {
@@ -641,7 +628,7 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
                 outputs: Vec::new(),
             };
             let batch = Batch {
-                jobs: std::slice::from_ref(&job),
+                jobs: slice::from_ref(&job),
                 drvs: &|_| Ok(Vec::new()),
             };
             for s in w.submit(&batch, &mut |e| sink.event(e))?.values() {
@@ -682,26 +669,26 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
 /// file is not empty holds the JSON. A local daemon's output is read from disk; a remote one
 /// arrives as a NAR.
 fn read_env_output(
-    transport: &crate::remote::worker::Transport,
-    conn: &mut crate::remote::worker::Connection,
+    transport: &Transport,
+    conn: &mut Connection,
     out_paths: &[String],
     sink: &mut EventSink,
-) -> crate::error::Result<(String, Vec<u8>)> {
+) -> error::Result<(String, Vec<u8>)> {
     for p in out_paths {
         let bytes = match transport {
             Transport::Unix(_) => {
-                std::fs::read(p).map_err(|e| CrateError::io(format!("cannot read '{p}'"), e))?
+                fs::read(p).map_err(|e| CrateError::io(format!("cannot read '{p}'"), e))?
             }
             Transport::Ssh { .. } | Transport::Grpc(_) => {
-                let dir = std::env::temp_dir().join(format!("iets-dev-env-{}", std::process::id()));
-                std::fs::create_dir_all(&dir)?;
+                let dir = env::temp_dir().join(format!("iets-dev-env-{}", std::process::id()));
+                fs::create_dir_all(&dir)?;
                 let dest = dir.join(StorePath::parse(p)?.base_name());
-                let _ = std::fs::remove_file(&dest);
+                let _ = fs::remove_file(&dest);
                 conn.nar_from_path(p, &mut |e| sink.event(e), &mut |r| {
-                    crate::store::nar::restore_path(r, &dest)
+                    nar::restore_path(r, &dest)
                 })?;
-                let bytes = std::fs::read(&dest)?;
-                let _ = std::fs::remove_dir_all(&dir);
+                let bytes = fs::read(&dest)?;
+                let _ = fs::remove_dir_all(&dir);
                 bytes
             }
         };

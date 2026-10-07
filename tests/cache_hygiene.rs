@@ -4,24 +4,29 @@
 //! removes only what the TTL says. Shapes follow nix-tarmac's
 //! tests/{crash,concurrent,corrupt,gc}_test.cpp. See docs/explanation/caching.md.
 
+use std::collections::HashSet;
+use std::ffi::CString;
+use std::fs::{self, File, Permissions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
+use std::{env, thread};
 
 use iets::cachefs;
 use iets::fetch::spool;
-use iets::trace::Obs;
+use iets::trace::key::Key;
 use iets::trace::run::Cache;
 use iets::trace::store::{ENTRY, Opened, Part, Store};
-use iets::trace::{key::Key, wire};
-use std::os::unix::fs::PermissionsExt;
+use iets::trace::{Obs, wire};
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 const KEYS: usize = 4;
 const OBS: usize = 400;
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("iets-hygiene-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).expect("temp dir");
+    let d = env::temp_dir().join(format!("iets-hygiene-{}-{tag}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).expect("temp dir");
     d
 }
 
@@ -82,7 +87,7 @@ fn check(store: &Store, key: usize) -> Option<usize> {
         .expect("a published entry has a read set");
     let obs = wire::decode_readset(&bytes).expect("a published entry decodes");
     assert_eq!(obs.len(), OBS, "an entry holds every observation");
-    let mut writers = std::collections::HashSet::new();
+    let mut writers = HashSet::new();
     for (i, o) in obs.iter().enumerate() {
         let Obs::Env { name, value } = o else {
             panic!("wrong observation kind")
@@ -113,7 +118,7 @@ fn concurrent_readers_and_writers_never_see_a_torn_entry() {
     let dir = tmp("concurrent");
     let store = Store::locate(Some(dir.to_str().expect("utf-8 path"))).expect("store");
     assert!(cachefs::prepare(store.root(), cachefs::Shape::Dirs, false));
-    std::thread::scope(|s| {
+    thread::scope(|s| {
         for w in 0..8u8 {
             let base = dir.clone();
             s.spawn(move || {
@@ -135,7 +140,7 @@ fn concurrent_readers_and_writers_never_see_a_torn_entry() {
 /// fast as it can until SIGKILL. A no-op in a normal test run.
 #[test]
 fn crash_writer_child() {
-    let Some(dir) = std::env::var_os("IETS_CRASH_DIR") else {
+    let Some(dir) = env::var_os("IETS_CRASH_DIR") else {
         return;
     };
     let store = Store::locate(Some(&dir.to_string_lossy())).expect("store");
@@ -146,12 +151,12 @@ fn crash_writer_child() {
 }
 
 fn spawn_and_kill(dir: &Path, ms: u64) {
-    let mut child = Command::new(std::env::current_exe().expect("this test binary"))
+    let mut child = Command::new(env::current_exe().expect("this test binary"))
         .args(["crash_writer_child", "--exact", "--nocapture"])
         .env("IETS_CRASH_DIR", dir)
         .spawn()
         .expect("spawn the writer");
-    std::thread::sleep(std::time::Duration::from_millis(ms));
+    thread::sleep(Duration::from_millis(ms));
     child.kill().expect("kill the writer");
     let status = child.wait().expect("reap the writer");
     assert!(!status.success(), "the writer died on the signal");
@@ -207,8 +212,8 @@ fn a_corrupt_entry_is_dropped_and_a_corrupt_store_is_wiped() {
     assert!(c.lookup(), "a read set that validates is a hit");
 
     let entry = c.store.entry_dir(&c.key).join(ENTRY);
-    let good = std::fs::read(&entry).expect("entry");
-    std::fs::write(&entry, &good[..good.len() / 2]).expect("truncate");
+    let good = fs::read(&entry).expect("entry");
+    fs::write(&entry, &good[..good.len() / 2]).expect("truncate");
     let c = cached(path);
     assert!(!c.lookup(), "a truncated entry misses");
     assert!(
@@ -221,14 +226,14 @@ fn a_corrupt_entry_is_dropped_and_a_corrupt_store_is_wiped() {
     assert!(!c.lookup());
     assert!(!c.store.entry_dir(&c.key).exists());
 
-    std::fs::create_dir_all(c.store.entry_dir(&c.key)).expect("entry dir");
-    std::fs::write(&entry, b"not an entry at all").expect("entry");
+    fs::create_dir_all(c.store.entry_dir(&c.key)).expect("entry dir");
+    fs::write(&entry, b"not an entry at all").expect("entry");
     let c = cached(path);
     assert!(!c.lookup(), "bytes that are not an entry miss");
     assert!(!c.store.entry_dir(&c.key).exists());
 
     put_hit(&c, &hit_entry());
-    std::fs::write(c.store.root().join("gc-stamp"), b"\x01not a time").expect("stamp");
+    fs::write(c.store.root().join("gc-stamp"), b"\x01not a time").expect("stamp");
     let c = cached(path);
     assert!(
         !c.store.entry_dir(&c.key).exists(),
@@ -249,21 +254,21 @@ fn a_changed_byte_or_a_copied_entry_is_a_miss() {
     put_hit(&c, &hit_entry());
     assert!(c.lookup(), "the entry it wrote is a hit");
     let entry = c.store.entry_dir(&c.key).join(ENTRY);
-    let good = std::fs::read(&entry).expect("entry");
+    let good = fs::read(&entry).expect("entry");
 
     for i in 0..good.len() {
         let mut bad = good.clone();
         bad[i] ^= 0xff;
-        std::fs::create_dir_all(c.store.entry_dir(&c.key)).expect("entry dir");
-        std::fs::write(&entry, &bad).expect("entry");
+        fs::create_dir_all(c.store.entry_dir(&c.key)).expect("entry dir");
+        fs::write(&entry, &bad).expect("entry");
         let c = cached(path);
         assert!(!c.lookup(), "byte {i} changed");
         assert!(!c.store.entry_dir(&c.key).exists(), "and it is poisoned");
     }
 
     let other = key_of(7);
-    std::fs::create_dir_all(c.store.entry_dir(&other)).expect("entry dir");
-    std::fs::write(c.store.entry_dir(&other).join(ENTRY), &good).expect("entry");
+    fs::create_dir_all(c.store.entry_dir(&other)).expect("entry dir");
+    fs::write(c.store.entry_dir(&other).join(ENTRY), &good).expect("entry");
     assert!(
         matches!(c.store.open(&other), Opened::Bad),
         "an entry under another key is not an entry there"
@@ -278,20 +283,20 @@ fn a_changed_byte_or_a_copied_entry_is_a_miss() {
 fn an_entry_that_is_not_a_plain_file_is_refused() {
     let dir = tmp("openrules");
     let good = dir.join("good");
-    std::fs::write(&good, b"x").expect("file");
+    fs::write(&good, b"x").expect("file");
     assert!(cachefs::open_entry(&good).is_some());
 
     let link = dir.join("link");
-    std::os::unix::fs::symlink(&good, &link).expect("link");
+    symlink(&good, &link).expect("link");
     assert!(cachefs::open_entry(&link).is_none(), "a symbolic link");
 
     let fifo = dir.join("fifo");
-    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("path");
+    let c = CString::new(fifo.as_os_str().as_encoded_bytes()).expect("path");
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     assert!(cachefs::open_entry(&fifo).is_none(), "a FIFO");
 
     let huge = dir.join("huge");
-    let f = std::fs::File::create(&huge).expect("file");
+    let f = File::create(&huge).expect("file");
     f.set_len(cachefs::MAX_ENTRY + 1).expect("sparse length");
     drop(f);
     assert!(
@@ -307,10 +312,10 @@ fn an_entry_that_is_not_a_plain_file_is_refused() {
 fn a_cache_is_private_to_its_owner() {
     let dir = tmp("modes");
     let root = dir.join("trace");
-    std::fs::create_dir_all(&root).expect("root");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("wide");
+    fs::create_dir_all(&root).expect("root");
+    fs::set_permissions(&root, Permissions::from_mode(0o755)).expect("wide");
     assert!(cachefs::prepare(&root, cachefs::Shape::Dirs, false));
-    let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+    let mode = |p: &Path| fs::metadata(p).expect("stat").permissions().mode() & 0o777;
     assert_eq!(mode(&root), 0o700, "an older root is tightened");
     assert_eq!(mode(&root.join("version")), 0o600);
 
@@ -329,15 +334,15 @@ fn a_cache_is_private_to_its_owner() {
 /// store is under `XDG_CACHE_HOME`, so this runs in a process of its own.
 #[test]
 fn input_touch_child() {
-    let Some(name) = std::env::var_os("IETS_INPUT_NAME") else {
+    let Some(name) = env::var_os("IETS_INPUT_NAME") else {
         return;
     };
     let name = name.to_string_lossy().into_owned();
     // prepared first: a store with an entry and no version file is wiped
     let entry = iets::treestore::root().expect("input store").join(&name);
-    std::fs::write(&entry, b"").expect("entry");
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
-    std::fs::File::options()
+    fs::write(&entry, b"").expect("entry");
+    let old = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
+    File::options()
         .write(true)
         .open(&entry)
         .expect("entry")
@@ -349,7 +354,7 @@ fn input_touch_child() {
         version: spool::INDEX_VERSION,
     }];
     iets::trace::validate::validate(&mut obs, 1).expect("the entry is there");
-    let now = std::fs::metadata(&entry)
+    let now = fs::metadata(&entry)
         .expect("stat")
         .modified()
         .expect("mtime");
@@ -361,7 +366,7 @@ fn input_touch_child() {
 #[test]
 fn an_input_observation_marks_its_entry_as_used() {
     let dir = tmp("inputtouch");
-    let out = Command::new(std::env::current_exe().expect("this test binary"))
+    let out = Command::new(env::current_exe().expect("this test binary"))
         .args(["input_touch_child", "--exact", "--nocapture"])
         .env("XDG_CACHE_HOME", &dir)
         .env("IETS_INPUT_NAME", "a3ck4d9zzk4l1r76rz5zv2wgycmpsy1y-source")

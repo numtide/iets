@@ -17,15 +17,22 @@
 //! download a sibling is already doing.
 
 use io::Write;
-use std::fs;
-use std::io;
+use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::str::from_utf8;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{env, fs, io, ptr, thread};
+
+use crate::compile::cache::IrCache;
+use crate::session::Session;
+use crate::store::path::StorePath;
+use crate::trace::{self, store};
+use crate::treestore::{self, pack};
 
 /// The store layout. A mismatch wipes the store; bump it when an entry
 /// encoding changes in a way the keys do not already cover.
@@ -56,7 +63,7 @@ const VERSION: &str = "version";
 const LOCK: &str = "lock";
 const STAMP: &str = "gc-stamp";
 const ENV_KEY: &str = "env-key";
-const PACKS: &str = crate::treestore::pack::PACKS;
+const PACKS: &str = pack::PACKS;
 
 /// A cache entry holds what an evaluation read — the bytes of every file and
 /// the answer of every `getEnv` — so it is the user's, not the machine's.
@@ -92,12 +99,12 @@ pub fn root(override_dir: Option<&str>) -> Option<PathBuf> {
     if let Some(d) = override_dir {
         return Some(PathBuf::from(d));
     }
-    if let Some(d) = &crate::session::Session::current().settings().cache_dir {
+    if let Some(d) = &Session::current().settings().cache_dir {
         return Some(d.clone());
     }
-    let base = match std::env::var_os("XDG_CACHE_HOME") {
+    let base = match env::var_os("XDG_CACHE_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".cache"),
+        _ => PathBuf::from(env::var_os("HOME")?).join(".cache"),
     };
     Some(base.join("iets"))
 }
@@ -121,7 +128,7 @@ pub fn root_link(override_dir: Option<&str>, parts: &[&[u8]]) -> Option<PathBuf>
         bytes.extend_from_slice(&(p.len() as u64).to_le_bytes());
         bytes.extend_from_slice(p);
     }
-    let name: String = crate::trace::sha256(&bytes)
+    let name: String = trace::sha256(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
@@ -135,14 +142,12 @@ pub fn root_link(override_dir: Option<&str>, parts: &[&[u8]]) -> Option<PathBuf>
 /// that name is the daemon's to say. `nix fmt` is the one command that runs
 /// what an entry remembered.
 pub fn program_of_output(out_path: &str, program: &str) -> bool {
-    let Ok(out) = crate::store::path::StorePath::parse(out_path) else {
+    let Ok(out) = StorePath::parse(out_path) else {
         return false;
     };
     let program = Path::new(program);
     program.starts_with(out.to_full_string())
-        && !program
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
+        && !program.components().any(|c| c == Component::ParentDir)
 }
 
 /// How a store names its entries under its root.
@@ -165,22 +170,21 @@ pub enum Shape {
 /// A sweep only ever removes something named like a key, so the store-level
 /// files, the `ir/` store under a shared `--cache-dir`, and anything else a
 /// user put in the directory all survive.
-fn is_key(name: &std::ffi::OsStr, shape: Shape) -> bool {
+fn is_key(name: &OsStr, shape: Shape) -> bool {
     let b = name.as_bytes();
     match shape {
-        Shape::StoreEntries => std::str::from_utf8(b)
-            .is_ok_and(|n| crate::store::path::StorePath::from_base_name(n).is_ok()),
+        Shape::StoreEntries => from_utf8(b).is_ok_and(|n| StorePath::from_base_name(n).is_ok()),
         Shape::Dirs | Shape::Links => b.len() == 64 && b.iter().all(u8::is_ascii_hexdigit),
         Shape::ShardedFiles => b.len() == 62 && b.iter().all(u8::is_ascii_hexdigit),
     }
 }
 
-fn is_shard(name: &std::ffi::OsStr) -> bool {
+fn is_shard(name: &OsStr) -> bool {
     let b = name.as_bytes();
     b.len() == 2 && b.iter().all(u8::is_ascii_hexdigit)
 }
 
-fn is_tmp(name: &std::ffi::OsStr) -> bool {
+fn is_tmp(name: &OsStr) -> bool {
     let b = name.as_bytes();
     b.starts_with(b".") && b.ends_with(b".tmp")
 }
@@ -217,21 +221,21 @@ fn entry_age(path: &Path, shape: Shape) -> Option<Duration> {
 /// sets both stamps to the current time, and `AT_SYMLINK_NOFOLLOW` sets them
 /// on the link itself.
 pub fn touch_link(path: &Path) {
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
         return;
     };
     unsafe {
         libc::utimensat(
             libc::AT_FDCWD,
             c.as_ptr(),
-            std::ptr::null(),
+            ptr::null(),
             libc::AT_SYMLINK_NOFOLLOW,
         )
     };
 }
 
 fn stamp_age(bytes: &[u8]) -> Option<Duration> {
-    let secs: u64 = std::str::from_utf8(bytes.trim_ascii()).ok()?.parse().ok()?;
+    let secs: u64 = from_utf8(bytes.trim_ascii()).ok()?.parse().ok()?;
     // a stamp in the future is no reason to wipe a store, but a sweep must
     // not wait for the clock to catch up with it
     Some(match now_secs().checked_sub(secs) {
@@ -314,8 +318,8 @@ pub fn open_entry(path: &Path) -> Option<(fs::File, fs::Metadata)> {
 /// A counter that keeps two writers of one name inside one process apart.
 /// Process-wide by nature: the names it disambiguates are process-wide.
 pub fn tag() -> u64 {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Whose directory a store root is, before iets writes to it.
@@ -330,7 +334,7 @@ enum Owner {
 
 /// A name a store of `shape` puts in its own root: a store-level file, a
 /// temporary file, an entry, or an IR shard.
-fn belongs(name: &std::ffi::OsStr, shape: Shape) -> bool {
+fn belongs(name: &OsStr, shape: Shape) -> bool {
     matches!(
         name.as_bytes(),
         b"version" | b"lock" | b"gc-stamp" | b"env-key"
@@ -425,12 +429,12 @@ pub fn prepare(root: &Path, shape: Shape, timings: bool) -> bool {
         Owner::Ready => {}
         Owner::Stale(why) => {
             if timings {
-                crate::errln!("cache: wiping {} ({why})", root.display());
+                errln!("cache: wiping {} ({why})", root.display());
             }
             wipe(root, shape);
         }
         Owner::Foreign => {
-            crate::errln!(
+            errln!(
                 "error: {} is not an iets cache and is not empty, so iets will not \
                  use it; point --cache-dir (or IETS_CACHE_DIR) at a new or empty \
                  directory, or empty this one",
@@ -481,7 +485,7 @@ pub fn env_key() -> &'static [u8; 32] {
     ENV_SECRET.get_or_init(|| [0u8; 32])
 }
 
-static ENV_SECRET: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+static ENV_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
 
 fn empty(root: &Path) -> bool {
     fs::read_dir(root).is_ok_and(|mut d| d.next().is_none())
@@ -526,7 +530,7 @@ pub fn try_write_lock(root: &Path) -> io::Result<Option<WriteLock>> {
         if waited >= LOCK_TIMEOUT {
             return Ok(None);
         }
-        std::thread::sleep(LOCK_POLL);
+        thread::sleep(LOCK_POLL);
         waited += LOCK_POLL;
     }
 }
@@ -572,7 +576,7 @@ fn set_now(fd: RawFd, path: Option<&Path>) {
             libc::futimens(fd, times.as_ptr());
         },
         Some(p) => {
-            let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+            let Ok(c) = CString::new(p.as_os_str().as_bytes()) else {
                 return;
             };
             unsafe {
@@ -674,7 +678,7 @@ pub fn sweep(root: &Path, shape: Shape, ttl: Duration, dry_run: bool) -> Swept {
         Shape::StoreEntries => {
             sweep_dir(root, shape, ttl, dry_run, &mut out);
             // the entries name the objects; the packs hold them
-            out.bytes += crate::treestore::collect(root, dry_run).freed;
+            out.bytes += treestore::collect(root, dry_run).freed;
         }
         Shape::ShardedFiles => {
             let Ok(rd) = fs::read_dir(root) else {
@@ -723,7 +727,7 @@ pub fn maybe_sweep(root: &Path, shape: Shape, timings: bool) {
     }
     let s = sweep(root, shape, Duration::from_secs(TTL_DAYS * DAY), false);
     if timings && s.scanned > 0 {
-        crate::errln!(
+        errln!(
             "cache: swept {} of {} entries ({} KiB) from {}",
             s.removed,
             s.scanned,
@@ -737,13 +741,13 @@ pub fn maybe_sweep(root: &Path, shape: Shape, timings: bool) {
 /// the input store and the roots store.
 pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
     let mut v = Vec::new();
-    if let Some(s) = crate::trace::store::Store::locate(cache_dir) {
+    if let Some(s) = store::Store::locate(cache_dir) {
         v.push((s.root().to_path_buf(), Shape::Dirs));
     }
-    if let Some(c) = crate::compile::cache::IrCache::locate(cache_dir, false) {
+    if let Some(c) = IrCache::locate(cache_dir, false) {
         v.push((c.root().to_path_buf(), Shape::ShardedFiles));
     }
-    if let Some(r) = crate::treestore::locate(cache_dir) {
+    if let Some(r) = treestore::locate(cache_dir) {
         v.push((r, Shape::StoreEntries));
     }
     if let Some(r) = roots(cache_dir) {
@@ -756,8 +760,12 @@ pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
 mod tests {
     use super::*;
 
+    use std::os::unix::fs::symlink;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("iets-cachefs-{}-{tag}", std::process::id()));
+        let d = env::temp_dir().join(format!("iets-cachefs-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).expect("temp dir");
         d
@@ -775,7 +783,7 @@ mod tests {
                 tv_nsec: 0,
             },
         ];
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
+        let c = CString::new(path.as_os_str().as_bytes()).expect("path");
         assert_eq!(
             unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) },
             0
@@ -789,7 +797,7 @@ mod tests {
             tv_nsec: 0,
         };
         let times = [ts, ts];
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
+        let c = CString::new(path.as_os_str().as_bytes()).expect("path");
         assert_eq!(
             unsafe {
                 libc::utimensat(
@@ -921,13 +929,11 @@ mod tests {
         ready(&d);
         let f = d.join(".x.fetching.tmp");
         let held = wait_lock(&f, || panic!("nobody holds it")).expect("first lock");
-        let waited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waited = Arc::new(AtomicBool::new(false));
         let (w, f2) = (waited.clone(), f.clone());
-        let t = std::thread::spawn(move || {
-            wait_lock(&f2, || w.store(true, std::sync::atomic::Ordering::SeqCst)).is_some()
-        });
-        while !waited.load(std::sync::atomic::Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(1));
+        let t = thread::spawn(move || wait_lock(&f2, || w.store(true, Ordering::SeqCst)).is_some());
+        while !waited.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
         }
         drop(held);
         assert!(t.join().expect("waiter"));
@@ -998,7 +1004,7 @@ mod tests {
         back_date(&target, 400 * DAY);
         for (name, secs) in [(OLD, 40 * DAY), (YOUNG, 60)] {
             let l = d.join(name);
-            std::os::unix::fs::symlink(&target, &l).expect("link");
+            symlink(&target, &l).expect("link");
             back_date_link(&l, secs);
         }
         let s = sweep(&d, Shape::Links, Duration::from_secs(TTL_DAYS * DAY), false);

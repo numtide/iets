@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use crate::cachefs;
 use crate::cli::help::{arg_error, unknown_flag, value};
+use crate::{cachefs, error};
 
 const DAY: u64 = 24 * 60 * 60;
 
@@ -42,10 +42,8 @@ pub fn cmd_cache_gc(argv: &[String]) -> i32 {
     }
     let stores = cachefs::stores(cache_dir.as_deref());
     if stores.is_empty() {
-        return crate::error::Error::Cache(
-            "no cache directory (no HOME and no --cache-dir)".into(),
-        )
-        .report();
+        return error::Error::Cache("no cache directory (no HOME and no --cache-dir)".into())
+            .report();
     }
     let ttl = Duration::from_secs(ttl_days * DAY);
     for (root, shape) in stores {

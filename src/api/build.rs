@@ -4,7 +4,9 @@
 //! (docs/explanation/plumbing-and-porcelain.md).
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::{fs, io};
 
 use crate::build::executor::Places;
 use crate::build::upload::PlanUpload;
@@ -14,8 +16,9 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::provenance::Provenance;
-use crate::remote::plan::Inputs;
+use crate::remote::plan::{self, Inputs};
 use crate::remote::worker::Missing;
+use crate::settings;
 use crate::store::locate::locate_in_store;
 use crate::store::path::StorePath;
 use crate::store::source::SourceOrigin;
@@ -49,7 +52,7 @@ pub fn config() -> Config {
 /// Every place the builds may go: the flag, else the `builder` setting, else
 /// nix.conf's `store` (docs/reference/settings.md).
 pub fn places(url: Option<&str>, cfg: &Config) -> Result<Places> {
-    Places::parse(&crate::settings::builders(url, cfg), &cfg.system())
+    Places::parse(&settings::builders(url, cfg), &cfg.system())
 }
 
 /// The one store a command addresses, for the commands that address a store
@@ -75,7 +78,7 @@ pub fn plan_with(
     drvs: &HashMap<StorePath, DrvInfo>,
     sources: &HashMap<StorePath, SourceOrigin>,
 ) -> Result<Plan> {
-    crate::remote::plan::plan(roots, Inputs { drvs, sources })
+    plan::plan(roots, Inputs { drvs, sources })
 }
 
 /// One derivation read back from its ATerm text, as the table [`plan_with`]
@@ -87,7 +90,7 @@ pub fn drv_info(path: &StorePath, text: Vec<u8>) -> Result<DrvInfo> {
     Ok(DrvInfo {
         outputs: drv.outputs.into_keys().collect(),
         references,
-        aterm: Some(std::sync::Arc::new(text)),
+        aterm: Some(Arc::new(text)),
         pos: None,
         attr: None,
     })
@@ -97,10 +100,10 @@ pub fn drv_info(path: &StorePath, text: Vec<u8>) -> Result<DrvInfo> {
 /// which is what lets one process plan or build a closure another evaluated and
 /// never wrote to the store (docs/reference/plumbing.md). Sources are not in it, so they
 /// still come from the local store.
-pub fn drvs_in_dir(dir: &std::path::Path) -> Result<HashMap<StorePath, DrvInfo>> {
-    let at = |e: std::io::Error| Error::io(format!("reading '{}'", dir.display()), e);
+pub fn drvs_in_dir(dir: &Path) -> Result<HashMap<StorePath, DrvInfo>> {
+    let at = |e: io::Error| Error::io(format!("reading '{}'", dir.display()), e);
     let mut out = HashMap::new();
-    for entry in std::fs::read_dir(dir).map_err(at)? {
+    for entry in fs::read_dir(dir).map_err(at)? {
         let entry = entry.map_err(at)?;
         let base = entry.file_name().to_string_lossy().into_owned();
         let Ok(path) = StorePath::from_base_name(&base) else {
@@ -109,8 +112,7 @@ pub fn drvs_in_dir(dir: &std::path::Path) -> Result<HashMap<StorePath, DrvInfo>>
         if !path.is_derivation() {
             continue;
         }
-        let text =
-            std::fs::read(entry.path()).map_err(|e| Error::io(format!("reading '{base}'"), e))?;
+        let text = fs::read(entry.path()).map_err(|e| Error::io(format!("reading '{base}'"), e))?;
         let info = drv_info(&path, text)?;
         out.insert(path, info);
     }

@@ -107,6 +107,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::thread;
 
     #[test]
     fn lifo_owner_fifo_thief() {
@@ -137,7 +138,7 @@ mod tests {
                 let d = d.clone();
                 let sum = sum.clone();
                 let taken = taken.clone();
-                std::thread::spawn(move || {
+                thread::spawn(move || {
                     while taken.load(Ordering::Relaxed) < N {
                         if let Some((a, b)) = d.steal() {
                             assert_eq!(b, a * 2);

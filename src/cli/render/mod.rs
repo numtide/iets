@@ -8,7 +8,9 @@ pub mod text;
 use serde_json::Value;
 
 use crate::api::render::Report;
-use std::io::Write;
+use crate::{error, log};
+use std::io::{self, Write};
+use std::process;
 
 /// Everything a command writes on stdout goes through here. Nothing is
 /// added: `b` is the output. A write that fails ends the process: exit 0 is
@@ -16,9 +18,7 @@ use std::io::Write;
 /// throws for the same reason.
 pub fn bytes(b: &[u8]) {
     if let Err(e) = write(b) {
-        std::process::exit(
-            crate::error::Error::io(format!("write of {} bytes", b.len()), e).report(),
-        )
+        process::exit(error::Error::io(format!("write of {} bytes", b.len()), e).report())
     }
 }
 
@@ -28,8 +28,8 @@ pub fn bytes_lossy(b: &[u8]) {
     let _ = write(b);
 }
 
-fn write(b: &[u8]) -> std::io::Result<()> {
-    let mut out = std::io::stdout();
+fn write(b: &[u8]) -> io::Result<()> {
+    let mut out = io::stdout();
     out.write_all(b)?;
     out.flush()
 }
@@ -66,7 +66,7 @@ pub fn size(b: u64) -> String {
 
 /// A status line on stderr: what a run did, not what it produced.
 pub fn status(text: &str) {
-    crate::log::line(text);
+    log::line(text);
 }
 
 /// The text layout of a value the operation layer produced. The JSON of the
@@ -86,10 +86,12 @@ pub fn emit<T: Report + Text>(v: &T, as_json: bool) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn sizes_render_as_nix_renders_them() {
         let got: Vec<String> = [100, 2000, 10547, 1_572_864, 6_000_000_000]
-            .map(super::size)
+            .map(size)
             .to_vec();
         assert_eq!(
             got,

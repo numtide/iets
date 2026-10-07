@@ -4,9 +4,11 @@ use std::collections::HashMap;
 
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::lint::purity;
 use crate::runtime::Word;
 use crate::runtime::arena::Stat;
 use crate::syntax::symbol::Sym;
+use crate::{parallel, print};
 
 pub fn register(r: &mut Registry) {
     r.op("__attrNames", 1, attr_names);
@@ -28,7 +30,7 @@ fn attr_names(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the argument passed to builtins.attrNames",
     )?;
-    let sorted = crate::print::lexicographic_order(ev, a);
+    let sorted = print::lexicographic_order(ev, a);
     let mut items = Vec::with_capacity(sorted.len());
     for attr in sorted {
         items.push(ev.sym_string(attr.sym));
@@ -42,7 +44,7 @@ fn attr_values(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> 
         pos,
         "while evaluating the argument passed to builtins.attrValues",
     )?;
-    let sorted = crate::print::lexicographic_order(ev, a);
+    let sorted = print::lexicographic_order(ev, a);
     let items: Vec<Word> = sorted.iter().map(|a| a.cell.get()).collect();
     Ok(ev.mk_list(&items))
 }
@@ -60,7 +62,7 @@ fn get_attr(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     )?;
     let sym = ev.sym(name);
     match a.get(sym) {
-        Some(attr) if sym == ev.s.rev_count => crate::lint::purity::count_read(ev, &attr.cell, pos),
+        Some(attr) if sym == ev.s.rev_count => purity::count_read(ev, &attr.cell, pos),
         Some(attr) => ev.force_cell(&attr.cell),
         None => bail!(
             ErrorKind::MissingAttr,
@@ -172,7 +174,7 @@ fn list_to_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         pos,
         "while evaluating the argument passed to builtins.listToAttrs",
     )?;
-    crate::parallel::fanout_list(ev, l); // parallel
+    parallel::fanout_list(ev, l); // parallel
     let mut entries: Vec<(Sym, Pos, Word)> = Vec::with_capacity(l.len as usize);
     let mut seen: HashMap<Sym, ()> = HashMap::new();
     for c in l.cells() {
@@ -223,7 +225,7 @@ fn zip_attrs_with(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
         pos,
         "while evaluating the second argument passed to builtins.zipAttrsWith",
     )?;
-    crate::parallel::fanout_list(ev, l); // parallel
+    parallel::fanout_list(ev, l); // parallel
     let mut groups: HashMap<Sym, Vec<Word>> = HashMap::new();
     let mut order: Vec<Sym> = Vec::new();
     for c in l.cells() {
@@ -265,7 +267,7 @@ fn cat_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the second argument passed to builtins.catAttrs",
     )?;
-    crate::parallel::fanout_list(ev, l); // parallel
+    parallel::fanout_list(ev, l); // parallel
     let mut out = Vec::new();
     for c in l.cells() {
         let w = c.get();
@@ -292,7 +294,7 @@ fn group_by(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the second argument passed to builtins.groupBy",
     )?;
-    crate::parallel::fanout_list(ev, l); // parallel
+    parallel::fanout_list(ev, l); // parallel
     let mut groups: HashMap<Sym, Vec<Word>> = HashMap::new();
     for c in l.cells() {
         let elem = c.get();

@@ -10,6 +10,10 @@
 
 use super::symbol::Sym;
 
+use std::ops;
+
+use crate::lint::allow::Allows;
+
 /// Index into `Ast::exprs`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ExprId(pub u32);
@@ -43,7 +47,7 @@ impl Range {
     }
 
     #[inline]
-    fn bounds(self) -> std::ops::Range<usize> {
+    fn bounds(self) -> ops::Range<usize> {
         self.start as usize..(self.start + self.len) as usize
     }
 }
@@ -70,7 +74,7 @@ pub struct Ast {
     /// Constructs the parser accepts but a lint may report (docs/reference/lints.md).
     pub notes: Vec<Note>,
     /// The lines `# iets: allow` comments cover (docs/reference/lints.md).
-    pub allows: crate::lint::allow::Allows,
+    pub allows: Allows,
 }
 
 /// A construct the parser saw and a lint may report: a `url-literal`

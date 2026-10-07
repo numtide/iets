@@ -11,18 +11,23 @@
 //! them once their batch is registered); `restart` last when it leaves.
 
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::io::{self, BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
+use std::{env, fs, thread};
 
 use super::instantiate::Instantiator;
 use super::line::{Line, json_str, json_str_list, split_object};
-use super::{FNV_BASIS, Node, admit, config, error_line, find_along_attr_path, fnv_step, node};
+use super::{
+    FNV_BASIS, Node, admit, attr_join, config, error_line, find_along_attr_path, fnv_step, node,
+};
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
+use crate::log;
 use crate::print::lexicographic_order;
 use crate::runtime::Word;
+use crate::session::{self, Session};
 use std::os::unix::process::ExitStatusExt;
 
 pub const MSG_NEXT: &str = "next";
@@ -42,7 +47,7 @@ pub fn write_out(out: &Out, line: &[u8]) {
 
 /// `VmHWM` of this process, in MB (Linux only; 0 elsewhere).
 pub fn peak_rss_mb() -> u64 {
-    std::fs::read_to_string("/proc/self/status")
+    fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
             s.lines()
@@ -62,7 +67,7 @@ pub fn run_worker(
     max_memory_mb: u64,
     out: &Out,
 ) -> Result<()> {
-    let stdin = std::io::stdin();
+    let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let chunk_depth = config().opts.chunk_depth;
     let flush = |inst: &mut Option<Instantiator>| -> Result<()> {
@@ -105,7 +110,7 @@ pub fn run_worker(
                 Ok(Node::Recurse(attrs)) => {
                     let names = lexicographic_order(ev, attrs);
                     let mut v = b"{\"attr\":".to_vec();
-                    v.extend(json_str(&super::attr_join(&path)));
+                    v.extend(json_str(&attr_join(&path)));
                     v.extend_from_slice(b",\"attrPath\":");
                     v.extend(json_str_list(path.iter()));
                     v.extend_from_slice(b",\"attrs\":");
@@ -150,21 +155,21 @@ enum Control {
 
 struct Proc {
     child: Child,
-    to: std::process::ChildStdin,
-    from: BufReader<std::process::ChildStdout>,
+    to: ChildStdin,
+    from: BufReader<ChildStdout>,
 }
 
 impl Proc {
     fn spawn(args: &[String]) -> Result<Proc> {
-        crate::session::Session::current()
+        Session::current()
             .jobs
             .spawned
             .fetch_add(1, Ordering::Relaxed);
-        let exe = std::env::current_exe().map_err(|e| Error::io("current_exe", e))?;
+        let exe = env::current_exe().map_err(|e| Error::io("current_exe", e))?;
         let mut child = Command::new(exe)
             .arg("eval-jobs")
             .arg("--worker")
-            .env("IETS_SESSION_ID", crate::log::session_id())
+            .env("IETS_SESSION_ID", log::session_id())
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -339,7 +344,7 @@ fn collector(shared: &Shared, args: &[String], sink: &Sink) -> Result<()> {
         let Some(p) = proc.as_mut() else {
             return Err(Error::Protocol("worker error: no worker process".into()));
         };
-        let joined = super::attr_join(&path);
+        let joined = attr_join(&path);
         p.send(&format!(
             "{MSG_DO}{}",
             String::from_utf8_lossy(&json_str_list(path.iter()))
@@ -393,11 +398,11 @@ pub fn run_collector(args: &[String], workers: usize, sink: Sink) -> Result<()> 
         }),
         Condvar::new(),
     ));
-    std::thread::scope(|s| {
+    thread::scope(|s| {
         for _ in 0..workers.max(1) {
             let shared = shared.clone();
             let sink = sink.clone();
-            s.spawn(crate::session::bind(move || {
+            s.spawn(session::bind(move || {
                 if let Err(e) = collector(&shared, args, &sink) {
                     let (lock, cv) = &*shared;
                     let mut st = lock.lock().unwrap();

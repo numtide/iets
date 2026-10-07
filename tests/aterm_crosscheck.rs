@@ -4,6 +4,7 @@
 //! harmonia (github.com/nix-community/harmonia, MIT) checks its ATerm code with.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 use iets::store::drv::{
@@ -17,7 +18,7 @@ fn fixture(file: &str) -> Vec<u8> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aterm")
         .join(file);
-    std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+    fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
 fn sp(base: &str) -> StorePath {

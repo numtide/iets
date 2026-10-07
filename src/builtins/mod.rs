@@ -15,6 +15,7 @@ pub mod text;
 use crate::eval::{Evaluator, Pos};
 use crate::runtime::{PrimFn, Word};
 use crate::syntax::symbol::Sym;
+use crate::{config, log};
 
 pub struct Registry {
     pub ops: Vec<(&'static str, u8, PrimFn)>,
@@ -53,15 +54,15 @@ fn builtins_name(name: &'static str) -> &'static str {
 /// Under one of Nix's own names iets answers as Nix does; its own commands
 /// have every feature, which is the documented divergence.
 fn exposed(name: &'static str) -> bool {
-    if !crate::log::classic() {
+    if !log::classic() {
         return true;
     }
     match builtins_name(name) {
         // primops.cc: `fetch-tree` or `flakes`, since the flake machinery is
         // written in Nix and calls it
-        "fetchTree" => crate::config::xp_on("fetch-tree") || crate::config::xp_on("flakes"),
-        "fetchClosure" => crate::config::xp_on("fetch-closure"),
-        "outputOf" => crate::config::xp_on("dynamic-derivations"),
+        "fetchTree" => config::xp_on("fetch-tree") || config::xp_on("flakes"),
+        "fetchClosure" => config::xp_on("fetch-closure"),
+        "outputOf" => config::xp_on("dynamic-derivations"),
         _ => true,
     }
 }
@@ -71,7 +72,7 @@ pub fn install(ev: &mut Evaluator) {
         ops: Vec::new(),
         consts: Vec::new(),
     };
-    core::register(&mut r);
+    self::core::register(&mut r);
     attrs::register(&mut r);
     lists::register(&mut r);
     strings::register(&mut r);

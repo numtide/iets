@@ -2,18 +2,17 @@
 //! hashed the way Nix addresses them.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::{fs, io, thread};
 
 use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
+use crate::session;
 use crate::store::drv::Derivation;
-use crate::store::hash::{Hash, HashAlgo, Hasher};
+use crate::store::hash::{self, Hash, HashAlgo, Hasher};
 use crate::store::nar::dump_string;
-use crate::store::path::IngestionMethod;
-use crate::store::path::make_fixed_output_path;
-use crate::store::path::{STORE_DIR, StorePath};
+use crate::store::path::{IngestionMethod, STORE_DIR, StorePath, make_fixed_output_path};
 use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
 
 /// One object the daemon must hold before it can build the root.
@@ -52,7 +51,7 @@ impl DrvHashes {
         let mut nar = Hasher::new(HashAlgo::Sha256);
         dump_string(aterm, &mut nar).expect("a hasher never fails");
         DrvHashes {
-            text: crate::store::hash::hash_bytes(HashAlgo::Sha256, aterm),
+            text: hash::hash_bytes(HashAlgo::Sha256, aterm),
             nar_size: nar.bytes_written(),
             nar_hash: nar.finish(),
         }
@@ -77,14 +76,14 @@ pub fn prehash_drvs(objects: &[&Object]) {
         }
         return;
     }
-    let threads = std::thread::available_parallelism()
+    let threads = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .min(todo.len());
     let next = AtomicUsize::new(0);
-    std::thread::scope(|s| {
+    thread::scope(|s| {
         for _ in 0..threads {
-            s.spawn(crate::session::bind(|| {
+            s.spawn(session::bind(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     if i >= todo.len() {
@@ -264,8 +263,8 @@ pub fn load_drv(
         return Ok((aterm, info.references, false));
     }
     let full = format!("{STORE_DIR}/{}", p.base_name());
-    let text = std::fs::read(&full)
-        .map_err(|e| Error::io(format!("cannot read derivation '{full}'"), e))?;
+    let text =
+        fs::read(&full).map_err(|e| Error::io(format!("cannot read derivation '{full}'"), e))?;
     let drv = Derivation::parse(&text, Derivation::name_from_path(p)?)?;
     let mut references = drv.input_srcs;
     references.extend(drv.input_drvs.into_keys());
@@ -359,16 +358,16 @@ pub fn plan(roots: &[StorePath], inputs: Inputs<'_>) -> Result<Plan> {
 
 /// Dumps and hashes every source on a thread pool; results keep the input order.
 fn hash_sources(sources: &[&StorePath], infos: &[SourceOrigin]) -> Result<Vec<Object>> {
-    let threads = std::thread::available_parallelism()
+    let threads = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .min(sources.len().max(1));
     let next = Mutex::new(0usize);
     let results: Vec<Mutex<Option<Result<Object>>>> =
         sources.iter().map(|_| Mutex::new(None)).collect();
-    std::thread::scope(|s| {
+    thread::scope(|s| {
         for _ in 0..threads {
-            s.spawn(crate::session::bind(|| {
+            s.spawn(session::bind(|| {
                 loop {
                     let i = {
                         let mut n = next.lock().unwrap();
@@ -406,11 +405,12 @@ fn hash_sources(sources: &[&StorePath], infos: &[SourceOrigin]) -> Result<Vec<Ob
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::nar::tests::fixture_tree;
     use crate::store::nar::{nar_hash, nar_size};
 
     #[test]
     fn hash_source_matches_nar_hash() {
-        let tree = crate::store::nar::tests::fixture_tree("plan");
+        let tree = fixture_tree("plan");
         let (h, size) = hash_source(&SrcPath::fs(tree.clone(), None)).unwrap();
         assert_eq!(h, nar_hash(&tree).unwrap());
         assert_eq!(size, nar_size(&tree).unwrap());

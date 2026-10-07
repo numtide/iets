@@ -5,18 +5,27 @@
 //! See `docs/reference/classic.md`.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use super::{Argv, Common, fallback};
-use crate::api::build::{Dispatch, Root};
-use crate::api::installable;
+use super::{
+    Argv, Common, common_flag, develop, drvshow, eval_config, fallback, fmt, local,
+    lookup_file_arg, settings, shell_settings, store_given,
+};
+use crate::api::build::{self, Dispatch, Root};
+use crate::api::{self, flake, installable};
 use crate::build::render::Style;
-use crate::cli::{EvalArgs, Input, Outcome, Run, abs_path, auto_args, cwd, report};
-use crate::eval::{Error, ErrorKind, EvalConfig, EvalResult, Evaluator, Pos};
+use crate::cli::{
+    self, EvalArgs, Input, Outcome, Run, abs_path, auto_args, cwd, devenv, render, report, search,
+};
+use crate::eval::{self, Error, ErrorKind, EvalConfig, EvalResult, Evaluator, Pos};
+use crate::provenance::Provenance;
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
 use crate::runtime::{Value, Word};
 use crate::store::path::StorePath;
+use crate::{config, error, ignored, print, session};
 
 const NAME: &str = "nix";
 /// filetransfer.hh: the default of `http-connections`.
@@ -81,12 +90,12 @@ pub fn main(argv: &[String]) -> i32 {
         "eval" => eval_main(argv, &rest),
         "build" => build_main(argv, &rest),
         "print-dev-env" => dev_env_main(argv, &rest),
-        "develop" => super::develop::main(argv, &rest),
-        "fmt" => super::fmt::main(argv, &rest),
-        "search" => crate::cli::search::classic_main(argv, &rest),
+        "develop" => develop::main(argv, &rest),
+        "fmt" => fmt::main(argv, &rest),
+        "search" => search::classic_main(argv, &rest),
         "derivation" if rest.get(k).is_some_and(|s| s == "show") => {
             rest.remove(k);
-            super::drvshow::main(argv, &rest)
+            drvshow::main(argv, &rest)
         }
         "flake" if rest.get(k).is_some_and(|s| s == "prefetch-inputs") => {
             rest.remove(k);
@@ -119,7 +128,7 @@ pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
         return Ok(false);
     }
     match s {
-        "--accept-flake-config" => crate::ignored::flag(s, crate::ignored::NO_NIX_CONFIG),
+        "--accept-flake-config" => ignored::flag(s, ignored::NO_NIX_CONFIG),
         // iets has every feature but this one, which changes what `fromTOML`
         // returns (docs/reference/divergences.md). Under a classic name the
         // value is still a setting, because the builtins Nix gates on a
@@ -135,11 +144,11 @@ pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
         }
         "--eval-store" => match a.value(s)?.as_str() {
             "auto" | "daemon" | "" => {
-                crate::ignored::flag(s, "iets evaluates in memory and needs no evaluation store")
+                ignored::flag(s, "iets evaluates in memory and needs no evaluation store")
             }
             v => return Err(format!("'--eval-store {v}' is not implemented")),
         },
-        _ => return super::common_flag(c, a, s),
+        _ => return common_flag(c, a, s),
     }
     Ok(true)
 }
@@ -261,11 +270,11 @@ pub fn nix_settings(
     c: &mut Common,
     file: bool,
     builder: bool,
-) -> Result<(crate::config::Config, Transport, Options), String> {
+) -> Result<(config::Config, Transport, Options), String> {
     let s = if builder {
-        super::settings(c)
+        settings(c)
     } else {
-        super::shell_settings(c)
+        shell_settings(c)
     }?;
     let set = c.flags.pure.is_some() || s.0.overridden("pure-eval");
     let pure = c.flags.pure.unwrap_or(true);
@@ -285,7 +294,7 @@ fn eval_main(argv: &[String], rest: &[String]) -> i32 {
         Ok(t) => t,
         Err(reason) => fallback(NAME, argv, &reason),
     };
-    let ec = super::eval_config(&n.c, &cfg);
+    let ec = eval_config(&n.c, &cfg);
     let run = n.run(ec, "nix eval", false, n.json);
     print_cached(argv, run, move |ev| eval_run(ev, &n))
 }
@@ -294,13 +303,13 @@ fn eval_main(argv: &[String], rest: &[String]) -> i32 {
 pub(super) fn print_cached(
     argv: &[String],
     run: Run,
-    f: impl FnOnce(&mut Evaluator) -> crate::error::Result<Vec<u8>> + Send + 'static,
+    f: impl FnOnce(&mut Evaluator) -> error::Result<Vec<u8>> + Send + 'static,
 ) -> i32 {
     if let Some(text) = run.hit_result() {
-        crate::cli::render::bytes(&text);
+        render::bytes(&text);
         return 0;
     }
-    match crate::cli::run_reported(run, move |ev, cache| {
+    match cli::run_reported(run, move |ev, cache| {
         let text = f(ev)?;
         if let Some(c) = cache {
             c.write(ev, &text, false);
@@ -310,14 +319,14 @@ pub(super) fn print_cached(
         Outcome::Failed(code) => code,
         Outcome::Unsupported(reason) => fallback(NAME, argv, &reason),
         Outcome::Ok(text) => {
-            crate::cli::render::bytes(&text);
+            render::bytes(&text);
             0
         }
     }
 }
 
 /// `nix eval`: the whole stdout, already formatted.
-fn eval_run(ev: &mut Evaluator, n: &Nix) -> crate::error::Result<Vec<u8>> {
+fn eval_run(ev: &mut Evaluator, n: &Nix) -> error::Result<Vec<u8>> {
     let cwd = cwd();
     let mut out: Vec<u8> = Vec::new();
     let what = n.installables.first().map_or(".", String::as_str);
@@ -339,7 +348,7 @@ fn eval_run(ev: &mut Evaluator, n: &Nix) -> crate::error::Result<Vec<u8>> {
         out.extend_from_slice(&s);
     } else if n.json {
         let mut ctx = Vec::new();
-        crate::print::print_json(ev, v, &mut out, &mut ctx, true, Pos::NONE)?;
+        print::print_json(ev, v, &mut out, &mut ctx, true, Pos::NONE)?;
         out.push(b'\n');
     } else {
         let mut seen = HashSet::new();
@@ -358,7 +367,7 @@ fn build_main(argv: &[String], rest: &[String]) -> i32 {
         Ok(t) => t,
         Err(reason) => fallback(NAME, argv, &reason),
     };
-    let ec = super::eval_config(&n.c, &cfg);
+    let ec = eval_config(&n.c, &cfg);
     let run = n.run(ec, "nix build", false, false);
     // a hit skips the evaluation and nothing else: the upload, the build,
     // the out-links and the roots all happen in `realise`
@@ -367,7 +376,7 @@ fn build_main(argv: &[String], rest: &[String]) -> i32 {
     }
     let n = Arc::new(n);
     let m = Arc::clone(&n);
-    match crate::cli::run_reported(run, move |ev, cache| {
+    match cli::run_reported(run, move |ev, cache| {
         let r = build_run(ev, &m)?;
         if let Some(c) = cache {
             c.write_build(ev, &remember(&r.0));
@@ -381,10 +390,7 @@ fn build_main(argv: &[String], rest: &[String]) -> i32 {
 }
 
 /// `nix build`: what to build, and the closure to upload.
-fn build_run(
-    ev: &mut Evaluator,
-    n: &Nix,
-) -> crate::error::Result<(Vec<installable::Install>, Box<Plan>)> {
+fn build_run(ev: &mut Evaluator, n: &Nix) -> error::Result<(Vec<installable::Install>, Box<Plan>)> {
     let cwd = cwd();
     let mut targets: Vec<installable::Install> = Vec::new();
     for what in &n.installables {
@@ -397,7 +403,7 @@ fn build_run(
         )?);
     }
     let roots = flat_roots(&targets);
-    let plan = crate::api::build::plan(ev, &Root::paths(&roots))?;
+    let plan = build::plan(ev, &Root::paths(&roots))?;
     Ok((targets, Box::new(plan)))
 }
 
@@ -422,28 +428,28 @@ fn prefetch_inputs_main(argv: &[String], rest: &[String]) -> i32 {
     if refs.len() > 1 {
         fallback(NAME, argv, "'nix flake prefetch-inputs' takes one flake");
     }
-    let fr = crate::api::flake_ref(refs.first().map_or(".", String::as_str), &cwd())
+    let fr = api::flake_ref(refs.first().map_or(".", String::as_str), &cwd())
         .unwrap_or_else(|e| fallback(NAME, argv, &e.to_string()));
-    let todo = crate::api::flake::info(&fr)
+    let todo = flake::info(&fr)
         .and_then(|i| i.inputs())
         .unwrap_or_else(|e| fallback(NAME, argv, &e.to_string()));
-    let system = crate::config::Config::load(&c.flags.overrides)
+    let system = config::Config::load(&c.flags.overrides)
         .unwrap_or_else(|e| fallback(NAME, argv, &e.to_string()))
         .system();
     let threads = todo.len().min(HTTP_CONNECTIONS);
-    let queue = std::sync::Mutex::new(todo.into_iter());
-    let failed = std::sync::atomic::AtomicBool::new(false);
-    std::thread::scope(|s| {
+    let queue = Mutex::new(todo.into_iter());
+    let failed = AtomicBool::new(false);
+    thread::scope(|s| {
         for _ in 0..threads {
-            s.spawn(crate::session::bind(|| {
+            s.spawn(session::bind(|| {
                 while let Some((name, r)) = queue.lock().unwrap().next() {
                     let mut ev = EvalConfig::new().system(&system).pure(true).build();
                     if let Some(h) = r.nar_hash() {
                         ev.input_names.insert(h.to_string(), name);
                     }
-                    if let Err(e) = crate::api::flake::tree(&mut ev, &r) {
+                    if let Err(e) = flake::tree(&mut ev, &r) {
                         report(&ev, &e);
-                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        failed.store(true, Ordering::Relaxed);
                     }
                 }
             }));
@@ -469,7 +475,7 @@ fn dev_env_main(argv: &[String], rest: &[String]) -> i32 {
     }
     // no flag reached here, so main.cc's default stands
     pass.push("--pure-eval".into());
-    crate::cli::devenv::cmd_print_dev_env(&pass)
+    devenv::cmd_print_dev_env(&pass)
 }
 
 /// The value one installable names: an attribute of the `--expr`/`--file`
@@ -480,12 +486,12 @@ pub(super) fn resolve(ev: &mut Evaluator, n: &Nix, what: &str, cwd: &[u8]) -> Ev
     let attr = if what == "." { "" } else { what };
     if let Some(e) = &n.expr {
         let root = ev.eval_string(e, cwd)?;
-        return crate::api::installable::find_along_attr_path(ev, root, attr, args);
+        return installable::find_along_attr_path(ev, root, attr, args);
     }
     if let Some(f) = &n.file {
-        let p = super::lookup_file_arg(ev, f, cwd)?;
+        let p = lookup_file_arg(ev, f, cwd)?;
         let root = ev.eval_file(&p, Pos::NONE)?;
-        return crate::api::installable::find_along_attr_path(ev, root, attr, args);
+        return installable::find_along_attr_path(ev, root, attr, args);
     }
     if what.contains('^') || what.as_bytes().starts_with(&ev.store_dir) {
         return Err(Error::boxed(
@@ -495,9 +501,9 @@ pub(super) fn resolve(ev: &mut Evaluator, n: &Nix, what: &str, cwd: &[u8]) -> Ev
         ));
     }
     let (loc, fragment) = what.split_once('#').unwrap_or((what, ""));
-    let fr = crate::cli::flake_ref(loc, cwd)
+    let fr = cli::flake_ref(loc, cwd)
         .map_err(|e| Error::boxed(ErrorKind::Unsupported, e.to_string(), Pos::NONE))?;
-    let outputs = crate::api::flake::outputs(ev, &fr)?;
+    let outputs = flake::outputs(ev, &fr)?;
     let mut found = installable::from_outputs(
         ev,
         outputs,
@@ -558,13 +564,7 @@ fn realise(
         quiet: !n.print_build_logs,
         ..Style::detect()
     };
-    let mut d = match Dispatch::open(
-        transport,
-        options,
-        plan,
-        crate::provenance::Provenance::off(),
-        style,
-    ) {
+    let mut d = match Dispatch::open(transport, options, plan, Provenance::off(), style) {
         Ok(d) => d,
         Err(e) => return e.report(),
     };
@@ -591,7 +591,7 @@ fn realise(
             let path = &paths[at];
             at += 1;
             if n.no_link {
-                if !super::store_given(&n.c) {
+                if !store_given(&n.c) {
                     links.push((path.clone(), None));
                     kept.push((format!("{i}!{output}"), path.clone()));
                 }
@@ -628,8 +628,8 @@ fn realise(
             .chain(n.expr.iter())
             .map(|s| s.as_bytes().to_vec()),
     );
-    crate::cli::devenv::keep_outputs(&super::local(), &key, &kept);
-    crate::cli::render::bytes(out.as_bytes());
+    devenv::keep_outputs(&local(), &key, &kept);
+    render::bytes(out.as_bytes());
     0
 }
 
@@ -649,7 +649,7 @@ fn print_eval(
     seen: &mut HashSet<u64>,
     depth: usize,
 ) -> EvalResult<()> {
-    if depth > crate::eval::MAX_CALL_DEPTH as usize {
+    if depth > eval::MAX_CALL_DEPTH as usize {
         return Err(Error::stack_overflow(Pos::NONE));
     }
     let w = match ev.force(w) {
@@ -685,8 +685,8 @@ fn print_eval(
                 return Ok(());
             }
             out.extend_from_slice(b"{ ");
-            for attr in crate::print::lexicographic_order(ev, a) {
-                crate::print::print_attr_name(out, ev.interner.name(attr.sym));
+            for attr in print::lexicographic_order(ev, a) {
+                print::print_attr_name(out, ev.interner.name(attr.sym));
                 out.extend_from_slice(b" = ");
                 print_eval(ev, attr.cell.get(), out, seen, depth + 1)?;
                 out.extend_from_slice(b"; ");
@@ -716,11 +716,11 @@ fn print_eval(
             out.extend_from_slice("»".as_bytes());
         }
         Value::Lambda(_) => {
-            out.extend_from_slice(crate::print::show_value_short(ev, w).as_bytes());
+            out.extend_from_slice(print::show_value_short(ev, w).as_bytes());
         }
         _ => {
             let mut one = HashSet::new();
-            crate::print::print_ambiguous(ev, w, 1, out, &mut one, depth)?;
+            print::print_ambiguous(ev, w, 1, out, &mut one, depth)?;
         }
     }
     Ok(())

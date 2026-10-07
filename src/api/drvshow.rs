@@ -5,6 +5,7 @@
 //! (docs/reference/classic.md, docs/reference/divergences.md).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::iter;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -12,6 +13,7 @@ use serde_json::{Map, Value};
 use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
+use crate::print;
 use crate::remote::plan::{load_drv, walk};
 use crate::store::drv::{Derivation, DerivationOutput};
 use crate::store::path::{IngestionMethod, StorePath};
@@ -52,13 +54,13 @@ pub fn json_text(v: &Value, pretty: bool) -> Vec<u8> {
 fn write_json(out: &mut Vec<u8>, v: &Value, indent: Option<usize>) {
     fn newline(out: &mut Vec<u8>, depth: usize) {
         out.push(b'\n');
-        out.extend(std::iter::repeat_n(b' ', depth * 2));
+        out.extend(iter::repeat_n(b' ', depth * 2));
     }
     let inner = indent.map(|d| d + 1);
     match v {
         Value::Number(n) if n.as_i64().is_none() && n.as_u64().is_none() => {
             let f = n.as_f64().unwrap_or(f64::NAN);
-            out.extend_from_slice(crate::print::json_float(f).as_bytes());
+            out.extend_from_slice(print::json_float(f).as_bytes());
         }
         Value::Array(a) if !a.is_empty() => {
             out.push(b'[');

@@ -4,10 +4,16 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use std::thread::{self, Builder};
+use std::time::{Duration, Instant};
+use std::{hint, process, ptr};
 
 use super::deque::Deque;
 use super::fiber::{self, Fiber};
+use super::force;
+use super::thunk::WaiterTable;
 use crate::runtime::{Arena, Word};
+use crate::session::{self, Session};
 
 pub const READY_CAP: usize = 4096;
 pub const TASK_CAP: usize = 4096;
@@ -51,7 +57,7 @@ struct Tuning {
 
 impl Tuning {
     fn read(n: usize) -> Tuning {
-        let s = crate::session::Session::current();
+        let s = Session::current();
         let s = s.settings();
         Tuning {
             spin: s.spin,
@@ -188,7 +194,7 @@ pub struct Runtime {
     driver: Box<dyn Driver>,
     stack_size: usize,
     tune: Tuning,
-    pub waiters: super::thunk::WaiterTable,
+    pub waiters: WaiterTable,
     /// Thunks whose evaluation failed, for helpers to skip. A failure is
     /// not memoised (Nix evaluates a failed thunk again at every force),
     /// so this table only stops the speculation: every cell of a fan-out
@@ -247,7 +253,7 @@ impl Runtime {
             driver,
             stack_size,
             tune: Tuning::read(n),
-            waiters: super::thunk::WaiterTable::new(),
+            waiters: WaiterTable::new(),
             failed: [const { AtomicU64::new(0) }; FAILED_SLOTS],
             deadlocks: AtomicUsize::new(0),
             stat_steals: AtomicUsize::new(0),
@@ -257,10 +263,10 @@ impl Runtime {
             stat_fiber_parks: AtomicUsize::new(0),
         }));
         for i in 1..n {
-            std::thread::Builder::new()
+            Builder::new()
                 .name(format!("iets-w{i}"))
                 .stack_size(4 << 20)
-                .spawn(crate::session::bind(move || {
+                .spawn(session::bind(move || {
                     fiber::install_overflow_handler();
                     let mut w = Worker::new(i);
                     rt.prewarm(&mut w);
@@ -279,9 +285,9 @@ impl Runtime {
         user: *mut (),
         entry: MainEntry,
     ) -> Result<(), fiber::StackError> {
-        if crate::session::Session::current().settings().par_stats >= 2 {
-            super::force::SAMPLE_POS.store(true, Ordering::Relaxed);
-            let _ = super::force::START.set(std::time::Instant::now());
+        if Session::current().settings().par_stats >= 2 {
+            force::SAMPLE_POS.store(true, Ordering::Relaxed);
+            let _ = force::START.set(Instant::now());
             self.spawn_timeline();
         }
         fiber::install_overflow_handler();
@@ -325,7 +331,7 @@ impl Runtime {
                     if self.has_work() {
                         break;
                     }
-                    std::hint::spin_loop();
+                    hint::spin_loop();
                 }
                 continue;
             }
@@ -399,7 +405,7 @@ impl Runtime {
         w.fibers_created += 1;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let slot = Box::into_raw(Box::new(Slot {
-            fiber: Fiber::new(stack, slot_entry, std::ptr::null_mut())?,
+            fiber: Fiber::new(stack, slot_entry, ptr::null_mut())?,
             id,
             cancel: AtomicBool::new(false),
             is_main: false,
@@ -411,7 +417,7 @@ impl Runtime {
                 len: 0,
             },
             main_entry: None,
-            worker: std::ptr::null_mut(),
+            worker: ptr::null_mut(),
             rt: self,
             trimmed: false,
         }));
@@ -423,7 +429,7 @@ impl Runtime {
     /// run that cannot grow its fiber pool finishes on the fibers it has.
     fn report_no_stack(&self, e: &fiber::StackError) {
         if !self.stack_failed.swap(true, Ordering::Relaxed) {
-            crate::errln!("iets: {e}; continuing without new fibers");
+            errln!("iets: {e}; continuing without new fibers");
         }
     }
 
@@ -471,7 +477,7 @@ impl Runtime {
             s.fiber.state.store(fiber::RUNNING, Ordering::Relaxed);
             s.worker = w;
             self.driver.on_switch(s, w);
-            let t0 = std::time::Instant::now();
+            let t0 = Instant::now();
             let st = &self.wstat[w.idx];
             st.running.store(1, Ordering::Relaxed);
             s.fiber.resume();
@@ -481,7 +487,7 @@ impl Runtime {
             self.driver.on_switch(s, w);
             match s.fiber.state.load(Ordering::Acquire) {
                 fiber::FINISHED => {
-                    s.worker = std::ptr::null_mut();
+                    s.worker = ptr::null_mut();
                     w.pool.push(slot);
                 }
                 // A waker may already have moved PARKING to WOKEN.
@@ -723,8 +729,8 @@ impl Runtime {
             if self.has_work() {
                 return;
             }
-            crate::errln!("iets: internal error: all workers idle with the main fiber parked");
-            std::process::abort();
+            errln!("iets: internal error: all workers idle with the main fiber parked");
+            process::abort();
         }
     }
 
@@ -785,19 +791,19 @@ impl Runtime {
     /// Print, every 20 ms, how many workers are inside fibers, how much
     /// work is queued and whether main is parked.
     fn spawn_timeline(&'static self) {
-        std::thread::spawn(crate::session::bind(move || {
-            let t0 = std::time::Instant::now();
+        thread::spawn(session::bind(move || {
+            let t0 = Instant::now();
             let mut last_busy = 0;
             let mut last_tasks = 0;
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                thread::sleep(Duration::from_millis(20));
                 if self.shutdown.load(Ordering::Relaxed) {
                     return;
                 }
                 let busy = self.stat_busy_ns();
                 let tasks = self.stat_tasks();
-                let pos = super::force::MAIN_POS.load(Ordering::Relaxed);
-                crate::errln!(
+                let pos = force::MAIN_POS.load(Ordering::Relaxed);
+                errln!(
                     "t={:4}ms running={:2} busy-workers={:.1} tasks/20ms={:5} queued={:5} sleepers={:2} main-at=pos{}",
                     t0.elapsed().as_millis(),
                     self.stat_running(),
@@ -893,7 +899,7 @@ fn futex_wait(word: &AtomicU32, expected: u32) {
             word as *const AtomicU32,
             libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
             expected,
-            std::ptr::null::<libc::timespec>(),
+            ptr::null::<libc::timespec>(),
         );
     }
 }
@@ -957,7 +963,7 @@ mod tests {
 
     impl Driver for TestDriver {
         fn new_user(&self, _rt: &Runtime) -> *mut () {
-            std::ptr::null_mut()
+            ptr::null_mut()
         }
         fn run_task(&self, rt: &Runtime, slot: &mut Slot) {
             let c = self.0;
@@ -1000,7 +1006,7 @@ mod tests {
                         c.done.fetch_add(1, Ordering::Release);
                         return;
                     }
-                    std::hint::spin_loop();
+                    hint::spin_loop();
                 },
                 _ => unreachable!(),
             }
@@ -1021,16 +1027,16 @@ mod tests {
         Box::leak(Box::new(Counter {
             sum: AtomicU64::new(0),
             done: AtomicU64::new(0),
-            parked: AtomicPtr::new(std::ptr::null_mut()),
+            parked: AtomicPtr::new(ptr::null_mut()),
         }))
     }
 
     fn wait_done(c: &Counter, n: u64) {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         while c.done.load(Ordering::Acquire) < n {
             // a hang guard, not a speed bound
             assert!(t0.elapsed().as_secs() < 300, "timeout");
-            std::thread::yield_now();
+            thread::yield_now();
         }
     }
 
@@ -1040,7 +1046,7 @@ mod tests {
         let rt = Runtime::start(4, Box::new(TestDriver(c)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
                 let n = 64;
@@ -1069,7 +1075,7 @@ mod tests {
         let rt = Runtime::start(3, Box::new(TestDriver(c)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
                 let park = Task {
@@ -1099,7 +1105,7 @@ mod tests {
         let rt = Runtime::start(2, Box::new(TestDriver(c)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
                 let wake = Task {

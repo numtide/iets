@@ -3,11 +3,16 @@
 //! drvPath. Also `placeholder` and `import` of a `.drv` store path.
 
 use std::collections::BTreeSet;
+use std::fs::{self, File, Metadata};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::{io, str};
 
-use super::Registry;
+use super::text::json;
+use super::{Registry, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::lint::{LintId, coerce, purity};
+use crate::parallel::shared::SharedMap;
 use crate::print::{json_escape, lexicographic_order, print_json};
 use crate::runtime::{AttrsObj, Ctx, Word, split_built};
 use crate::store::drv::{
@@ -19,6 +24,8 @@ use crate::store::path::{
     DRV_EXTENSION, IngestionMethod, StorePath, check_name, hash_placeholder, output_path_name,
 };
 use crate::syntax::symbol::Sym;
+use crate::trace::{self, Trace};
+use crate::{log, parallel, provenance};
 
 pub fn register(r: &mut Registry) {
     r.op("derivationStrict", 1, derivation_strict);
@@ -51,8 +58,8 @@ pub struct DrvInfo {
 /// derivations this evaluation created).
 #[derive(Clone)]
 pub struct DrvState {
-    pub hash_cache: Arc<std::sync::Mutex<DrvHashCache>>,
-    pub drvs: crate::parallel::shared::SharedMap<StorePath, DrvInfo>,
+    pub hash_cache: Arc<Mutex<DrvHashCache>>,
+    pub drvs: SharedMap<StorePath, DrvInfo>,
     dump_dir: Option<PathBuf>,
     pub nr_derivations: u64,
     keep_aterm: bool,
@@ -141,7 +148,7 @@ fn utf8(bytes: &[u8], pos: Pos) -> EvalResult<String> {
 }
 
 fn parse_store_path(p: &[u8], pos: Pos) -> EvalResult<StorePath> {
-    let s = std::str::from_utf8(p)
+    let s = str::from_utf8(p)
         .map_err(|_| Error::boxed(ErrorKind::Eval, "store path is not valid UTF-8", pos))?;
     StorePath::parse(s).map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))
 }
@@ -153,7 +160,7 @@ fn derivation_strict(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<
         pos,
         "while evaluating the argument passed to builtins.derivationStrict",
     )?;
-    crate::parallel::fanout_attrs_coerce(ev, attrs); // parallel
+    parallel::fanout_attrs_coerce(ev, attrs); // parallel
     let Some(name_attr) = attrs.get(ev.s.name) else {
         let mut e = Error::new(
             ErrorKind::MissingAttr,
@@ -355,8 +362,8 @@ fn process_attr(
     }
     if let Some(owner) = b.lint_owner {
         let forced = ev.force(w)?;
-        let site = crate::lint::coerce::drv_attr_pos(ev, attr_pos, owner);
-        crate::lint::coerce::drv_value(ev, key, forced, site)?;
+        let site = coerce::drv_attr_pos(ev, attr_pos, owner);
+        coerce::drv_value(ev, key, forced, site)?;
     }
     // the attribute's own position, so a coercion lint names the binding
     let raw = ev.coerce_to_string(w, &mut b.context, attr_pos, "", true, true, true)?;
@@ -376,14 +383,12 @@ fn process_attr(
     }
     let st = utf8(&raw, pos)?;
     if sym == s.json {
-        crate::log::line(&format!(
+        log::line(&format!(
             "warning: In derivation '{}': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead.",
             b.drv.name
         ));
         let text = ev.arena.alloc_bytes(st.as_bytes());
-        b.drv.structured_attrs = Some(super::text::json::canonical_structured_attrs(
-            ev, text, pos,
-        )?);
+        b.drv.structured_attrs = Some(json::canonical_structured_attrs(ev, text, pos)?);
         return Ok(());
     }
     if sym == s.builder {
@@ -443,14 +448,11 @@ fn derivation_strict_internal(
     // `lint::coerce::drv_fallback`, found when the first finding needs it
     let mut lint_fallback: Option<Pos> = None;
     let mut fallback = |ev: &mut Evaluator| {
-        *lint_fallback
-            .get_or_insert_with(|| crate::lint::coerce::drv_fallback(ev, attrs, pos, name_pos))
+        *lint_fallback.get_or_insert_with(|| coerce::drv_fallback(ev, attrs, pos, name_pos))
     };
-    let lint_owner = if ev.lint_on(crate::lint::LintId::DrvBoolNull)
-        || ev.lint_on(crate::lint::LintId::DrvList)
-    {
+    let lint_owner = if ev.lint_on(LintId::DrvBoolNull) || ev.lint_on(LintId::DrvList) {
         let builder_pos = attrs.get(s.builder).map_or(Pos::NONE, |a| a.pos);
-        crate::lint::coerce::drv_owner(ev, pos, builder_pos)
+        coerce::drv_owner(ev, pos, builder_pos)
     } else {
         None
     };
@@ -489,8 +491,8 @@ fn derivation_strict_internal(
         let ctx = &b.context[before..];
         if ctx.iter().any(|c| !c.is_store()) {
             let fallback = fallback(ev);
-            let site = crate::lint::coerce::drv_attr_pos(ev, attr.pos, fallback);
-            crate::lint::purity::marks_in_drv(ev, drv_name, &key, ctx, site, attr.pos)?;
+            let site = coerce::drv_attr_pos(ev, attr.pos, fallback);
+            purity::marks_in_drv(ev, drv_name, &key, ctx, site, attr.pos)?;
         }
     }
 
@@ -584,7 +586,7 @@ fn derivation_strict_internal(
             };
             let zero = Hash::from_bytes(algo, &vec![0u8; algo.size()])
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))?;
-            crate::log::line(&format!(
+            log::line(&format!(
                 "warning: found empty hash, assuming '{}'",
                 zero.to_sri()
             ));
@@ -594,7 +596,7 @@ fn derivation_strict_internal(
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))?
         };
         let method = ingestion_method.unwrap_or(IngestionMethod::Flat);
-        if ev.lint_on(crate::lint::LintId::Fod) {
+        if ev.lint_on(LintId::Fod) {
             let sri = hash.to_sri();
             let algo = sri.split('-').next().unwrap_or("");
             let mode = match method {
@@ -603,8 +605,8 @@ fn derivation_strict_internal(
                 IngestionMethod::Text => "text",
             };
             let fallback = fallback(ev);
-            let site = crate::lint::coerce::drv_attr_pos(ev, name_pos, fallback);
-            crate::lint::purity::fod(ev, drv_name, mode, algo, site)?;
+            let site = coerce::drv_attr_pos(ev, name_pos, fallback);
+            purity::fod(ev, drv_name, mode, algo, site)?;
         }
         let out = DerivationOutput::Fixed { method, hash };
         let path = out
@@ -672,7 +674,7 @@ fn derivation_strict_internal(
     // while the drvPath that names it is returned
     if let Some(dir) = &ev.drv.dump_dir {
         let file = dir.join(drv_path.base_name());
-        std::fs::write(&file, &text).map_err(|e| {
+        fs::write(&file, &text).map_err(|e| {
             Error::boxed(
                 ErrorKind::Io,
                 format!("writing '{}': {e}", file.display()),
@@ -689,13 +691,13 @@ fn derivation_strict_internal(
     // same way, so the first attribute still bound in a root tree is next.
     let pname_pos = attrs.get(s.pname).map(|a| a.pos);
     let site = if ev.drv.keep_site {
-        crate::provenance::real_pos(ev, pos)
-            .or_else(|| pname_pos.and_then(|p| crate::provenance::real_pos(ev, p)))
+        provenance::real_pos(ev, pos)
+            .or_else(|| pname_pos.and_then(|p| provenance::real_pos(ev, p)))
             .or_else(|| {
-                let p = crate::lint::coerce::drv_fallback(ev, attrs, pos, name_pos);
-                crate::provenance::real_pos(ev, p)
+                let p = coerce::drv_fallback(ev, attrs, pos, name_pos);
+                provenance::real_pos(ev, p)
             })
-            .or_else(|| crate::provenance::real_pos(ev, name_pos))
+            .or_else(|| provenance::real_pos(ev, name_pos))
     } else {
         None
     };
@@ -893,16 +895,16 @@ fn output_of(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 }
 
 /// `load_derivation_from_store` plus a `File` observation of the `.drv`.
-pub fn load_drv_traced(trace: &crate::trace::Trace, p: &StorePath) -> Result<Derivation, DrvError> {
+pub fn load_drv_traced(trace: &Trace, p: &StorePath) -> Result<Derivation, DrvError> {
     if !trace.is_on() {
         return load_derivation_from_store(p);
     }
     let full = p.to_string();
-    let read = || -> std::io::Result<(std::fs::Metadata, Vec<u8>)> {
-        let mut f = std::fs::File::open(&full)?;
+    let read = || -> io::Result<(Metadata, Vec<u8>)> {
+        let mut f = File::open(&full)?;
         let meta = f.metadata()?;
         let mut d = Vec::with_capacity(meta.len() as usize);
-        std::io::Read::read_to_end(&mut f, &mut d)?;
+        io::Read::read_to_end(&mut f, &mut d)?;
         Ok((meta, d))
     };
     let (meta, bytes) =
@@ -988,13 +990,13 @@ pub fn import_derivation(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalResul
     if !path.ends_with(DRV_EXTENSION.as_bytes()) {
         return Ok(None);
     }
-    let Ok(sp) = std::str::from_utf8(path).map(StorePath::parse) else {
+    let Ok(sp) = str::from_utf8(path).map(StorePath::parse) else {
         return Ok(None);
     };
     let Ok(sp) = sp else {
         return Ok(None);
     };
-    if super::store_hooks::stat(ev, path, true) != crate::trace::Kind::Regular {
+    if store_hooks::stat(ev, path, true) != trace::Kind::Regular {
         return Ok(None);
     }
     let drv = load_drv(ev, &sp).map_err(|e| drv_err(e, pos))?;

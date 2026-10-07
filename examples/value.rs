@@ -7,6 +7,9 @@
 use iets::api::value::{ContextElem, Eval, Value, ValueKind};
 use iets::eval::Evaluator;
 
+use std::env;
+use std::process::{self, ExitCode};
+
 const DEFAULT: &str = r#"
   rec {
     name = "demo";
@@ -21,12 +24,12 @@ const DEFAULT: &str = r#"
   }
 "#;
 
-fn main() -> std::process::ExitCode {
+fn main() -> ExitCode {
     // a frontend owns the run state and says where messages go
     let session = iets::session::Session::new();
     session.log.write_to_stderr();
     let _entered = session.enter();
-    let mut argv = std::env::args().skip(1);
+    let mut argv = env::args().skip(1);
     let src = match argv.next().as_deref() {
         None => DEFAULT.to_string(),
         Some("-E") | Some("--expr") => argv.next().unwrap_or_else(|| die("-E needs an EXPR")),
@@ -39,13 +42,13 @@ fn main() -> std::process::ExitCode {
         Ok(v) => v,
         Err(err) => {
             iets::api::report(e.evaluator(), &err);
-            return std::process::ExitCode::from(1);
+            return ExitCode::from(1);
         }
     };
 
     println!("root is {}", root.kind().type_of());
     let Some(n) = root.attrs_len() else {
-        return std::process::ExitCode::SUCCESS;
+        return ExitCode::SUCCESS;
     };
 
     // index order is the evaluator's own, so sort for a stable listing
@@ -62,7 +65,7 @@ fn main() -> std::process::ExitCode {
             Ok(v) => v,
             Err(err) => {
                 iets::api::report(e.evaluator(), &err);
-                return std::process::ExitCode::from(1);
+                return ExitCode::from(1);
             }
         };
         println!(
@@ -90,7 +93,7 @@ fn main() -> std::process::ExitCode {
             }
         }
     }
-    std::process::ExitCode::SUCCESS
+    ExitCode::SUCCESS
 }
 
 fn show_value(v: Value<'_>) -> String {
@@ -125,5 +128,5 @@ fn show(bytes: &[u8]) -> String {
 
 fn die(msg: &str) -> ! {
     eprintln!("usage: value [-E EXPR]: {msg}");
-    std::process::exit(2)
+    process::exit(2)
 }

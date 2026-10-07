@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
-use std::fmt;
+use std::{error, fmt};
 
-use super::hash::{Hash, HashAlgo, compress_hash, hash_bytes, is_nix32_char};
+use super::hash::{self, Hash, HashAlgo, HashFormat, compress_hash, hash_bytes, is_nix32_char};
+
+use crate::events::{self, Field};
 
 pub const STORE_DIR: &str = "/nix/store";
 
@@ -22,7 +24,7 @@ impl fmt::Display for StorePathError {
     }
 }
 
-impl std::error::Error for StorePathError {}
+impl error::Error for StorePathError {}
 
 /// A store path stored as its base name `<hash>-<name>`, like path.hh:StorePath.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,7 +91,7 @@ impl StorePath {
     pub fn new(hash: &Hash, name: &str) -> Result<StorePath, StorePathError> {
         check_name(name)?;
         let mut base_name = String::with_capacity(HASH_PART_LEN + 1 + name.len());
-        super::hash::nix32_encode_into(&mut base_name, hash.bytes());
+        hash::nix32_encode_into(&mut base_name, hash.bytes());
         debug_assert_eq!(base_name.len(), HASH_PART_LEN);
         base_name.push('-');
         base_name.push_str(name);
@@ -156,13 +158,13 @@ impl StorePath {
     }
 }
 
-impl crate::events::Field for &StorePath {
+impl Field for &StorePath {
     fn write(self, out: &mut Vec<u8>) {
         let start = out.len();
         out.extend_from_slice(STORE_DIR.as_bytes());
         out.push(b'/');
         out.extend_from_slice(self.base_name().as_bytes());
-        crate::events::quote_in_place(out, start);
+        events::quote_in_place(out, start);
     }
 }
 
@@ -172,7 +174,7 @@ pub fn make_store_path(ty: &str, hash: &Hash, name: &str) -> Result<StorePath, S
     let mut s = String::with_capacity(ty.len() + STORE_DIR.len() + name.len() + 80);
     s.push_str(ty);
     s.push(':');
-    hash.write_string_with(&mut s, super::hash::HashFormat::Base16, true);
+    hash.write_string_with(&mut s, HashFormat::Base16, true);
     s.push(':');
     s.push_str(STORE_DIR);
     s.push(':');
@@ -285,7 +287,7 @@ pub fn make_fixed_output_path(
     let mut payload = String::with_capacity(96);
     payload.push_str("fixed:out:");
     payload.push_str(method.prefix());
-    hash.write_string_with(&mut payload, super::hash::HashFormat::Base16, true);
+    hash.write_string_with(&mut payload, HashFormat::Base16, true);
     payload.push(':');
     let digest = hash_bytes(HashAlgo::Sha256, payload.as_bytes());
     make_store_path("output:out", &digest, name)
@@ -313,6 +315,7 @@ pub fn hash_placeholder(output_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::nar::tests::fixture_tree;
     use crate::store::nar::{nar_hash, nar_hash_filtered};
 
     fn set(paths: &[&str]) -> BTreeSet<StorePath> {
@@ -357,7 +360,7 @@ mod tests {
     // nix-instantiate --eval -E '"${./tree}"' (tree from nar.rs fixture_tree)
     #[test]
     fn path_copy_directory() {
-        let tree = crate::store::nar::tests::fixture_tree("pathcopy");
+        let tree = fixture_tree("pathcopy");
         let h = nar_hash(&tree).unwrap();
         let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "tree", &BTreeSet::new())
             .unwrap();
@@ -370,7 +373,7 @@ mod tests {
     // nix-instantiate --eval -E '"${./tree/a.txt}"'
     #[test]
     fn path_copy_file() {
-        let tree = crate::store::nar::tests::fixture_tree("pathfile");
+        let tree = fixture_tree("pathfile");
         let h = nar_hash(&tree.join("a.txt")).unwrap();
         let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "a.txt", &BTreeSet::new())
             .unwrap();
@@ -383,7 +386,7 @@ mod tests {
     // nix-instantiate --eval -E '"${builtins.filterSource (p: t: baseNameOf p != "sub") ./tree}"'
     #[test]
     fn filter_source() {
-        let tree = crate::store::nar::tests::fixture_tree("filtersrc");
+        let tree = fixture_tree("filtersrc");
         let (h, _) = nar_hash_filtered(&tree, HashAlgo::Sha256, &mut |p, _| {
             p.file_name().unwrap() != "sub"
         })
@@ -399,7 +402,7 @@ mod tests {
     // nix-instantiate --eval -E '"${builtins.path { path = ./tree; name = "mytree"; }}"'
     #[test]
     fn path_with_name() {
-        let tree = crate::store::nar::tests::fixture_tree("pathname");
+        let tree = fixture_tree("pathname");
         let h = nar_hash(&tree).unwrap();
         let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "mytree", &BTreeSet::new())
             .unwrap();

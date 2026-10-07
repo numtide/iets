@@ -4,10 +4,9 @@
 //! `crate::api::drvshow`'s; this file is the command line and the printing.
 //! See `docs/reference/classic.md`.
 
-use super::fallback;
 use super::nix::{Nix, nix_settings, print_cached, resolve};
-use crate::api::drvshow;
-use crate::api::installable;
+use super::{eval_config, fallback};
+use crate::api::{drvshow, installable};
 use crate::cli::{cwd, render};
 
 const NAME: &str = "nix";
@@ -43,7 +42,7 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
         Err(reason) => fallback(NAME, argv, &reason),
     };
     let pretty = n.pretty.unwrap_or_else(render::pretty);
-    let ec = super::eval_config(&n.c, &cfg);
+    let ec = eval_config(&n.c, &cfg);
     // `-r` and the indentation make another document, so both are in the key
     let run = n.run(ec, "nix derivation show", n.recursive, pretty);
     print_cached(argv, run, move |ev| {

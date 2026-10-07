@@ -9,11 +9,15 @@
 //! The layer is thin: every getter is the load the evaluator itself does.
 //! Only the constructors allocate (docs/reference/library.md).
 
+use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 
 use crate::eval::{Error, EvalResult, Evaluator, Pos};
 use crate::runtime::value::Value as View;
 use crate::runtime::{Ctx, Word};
+
+use super::EvalArgs;
+use crate::api;
 
 const WHERE: &str = "while reading a value through the library API";
 
@@ -78,8 +82,8 @@ fn val<'e>(w: Word) -> Value<'e> {
     Value { w, ev: PhantomData }
 }
 
-impl std::fmt::Debug for Value<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Value<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "Value({})", self.kind().type_of())
     }
 }
@@ -224,8 +228,8 @@ impl<'e> Eval<'e> {
     }
 
     /// Evaluate what `args` names: an expression, a file or a flake output.
-    pub fn evaluate(&mut self, args: super::EvalArgs) -> Result<Value<'e>, Box<Error>> {
-        super::evaluate(self.ev, args).map(val)
+    pub fn evaluate(&mut self, args: EvalArgs) -> Result<Value<'e>, Box<Error>> {
+        api::evaluate(self.ev, args).map(val)
     }
 
     /// To weak head normal form: the value's own type becomes known.

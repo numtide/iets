@@ -5,16 +5,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Argv, Common, common_flag, fallback};
-use crate::api::build::{self as apibuild, Dispatch, Root};
-use crate::api::installable;
+use super::{
+    Argv, Common, common_flag, eval_config, eval_input, fallback, local, settings, store_given,
+};
+use crate::api::build::{Dispatch, Root};
+use crate::api::{build as apibuild, installable};
 use crate::build::render::Style;
-use crate::cli::{Outcome, abs_path, auto_args, cwd};
+use crate::cli::{self, Outcome, Run, abs_path, auto_args, cwd, devenv};
+use crate::error;
 use crate::eval::Evaluator;
-use crate::provenance::Provenance;
+use crate::provenance::{self, Provenance};
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
-use std::io::Write;
+use crate::store::path::StorePath;
+use std::io::{self, Write};
 
 const NAME: &str = "nix-build";
 
@@ -74,14 +78,14 @@ pub fn main(argv: &[String]) -> i32 {
         Ok(b) => b,
         Err(reason) => fallback(NAME, argv, &reason),
     };
-    let (cfg, transport, options) = match super::settings(&b.c) {
+    let (cfg, transport, options) = match settings(&b.c) {
         Ok(t) => t,
         Err(reason) => fallback(NAME, argv, &reason),
     };
-    let ec = super::eval_config(&b.c, &cfg);
+    let ec = eval_config(&b.c, &cfg);
     let b = Arc::new(b);
     let build = Arc::clone(&b);
-    match crate::cli::run_reported(crate::cli::Run::on(ec), move |ev, _| run(ev, &build)) {
+    match cli::run_reported(Run::on(ec), move |ev, _| run(ev, &build)) {
         Outcome::Failed(code) => code,
         Outcome::Unsupported(reason) => fallback(NAME, argv, &reason),
         Outcome::Ok(Built::Empty) => 0,
@@ -91,15 +95,15 @@ pub fn main(argv: &[String]) -> i32 {
     }
 }
 
-fn run(ev: &mut Evaluator, b: &Build) -> crate::error::Result<Built> {
+fn run(ev: &mut Evaluator, b: &Build) -> error::Result<Built> {
     let cwd = cwd();
     let mut roots: Vec<Root> = Vec::new();
     let mut seen = HashSet::new();
     let args = auto_args(ev, &b.c.flags.args, &cwd)?;
     for file in &b.c.files {
-        let root = super::eval_input(ev, &b.c, file, &cwd)?;
+        let root = eval_input(ev, &b.c, file, &cwd)?;
         for attr in &b.c.flags.attrs {
-            let v = crate::api::installable::find_along_attr_path(ev, root, attr, args)?;
+            let v = installable::find_along_attr_path(ev, root, attr, args)?;
             installable::get_drvs_at(ev, v, args, &mut roots, &mut seen, attr)?;
         }
     }
@@ -124,7 +128,7 @@ fn keep_outputs(b: &Build, kept: &[(String, String)]) {
     let mut key: Vec<Vec<u8>> = vec![b"nix-build".to_vec(), cwd()];
     key.extend(b.c.files.iter().map(|f| f.as_bytes().to_vec()));
     key.extend(b.c.flags.attrs.iter().map(|a| a.as_bytes().to_vec()));
-    crate::cli::devenv::keep_outputs(&super::local(), &key, kept);
+    devenv::keep_outputs(&local(), &key, kept);
 }
 
 /// Uploads the closure, builds every root in one call, links and prints.
@@ -146,9 +150,9 @@ fn realise(
     };
     // nix-build asks for every root in one op, one output per root. The bare
     // attribute names each one: the dispatcher adds the position, once.
-    let name = |p: &crate::store::path::StorePath| {
+    let name = |p: &StorePath| {
         prov.attr_of(&p.to_string())
-            .unwrap_or_else(|| crate::provenance::drv_name(&p.to_string()))
+            .unwrap_or_else(|| provenance::drv_name(&p.to_string()))
     };
     let built = match d.realise(roots, &name) {
         Ok(b) => b,
@@ -177,7 +181,7 @@ fn realise(
     for (r, path) in roots.iter().zip(&paths) {
         let drv = r.drv.to_string();
         if b.no_out_link {
-            if !super::store_given(&b.c) {
+            if !store_given(&b.c) {
                 links.push((path.clone(), None));
                 kept.push((format!("{}!{}", counter[&drv], r.output), path.clone()));
             }
@@ -201,7 +205,7 @@ fn realise(
         return e.report();
     }
     keep_outputs(b, &kept);
-    let mut stdout = std::io::stdout();
+    let mut stdout = io::stdout();
     let _ = stdout.write_all(out.as_bytes());
     let _ = stdout.flush();
     0

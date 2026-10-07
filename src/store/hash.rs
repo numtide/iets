@@ -1,5 +1,5 @@
-use std::fmt;
-use std::io::Write;
+use std::io::{self, Write};
+use std::{error, fmt};
 
 use md5::Digest as _;
 
@@ -65,7 +65,7 @@ impl fmt::Display for HashError {
     }
 }
 
-impl std::error::Error for HashError {}
+impl error::Error for HashError {}
 
 const MAX_HASH_SIZE: usize = 64;
 
@@ -306,12 +306,12 @@ impl Hasher {
 }
 
 impl Write for Hasher {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.update(buf);
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }

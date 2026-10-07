@@ -3,7 +3,7 @@
 //! `vector<KeyedBuildResult>` in the replies, and `UnkeyedValidPathInfo` at
 //! protocol 1.16 in a `PathInfo`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 
 use crate::error::{Error, Result};
@@ -22,7 +22,7 @@ pub const BUILD_PROTOCOL: u32 = (1 << 8) | 37;
 pub fn write_basic_derivation(
     w: &mut dyn Write,
     drv: &Derivation,
-    input_srcs: &std::collections::BTreeSet<StorePath>,
+    input_srcs: &BTreeSet<StorePath>,
 ) -> io::Result<()> {
     write_u64(w, drv.outputs.len() as u64)?;
     for (name, out) in &drv.outputs {
@@ -105,7 +105,7 @@ impl BuildResult {
 
     /// `TransientFailure` (6) is what the daemon turns into `UNAVAILABLE` for a
     /// retry; the others are the build's own verdict.
-    pub fn read(r: &mut dyn std::io::Read) -> io::Result<BuildResult> {
+    pub fn read(r: &mut dyn io::Read) -> io::Result<BuildResult> {
         let mut res = BuildResult {
             status: read_u64(r)?,
             error_msg: read_str(r)?,
@@ -138,7 +138,7 @@ impl BuildResult {
     }
 }
 
-fn read_opt_u64(r: &mut dyn std::io::Read) -> io::Result<Option<u64>> {
+fn read_opt_u64(r: &mut dyn io::Read) -> io::Result<Option<u64>> {
     if read_u64(r)? == 1 {
         Ok(Some(read_u64(r)?))
     } else {
@@ -221,7 +221,7 @@ pub fn basic_input_srcs(
     drv_path: &StorePath,
     drv: &Derivation,
     output_of: &dyn Fn(&StorePath, &str) -> Option<StorePath>,
-) -> Result<std::collections::BTreeSet<StorePath>> {
+) -> Result<BTreeSet<StorePath>> {
     let mut srcs = drv.input_srcs.clone();
     for (dep, node) in &drv.input_drvs {
         for o in &node.outputs {

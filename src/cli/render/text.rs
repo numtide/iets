@@ -2,9 +2,13 @@
 //! terminal shows in place of the contract shape.
 
 use crate::api::render::{Closure, Fetched, Missing, Outcomes};
+use crate::log;
 use crate::store::drvdiff::Diff;
+use crate::store::path;
 
-use super::Text;
+use super::{Text, status};
+
+use std::collections::BTreeSet;
 
 /// shared.cc:printMissing at lvlError, as `nix build --dry-run` prints it.
 /// It is a log record, not output: `--json` prints the contract beside it,
@@ -34,10 +38,8 @@ pub fn missing(m: &Missing) {
     ];
     for (paths, one, many) in sections {
         if !paths.is_empty() {
-            crate::log::msg(0, if paths.len() == 1 { &one } else { &many });
-            paths
-                .iter()
-                .for_each(|p| crate::log::msg(0, &format!("  {p}")));
+            log::msg(0, if paths.len() == 1 { &one } else { &many });
+            paths.iter().for_each(|p| log::msg(0, &format!("  {p}")));
         }
     }
 }
@@ -63,7 +65,7 @@ pub fn built(o: &Outcomes) {
     if !failed.is_empty() {
         line = format!("{line}: {}", failed.join(", "));
     }
-    super::status(&line);
+    status(&line);
 }
 
 impl Text for Fetched {
@@ -77,9 +79,7 @@ impl Text for Closure {
         if self.is_empty() {
             return "the two closures hold the same packages\n".into();
         }
-        let join = |v: &std::collections::BTreeSet<String>| {
-            v.iter().cloned().collect::<Vec<_>>().join(", ")
-        };
+        let join = |v: &BTreeSet<String>| v.iter().cloned().collect::<Vec<_>>().join(", ");
         (self.packages.iter())
             .map(|c| match c.change {
                 "added" => format!("added   {} {}\n", c.name, join(&c.b)),
@@ -148,9 +148,7 @@ fn short(a: &str, b: &str) -> bool {
 /// `NAME` of `/nix/store/<hash>-NAME.drv`.
 fn drv_name(path: &str) -> &str {
     let base = path.rsplit('/').next().unwrap_or(path);
-    let name = base
-        .get(crate::store::path::HASH_PART_LEN + 1..)
-        .unwrap_or(base);
+    let name = base.get(path::HASH_PART_LEN + 1..).unwrap_or(base);
     name.strip_suffix(".drv").unwrap_or(name)
 }
 

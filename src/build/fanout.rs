@@ -7,10 +7,12 @@
 //! and a job's log lines stay attributed to it.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Condvar, Mutex};
+use std::thread;
 
 use crate::remote::event::Event;
+use crate::session;
 
 /// What one job needs from the scheduler: which jobs must finish first.
 pub struct Job {
@@ -71,13 +73,13 @@ pub fn run<R: Send>(
     let dependants = &dependants;
     let threads = limit.max(1).min(jobs.len());
 
-    std::thread::scope(|s| {
-        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+    thread::scope(|s| {
+        let (tx, rx) = mpsc::channel::<Event>();
         for _ in 0..threads {
             let tx = tx.clone();
             let run = &run;
             let wake = &wake;
-            s.spawn(crate::session::bind(move || {
+            s.spawn(session::bind(move || {
                 while let Some(i) = next(run, wake) {
                     let blocked = run.lock().unwrap().blocked[i];
                     let res = match blocked {
@@ -138,6 +140,7 @@ mod tests {
     use super::*;
     use crate::remote::event::Log;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     fn jobs(deps: &[&[usize]]) -> Vec<Job> {
         deps.iter()
@@ -157,7 +160,7 @@ mod tests {
                 drv_path: format!("job{i}"),
                 line: b"x".to_vec(),
             }));
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
             live.fetch_sub(1, Ordering::SeqCst);
             true
         };

@@ -11,9 +11,11 @@ mod ledger;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fmt::{self, Debug, Formatter};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::trace::key::Key;
 use crate::trace::{Obs, Trace};
 
 /// A working tree as its SCM reports it.
@@ -80,8 +82,8 @@ impl PartialEq for dyn Scm {
 
 impl Eq for dyn Scm {}
 
-impl std::fmt::Debug for dyn Scm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for dyn Scm {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
@@ -150,7 +152,7 @@ pub fn named(name: &str) -> Option<&'static dyn Scm> {
 }
 
 fn count_key(scm: &dyn Scm, rev: &str) -> String {
-    let mut key = crate::trace::key::Key::new("rev-count");
+    let mut key = Key::new("rev-count");
     key.field("scm", scm.name().as_bytes());
     key.field("rev", rev.as_bytes());
     key.finish()

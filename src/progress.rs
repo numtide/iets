@@ -4,20 +4,23 @@
 //! carry it and nothing is drawn.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::thread::{self, Builder};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::build::event::fmt_duration;
+use crate::build::render;
 use crate::log::{
-    ACT_BUILD, ACT_BUILDS, ACT_COPY_PATH, ACT_COPY_PATHS, ACT_FETCH_TREE, ACT_FILE_TRANSFER,
+    self, ACT_BUILD, ACT_BUILDS, ACT_COPY_PATH, ACT_COPY_PATHS, ACT_FETCH_TREE, ACT_FILE_TRANSFER,
     ACT_QUERY_PATH_INFO, ACT_REALISE, ACT_SUBSTITUTE, LVL_INFO,
 };
+use crate::session::{self, Session};
 
 pub const FIRST: Duration = Duration::from_secs(5);
-pub const HEARTBEAT: Duration = crate::build::render::HEARTBEAT;
+pub const HEARTBEAT: Duration = render::HEARTBEAT;
 const STALL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,7 +74,7 @@ impl Board {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Tasks> {
+    fn lock(&self) -> MutexGuard<'_, Tasks> {
         self.tasks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -99,14 +102,14 @@ impl Board {
             t.ticking = true;
             spawn_ticker();
         }
-        let classic = self.mode() == Mode::Lines && crate::log::classic();
+        let classic = self.mode() == Mode::Lines && log::classic();
         (classic && lvl <= LVL_INFO && !text.is_empty() && !is_build(ty))
             .then(|| format!("{text}..."))
     }
 
     /// logging.hh:resProgress: done, expected, running, failed.
     pub fn result(&self, id: u64, ty: u64, f: &[Value]) {
-        if ty != crate::log::RES_PROGRESS {
+        if ty != log::RES_PROGRESS {
             return;
         }
         let n = |i: usize| f.get(i).and_then(Value::as_u64).unwrap_or(0);
@@ -156,7 +159,7 @@ impl Board {
         match self.mode() {
             Mode::Bar if t.suspended > 0 => Some(Tick::Bar(String::new())),
             Mode::Bar => Some(Tick::Bar(summary(&t.all, now, true).unwrap_or_default())),
-            Mode::Lines if crate::log::classic() => Some(Tick::Quiet),
+            Mode::Lines if log::classic() => Some(Tick::Quiet),
             Mode::Lines => {
                 let due = t.beat.is_none_or(|b| now - b >= HEARTBEAT);
                 let new = t
@@ -191,14 +194,14 @@ enum Tick {
 }
 
 fn spawn_ticker() {
-    let run = crate::session::bind(|| {
+    let run = session::bind(|| {
         loop {
-            let s = crate::session::Session::current();
+            let s = Session::current();
             let pause = match s.log.progress.mode() {
                 Mode::Bar => Duration::from_millis(250),
                 _ => Duration::from_secs(1),
             };
-            std::thread::sleep(pause);
+            thread::sleep(pause);
             match s.log.progress.tick(Instant::now()) {
                 None => {
                     s.log.set_status(String::new());
@@ -210,9 +213,7 @@ fn spawn_ticker() {
             }
         }
     });
-    let _ = std::thread::Builder::new()
-        .name("progress".into())
-        .spawn(run);
+    let _ = Builder::new().name("progress".into()).spawn(run);
 }
 
 /// The build renderer reports these in a log.

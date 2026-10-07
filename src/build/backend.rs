@@ -11,18 +11,21 @@
 //! store's scheduler, with up to `max-builds` in flight, which the gRPC API
 //! tags with its derivation, so the events key correctly.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
-use crate::remote::copy::Copying;
+use crate::log::{self, Activity};
+use crate::remote::copy::{self, Copying};
 use crate::remote::event::Event;
-use crate::remote::plan::{Object, Plan};
-use crate::remote::worker::wire::write_object;
-use crate::remote::worker::{Connection, DEFAULT_SOCKET, Missing, Options, Stats, Transport, wire};
+use crate::remote::grpc::backend::Grpc;
+use crate::remote::plan::{self, Object, Plan};
+use crate::remote::worker::wire::{self, write_object};
+use crate::remote::worker::{Connection, DEFAULT_SOCKET, Missing, Options, Stats, Transport};
+use crate::store::nar;
 use crate::store::path::StorePath;
 
 /// One derivation of a ready set, and the outputs the caller wants.
@@ -39,8 +42,7 @@ impl Job {
         if self.outputs.is_empty() {
             return "*".to_string();
         }
-        let names: std::collections::BTreeSet<&str> =
-            self.outputs.iter().map(String::as_str).collect();
+        let names: BTreeSet<&str> = self.outputs.iter().map(String::as_str).collect();
         names.into_iter().collect::<Vec<_>>().join(",")
     }
 }
@@ -194,7 +196,7 @@ pub fn open(
     on_event: &mut dyn FnMut(Event),
 ) -> Result<Box<dyn Backend>> {
     if let Transport::Grpc(cfg) = transport {
-        return Ok(Box::new(crate::remote::grpc::backend::Grpc::open(cfg)?));
+        return Ok(Box::new(Grpc::open(cfg)?));
     }
     Ok(Box::new(Worker::open(transport, options, on_event)?))
 }
@@ -358,7 +360,7 @@ impl Backend for Worker {
             return Ok(0);
         }
         let t0 = Instant::now();
-        crate::remote::plan::prehash_drvs(objects);
+        plan::prehash_drvs(objects);
         let before = self.conn.bytes_sent();
         let mut copying = Copying::new(objects.len(), "local", &self.transport.uri());
         let mut body = |w: &mut dyn Write| -> io::Result<()> {
@@ -396,7 +398,7 @@ impl Backend for Worker {
             let drv = r.path.split('!').next().unwrap_or(&r.path).to_string();
             let e = out.entry(drv).or_insert_with(Status::ok);
             if !r.success() {
-                let exit = crate::log::build_exit(r.status, &r.msg);
+                let exit = log::build_exit(r.status, &r.msg);
                 *e = Status::failed(format!("status {}: {}", r.status, r.msg), exit);
             }
         }
@@ -430,14 +432,14 @@ impl Backend for Worker {
             "copying path '{store_path}' from '{}'",
             self.transport.uri()
         );
-        let _act = crate::log::Activity::new(
-            crate::log::LVL_INFO,
-            crate::log::ACT_COPY_PATH,
+        let _act = Activity::new(
+            log::LVL_INFO,
+            log::ACT_COPY_PATH,
             &what,
             vec![store_path.into()],
         );
         self.conn.nar_from_path(store_path, &mut |_| {}, &mut |r| {
-            crate::store::nar::restore_path(r, &dest)
+            nar::restore_path(r, &dest)
         })?;
         self.t.fetch += t0.elapsed();
         self.t.fetched += 1;
@@ -460,7 +462,7 @@ impl Backend for Worker {
         let paths = link_targets(links)?;
         let mut conn = Connection::open(&local(), &mut |_| {})?;
         let from = self.transport.uri();
-        crate::remote::copy::closure(&mut self.conn, &from, &mut conn, &paths, &mut |_| {})?;
+        copy::closure(&mut self.conn, &from, &mut conn, &paths, &mut |_| {})?;
         add_roots(&mut conn, links)
     }
 

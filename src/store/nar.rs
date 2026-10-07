@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use super::hash::{Hash, HashAlgo, Hasher};
@@ -715,7 +715,7 @@ impl Restorer<'_> {
             TAG_SYM => {
                 self.r.consume(&TOK_SYM, "'symlink' 'target'")?;
                 take(&mut self.r, MAX_TARGET, &mut self.name)?;
-                std::os::unix::fs::symlink(OsStr::from_bytes(&self.name), self.cur())?;
+                symlink(OsStr::from_bytes(&self.name), self.cur())?;
             }
             // The `)` that ends a directory's entry list is the node's own, so
             // `directory` consumes it and this one must not look for a second.
@@ -858,7 +858,7 @@ pub fn nar_hash_of_string(contents: &[u8]) -> Hash {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::env;
     use std::path::PathBuf;
 
     /// Builds the fixture tree used by the shell commands in the test comments:
@@ -866,7 +866,7 @@ pub(crate) mod tests {
     /// printf '#!/bin/sh\necho hi\n' > tree/run.sh; chmod +x tree/run.sh;
     /// ln -s a.txt tree/link; : > tree/sub/empty; printf zzz > tree/sub/z
     pub(crate) fn fixture_tree(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("iets-nar-{}-{tag}", std::process::id()));
+        let dir = env::temp_dir().join(format!("iets-nar-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let tree = dir.join("tree");
         fs::create_dir_all(tree.join("sub")).unwrap();
@@ -967,7 +967,7 @@ pub(crate) mod tests {
 
     #[test]
     fn restore_rejects_garbage() {
-        let out = std::env::temp_dir().join(format!("iets-nar-garbage-{}", std::process::id()));
+        let out = env::temp_dir().join(format!("iets-nar-garbage-{}", std::process::id()));
         assert!(restore_path(&mut &b"nix-archive-2"[..], &out).is_err());
     }
 

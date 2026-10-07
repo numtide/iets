@@ -5,17 +5,20 @@
 //! crate implements 1.1 and has no switch for the older spec. [`reject_1_1`]
 //! and the seconds check in [`convert`] take the 1.1-only syntax back out.
 
+use std::str::from_utf8;
 use std::sync::atomic::Ordering;
 
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::runtime::Word;
+use crate::session::Session;
+use crate::syntax::lexer;
 use crate::syntax::symbol::Sym;
 use ::toml::Value as T;
 use std::fmt::Write as _;
 
 /// The `parse-toml-timestamps` experimental feature.
 pub fn set_parse_toml_timestamps(on: bool) {
-    crate::session::Session::current()
+    Session::current()
         .toml_timestamps
         .store(on, Ordering::Relaxed);
 }
@@ -26,7 +29,7 @@ pub fn from_toml(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         pos,
         "while evaluating the argument passed to builtins.fromTOML",
     )?;
-    let text = match std::str::from_utf8(s) {
+    let text = match from_utf8(s) {
         Ok(t) => t,
         Err(e) => bail!(ErrorKind::Eval, pos, "while parsing TOML: {}", e),
     };
@@ -218,7 +221,7 @@ fn convert(ev: &mut Evaluator, v: ::toml::Value, pos: Pos) -> EvalResult<Word> {
 }
 
 fn no_nul(s: &[u8], pos: Pos) -> EvalResult<()> {
-    if let Err(msg) = crate::syntax::lexer::no_nul(s) {
+    if let Err(msg) = lexer::no_nul(s) {
         // prim_fromTOML wraps the thrown Error's what(), prefix included
         bail!(ErrorKind::Eval, pos, "while parsing TOML: error: {}", msg);
     }

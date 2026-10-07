@@ -14,7 +14,8 @@
 //! Neither shape knows the transport: both speak `build::backend::Backend`,
 //! so the same upload runs over the worker protocol and over `grpc://`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::slice;
 use std::time::{Duration, Instant};
 
 use crate::builtins::derivation::DrvInfo;
@@ -22,7 +23,8 @@ use crate::error::{Error, Result};
 use crate::eval::Known;
 use crate::parallel::shared::SharedMap;
 use crate::remote::event::Event;
-use crate::remote::plan::{Locator, Node, Object, Plan};
+use crate::remote::plan::{self, Locator, Node, Object, Plan};
+use crate::store::locate;
 use crate::store::path::StorePath;
 use crate::store::source::SourceOrigin;
 
@@ -182,10 +184,9 @@ impl StreamUpload {
         roots: &[StorePath],
         known: &HashSet<StorePath>,
     ) -> Result<(Vec<Node>, Vec<StorePath>)> {
-        let (drvs, srcs, _) =
-            crate::remote::plan::walk(roots, known, &|p| self.drvs.get(p), &|p| {
-                self.sources.origin(p)?.text_refs().cloned()
-            })?;
+        let (drvs, srcs, _) = plan::walk(roots, known, &|p| self.drvs.get(p), &|p| {
+            self.sources.origin(p)?.text_refs().cloned()
+        })?;
         Ok((drvs, srcs))
     }
 
@@ -195,10 +196,7 @@ impl StreamUpload {
         if let Some(origin) = self.sources.origin(p) {
             return Ok(Some(origin));
         }
-        let found = crate::store::locate::locate_in_store(
-            std::slice::from_ref(p),
-            &std::collections::HashMap::new(),
-        )?;
+        let found = locate::locate_in_store(slice::from_ref(p), &HashMap::new())?;
         Ok(found.into_iter().next().flatten())
     }
 }
@@ -276,7 +274,7 @@ impl Uploader for StreamUpload {
             return roots
                 .iter()
                 .map(|p| {
-                    crate::remote::plan::load_drv(p, &|p| self.drvs.get(p)).map(|(aterm, ..)| Drv {
+                    plan::load_drv(p, &|p| self.drvs.get(p)).map(|(aterm, ..)| Drv {
                         path: p.clone(),
                         aterm,
                     })

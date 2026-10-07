@@ -10,18 +10,20 @@ pub mod watch;
 pub mod wire;
 
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::fs;
-use std::io;
+use std::collections::{HashMap, HashSet};
+use std::env::var_os;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::{fs, io, mem};
 
-use crate::store::hash::HashAlgo;
-use crate::store::nar::FileType as F;
+use crate::cachefs;
+use crate::store::hash::{Hash, HashAlgo};
+use crate::store::nar::{self, FileType};
 use sha2::{Digest, Sha256};
 
 pub type Digest32 = [u8; 32];
@@ -263,11 +265,11 @@ impl Query {
 /// Runs `argv` in `dir` and returns its exit status and stdout; stderr is
 /// inherited.
 fn run_cmd(dir: &Path, argv: &[Vec<u8>]) -> io::Result<(i32, Vec<u8>)> {
-    let out = std::process::Command::new(std::ffi::OsStr::from_bytes(&argv[0]))
-        .args(argv[1..].iter().map(|a| std::ffi::OsStr::from_bytes(a)))
+    let out = Command::new(OsStr::from_bytes(&argv[0]))
+        .args(argv[1..].iter().map(|a| OsStr::from_bytes(a)))
         .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
         .output()?;
     Ok((out.status.code().unwrap_or(-1), out.stdout))
 }
@@ -351,12 +353,11 @@ impl Trace {
         let Some(i) = &self.0 else {
             return Vec::new();
         };
-        let all = std::mem::take(&mut *i.obs.lock().unwrap());
+        let all = mem::take(&mut *i.obs.lock().unwrap());
         // one pass to find the subjects that repeat, and a second that encodes
         // only those: comparing each repeat with every earlier observation was
         // quadratic, and 80,000 of one subject took 12 s
-        let mut counts: std::collections::HashMap<(u8, Cow<'_, [u8]>, u8), u32> =
-            std::collections::HashMap::with_capacity(all.len());
+        let mut counts: HashMap<(u8, Cow<'_, [u8]>, u8), u32> = HashMap::with_capacity(all.len());
         for o in &all {
             *counts.entry(o.dedupe_key()).or_default() += 1;
         }
@@ -390,7 +391,7 @@ impl Trace {
 
     /// Stats `path` and records what it saw; returns the kind.
     pub fn stat_now(&self, path: &[u8], follow: bool) -> Kind {
-        let kind = stat_kind(Path::new(std::ffi::OsStr::from_bytes(path)), follow);
+        let kind = stat_kind(Path::new(OsStr::from_bytes(path)), follow);
         self.stat(path, follow, kind);
         kind
     }
@@ -526,8 +527,8 @@ pub fn sha256(bytes: &[u8]) -> Digest32 {
 /// (`cachefs::env_key`), so the entry says whether the value changed and
 /// nothing else about it.
 pub fn env_hash(name: &[u8]) -> Option<Digest32> {
-    let v = std::env::var_os(std::ffi::OsStr::from_bytes(name))?;
-    let mut h = blake3::Hasher::new_keyed(crate::cachefs::env_key());
+    let v = var_os(OsStr::from_bytes(name))?;
+    let mut h = blake3::Hasher::new_keyed(cachefs::env_key());
     h.update(&(name.len() as u64).to_le_bytes());
     h.update(name);
     h.update(v.as_bytes());
@@ -674,7 +675,7 @@ impl TreeFp {
 
     /// One directory entry the dump offered to the filter, and what the filter
     /// answered. Rejected entries reach `seen_hash` only, as in `walk_fp`.
-    pub fn entry(&mut self, p: &Path, t: crate::store::nar::FileType, accepted: bool) {
+    pub fn entry(&mut self, p: &Path, t: FileType, accepted: bool) {
         let rel = &p.as_os_str().as_bytes()[self.root_len..];
         self.seen_h.update((rel.len() as u64).to_le_bytes());
         self.seen_h.update(rel);
@@ -762,7 +763,7 @@ fn walk_fp(
             let mut entries = read_dir_kinds(path)?;
             entries.sort();
             for (name, ekind) in entries {
-                let child = path.join(std::ffi::OsStr::from_bytes(&name));
+                let child = path.join(OsStr::from_bytes(&name));
                 let mut crel = rel.to_vec();
                 crel.push(b'/');
                 crel.extend_from_slice(&name);
@@ -787,12 +788,12 @@ pub fn tree_rehash(
     accepted: Option<&HashSet<PathBuf>>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
     let mut fp = TreeFp::new(root).ok_or_else(|| io::Error::other("tree is gone"))?;
-    let mut filter = |p: &Path, t: crate::store::nar::FileType| -> bool {
+    let mut filter = |p: &Path, t: FileType| -> bool {
         let keep = accepts(accepted, p);
         fp.entry(p, t, keep);
         keep
     };
-    let (h, _) = crate::store::nar::nar_hash_filtered(root, HashAlgo::Sha256, &mut filter)?;
+    let (h, _) = nar::nar_hash_filtered(root, HashAlgo::Sha256, &mut filter)?;
     let newest = fp.newest;
     let (stat_hash, seen_hash) = fp
         .finish()
@@ -800,16 +801,16 @@ pub fn tree_rehash(
     Ok((hash_to_digest(&h), seen_hash, stat_hash, newest))
 }
 
-fn nar_kind(t: crate::store::nar::FileType) -> Kind {
+fn nar_kind(t: FileType) -> Kind {
     match t {
-        F::Regular => Kind::Regular,
-        F::Directory => Kind::Directory,
-        F::Symlink => Kind::Symlink,
-        F::Unknown => Kind::Other,
+        FileType::Regular => Kind::Regular,
+        FileType::Directory => Kind::Directory,
+        FileType::Symlink => Kind::Symlink,
+        FileType::Unknown => Kind::Other,
     }
 }
 
-pub fn hash_to_digest(h: &crate::store::hash::Hash) -> Digest32 {
+pub fn hash_to_digest(h: &Hash) -> Digest32 {
     let mut d = [0u8; 32];
     d.copy_from_slice(h.bytes());
     d
@@ -818,6 +819,10 @@ pub fn hash_to_digest(h: &crate::store::hash::Hash) -> Digest32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Instant;
+
+    use crate::store::nar::tests::fixture_tree;
 
     #[test]
     fn dedupe_keeps_conflicting_values() {
@@ -855,7 +860,7 @@ mod tests {
                 },
             });
         }
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let v = t.take();
         assert_eq!(v.len(), 2, "one per distinct value");
         assert!(t0.elapsed().as_secs() < 2, "{:?}", t0.elapsed());
@@ -884,7 +889,7 @@ mod tests {
     /// every cache entry a dump writes would miss on validation.
     #[test]
     fn dump_fingerprint_matches_the_separate_walk() {
-        let dir = crate::store::nar::tests::fixture_tree("trace-fused");
+        let dir = fixture_tree("trace-fused");
         for accepted in [
             None,
             Some(
@@ -894,17 +899,12 @@ mod tests {
             ),
         ] {
             let mut fp = TreeFp::new(&dir).unwrap();
-            let mut filter = |p: &Path, t: crate::store::nar::FileType| {
+            let mut filter = |p: &Path, t: FileType| {
                 let keep = accepts(accepted.as_ref(), p);
                 fp.entry(p, t, keep);
                 keep
             };
-            crate::store::nar::nar_hash_filtered(
-                &dir,
-                crate::store::hash::HashAlgo::Sha256,
-                &mut filter,
-            )
-            .unwrap();
+            nar::nar_hash_filtered(&dir, HashAlgo::Sha256, &mut filter).unwrap();
             assert_eq!(
                 fp.finish().unwrap(),
                 tree_fingerprint(&dir, accepted.as_ref()).unwrap()
@@ -914,16 +914,16 @@ mod tests {
 
     #[test]
     fn fingerprint_changes_with_content_size_and_seen_entries() {
-        let dir = crate::store::nar::tests::fixture_tree("trace-fp");
+        let dir = fixture_tree("trace-fp");
         let (a, sa) = tree_fingerprint(&dir, None).unwrap();
         let (b, sb) = tree_fingerprint(&dir, None).unwrap();
         assert_eq!((a, sa), (b, sb));
-        std::fs::write(dir.join("new-file"), b"x").unwrap();
+        fs::write(dir.join("new-file"), b"x").unwrap();
         let (c, sc) = tree_fingerprint(&dir, None).unwrap();
         assert_ne!(a, c);
         assert_ne!(sa, sc);
         let (nar, seen, stat, newest) = tree_rehash(&dir, None).unwrap();
-        let written = std::fs::symlink_metadata(dir.join("new-file")).unwrap();
+        let written = fs::symlink_metadata(dir.join("new-file")).unwrap();
         assert_eq!(newest, written.mtime());
         assert_eq!(stat, c);
         assert_eq!(seen, sc);

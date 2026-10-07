@@ -1,9 +1,11 @@
 //! `builtins.toXML`, byte-exact with `value-to-xml.cc` and `xml-writer.cc`.
 
 use std::collections::HashSet;
+use std::iter;
 
 use crate::compile::ir::ParamIr;
 use crate::eval::{EvalResult, Evaluator, Pos};
+use crate::print;
 use crate::runtime::{AttrsObj, Ctx, Value, Word, ctx_to_arena};
 
 pub fn to_xml(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -18,7 +20,7 @@ pub fn to_xml(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 }
 
 fn indent(out: &mut Vec<u8>, depth: usize) {
-    out.extend(std::iter::repeat_n(b' ', depth * 2));
+    out.extend(iter::repeat_n(b' ', depth * 2));
 }
 
 fn attr_value(out: &mut Vec<u8>, s: &[u8]) {
@@ -75,7 +77,7 @@ fn show_attrs(
     ctx: &mut Vec<Ctx>,
     drvs_seen: &mut HashSet<&'static [u8]>,
 ) -> EvalResult<()> {
-    for attr in crate::print::lexicographic_order(ev, a) {
+    for attr in print::lexicographic_order(ev, a) {
         let name = ev.interner.name(attr.sym);
         open_element(out, depth, "attr", &[("name", name)]);
         print_xml(
@@ -135,7 +137,7 @@ fn print_xml_inner(
             out,
             depth,
             "float",
-            &[("value", crate::print::format_g(f).as_bytes())],
+            &[("value", print::format_g(f).as_bytes())],
         ),
         Value::Attrs(a) => {
             if ev.is_derivation(w)? {

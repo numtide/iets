@@ -30,9 +30,7 @@ pub fn show(ev: &Evaluator, roots: &[StorePath], recursive: bool) -> Result<Valu
     };
     let mut drvs = Map::new();
     for (path, aterm) in nodes {
-        let text = std::str::from_utf8(&aterm)
-            .map_err(|_| Error::Store(format!("derivation '{path}' is not utf-8")))?;
-        let drv = Derivation::parse(text, Derivation::name_from_path(&path)?)?;
+        let drv = Derivation::parse(&aterm, Derivation::name_from_path(&path)?)?;
         drvs.insert(path.base_name().to_string(), derivation(&drv)?);
     }
     let mut out = Map::new();
@@ -150,7 +148,7 @@ fn derivation(drv: &Derivation) -> Result<Value> {
         "env".into(),
         Value::Object(
             (drv.env.iter())
-                .map(|(k, v)| (k.clone(), Value::from(v.as_str())))
+                .map(|(k, v)| (k.clone(), Value::from(String::from_utf8_lossy(v))))
                 .collect(),
         ),
     );
@@ -237,8 +235,12 @@ fn render(m: IngestionMethod) -> &'static str {
     }
 }
 
-fn strings(v: &[String]) -> Value {
-    Value::Array(v.iter().map(|s| Value::from(s.as_str())).collect())
+fn strings(v: &[Vec<u8>]) -> Value {
+    Value::Array(
+        v.iter()
+            .map(|s| Value::from(String::from_utf8_lossy(s)))
+            .collect(),
+    )
 }
 
 fn paths(v: &BTreeSet<StorePath>) -> Value {
@@ -252,7 +254,7 @@ mod tests {
     use super::*;
 
     fn json_of(aterm: &str, name: &str) -> String {
-        let drv = Derivation::parse(aterm, name).unwrap();
+        let drv = Derivation::parse(aterm.as_bytes(), name).unwrap();
         derivation(&drv).unwrap().to_string()
     }
 

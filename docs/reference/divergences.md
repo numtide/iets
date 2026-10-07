@@ -53,6 +53,20 @@ number above 9223372036854775807, which Nix keeps as an unsigned value and
 writes back unchanged. Only a hand-written `__json` can hold one:
 `builtins.toJSON` cannot produce it.
 
+## Bytes that are not UTF-8 in a derivation
+
+A Nix string is bytes. An env value and an argument keep them, and the
+`.drv` path is the one Nix gives. Two places still differ:
+
+- `builder` and `system` must be UTF-8. Nix takes any bytes there; iets
+  stops with `string is not valid UTF-8`.
+- `nix derivation show` writes each such byte as U+FFFD. Nix fails with
+  `[json.exception.type_error.316]`.
+
+Observe it with `builtins.substring 0 1 "é"`, which is one byte that is not
+UTF-8: as `builder = "/bin/sh" + …` the evaluation fails, as `v = …` it
+gives `/nix/store/vhkdfhp7f0qfk8j0kx9b54hpn6cyg8m1-x.drv` like Nix.
+
 ## `builtins.genericClosure`
 
 The key set is a sorted vector with binary search instead of a

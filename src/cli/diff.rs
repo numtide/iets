@@ -34,9 +34,7 @@ pub fn cmd_diff(argv: &[String]) -> i32 {
     // a derivation this run evaluated, else the one in /nix/store
     let mut load = |p: &StorePath| -> std::result::Result<Derivation, DrvError> {
         match aterms.get(p) {
-            Some(t) => {
-                Derivation::parse(&String::from_utf8_lossy(t), Derivation::name_from_path(p)?)
-            }
+            Some(t) => Derivation::parse(t, Derivation::name_from_path(p)?),
             None => load_derivation_from_store(p),
         }
     };

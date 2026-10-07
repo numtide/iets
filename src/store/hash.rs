@@ -401,12 +401,21 @@ pub fn nix32_decode(s: &str) -> Result<Vec<u8>, HashError> {
     Ok(res)
 }
 
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// Mirrors base-n.cc:base16::encode, appended to a buffer the caller keeps.
 pub fn base16_encode_into(s: &mut String, bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     for b in bytes {
         s.push(HEX[(b >> 4) as usize] as char);
         s.push(HEX[(b & 0xf) as usize] as char);
+    }
+}
+
+/// `base16_encode_into` for a byte buffer.
+pub fn base16_encode_into_bytes(s: &mut Vec<u8>, bytes: &[u8]) {
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize]);
+        s.push(HEX[(b & 0xf) as usize]);
     }
 }
 

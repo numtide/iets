@@ -260,3 +260,29 @@ fn from_json_and_toml_reject_null_bytes() {
         format!("while parsing TOML: error: {}", msg("k␀"))
     );
 }
+
+/// The `.drvPath` answers of `nix-instantiate --eval --strict` (Nix 2.34.8). A
+/// Nix string is bytes, and the `.drv` path hashes them as they are.
+#[test]
+fn derivation_keeps_env_and_args_that_are_not_utf8() {
+    let byte = r#"(builtins.substring 0 1 "é")"#;
+    for (attrs, want) in [
+        (
+            format!("v = {byte};"),
+            "vhkdfhp7f0qfk8j0kx9b54hpn6cyg8m1-x.drv",
+        ),
+        (
+            format!("args = [ {byte} ];"),
+            "qsjvddzs1qqxaf6lm7w8pf66lhmkzb5l-x.drv",
+        ),
+        (
+            format!(r#"v = {byte}; __structuredAttrs = false; passAsFile = [ "v" ];"#),
+            "qxxd6h5v28msmzrnzf9mc1jxfk2d645i-x.drv",
+        ),
+    ] {
+        let src = format!(
+            r#"(derivation {{ name = "x"; builder = "/bin/sh"; system = "x86_64-linux"; {attrs} }}).drvPath"#
+        );
+        assert_eq!(eval_str(&src), format!(r#""/nix/store/{want}""#), "{attrs}");
+    }
+}

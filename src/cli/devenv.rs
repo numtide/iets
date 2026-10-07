@@ -578,10 +578,7 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
 
     let r = (|| -> crate::error::Result<DevEnv> {
         let shell = match ev.drv.drvs.get(&shell_path).and_then(|i| i.aterm) {
-            Some(aterm) => Derivation::parse(
-                std::str::from_utf8(&aterm).map_err(|e| CrateError::Store(e.to_string()))?,
-                Derivation::name_from_path(&shell_path)?,
-            ),
+            Some(aterm) => Derivation::parse(&aterm, Derivation::name_from_path(&shell_path)?),
             None => load_drv_traced(ev.trace(), &shell_path),
         }?;
         let trace = ev.trace().clone();
@@ -597,7 +594,7 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
             DrvInfo {
                 outputs: env_drv.outputs.keys().cloned().collect(),
                 references,
-                aterm: Some(Arc::new(text.into_bytes())),
+                aterm: Some(Arc::new(text)),
                 pos: None,
                 attr: None,
             },

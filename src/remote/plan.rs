@@ -263,12 +263,12 @@ pub fn load_drv(
         return Ok((aterm, info.references, false));
     }
     let full = format!("{STORE_DIR}/{}", p.base_name());
-    let text = std::fs::read_to_string(&full)
+    let text = std::fs::read(&full)
         .map_err(|e| Error::io(format!("cannot read derivation '{full}'"), e))?;
     let drv = Derivation::parse(&text, Derivation::name_from_path(p)?)?;
     let mut references = drv.input_srcs;
     references.extend(drv.input_drvs.into_keys());
-    Ok((Arc::new(text.into_bytes()), references, true))
+    Ok((Arc::new(text), references, true))
 }
 
 /// The drvs `roots` need, each after every drv it references, and the

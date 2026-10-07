@@ -84,10 +84,11 @@ fn walk(
     // the env entry named after an output holds that output's path, which
     // differs whenever anything else does (nix-diff leaves it out too), and
     // `env name` is the derivation's own name, which the `name` item said
-    let echoes_name =
-        |d: &super::drv::Derivation| (d.env.iter()).any(|(k, v)| k == "name" && *v == d.name);
+    let echoes_name = |d: &super::drv::Derivation| {
+        (d.env.iter()).any(|(k, v)| k == "name" && *v == d.name.as_bytes())
+    };
     let hide_name = echoes_name(&a) && echoes_name(&b);
-    let keep = |(k, _): &&(String, String)| {
+    let keep = |(k, _): &&(String, Vec<u8>)| {
         (!a.outputs.contains_key(k) || !b.outputs.contains_key(k)) && !(hide_name && k == "name")
     };
     let (ea, eb): (BTreeMap<_, _>, BTreeMap<_, _>) = (
@@ -95,7 +96,9 @@ fn walk(
         b.env.iter().filter(keep).map(|(k, x)| (k, x)).collect(),
     );
     for k in union(ea.keys().copied(), eb.keys().copied()) {
-        let side = |e: &BTreeMap<&String, &String>| e.get(k).map(|x| (*x).clone());
+        let side = |e: &BTreeMap<&String, &Vec<u8>>| {
+            e.get(k).map(|x| String::from_utf8_lossy(x).into_owned())
+        };
         entry(v, "env", k, side(&ea), side(&eb));
     }
     let srcs = &a.input_srcs;
@@ -163,8 +166,10 @@ fn entry(v: &mut Vec<Item>, what: &'static str, key: &str, a: Option<String>, b:
 
 /// The builder's args, one quoted arg per line, so a long command line
 /// diffs line by line.
-fn args(v: &[String]) -> String {
-    v.iter().map(|s| format!("{s:?}\n")).collect()
+fn args(v: &[Vec<u8>]) -> String {
+    v.iter()
+        .map(|s| format!("{:?}\n", String::from_utf8_lossy(s)))
+        .collect()
 }
 
 /// A fixed or content-addressed output, as text; `None` for an
@@ -251,12 +256,12 @@ mod tests {
             name: name.to_string(),
             platform: "x86_64-linux".into(),
             builder: "/bin/sh".into(),
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(|s| s.as_bytes().to_vec()).collect(),
             ..Derivation::default()
         };
         d.outputs.insert("out".into(), DerivationOutput::Deferred);
         for (k, v) in env {
-            d.env_set(k, v.to_string());
+            d.env_set(k, v.as_bytes().to_vec());
         }
         d
     }

@@ -79,7 +79,7 @@ pub fn plan_with(
 
 /// One derivation read back from its ATerm text, as the table [`plan_with`]
 /// takes: a `.drv` file, or an entry of a `--dump-drvs` directory.
-pub fn drv_info(path: &StorePath, text: String) -> Result<DrvInfo> {
+pub fn drv_info(path: &StorePath, text: Vec<u8>) -> Result<DrvInfo> {
     use crate::store::drv::Derivation;
     let drv = Derivation::parse(&text, Derivation::name_from_path(path)?)?;
     let mut references = drv.input_srcs;
@@ -87,7 +87,7 @@ pub fn drv_info(path: &StorePath, text: String) -> Result<DrvInfo> {
     Ok(DrvInfo {
         outputs: drv.outputs.into_keys().collect(),
         references,
-        aterm: Some(std::sync::Arc::new(text.into_bytes())),
+        aterm: Some(std::sync::Arc::new(text)),
         pos: None,
         attr: None,
     })
@@ -109,8 +109,8 @@ pub fn drvs_in_dir(dir: &std::path::Path) -> Result<HashMap<StorePath, DrvInfo>>
         if !path.is_derivation() {
             continue;
         }
-        let text = std::fs::read_to_string(entry.path())
-            .map_err(|e| Error::io(format!("reading '{base}'"), e))?;
+        let text =
+            std::fs::read(entry.path()).map_err(|e| Error::io(format!("reading '{base}'"), e))?;
         let info = drv_info(&path, text)?;
         out.insert(path, info);
     }

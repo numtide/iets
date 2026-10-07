@@ -536,19 +536,17 @@ fn event_sink<'a>(
 fn has_output_hash(d: &backend::Drv, specified: &str) -> bool {
     use crate::store::drv::{Derivation, DerivationOutput};
     use crate::store::hash::{Hash, HashFormat};
-    let (Ok(want), Ok(text)) = (
-        Hash::parse_any(specified, None),
-        std::str::from_utf8(&d.aterm),
-    ) else {
+    let Ok(want) = Hash::parse_any(specified, None) else {
         return false;
     };
-    if !text.contains(&want.to_string_with(HashFormat::Base16, false)) {
+    let hex = want.to_string_with(HashFormat::Base16, false);
+    if !d.aterm.windows(hex.len()).any(|w| w == hex.as_bytes()) {
         return false;
     }
     let Ok(name) = Derivation::name_from_path(&d.path) else {
         return false;
     };
-    let Ok(drv) = Derivation::parse(text, name) else {
+    let Ok(drv) = Derivation::parse(&d.aterm, name) else {
         return false;
     };
     (drv.outputs.values())

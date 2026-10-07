@@ -58,10 +58,7 @@ fn rewrite(
         .cloned()
         .ok_or_else(|| bad("not evaluated"))?;
     let aterm = info.aterm.clone().ok_or_else(|| bad("it has no ATerm"))?;
-    let mut drv = Derivation::parse(
-        &String::from_utf8_lossy(&aterm),
-        Derivation::name_from_path(root)?,
-    )?;
+    let mut drv = Derivation::parse(&aterm, Derivation::name_from_path(root)?)?;
     // a fixed-output derivation has exactly one output (derivationStrict)
     let Some((name, DerivationOutput::Fixed { method, hash })) = drv.outputs.iter().next() else {
         return Err(bad("not a fixed-output derivation: it has no 'hash'"));
@@ -72,11 +69,14 @@ fn rewrite(
         .insert(name.clone(), DerivationOutput::Fixed { method, hash });
     // only the output path moves: the `outputHash` the builder may read stays
     // what it was, and the daemon checks the output against `outputs`
-    drv.env_set(&name, drv.fixed_output_path(&name)?.to_full_string());
+    drv.env_set(
+        &name,
+        drv.fixed_output_path(&name)?.to_full_string().into_bytes(),
+    );
     let aterm = drv.unparse()?;
     let new_root = drv.drv_path_for(&aterm)?;
     let info = DrvInfo {
-        aterm: Some(Arc::new(aterm.into_bytes())),
+        aterm: Some(Arc::new(aterm)),
         ..info
     };
     drvs.insert(new_root.clone(), info);
@@ -145,7 +145,7 @@ mod tests {
             ..Derivation::default()
         };
         if let Ok(p) = drv.fixed_output_path("out") {
-            drv.env_set("out", p.to_full_string());
+            drv.env_set("out", p.to_full_string().into_bytes());
         }
         drv.env_set("outputHash", REAL.into());
         let aterm = drv.unparse().unwrap();
@@ -153,7 +153,7 @@ mod tests {
         let info = DrvInfo {
             outputs: BTreeSet::from(["out".to_string()]),
             references: BTreeSet::new(),
-            aterm: Some(Arc::new(aterm.into_bytes())),
+            aterm: Some(Arc::new(aterm)),
             pos: None,
             attr: None,
         };
@@ -174,15 +174,15 @@ mod tests {
         assert_eq!(name, "msg");
         assert_ne!(new_root, root);
         let aterm = drvs[&new_root].aterm.clone().unwrap();
-        let drv = Derivation::parse(&String::from_utf8_lossy(&aterm), "msg").unwrap();
+        let drv = Derivation::parse(&aterm, "msg").unwrap();
         assert_eq!(drv.drv_path().unwrap(), new_root);
-        assert_eq!(drv.env_get("outputHash"), Some(REAL));
+        assert_eq!(drv.env_str("outputHash"), Some(REAL));
         let out = drv.fixed_output_path("out").unwrap().to_full_string();
-        assert_eq!(drv.env_get("out"), Some(out.as_str()));
+        assert_eq!(drv.env_str("out"), Some(out.as_str()));
         // the derivation the evaluation made is still there, untouched
         let old = drvs[&root].aterm.clone().unwrap();
-        let old = Derivation::parse(&String::from_utf8_lossy(&old), "msg").unwrap();
-        assert_eq!(old.env_get("outputHash"), Some(REAL));
+        let old = Derivation::parse(&old, "msg").unwrap();
+        assert_eq!(old.env_str("outputHash"), Some(REAL));
         let DerivationOutput::Fixed { hash, .. } = drv.outputs["out"] else {
             panic!("fixed")
         };

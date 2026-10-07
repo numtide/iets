@@ -320,7 +320,7 @@ pub fn rewrite(
             for name in &names {
                 if matches!(drv.outputs[name], DerivationOutput::InputAddressed(_)) {
                     drv.outputs.insert(name.clone(), DerivationOutput::Deferred);
-                    drv.env_set(name, String::new());
+                    drv.env_set(name, Vec::new());
                 }
             }
             let mut loader = |p: &StorePath| load_derivation_from_store(p);
@@ -332,7 +332,7 @@ pub fn rewrite(
                 if valid.is_empty() {
                     let mut references = drv.input_srcs.clone();
                     references.extend(drv.input_drvs.keys().cloned());
-                    let aterm = std::sync::Arc::new(text.into_bytes());
+                    let aterm = std::sync::Arc::new(text);
                     let object = Object::drv(new_path.clone(), aterm, references);
                     let mut body = |w: &mut dyn Write| -> std::io::Result<()> {
                         crate::remote::worker::wire::write_u64(w, 1)?;
@@ -348,7 +348,7 @@ pub fn rewrite(
                 }
                 job.drv_path = new_path.clone();
                 for name in &names {
-                    let p = drv.env_get(name).and_then(|s| StorePath::parse(s).ok());
+                    let p = drv.env_str(name).and_then(|s| StorePath::parse(s).ok());
                     job.outputs.insert(name.clone(), p);
                 }
                 if let Some(e) = jobs.get_mut(&agg.name) {

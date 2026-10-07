@@ -71,7 +71,7 @@ pub fn env_derivation(
     }
     let mut drv = shell.clone();
     let get_env = get_env_sh_path();
-    drv.args = vec![get_env.to_string()];
+    drv.args = vec![get_env.to_string().into_bytes()];
     if let Some(sa) = &drv.structured_attrs {
         drv.structured_attrs = Some(erase_output_checks(sa)?);
     } else {
@@ -86,7 +86,7 @@ pub fn env_derivation(
     }
     drv.name.push_str("-env");
     let name = drv.name.clone();
-    drv.env_set("name", name);
+    drv.env_set("name", name.into_bytes());
     drv.input_srcs.insert(get_env);
     let reset: Vec<String> = drv
         .outputs
@@ -101,7 +101,7 @@ pub fn env_derivation(
         .collect();
     for n in reset {
         drv.outputs.insert(n.clone(), DerivationOutput::Deferred);
-        drv.env_set(&n, String::new());
+        drv.env_set(&n, Vec::new());
     }
     finalize_input_addressed_outputs(&mut drv, cache, loader)?;
     Ok(drv)
@@ -536,12 +536,12 @@ mod tests {
     fn env_derivation_matches_nix() {
         let shell_path = "1rpf3nddnjznxv3q2bf64vpn8zdz1ciw-nix-shell.drv";
         let env_path = "vlcxckkq3qad5dp748a5xypnkwq76azw-nix-shell-env.drv";
-        let shell = Derivation::parse(&fixture(shell_path), "nix-shell").unwrap();
+        let shell = Derivation::parse(fixture(shell_path).as_bytes(), "nix-shell").unwrap();
         let mut cache = DrvHashCache::new();
         let mut loader = load_derivation_from_store;
         let env = env_derivation(&shell, &mut cache, &mut loader).unwrap();
         assert_eq!(env.name, "nix-shell-env");
-        assert_eq!(env.unparse().unwrap(), fixture(env_path));
+        assert_eq!(env.unparse().unwrap(), fixture(env_path).as_bytes());
         assert_eq!(
             env.drv_path().unwrap().to_string(),
             format!("/nix/store/{env_path}")

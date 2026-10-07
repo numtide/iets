@@ -308,7 +308,7 @@ fn process_attr(
                 true,
                 true,
             )?;
-            b.drv.args.push(utf8(&st, pos)?);
+            b.drv.args.push(st.into_owned());
         }
         return Ok(());
     }
@@ -359,8 +359,22 @@ fn process_attr(
         crate::lint::coerce::drv_value(ev, key, forced, site)?;
     }
     // the attribute's own position, so a coercion lint names the binding
-    let st = ev.coerce_to_string(w, &mut b.context, attr_pos, "", true, true, true)?;
-    let st = utf8(&st, pos)?;
+    let raw = ev.coerce_to_string(w, &mut b.context, attr_pos, "", true, true, true)?;
+    let is_text = [
+        s.json,
+        s.builder,
+        s.system,
+        s.output_hash,
+        s.output_hash_algo,
+        s.output_hash_mode,
+        s.outputs,
+    ]
+    .contains(&sym);
+    if !is_text {
+        b.drv.env.push((key.to_string(), raw.into_owned()));
+        return Ok(());
+    }
+    let st = utf8(&raw, pos)?;
     if sym == s.json {
         crate::log::line(&format!(
             "warning: In derivation '{}': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead.",
@@ -388,7 +402,7 @@ fn process_attr(
             pos,
         )?;
     }
-    b.drv.env.push((key.to_string(), st));
+    b.drv.env.push((key.to_string(), st.into_bytes()));
     Ok(())
 }
 
@@ -597,19 +611,19 @@ fn derivation_strict_internal(
             .fixed_path(drv_name, "out")
             .map_err(|e| drv_err(e, pos))?
             .expect("fixed output has a path");
-        drv.env_set("out", path.to_string());
+        drv.env_set("out", path.to_string().into_bytes());
         drv.outputs.insert("out".into(), out);
     } else if content_addressed {
         let algo = output_hash_algo.unwrap_or(HashAlgo::Sha256);
         let method = ingestion_method.unwrap_or(IngestionMethod::Recursive);
         for o in &outputs {
-            drv.env_set(o, hash_placeholder(o));
+            drv.env_set(o, hash_placeholder(o).into_bytes());
             drv.outputs
                 .insert(o.clone(), DerivationOutput::CaFloating { method, algo });
         }
     } else {
         for o in &outputs {
-            drv.env_set(o, String::new());
+            drv.env_set(o, Vec::new());
             drv.outputs.insert(o.clone(), DerivationOutput::Deferred);
         }
         finalize_input_addressed_outputs(
@@ -633,11 +647,7 @@ fn derivation_strict_internal(
         .with_aterm(|t| {
             (
                 drv.drv_path_for(t),
-                if keep_text {
-                    t.to_string()
-                } else {
-                    String::new()
-                },
+                if keep_text { t.to_vec() } else { Vec::new() },
             )
         })
         .map_err(|e| drv_err(e, pos))?;
@@ -694,7 +704,7 @@ fn derivation_strict_internal(
         DrvInfo {
             outputs: drv.outputs.keys().cloned().collect(),
             references,
-            aterm: (ev.drv.keep_aterm || produces_drv).then(|| Arc::new(text.into_bytes())),
+            aterm: (ev.drv.keep_aterm || produces_drv).then(|| Arc::new(text)),
             pos: site,
             attr: None,
         },
@@ -898,19 +908,13 @@ pub fn load_drv_traced(trace: &crate::trace::Trace, p: &StorePath) -> Result<Der
     let (meta, bytes) =
         read().map_err(|e| DrvError(format!("cannot read derivation '{full}': {e}")))?;
     trace.file(full.as_bytes(), &meta, &bytes);
-    let text = String::from_utf8(bytes)
-        .map_err(|_| DrvError(format!("derivation '{full}' is not valid UTF-8")))?;
-    Derivation::parse(&text, Derivation::name_from_path(p)?)
+    Derivation::parse(&bytes, Derivation::name_from_path(p)?)
 }
 
 /// The derivation as this evaluation wrote it, else from the store.
 pub fn load_drv(ev: &Evaluator, p: &StorePath) -> Result<Derivation, DrvError> {
     match ev.drv.drvs.get(p).and_then(|i| i.aterm) {
-        Some(aterm) => Derivation::parse(
-            std::str::from_utf8(&aterm)
-                .map_err(|_| DrvError(format!("derivation '{p}' is not valid UTF-8")))?,
-            Derivation::name_from_path(p)?,
-        ),
+        Some(aterm) => Derivation::parse(&aterm, Derivation::name_from_path(p)?),
         None => load_drv_traced(ev.trace(), p),
     }
 }
@@ -1003,7 +1007,7 @@ pub fn import_derivation(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalResul
         .arena
         .mk_string_ctx(path_bytes, &[Ctx::DrvDeep(path_bytes)]);
     entries.push((ev.s.drv_path, Pos::NONE, dp));
-    let name = ev.mk_string(drv.env_get("name").unwrap_or("").as_bytes());
+    let name = ev.mk_string(drv.env_get("name").unwrap_or(b""));
     entries.push((ev.s.name, Pos::NONE, name));
     let mut names = Vec::with_capacity(drv.outputs.len());
     for (name, out) in &drv.outputs {

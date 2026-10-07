@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::hash::{Hash, HashAlgo, HashFormat, base16_encode_into, hash_bytes};
+use super::hash::{
+    Hash, HashAlgo, HashFormat, base16_encode_into, base16_encode_into_bytes, hash_bytes,
+};
 use super::path::{
     DRV_EXTENSION, IngestionMethod, STORE_DIR, StorePath, make_fixed_output_path, make_output_path,
     make_text_path, output_path_name,
@@ -81,8 +83,8 @@ pub struct Derivation {
     pub input_drvs: BTreeMap<StorePath, InputNode>,
     pub platform: String,
     pub builder: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
+    pub args: Vec<Vec<u8>>,
+    pub env: Vec<(String, Vec<u8>)>,
     pub structured_attrs: Option<String>,
 }
 
@@ -105,16 +107,26 @@ pub type DrvHashCache = BTreeMap<StorePath, DrvHash>;
 /// Reads a .drv that is not in the cache. Mirrors Store::readInvalidDerivation.
 pub type DrvLoader<'a> = dyn FnMut(&StorePath) -> Result<Derivation, DrvError> + 'a;
 
+trait PushStr {
+    fn push_str(&mut self, s: &str);
+}
+
+impl PushStr for Vec<u8> {
+    fn push_str(&mut self, s: &str) {
+        self.extend_from_slice(s.as_bytes());
+    }
+}
+
 /// Mirrors derivations.cc:printString: ATerm string with `\"`, `\\`, `\n`, `\r`, `\t` escapes.
-fn print_string(out: &mut String, s: &str) {
-    out.push('"');
+fn print_string(out: &mut Vec<u8>, s: &[u8]) {
+    out.push(b'"');
     let mut rest = s;
     while let Some(i) = rest
-        .bytes()
+        .iter()
         .position(|b| matches!(b, b'"' | b'\\' | b'\n' | b'\r' | b'\t'))
     {
-        out.push_str(&rest[..i]);
-        out.push_str(match rest.as_bytes()[i] {
+        out.extend_from_slice(&rest[..i]);
+        out.push_str(match rest[i] {
             b'"' => "\\\"",
             b'\\' => "\\\\",
             b'\n' => "\\n",
@@ -123,42 +135,42 @@ fn print_string(out: &mut String, s: &str) {
         });
         rest = &rest[i + 1..];
     }
-    out.push_str(rest);
-    out.push('"');
+    out.extend_from_slice(rest);
+    out.push(b'"');
 }
 
 /// Mirrors derivations.cc:printUnquotedString (no escaping; for store paths and names).
-fn print_unquoted(out: &mut String, s: &str) {
-    out.push('"');
+fn print_unquoted(out: &mut Vec<u8>, s: &str) {
+    out.push(b'"');
     out.push_str(s);
-    out.push('"');
+    out.push(b'"');
 }
 
 /// `print_unquoted` of `p.to_string()`, without the string.
-fn print_store_path(out: &mut String, p: &StorePath) {
-    out.push('"');
+fn print_store_path(out: &mut Vec<u8>, p: &StorePath) {
+    out.push(b'"');
     out.push_str(STORE_DIR);
-    out.push('/');
+    out.push(b'/');
     out.push_str(p.base_name());
-    out.push('"');
+    out.push(b'"');
 }
 
 /// Mirrors content-address.cc:ContentAddress::printMethodAlgo quoted:
 /// `"r:sha256"` or `"sha256"`.
-fn print_method_algo(out: &mut String, method: IngestionMethod, algo: HashAlgo) {
-    out.push('"');
+fn print_method_algo(out: &mut Vec<u8>, method: IngestionMethod, algo: HashAlgo) {
+    out.push(b'"');
     out.push_str(method.prefix());
     out.push_str(algo.name());
-    out.push('"');
+    out.push(b'"');
 }
 
 /// One ATerm buffer per thread, so the 20,000 unparses of a nixos closure
 /// keep the capacity the first one grew to. It is taken out of the slot
 /// while in use: `hash_derivation_modulo` recurses, and the inner call must
 /// not see the buffer the outer one is filling.
-fn with_aterm_buf<R>(f: impl FnOnce(&mut String) -> R) -> R {
+fn with_aterm_buf<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
     thread_local! {
-        static BUF: std::cell::Cell<String> = const { std::cell::Cell::new(String::new()) };
+        static BUF: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
     }
     let mut s = BUF.with(|b| b.take());
     s.clear();
@@ -167,19 +179,21 @@ fn with_aterm_buf<R>(f: impl FnOnce(&mut String) -> R) -> R {
     r
 }
 
-fn print_list<'a>(out: &mut String, items: impl Iterator<Item = &'a str>, quoted: bool) {
-    out.push('[');
+fn print_list<'a>(out: &mut Vec<u8>, items: impl Iterator<Item = &'a [u8]>, quoted: bool) {
+    out.push(b'[');
     for (i, s) in items.enumerate() {
         if i > 0 {
-            out.push(',');
+            out.push(b',');
         }
         if quoted {
             print_string(out, s);
         } else {
-            print_unquoted(out, s);
+            out.push(b'"');
+            out.extend_from_slice(s);
+            out.push(b'"');
         }
     }
-    out.push(']');
+    out.push(b']');
 }
 
 impl DerivationOutput {
@@ -212,7 +226,7 @@ impl DerivationOutput {
 
 impl Derivation {
     /// Mirrors derivations.cc:Derivation::unparse without masking.
-    pub fn unparse(&self) -> Result<String, DrvError> {
+    pub fn unparse(&self) -> Result<Vec<u8>, DrvError> {
         self.unparse_with(false, None)
     }
 
@@ -221,8 +235,8 @@ impl Derivation {
         &self,
         mask_outputs: bool,
         actual_inputs: Option<&BTreeMap<String, InputNode>>,
-    ) -> Result<String, DrvError> {
-        let mut s = String::with_capacity(4096);
+    ) -> Result<Vec<u8>, DrvError> {
+        let mut s = Vec::with_capacity(4096);
         self.unparse_into(&mut s, mask_outputs, actual_inputs)?;
         Ok(s)
     }
@@ -230,7 +244,7 @@ impl Derivation {
     /// The ATerm of this derivation, then `f` over it. The buffer is reused
     /// between calls, so a caller that only hashes or paths the ATerm and
     /// drops it allocates nothing.
-    pub fn with_aterm<R>(&self, f: impl FnOnce(&str) -> R) -> Result<R, DrvError> {
+    pub fn with_aterm<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Result<R, DrvError> {
         with_aterm_buf(|s| {
             self.unparse_into(s, false, None)?;
             Ok(f(s))
@@ -240,7 +254,7 @@ impl Derivation {
     /// `unparse_with` appended to a buffer the caller keeps.
     pub fn unparse_into(
         &self,
-        s: &mut String,
+        s: &mut Vec<u8>,
         mask_outputs: bool,
         actual_inputs: Option<&BTreeMap<String, InputNode>>,
     ) -> Result<(), DrvError> {
@@ -253,13 +267,13 @@ impl Derivation {
         }
         for (i, (name, out)) in self.outputs.iter().enumerate() {
             if i > 0 {
-                s.push(',');
+                s.push(b',');
             }
-            s.push('(');
+            s.push(b'(');
             print_unquoted(s, name);
             match out {
                 DerivationOutput::InputAddressed(p) => {
-                    s.push(',');
+                    s.push(b',');
                     if mask_outputs {
                         s.push_str("\"\"");
                     } else {
@@ -268,18 +282,18 @@ impl Derivation {
                     s.push_str(",\"\",\"\"");
                 }
                 DerivationOutput::Fixed { method, hash } => {
-                    s.push(',');
+                    s.push(b',');
                     if mask_outputs {
                         s.push_str("\"\"");
                     } else {
                         print_store_path(s, &self.fixed_output_path(name)?);
                     }
-                    s.push(',');
+                    s.push(b',');
                     print_method_algo(s, *method, hash.algo);
-                    s.push(',');
-                    s.push('"');
-                    base16_encode_into(s, hash.bytes());
-                    s.push('"');
+                    s.push(b',');
+                    s.push(b'"');
+                    base16_encode_into_bytes(s, hash.bytes());
+                    s.push(b'"');
                 }
                 DerivationOutput::CaFloating { method, algo } => {
                     s.push_str(",\"\",");
@@ -288,60 +302,60 @@ impl Derivation {
                 }
                 DerivationOutput::Deferred => s.push_str(",\"\",\"\",\"\""),
             }
-            s.push(')');
+            s.push(b')');
         }
         s.push_str("],[");
         match actual_inputs {
             Some(inputs) => {
                 for (i, (hash_hex, node)) in inputs.iter().enumerate() {
                     if i > 0 {
-                        s.push(',');
+                        s.push(b',');
                     }
-                    s.push('(');
+                    s.push(b'(');
                     print_unquoted(s, hash_hex);
                     unparse_node(s, node);
-                    s.push(')');
+                    s.push(b')');
                 }
             }
             None => {
                 for (i, (drv_path, node)) in self.input_drvs.iter().enumerate() {
                     if i > 0 {
-                        s.push(',');
+                        s.push(b',');
                     }
-                    s.push('(');
+                    s.push(b'(');
                     print_store_path(s, drv_path);
                     unparse_node(s, node);
-                    s.push(')');
+                    s.push(b')');
                 }
             }
         }
         s.push_str("],[");
         for (i, src) in self.input_srcs.iter().enumerate() {
             if i > 0 {
-                s.push(',');
+                s.push(b',');
             }
             print_store_path(s, src);
         }
         s.push_str("],");
         print_unquoted(s, &self.platform);
-        s.push(',');
-        print_string(s, &self.builder);
-        s.push(',');
-        print_list(s, self.args.iter().map(String::as_str), true);
+        s.push(b',');
+        print_string(s, self.builder.as_bytes());
+        s.push(b',');
+        print_list(s, self.args.iter().map(Vec::as_slice), true);
         s.push_str(",[");
         let mut first = true;
-        let mut emit = |s: &mut String, k: &str, v: &str| {
+        let mut emit = |s: &mut Vec<u8>, k: &str, v: &[u8]| {
             if first {
                 first = false;
             } else {
-                s.push(',');
+                s.push(b',');
             }
-            s.push('(');
-            print_string(s, k);
-            s.push(',');
+            s.push(b'(');
+            print_string(s, k.as_bytes());
+            s.push(b',');
             let masked = mask_outputs && self.outputs.contains_key(k);
-            print_string(s, if masked { "" } else { v });
-            s.push(')');
+            print_string(s, if masked { b"" } else { v });
+            s.push(b')');
         };
         let mut pending_json = self.structured_attrs.as_deref();
         for (k, v) in &self.env {
@@ -354,13 +368,13 @@ impl Derivation {
             if let Some(json) = pending_json
                 && k.as_str() > STRUCTURED_ATTRS_ENV
             {
-                emit(s, STRUCTURED_ATTRS_ENV, json);
+                emit(s, STRUCTURED_ATTRS_ENV, json.as_bytes());
                 pending_json = None;
             }
             emit(s, k, v);
         }
         if let Some(json) = pending_json {
-            emit(s, STRUCTURED_ATTRS_ENV, json);
+            emit(s, STRUCTURED_ATTRS_ENV, json.as_bytes());
         }
         s.push_str("])");
         Ok(())
@@ -387,16 +401,13 @@ impl Derivation {
 
     /// Mirrors derivations.cc:parseDerivation, both the traditional `Derive(...)`
     /// form and `DrvWithVersion("xp-dyn-drv",...)`.
-    pub fn parse(s: &str, name: &str) -> Result<Derivation, DrvError> {
-        let mut p = Parser {
-            s: s.as_bytes(),
-            pos: 0,
-        };
+    pub fn parse(s: &[u8], name: &str) -> Result<Derivation, DrvError> {
+        let mut p = Parser { s, pos: 0 };
         let mut drv = Derivation {
             name: name.to_string(),
             ..Default::default()
         };
-        let dynamic = if s.starts_with("DrvWithVersion(") {
+        let dynamic = if s.starts_with(b"DrvWithVersion(") {
             p.expect(b"DrvWithVersion(")?;
             let v = p.string()?;
             if v != "xp-dyn-drv" {
@@ -444,17 +455,20 @@ impl Derivation {
         drv.builder = p.string()?;
         p.expect(b",[")?;
         while !p.end_of_list()? {
-            drv.args.push(p.string()?);
+            drv.args.push(p.bytes()?);
         }
         p.expect(b",[")?;
         while !p.end_of_list()? {
             p.expect(b"(")?;
             let k = p.string()?;
             p.expect(b",")?;
-            let v = p.string()?;
+            let v = p.bytes()?;
             p.expect(b")")?;
             if k == STRUCTURED_ATTRS_ENV {
-                drv.structured_attrs = Some(v);
+                drv.structured_attrs =
+                    Some(String::from_utf8(v).map_err(|_| {
+                        DrvError("non-UTF-8 structured attrs in derivation".into())
+                    })?);
             } else {
                 drv.env.push((k, v));
             }
@@ -488,10 +502,10 @@ impl Derivation {
     }
 
     /// `drv_path` for a caller that already holds `self.unparse()`, so the ATerm is built once.
-    pub fn drv_path_for(&self, aterm: &str) -> Result<StorePath, DrvError> {
+    pub fn drv_path_for(&self, aterm: &[u8]) -> Result<StorePath, DrvError> {
         let mut references = self.input_srcs.clone();
         references.extend(self.input_drvs.keys().cloned());
-        let hash = hash_bytes(HashAlgo::Sha256, aterm.as_bytes());
+        let hash = hash_bytes(HashAlgo::Sha256, aterm);
         let mut name = String::with_capacity(self.name.len() + DRV_EXTENSION.len());
         name.push_str(&self.name);
         name.push_str(DRV_EXTENSION);
@@ -499,15 +513,20 @@ impl Derivation {
     }
 
     /// Looks up `key` in the sorted env.
-    pub fn env_get(&self, key: &str) -> Option<&str> {
+    pub fn env_get(&self, key: &str) -> Option<&[u8]> {
         self.env
             .binary_search_by(|(k, _)| k.as_str().cmp(key))
             .ok()
-            .map(|i| self.env[i].1.as_str())
+            .map(|i| self.env[i].1.as_slice())
+    }
+
+    /// `env_get` of a value that is UTF-8; `None` for one that is not.
+    pub fn env_str(&self, key: &str) -> Option<&str> {
+        self.env_get(key).and_then(|v| std::str::from_utf8(v).ok())
     }
 
     /// Inserts or replaces `key` in the sorted env.
-    pub fn env_set(&mut self, key: &str, value: String) {
+    pub fn env_set(&mut self, key: &str, value: Vec<u8>) {
         match self.env.binary_search_by(|(k, _)| k.as_str().cmp(key)) {
             Ok(i) => self.env[i].1 = value,
             Err(i) => self.env.insert(i, (key.to_string(), value)),
@@ -599,8 +618,13 @@ impl Parser<'_> {
         }
     }
 
-    /// Mirrors derivations.cc:parseString.
     fn string(&mut self) -> Result<String, DrvError> {
+        String::from_utf8(self.bytes()?)
+            .map_err(|_| DrvError("non-UTF-8 string in derivation".into()))
+    }
+
+    /// Mirrors derivations.cc:parseString.
+    fn bytes(&mut self) -> Result<Vec<u8>, DrvError> {
         self.expect(b"\"")?;
         let mut out = Vec::new();
         loop {
@@ -627,7 +651,7 @@ impl Parser<'_> {
                 c => out.push(c),
             }
         }
-        String::from_utf8(out).map_err(|_| DrvError("non-UTF-8 string in derivation".into()))
+        Ok(out)
     }
 
     /// Mirrors derivations.cc:parsePath.
@@ -677,23 +701,23 @@ impl Parser<'_> {
 }
 
 /// Mirrors derivations.cc:unparseDerivedPathMapNode, including the comma it writes.
-fn unparse_node(s: &mut String, node: &InputNode) {
-    s.push(',');
+fn unparse_node(s: &mut Vec<u8>, node: &InputNode) {
+    s.push(b',');
     if node.children.is_empty() {
-        print_list(s, node.outputs.iter().map(String::as_str), false);
+        print_list(s, node.outputs.iter().map(String::as_bytes), false);
         return;
     }
-    s.push('(');
-    print_list(s, node.outputs.iter().map(String::as_str), false);
+    s.push(b'(');
+    print_list(s, node.outputs.iter().map(String::as_bytes), false);
     s.push_str(",[");
     for (i, (name, child)) in node.children.iter().enumerate() {
         if i > 0 {
-            s.push(',');
+            s.push(b',');
         }
-        s.push('(');
+        s.push(b'(');
         print_unquoted(s, name);
         unparse_node(s, child);
-        s.push(')');
+        s.push(b')');
     }
     s.push_str("])");
 }
@@ -775,7 +799,7 @@ pub fn hash_derivation_modulo(
 
     let hash = with_aterm_buf(|s| {
         drv.unparse_into(s, mask_outputs, Some(&inputs2))?;
-        Ok::<_, DrvError>(hash_bytes(HashAlgo::Sha256, s.as_bytes()))
+        Ok::<_, DrvError>(hash_bytes(HashAlgo::Sha256, s))
     })?;
     let hashes = drv.outputs.keys().map(|k| (k.clone(), hash)).collect();
     Ok(DrvHash { hashes, kind })
@@ -801,7 +825,7 @@ pub fn path_derivation_modulo(
 pub fn load_derivation_from_store(drv_path: &StorePath) -> Result<Derivation, DrvError> {
     let name = Derivation::name_from_path(drv_path)?;
     let full = format!("{STORE_DIR}/{}", drv_path.base_name());
-    let text = std::fs::read_to_string(&full)
+    let text = std::fs::read(&full)
         .map_err(|e| DrvError(format!("cannot read derivation '{full}': {e}")))?;
     Derivation::parse(&text, name)
 }
@@ -856,10 +880,11 @@ pub fn finalize_input_addressed_outputs(
         };
         let actual = actual.to_string();
         match drv.env_get(&name) {
-            None | Some("") => drv.env_set(&name, actual),
-            Some(v) if v != actual => {
+            None | Some(b"") => drv.env_set(&name, actual.into_bytes()),
+            Some(v) if v != actual.as_bytes() => {
                 return Err(DrvError(format!(
-                    "derivation has incorrect environment variable '{name}', should be '{actual}' but is actually '{v}'"
+                    "derivation has incorrect environment variable '{name}', should be '{actual}' but is actually '{}'",
+                    String::from_utf8_lossy(v)
                 )));
             }
             Some(_) => {}
@@ -879,15 +904,15 @@ mod tests {
 
     /// Copies of /nix/store/*.drv produced by Nix 2.34.8 (`cp /nix/store/<name> tests/fixtures/drv/`).
     /// The file name is the store path, so `drv_path()` is checked against it.
-    fn fixtures() -> Vec<(StorePath, String)> {
-        let mut v: Vec<(StorePath, String)> = std::fs::read_dir(fixture_dir())
+    fn fixtures() -> Vec<(StorePath, Vec<u8>)> {
+        let mut v: Vec<(StorePath, Vec<u8>)> = std::fs::read_dir(fixture_dir())
             .unwrap()
             .map(|e| {
                 let e = e.unwrap();
                 let base = e.file_name().into_string().unwrap();
                 (
                     StorePath::from_base_name(&base).unwrap(),
-                    std::fs::read_to_string(e.path()).unwrap(),
+                    std::fs::read(e.path()).unwrap(),
                 )
             })
             .collect();
@@ -903,7 +928,7 @@ mod tests {
     fn fixture_loader(drv_path: &StorePath) -> Result<Derivation, DrvError> {
         let local = fixture_dir().join(drv_path.base_name());
         if local.exists() {
-            let text = std::fs::read_to_string(local).unwrap();
+            let text = std::fs::read(local).unwrap();
             return Derivation::parse(&text, Derivation::name_from_path(drv_path)?);
         }
         load_derivation_from_store(drv_path)
@@ -941,7 +966,7 @@ mod tests {
     /// The whole input closure of `drv` is vendored under tests/fixtures/drv.
     fn closure_in_fixtures(drv: &Derivation) -> bool {
         drv.input_drvs.keys().all(|p| {
-            let Ok(text) = std::fs::read_to_string(fixture_dir().join(p.base_name())) else {
+            let Ok(text) = std::fs::read(fixture_dir().join(p.base_name())) else {
                 return false;
             };
             Derivation::name_from_path(p)
@@ -1027,7 +1052,7 @@ mod tests {
                 )]),
             },
         );
-        let aterm = drv.unparse().unwrap();
+        let aterm = String::from_utf8(drv.unparse().unwrap()).unwrap();
         assert!(
             aterm.starts_with("DrvWithVersion(\"xp-dyn-drv\",["),
             "{aterm}"
@@ -1043,13 +1068,13 @@ mod tests {
             aterm.contains("(\"/nix/store/11111111111111111111111111111111-plain.drv\",[\"out\"])"),
             "{aterm}"
         );
-        assert_eq!(Derivation::parse(&aterm, "dyn").unwrap(), drv);
+        assert_eq!(Derivation::parse(aterm.as_bytes(), "dyn").unwrap(), drv);
 
         // without children the traditional form comes back
         drv.input_drvs.retain(|p, _| p.name() == "plain.drv");
-        let flat = drv.unparse().unwrap();
+        let flat = String::from_utf8(drv.unparse().unwrap()).unwrap();
         assert!(flat.starts_with("Derive(["), "{flat}");
-        assert_eq!(Derivation::parse(&flat, "dyn").unwrap(), drv);
+        assert_eq!(Derivation::parse(flat.as_bytes(), "dyn").unwrap(), drv);
     }
 
     fn simple(name: &str, outputs: &[&str]) -> Derivation {
@@ -1062,7 +1087,7 @@ mod tests {
         for o in outputs {
             drv.outputs
                 .insert(o.to_string(), DerivationOutput::Deferred);
-            drv.env_set(o, String::new());
+            drv.env_set(o, Vec::new());
         }
         drv.env_set("builder", "/bin/sh".into());
         drv.env_set("name", name.into());
@@ -1101,12 +1126,11 @@ mod tests {
             )
         );
         assert_eq!(
-            drv.env_get("dev"),
+            drv.env_str("dev"),
             Some("/nix/store/nx6zsacidiymqhs3yji2j0i0srcnnvkc-ia-dev")
         );
         let expected =
-            std::fs::read_to_string(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv"))
-                .unwrap();
+            std::fs::read(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv")).unwrap();
         assert_eq!(drv.unparse().unwrap(), expected);
     }
 
@@ -1133,7 +1157,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            drv.env_get("out"),
+            drv.env_str("out"),
             Some("/nix/store/s05rl80bpix1186wb5f471k7fxwwp7lf-fr")
         );
         assert_eq!(
@@ -1141,8 +1165,7 @@ mod tests {
             "/nix/store/sqjiq38d04j09g4dws6a9d644618zf21-fr.drv"
         );
         let expected =
-            std::fs::read_to_string(fixture_dir().join("sqjiq38d04j09g4dws6a9d644618zf21-fr.drv"))
-                .unwrap();
+            std::fs::read(fixture_dir().join("sqjiq38d04j09g4dws6a9d644618zf21-fr.drv")).unwrap();
         assert_eq!(drv.unparse().unwrap(), expected);
     }
 
@@ -1178,7 +1201,7 @@ mod tests {
             "/nix/store/0fdrgjkjrlf9vi5xgyxfl6s8ihav2idi-dep2.drv"
         );
         assert_eq!(
-            drv.env_get("out"),
+            drv.env_str("out"),
             Some("/nix/store/f1lfacbx1gq8g6pw0290cijhli2n3nls-dep2")
         );
         assert!(cache.contains_key(&dep));
@@ -1189,13 +1212,10 @@ mod tests {
 
     #[test]
     fn string_escapes_roundtrip() {
-        let mut s = String::new();
-        print_string(&mut s, "a\"b\\c\nd\re\tf$g");
-        assert_eq!(s, "\"a\\\"b\\\\c\\nd\\re\\tf$g\"");
-        let mut p = Parser {
-            s: s.as_bytes(),
-            pos: 0,
-        };
+        let mut s = Vec::new();
+        print_string(&mut s, b"a\"b\\c\nd\re\tf$g");
+        assert_eq!(s, b"\"a\\\"b\\\\c\\nd\\re\\tf$g\"");
+        let mut p = Parser { s: &s, pos: 0 };
         assert_eq!(p.string().unwrap(), "a\"b\\c\nd\re\tf$g");
         assert!(
             Parser {
@@ -1218,10 +1238,9 @@ mod tests {
     #[test]
     fn masked_unparse_blanks_output_paths_and_env() {
         let text =
-            std::fs::read_to_string(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv"))
-                .unwrap();
+            std::fs::read(fixture_dir().join("73as87hfqgllqymcyhn1bi8iman2wwqx-ia.drv")).unwrap();
         let drv = Derivation::parse(&text, "ia").unwrap();
-        let masked = drv.unparse_with(true, None).unwrap();
+        let masked = String::from_utf8(drv.unparse_with(true, None).unwrap()).unwrap();
         assert!(masked.starts_with("Derive([(\"dev\",\"\",\"\",\"\"),(\"out\",\"\",\"\",\"\")],"));
         assert!(masked.contains("(\"dev\",\"\")"));
         assert!(masked.contains("(\"out\",\"\")"));

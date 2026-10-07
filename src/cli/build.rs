@@ -274,7 +274,7 @@ fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
         Err(e) => return CrateError::from(e).report(),
     };
     // The root may be a copy outside the store; its inputs are read from `/nix/store`.
-    let info = std::fs::read_to_string(root_arg)
+    let info = std::fs::read(root_arg)
         .map_err(CrateError::from)
         .and_then(|text| crate::api::build::drv_info(&root, text));
     let info = match info {

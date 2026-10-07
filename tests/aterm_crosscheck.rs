@@ -13,11 +13,11 @@ use iets::store::drv::{
 use iets::store::hash::{Hash, HashAlgo};
 use iets::store::path::{IngestionMethod, StorePath};
 
-fn fixture(file: &str) -> String {
+fn fixture(file: &str) -> Vec<u8> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aterm")
         .join(file);
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+    std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
 fn sp(base: &str) -> StorePath {
@@ -124,9 +124,9 @@ fn upstream_input_addressed_paths_recompute() {
 }
 
 fn simple(name: &str, outputs: &[(&str, DerivationOutput)], env: &[(&str, &str)]) -> Derivation {
-    let mut env: Vec<(String, String)> = env
+    let mut env: Vec<(String, Vec<u8>)> = env
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
         .collect();
     env.sort();
     Derivation {
@@ -171,7 +171,7 @@ fn upstream_invariants_fill_in_deferred() {
             "{name}"
         );
         assert_eq!(
-            drv.env_get("out"),
+            drv.env_str("out"),
             Some(format!("/nix/store/{want}").as_str()),
             "{name}"
         );
@@ -289,8 +289,9 @@ fn harmonia_cases_roundtrip() {
             "linux-6.16.tar.xz",
         ),
     ] {
-        let drv = Derivation::parse(input, name).unwrap_or_else(|e| panic!("{input}: {e}"));
-        assert_eq!(drv.unparse().unwrap(), input);
+        let drv =
+            Derivation::parse(input.as_bytes(), name).unwrap_or_else(|e| panic!("{input}: {e}"));
+        assert_eq!(drv.unparse().unwrap(), input.as_bytes());
     }
 }
 
@@ -299,13 +300,15 @@ fn harmonia_cases_roundtrip() {
 #[test]
 fn fixed_output_path_is_recomputed_not_trusted() {
     let wrong = r#"Derive([("out","/nix/store/00000000000000000000000000000000-linux-6.16.tar.xz","sha256","1a4be2fe6b5246aa4ac8987a8a4af34c42a8dd7d08b46ab48516bcc1befbcd83")],[],[],"builtin","builtin:fetchurl",[],[("name","linux-6.16.tar.xz")])"#;
-    let drv = Derivation::parse(wrong, "linux-6.16.tar.xz").unwrap();
+    let drv = Derivation::parse(wrong.as_bytes(), "linux-6.16.tar.xz").unwrap();
     assert_eq!(
         drv.unparse().unwrap(),
-        wrong.replace(
-            "00000000000000000000000000000000",
-            "6fr8dalasgpy0bpykhjq2b9q65lb4j8y"
-        )
+        wrong
+            .replace(
+                "00000000000000000000000000000000",
+                "6fr8dalasgpy0bpykhjq2b9q65lb4j8y"
+            )
+            .into_bytes()
     );
 }
 
@@ -319,7 +322,7 @@ fn malformed_aterm_is_an_error() {
         r#"Derive([("out","","r:sha256","abc")],[],[],"x86_64-linux","/bin/sh",[],[])"#,
         r#"Derive([("out","/nix/store/00000000000000000000000000000000-x","sha256","abc")],[],[],"x86_64-linux","/bin/sh",[],[])"#,
     ] {
-        assert!(Derivation::parse(input, "x").is_err(), "{input}");
+        assert!(Derivation::parse(input.as_bytes(), "x").is_err(), "{input}");
     }
 }
 
@@ -411,4 +414,16 @@ fn masked_and_unmasked_hashes_differ_once_filled() {
     let identity =
         hash_derivation_modulo(&drv, false, &mut DrvHashCache::new(), &mut no_loader).unwrap();
     assert_ne!(masked.hashes["out"], identity.hashes["out"]);
+}
+
+/// harmonia-store-aterm/tests/roundtrip.rs `roundtrip_non_utf8_bytes`: an ATerm
+/// string is bytes, and an arg or an env value that is not UTF-8 survives.
+#[test]
+fn bytes_that_are_not_utf8_roundtrip() {
+    let input: &[u8] = b"Derive([(\"out\",\"\",\"\",\"\")],[],[],\"x86_64-linux\",\"/bin/sh\",[\"a\xc8\x82b\"],[(\"name\",\"test\"),(\"v\",\"\xc8\")])";
+    let drv = Derivation::parse(input, "test").unwrap();
+    assert_eq!(drv.args, [b"a\xc8\x82b".to_vec()]);
+    assert_eq!(drv.env_get("v"), Some(&b"\xc8"[..]));
+    assert_eq!(drv.env_str("v"), None);
+    assert_eq!(drv.unparse().unwrap(), input);
 }

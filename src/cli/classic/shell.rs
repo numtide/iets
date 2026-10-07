@@ -525,7 +525,7 @@ fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::R
     let pass_as_file: BTreeSet<&str> = match drv.structured_attrs {
         Some(_) => BTreeSet::new(),
         None => drv
-            .env_get("passAsFile")
+            .env_str("passAsFile")
             .unwrap_or_default()
             .split_whitespace()
             .collect(),
@@ -538,7 +538,7 @@ fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::R
             write(&p, value)?;
             env.insert(format!("{name}Path").into(), p.into_os_string());
         } else {
-            env.insert(name.into(), value.into());
+            env.insert(name.into(), OsStr::from_bytes(value).to_owned());
         }
     }
 
@@ -548,14 +548,14 @@ fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::R
         structured_rc = write_shell(&json);
         let sh = tmp_dir.join(".attrs.sh");
         let js = tmp_dir.join(".attrs.json");
-        write(&js, &serde_json::Value::Object(json).to_string())?;
+        write(&js, serde_json::Value::Object(json).to_string())?;
         write(&sh, &structured_rc)?;
         env.insert("NIX_ATTRS_SH_FILE".into(), sh.into_os_string());
         env.insert("NIX_ATTRS_JSON_FILE".into(), js.into_os_string());
     }
 
     let rc_path = tmp_dir.join("rc");
-    write(&rc_path, &rc_script(s, shell, &tmp, &structured_rc))?;
+    write(&rc_path, rc_script(s, shell, &tmp, &structured_rc))?;
 
     let mut cmd = Command::new(shell);
     cmd.arg0("bash");
@@ -568,7 +568,7 @@ fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::R
     Err(CrateError::io(format!("executing shell '{shell}'"), e))
 }
 
-fn write(path: &Path, text: &str) -> crate::error::Result<()> {
+fn write(path: &Path, text: impl AsRef<[u8]>) -> crate::error::Result<()> {
     std::fs::write(path, text)
         .map_err(|e| CrateError::io(format!("cannot write '{}'", path.display()), e))
 }

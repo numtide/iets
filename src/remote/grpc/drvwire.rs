@@ -67,14 +67,14 @@ pub fn write_basic_derivation(
     write_strs(w, &drv.args)?;
     // StructuredAttrs::unparse puts the JSON back under `__json`; the env map
     // is sorted by key, so the entry goes where its key belongs.
-    let mut env: BTreeMap<&str, &str> = drv.env.iter().map(|(k, v)| (&k[..], &v[..])).collect();
+    let mut env: BTreeMap<&str, &[u8]> = drv.env.iter().map(|(k, v)| (&k[..], &v[..])).collect();
     if let Some(json) = &drv.structured_attrs {
-        env.insert(STRUCTURED_ATTRS_ENV, json);
+        env.insert(STRUCTURED_ATTRS_ENV, json.as_bytes());
     }
     write_u64(w, env.len() as u64)?;
     for (k, v) in env {
         write_str(w, k.as_bytes())?;
-        write_str(w, v.as_bytes())?;
+        write_str(w, v)?;
     }
     Ok(())
 }
@@ -245,7 +245,7 @@ mod tests {
     const ATERM: &str = r#"Derive([("out","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo","","")],[("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-dep.drv",["out"])],["/nix/store/cccccccccccccccccccccccccccccccc-src"],"x86_64-linux","/bin/sh",["-c","true"],[("__json","{\"a\":1}"),("out","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo"),("zz","last")])"#;
 
     fn fixture() -> Derivation {
-        Derivation::parse(ATERM, "foo").unwrap()
+        Derivation::parse(ATERM.as_bytes(), "foo").unwrap()
     }
 
     /// Reproduces `derivation::write` by hand: the field order and the empty

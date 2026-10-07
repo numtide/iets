@@ -525,11 +525,7 @@ fn read_drv(ev: &Evaluator, p: &StorePath) -> EvalResult<Derivation> {
     let err = |m: String| Error::boxed(ErrorKind::Eval, m, Pos::NONE);
     let name = Derivation::name_from_path(p).map_err(|e| err(e.0))?;
     match ev.drv.drvs.get(p).and_then(|i| i.aterm) {
-        Some(aterm) => {
-            let text = std::str::from_utf8(&aterm)
-                .map_err(|_| err(format!("derivation '{p}' is not valid UTF-8")))?;
-            Derivation::parse(text, name).map_err(|e| err(e.0))
-        }
+        Some(aterm) => Derivation::parse(&aterm, name).map_err(|e| err(e.0)),
         None => load_derivation_from_store(p).map_err(|e| err(e.0)),
     }
 }
@@ -548,7 +544,7 @@ fn required_system_features(drv: &Derivation) -> BTreeSet<String> {
             })
             .unwrap_or_default(),
         None => drv
-            .env_get("requiredSystemFeatures")
+            .env_str("requiredSystemFeatures")
             .map(|s| s.split_whitespace().map(str::to_owned).collect())
             .unwrap_or_default(),
     };

@@ -147,9 +147,7 @@ pub fn substitute(c: &mut Client, paths: &[StorePath], t: &mut Timings) -> Resul
 pub fn drv_table(drvs: &[crate::build::backend::Drv]) -> Result<BTreeMap<StorePath, Derivation>> {
     let mut out = BTreeMap::new();
     for d in drvs {
-        let text = std::str::from_utf8(&d.aterm)
-            .map_err(|_| Error::Plan(format!("derivation '{}' is not UTF-8", d.path)))?;
-        let drv = Derivation::parse(text, Derivation::name_from_path(&d.path)?)?;
+        let drv = Derivation::parse(&d.aterm, Derivation::name_from_path(&d.path)?)?;
         out.insert(d.path.clone(), drv);
     }
     Ok(out)
@@ -419,7 +417,7 @@ fn required_system_features(drv: &Derivation) -> Vec<String> {
         }
         return out.into_iter().collect();
     }
-    drv.env_get("requiredSystemFeatures")
+    drv.env_str("requiredSystemFeatures")
         .unwrap_or("")
         .split_whitespace()
         .map(str::to_string)

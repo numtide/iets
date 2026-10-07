@@ -15,6 +15,7 @@ use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::remote::worker::{Connection, Transport};
 use crate::store::path::StorePath;
 use crate::store::source::{SourceOrigin, SrcPath};
+use serde_json::Value;
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
 /// store path when this returns. The `fetchTree` builtin and `nix flake
@@ -487,7 +488,6 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
 /// are, as under Nix, or into `act`'s detail. Returns the text, for the
 /// hash mismatch check.
 fn relay(from: impl Read, act: &crate::log::Activity) -> String {
-    use serde_json::Value;
     let session = crate::session::Session::current();
     let terminal = session.log.progress.mode() == crate::progress::Mode::Bar && !crate::log::json();
     let mut said = String::new();

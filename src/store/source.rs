@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::hash::Hash;
 use super::path::StorePath;
+use std::os::unix::ffi::OsStrExt;
 
 /// The entries a tree filter kept, `None` for no filter.
 pub type Accepted = Option<Arc<HashSet<PathBuf>>>;
@@ -72,7 +73,6 @@ impl SrcPath {
     /// filter keeps part of the tree out of the copy. Appends, because the
     /// event stream builds a record without allocating.
     pub fn describe_into(&self, out: &mut Vec<u8>) {
-        use std::os::unix::ffi::OsStrExt;
         let accepted = match &self.src {
             Src::Fs { root, accepted } => {
                 out.extend_from_slice(root.as_os_str().as_bytes());

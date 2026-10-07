@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use iets::cachefs;
+use iets::fetch::spool;
 use iets::trace::Obs;
 use iets::trace::run::Cache;
 use iets::trace::store::{ENTRY, Opened, Part, Store};
 use iets::trace::{key::Key, wire};
+use std::os::unix::fs::PermissionsExt;
 
 const KEYS: usize = 4;
 const OBS: usize = 400;
@@ -303,7 +305,6 @@ fn an_entry_that_is_not_a_plain_file_is_refused() {
 /// the user's whatever the umask, and an older cache root is tightened.
 #[test]
 fn a_cache_is_private_to_its_owner() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tmp("modes");
     let root = dir.join("trace");
     std::fs::create_dir_all(&root).expect("root");
@@ -328,7 +329,6 @@ fn a_cache_is_private_to_its_owner() {
 /// store is under `XDG_CACHE_HOME`, so this runs in a process of its own.
 #[test]
 fn input_touch_child() {
-    use iets::fetch::spool;
     let Some(name) = std::env::var_os("IETS_INPUT_NAME") else {
         return;
     };

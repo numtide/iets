@@ -1,7 +1,13 @@
+use super::ast::Expr;
 use super::ast::FileId;
+use super::ast::Note;
+use super::ast::StrPart;
 use super::dump::dump;
 use super::symbol::Interner;
 use super::{line_col, parse};
+use crate::lint::LintId;
+use crate::lint::allow::bit;
+use serde_json::Value;
 
 fn dump_src(src: &str) -> String {
     let mut interner = Interner::new();
@@ -318,9 +324,6 @@ fn line_col_counts_bytes() {
 
 #[test]
 fn allow_comments() {
-    use super::ast::Note;
-    use crate::lint::LintId;
-    use crate::lint::allow::bit;
     let parse_allows = |src: &str| {
         let mut interner = Interner::new();
         let ast = parse(src.as_bytes(), FileId(0), &mut interner).unwrap();
@@ -373,7 +376,6 @@ fn spans_cover_tokens() {
 
 /// Value of a parsed string whose interpolations are all literal strings.
 fn literal_value(ast: &super::ast::Ast, id: super::ast::ExprId) -> Option<Vec<u8>> {
-    use super::ast::{Expr, StrPart};
     let Expr::Str(parts) = ast.expr(id) else {
         return None;
     };
@@ -541,7 +543,6 @@ fn nul_in_string_literals() {
 
 #[test]
 fn json_gives_every_node_its_kind_and_span() {
-    use serde_json::Value;
     let json_of = |src: &str| {
         let mut interner = Interner::new();
         let ast = parse(src.as_bytes(), FileId(0), &mut interner).unwrap();

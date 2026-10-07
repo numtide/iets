@@ -8,7 +8,21 @@ use crate::cli::{
 };
 use crate::error::Error as CrateError;
 use crate::eval::{Error, Evaluator, Pos};
+use crate::jobs::Line;
+use crate::jobs::cache::Resolver;
+use crate::jobs::collector::Out;
+use crate::jobs::collector::Sink;
+use crate::jobs::collector::run_collector;
+use crate::jobs::collector::run_worker;
+use crate::jobs::collector::write_out;
+use crate::jobs::emit::Emitter;
+use crate::jobs::instantiate::Instantiator;
+use crate::jobs::instantiate::Store;
+use crate::remote::worker::Connection;
 use crate::runtime::Word;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc::channel;
 
 /// nix-eval-jobs's `MyArgs::DEFAULT_MAX_MEMORY_SIZE` (eval-args.hh:18): an
 /// arena without a GC cannot shed a walked subtree, so the default needs
@@ -370,11 +384,6 @@ fn jobs_single(
     transport: &crate::remote::worker::Transport,
     t0: std::time::Instant,
 ) -> i32 {
-    use crate::jobs::cache::Resolver;
-    use crate::jobs::emit::Emitter;
-    use crate::jobs::instantiate::{Instantiator, Store};
-    use std::sync::{Arc, Mutex};
-
     let root = match jobs_root(ev, a, j) {
         Ok(r) => r,
         Err(e) => return report(ev, &e),
@@ -441,10 +450,6 @@ fn jobs_worker(
     j: &JobsArgs,
     transport: &crate::remote::worker::Transport,
 ) -> i32 {
-    use crate::jobs::collector::{Out, run_worker, write_out};
-    use crate::jobs::instantiate::{Instantiator, Store};
-    use std::sync::{Arc, Mutex};
-
     let out: Out = Arc::new(Mutex::new(Box::new(std::io::stdout())));
     let fail = |out: &Out, r: crate::log::Report| -> i32 {
         let (msg, code) = (r.text(), r.emit());
@@ -501,14 +506,6 @@ fn jobs_collector(
     transport: &crate::remote::worker::Transport,
     t0: std::time::Instant,
 ) -> i32 {
-    use crate::jobs::Line;
-    use crate::jobs::cache::Resolver;
-    use crate::jobs::collector::{Sink, run_collector};
-    use crate::jobs::emit::Emitter;
-    use crate::remote::worker::Connection;
-    use std::sync::mpsc::channel;
-    use std::sync::{Arc, Mutex};
-
     let stdout = Box::new(std::io::BufWriter::new(std::io::stdout()));
     let emitter = Arc::new(Mutex::new(Emitter::new(stdout, j.opts.constituents)));
     let (tx, rx) = channel::<Line>();

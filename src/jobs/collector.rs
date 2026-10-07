@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::print::lexicographic_order;
 use crate::runtime::Word;
+use std::os::unix::process::ExitStatusExt;
 
 pub const MSG_NEXT: &str = "next";
 pub const MSG_RESTART: &str = "restart";
@@ -192,7 +193,6 @@ impl Proc {
 
     /// nix-eval-jobs.cc:handleBrokenWorkerPipe: what a dead worker means.
     fn broken(&mut self, what: &str) -> String {
-        use std::os::unix::process::ExitStatusExt;
         match self.child.wait() {
             Ok(st) if st.code() == Some(1) => format!(
                 "while {what}, evaluation worker exited with exit code 1, (possible infinite recursion)"

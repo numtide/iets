@@ -8,6 +8,7 @@ use crate::eval::Evaluator;
 use crate::store::path::StorePath;
 use crate::trace::key::Key;
 use crate::trace::store::{Entry, Opened, Part};
+use crate::trace::wire;
 
 /// The tracing cache for one run: where the entry lives and its key. See docs/explanation/caching.md.
 pub struct Cache {
@@ -143,7 +144,6 @@ impl Cache {
     /// `currentTime` or called a fetcher writes nothing. `tables` adds the
     /// drv and source tables, which only a `build` hit reads back.
     pub fn write(&self, ev: &Evaluator, result: &[u8], tables: bool) {
-        use crate::trace::wire;
         if !ev.trace().is_cacheable() {
             if self.timings {
                 crate::errln!("cache: not written (uncacheable run)");
@@ -222,7 +222,6 @@ impl Cache {
         HashMap<crate::store::path::StorePath, crate::builtins::derivation::DrvInfo>,
         HashMap<crate::store::path::StorePath, crate::store::source::SourceOrigin>,
     )> {
-        use crate::trace::wire;
         let tables = (|| {
             let roots = wire::decode_roots(&self.part(Part::Result)?)?;
             let drvs = wire::decode_drvs(&self.part(Part::Drvs)?)?;

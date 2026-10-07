@@ -11,6 +11,8 @@ use crate::error::{Error, Result};
 use crate::store::drv::Derivation;
 use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::nar::dump_string;
+use crate::store::path::IngestionMethod;
+use crate::store::path::make_fixed_output_path;
 use crate::store::path::{STORE_DIR, StorePath};
 use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
 
@@ -210,7 +212,6 @@ impl Plan {
 /// `AddMultipleToStore` recomputes the NAR hash of a `fixed:r` path and rejects a mismatch,
 /// and `write_object` refuses to send a NAR whose length is not the recorded `nar_size`.
 fn check_source_path(path: &StorePath, kind: &SourceKind, nar_hash: &Hash) -> Result<()> {
-    use crate::store::path::{IngestionMethod, make_fixed_output_path};
     if let SourceKind::Source = kind {
         let expected = make_fixed_output_path(
             IngestionMethod::Recursive,

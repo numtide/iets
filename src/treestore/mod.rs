@@ -45,6 +45,7 @@ use crate::fetch::spool::{self, Blob, Node, Tree};
 use crate::store::hash::Hash;
 use crate::store::nar::{FileType, PathFilter};
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path};
+use std::sync::atomic::Ordering::Relaxed;
 
 /// The store path a tree with this NAR hash has. The one naming site for a
 /// tree the store holds: `fetchTree`, `fetchTarball` and a copied source all
@@ -192,7 +193,6 @@ fn packs() -> Option<Arc<pack::Packs>> {
 /// index and decoding it is the one fixed cost the tree store adds to an
 /// evaluation that `/nix/store` does not pay.
 pub fn report_timings() {
-    use std::sync::atomic::Ordering::Relaxed;
     let s = session();
     let n = s.trees.entries.load(Relaxed);
     if n > 0 {
@@ -234,7 +234,6 @@ fn open(root: &Path, packs: Arc<pack::Packs>, name: &str) -> Option<StoredTree> 
 
 /// The tree named `name`, opened once per run.
 pub fn get(name: &str) -> Option<Arc<StoredTree>> {
-    use std::sync::atomic::Ordering::Relaxed;
     let s = session();
     if let Some(hit) = s.trees.opened.lock().unwrap().get(name) {
         return hit.clone();

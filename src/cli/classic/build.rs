@@ -14,6 +14,7 @@ use crate::eval::Evaluator;
 use crate::provenance::Provenance;
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
+use std::io::Write;
 
 const NAME: &str = "nix-build";
 
@@ -200,7 +201,6 @@ fn realise(
         return e.report();
     }
     keep_outputs(b, &kept);
-    use std::io::Write;
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(out.as_bytes());
     let _ = stdout.flush();

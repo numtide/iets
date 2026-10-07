@@ -3,12 +3,18 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::api::build as apibuild;
 use crate::api::installable::roots_of;
+use crate::api::render::Report;
+use crate::build::Target;
 use crate::build::fixhash::{self, Answer};
+use crate::build::render::Style;
 use crate::cli::help::{arg_error, each_arg};
 use crate::cli::{EvalArgs, Input, Run, build_targets, evaluate, parse_eval_args, report, run_for};
 use crate::error::Error as CrateError;
 use crate::eval::Evaluator;
+use crate::settings::FixHashes;
+use crate::store::path::StorePath;
 use crate::trace::run::Cache;
 
 struct BuildArgs {
@@ -29,7 +35,6 @@ struct BuildArgs {
 /// take a `.drv` path and read its closure from `/nix/store`. A fixed-output
 /// build that fails on its hash gets it fixed per the `fix-hashes` setting.
 pub fn cmd_build(argv: &[String]) -> i32 {
-    use crate::settings::FixHashes;
     let mut ask = match crate::session::Session::current().settings().fix_hashes {
         FixHashes::Never => return build_once(argv),
         FixHashes::Ask if !fixhash::interactive() => return build_once(argv),
@@ -252,7 +257,6 @@ fn build_eval(
 /// Legacy mode: `DRV` is a `.drv` store path, or a copy of the file named
 /// `<hash>-<name>.drv`; its closure is read from `/nix/store`.
 fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
-    use crate::store::path::StorePath;
     let base = std::path::Path::new(root_arg)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -299,10 +303,6 @@ fn build_roots(
     inputs: crate::remote::plan::Inputs<'_>,
     prov: &crate::provenance::Provenance,
 ) -> i32 {
-    use crate::api::build as apibuild;
-    use crate::build::Target;
-    use crate::build::render::Style;
-
     if roots.is_empty() {
         return no_output("nothing to build: the expression has no derivation in it");
     }
@@ -444,7 +444,6 @@ fn print_missing(
     plan: &crate::remote::plan::Plan,
     json: bool,
 ) -> i32 {
-    use crate::api::render::Report;
     let m = crate::api::render::Missing::of(m, plan);
     crate::cli::render::text::missing(&m);
     if json {

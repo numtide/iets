@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use crate::api::build::Root;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::runtime::Ctx;
 use crate::runtime::Word;
 use crate::store::path::StorePath;
 
@@ -270,7 +271,6 @@ pub fn drv_roots(
     v: Word,
     roots: &mut Vec<(StorePath, Option<String>)>,
 ) -> EvalResult<()> {
-    use crate::runtime::Ctx;
     let bad = |msg: String| Error::boxed(ErrorKind::Eval, msg, Pos::NONE);
     let v = ev.force(v)?;
     if let Some(attrs) = v.as_attrs() {

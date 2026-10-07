@@ -17,6 +17,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
+use crate::log::ACT_FILE_TRANSFER;
+use crate::log::Activity;
+use crate::log::LVL_TALKATIVE;
+use crate::log::RES_PROGRESS;
+use http_body_util::BodyExt;
 
 /// filetransfer.cc:CURLOPT_MAXREDIRS.
 const MAX_REDIRECTS: usize = 10;
@@ -390,7 +395,6 @@ fn drain(
     limits: Limits,
     sink: &mut dyn Write,
 ) -> Result<u64> {
-    use crate::log::{ACT_FILE_TRANSFER, Activity, LVL_TALKATIVE, RES_PROGRESS};
     let shown = shown(url);
     // filetransfer.cc:TransferItem::act
     let act = Activity::new(
@@ -437,8 +441,6 @@ async fn stream(
     limits: Limits,
     tx: tokio::sync::mpsc::Sender<std::result::Result<Vec<u8>, String>>,
 ) -> Result<()> {
-    use http_body_util::BodyExt;
-
     let first = Url::parse(url)?;
     let mut sent = headers.to_vec();
     sent.extend(first.basic());

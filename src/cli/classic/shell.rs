@@ -18,13 +18,17 @@ use crate::api::installable;
 use crate::build::backend::Worker;
 use crate::build::upload::{PlanUpload, Uploader};
 use crate::cli::{Outcome, auto_args, cwd, report};
+use crate::compile::ir::ParamIr;
 use crate::devenv::escape_shell_arg_always as esc;
 use crate::error::Error as CrateError;
 use crate::eval::{Error, ErrorKind, Evaluator, Pos};
+use crate::remote::event::Event;
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
+use crate::runtime::Value;
 use crate::store::drv::{Derivation, DerivationOutput};
 use crate::store::path::{STORE_DIR, StorePath, hash_placeholder};
+use serde_json::Value as Json;
 
 const NAME: &str = "nix-shell";
 
@@ -319,8 +323,6 @@ fn bash(ev: &mut Evaluator, cwd: &[u8]) -> Bash {
 /// nix-build.cc:takesNixShellAttr: a function with an `inNixShell` formal gets
 /// it passed as `true`.
 fn takes_in_nix_shell(ev: &Evaluator, w: crate::runtime::Word) -> bool {
-    use crate::compile::ir::ParamIr;
-    use crate::runtime::Value;
     let Value::Lambda(l) = w.view() else {
         return false;
     };
@@ -350,7 +352,6 @@ fn realise(s: &Shell, transport: &Transport, options: &Options, r: Ready, cores:
     let quiet = s.c.quiet;
     let failed = std::cell::Cell::new(false);
     let mut on_event = |e: crate::remote::event::Event| {
-        use crate::remote::event::Event;
         match e {
             // under internal-json a line of a build is already its result record
             Event::Log(l) if !quiet && (l.drv_path.is_empty() || !crate::log::json()) => {
@@ -548,7 +549,7 @@ fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> crate::error::R
         structured_rc = write_shell(&json);
         let sh = tmp_dir.join(".attrs.sh");
         let js = tmp_dir.join(".attrs.json");
-        write(&js, serde_json::Value::Object(json).to_string())?;
+        write(&js, Json::Object(json).to_string())?;
         write(&sh, &structured_rc)?;
         env.insert("NIX_ATTRS_SH_FILE".into(), sh.into_os_string());
         env.insert("NIX_ATTRS_JSON_FILE".into(), js.into_os_string());
@@ -631,12 +632,12 @@ fn rc_script(s: &Shell, shell: &str, tmp: &str, structured_rc: &str) -> String {
 fn prepare_structured_attrs(
     sa: &str,
     outputs: &BTreeMap<String, DerivationOutput>,
-) -> crate::error::Result<serde_json::Map<String, serde_json::Value>> {
-    let mut json: serde_json::Map<String, serde_json::Value> = serde_json::from_str(sa)
+) -> crate::error::Result<serde_json::Map<String, Json>> {
+    let mut json: serde_json::Map<String, Json> = serde_json::from_str(sa)
         .map_err(|e| CrateError::Store(format!("structured attrs are not valid JSON: {e}")))?;
     let exports = match json.get("exportReferencesGraph") {
-        None | Some(serde_json::Value::Null) => false,
-        Some(serde_json::Value::Object(o)) => !o.is_empty(),
+        None | Some(Json::Null) => false,
+        Some(Json::Object(o)) => !o.is_empty(),
         Some(_) => true,
     };
     if exports {
@@ -646,10 +647,10 @@ fn prepare_structured_attrs(
     }
     json.insert(
         "outputs".into(),
-        serde_json::Value::Object(
+        Json::Object(
             outputs
                 .keys()
-                .map(|n| (n.clone(), serde_json::Value::String(hash_placeholder(n))))
+                .map(|n| (n.clone(), Json::String(hash_placeholder(n))))
                 .collect(),
         ),
     );
@@ -658,7 +659,7 @@ fn prepare_structured_attrs(
 
 /// parsed-derivations.cc:StructuredAttrs::writeShell: the `declare` lines for
 /// every attribute whose value bash can hold.
-fn write_shell(json: &serde_json::Map<String, serde_json::Value>) -> String {
+fn write_shell(json: &serde_json::Map<String, Json>) -> String {
     let mut out = String::new();
     for (key, value) in json {
         if !is_sh_var_name(key) {
@@ -703,17 +704,16 @@ fn is_sh_var_name(s: &str) -> bool {
 }
 
 /// `handleSimpleType`: a string, an integral number, `null` or a bool.
-fn simple_type(v: &serde_json::Value) -> Option<String> {
-    use serde_json::Value;
+fn simple_type(v: &Json) -> Option<String> {
     match v {
-        Value::String(s) => Some(esc(s)),
-        Value::Number(n) => {
+        Json::String(s) => Some(esc(s)),
+        Json::Number(n) => {
             let f = n.as_f64()? as f32;
             let i = n.as_f64()? as i32;
             (f.ceil() == f).then(|| i.to_string())
         }
-        Value::Null => Some("''".into()),
-        Value::Bool(b) => Some(if *b { "1" } else { "" }.into()),
+        Json::Null => Some("''".into()),
+        Json::Bool(b) => Some(if *b { "1" } else { "" }.into()),
         _ => None,
     }
 }
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn declares_for_every_bash_shaped_value() {
-        let json: serde_json::Value = serde_json::from_str(
+        let json: Json = serde_json::from_str(
             r#"{"name":"x","doCheck":true,"off":false,"n":3,"f":1.5,"nil":null,
                 "l":["a","b"],"bad":[{"x":1}],"m":{"k":"v"},"not a name":1,
                 "deep":{"k":[1]}}"#,

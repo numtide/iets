@@ -4,7 +4,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use crate::error::Error as CrateError;
+use crate::store::path::STORE_DIR;
 use crate::store::path::StorePath;
+use crate::store::source::SourceKind;
+use crate::store::source::SourceOrigin;
+use crate::store::source::SrcPath;
 
 /// What the store answered for a path, kept for the life of the process: the
 /// references of a valid store path never change.
@@ -57,9 +61,6 @@ pub fn locate_in_store(
     paths: &[crate::store::path::StorePath],
     overrides: &HashMap<String, std::path::PathBuf>,
 ) -> crate::error::Result<Vec<Option<crate::store::source::SourceOrigin>>> {
-    use crate::store::path::{STORE_DIR, StorePath};
-    use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
-
     let ask: Vec<String> = paths
         .iter()
         .map(|p| p.to_string())

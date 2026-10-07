@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use crate::eval::Evaluator;
 use crate::store::hash::{Hash, HashFormat};
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 
 /// One rewrite: `old` becomes `new` at byte `at` of `file`, which is
 /// `line:column`.
@@ -27,7 +29,6 @@ impl Fix {
     /// A temporary file beside the original, renamed over it: a crash or a
     /// full disk must never leave a source file of the user cut in half.
     pub fn write(&self) -> Result<(), String> {
-        use std::io::Write;
         let err = |e: std::io::Error| format!("{}: {e}", self.file.display());
         let mut text = std::fs::read(&self.file).map_err(err)?;
         if text.get(self.at..self.at + self.old.len()) != Some(self.old.as_bytes()) {
@@ -97,7 +98,6 @@ pub fn prompt(fix: &Fix) -> Answer {
 /// The files `ev` parsed, each copied store path mapped back to its local
 /// file; the rest of the store is left out, so nixpkgs is never edited.
 pub fn local_files(ev: &Evaluator) -> Vec<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
     let map = crate::provenance::SourceMap::from_eval(ev);
     let mut out: Vec<PathBuf> = (0..)
         .map_while(|i| ev.files.get(i))

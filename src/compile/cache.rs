@@ -20,6 +20,8 @@ use super::ir::{
 use crate::eval::{Evaluator, Pos};
 use crate::runtime::{Kind, Word};
 use crate::syntax::symbol::{FxHashMap, Sym};
+use std::io::Read;
+use std::sync::atomic::Ordering;
 
 const MAGIC: &[u8; 8] = b"IETS_IR2";
 
@@ -106,7 +108,6 @@ impl IrCache {
     /// integrity check is verified before the caller decodes anything, and an
     /// entry that fails it is poisoned like one that does not decode.
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
-        use std::io::Read;
         let (f, md) = crate::cachefs::open_entry(&self.entry(key))?;
         let mut bytes = Vec::with_capacity(md.len() as usize + 1);
         let mut r = &f;
@@ -137,7 +138,6 @@ impl IrCache {
     /// Skips the write when a sibling process holds the store lock: the file
     /// is compiled again next run, which is cheaper than waiting here.
     pub fn write(&self, key: &str, bytes: &[u8]) {
-        use std::sync::atomic::Ordering;
         let path = self.entry(key);
         let dir = path.parent().expect("entry has a parent");
         let _ = crate::cachefs::create_dir(dir);

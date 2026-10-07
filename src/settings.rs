@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
+use toml::Value;
 
 /// Keys a settings file may set. Nothing else: the file is ours, so a name
 /// that is not here is a mistake, not a setting for someone else.
@@ -264,7 +265,7 @@ impl Settings {
     fn from_conf(c: &Conf, env: &Env) -> Result<Settings> {
         let source_map: Vec<(String, String)> = c
             .get("source-map", "a list of \"STOREPATH=LOCALDIR\"", |v| {
-                let pair = |e: &toml::Value| {
+                let pair = |e: &Value| {
                     let (store, local) = e.as_str()?.split_once('=')?;
                     Some((store.to_string(), local.to_string()))
                 };
@@ -379,14 +380,14 @@ impl Default for Settings {
 /// needs no quotes. Bare text for `source-map` is a whitespace-separated list.
 /// `builder` in each of its three forms: one URL, several URLs, or several
 /// tables that also carry the constraints.
-fn read_builders(v: &toml::Value) -> Option<Vec<BuilderSpec>> {
+fn read_builders(v: &Value) -> Option<Vec<BuilderSpec>> {
     if let Some(url) = v.as_str() {
         return Some(split_urls(url));
     }
     v.as_array()?.iter().map(read_builder).collect()
 }
 
-fn read_builder(v: &toml::Value) -> Option<BuilderSpec> {
+fn read_builder(v: &Value) -> Option<BuilderSpec> {
     if let Some(url) = v.as_str() {
         return Some(BuilderSpec::bare(url));
     }
@@ -419,15 +420,17 @@ fn split_urls(spec: &str) -> Vec<BuilderSpec> {
         .collect()
 }
 
-fn flag_value(name: &str, value: &str) -> toml::Value {
-    use toml::Value::{Array, Boolean, Integer, String};
+fn flag_value(name: &str, value: &str) -> Value {
     let table = format!("v = {value}").parse::<toml::Table>();
     match table.ok().and_then(|mut t| t.remove("v")) {
-        Some(v @ (Boolean(_) | Integer(_) | String(_) | Array(_))) => v,
-        _ if name == "source-map" => {
-            Array(value.split_whitespace().map(|e| String(e.into())).collect())
-        }
-        _ => String(value.into()),
+        Some(v @ (Value::Boolean(_) | Value::Integer(_) | Value::String(_) | Value::Array(_))) => v,
+        _ if name == "source-map" => Value::Array(
+            value
+                .split_whitespace()
+                .map(|e| Value::String(e.into()))
+                .collect(),
+        ),
+        _ => Value::String(value.into()),
     }
 }
 
@@ -436,7 +439,7 @@ fn flag_value(name: &str, value: &str) -> toml::Value {
 /// `source-map`, whose entries add up.
 #[derive(Debug, Default)]
 struct Conf {
-    at: BTreeMap<String, (toml::Value, String)>,
+    at: BTreeMap<String, (Value, String)>,
 }
 
 impl Conf {
@@ -452,7 +455,7 @@ impl Conf {
 
     /// `file` is a settings file, where a `[lint]` table is `lint::Config`'s
     /// to read.
-    fn set(&mut self, name: &str, value: toml::Value, at: &str, file: bool) -> Result<()> {
+    fn set(&mut self, name: &str, value: Value, at: &str, file: bool) -> Result<()> {
         if name == "lint" && file {
             return Ok(());
         }
@@ -463,12 +466,10 @@ impl Conf {
         }
         let mut at = at.to_string();
         let value = match (self.at.remove(name), value) {
-            (Some((toml::Value::Array(mut old), before)), toml::Value::Array(new))
-                if name == "source-map" =>
-            {
+            (Some((Value::Array(mut old), before)), Value::Array(new)) if name == "source-map" => {
                 old.extend(new);
                 at = format!("{before} and {at}");
-                toml::Value::Array(old)
+                Value::Array(old)
             }
             (_, value) => value,
         };
@@ -480,7 +481,7 @@ impl Conf {
         &self,
         name: &str,
         want: &str,
-        read: impl Fn(&toml::Value) -> Option<T>,
+        read: impl Fn(&Value) -> Option<T>,
     ) -> Result<Option<T>> {
         let Some((v, at)) = self.at.get(name) else {
             return Ok(None);
@@ -493,7 +494,7 @@ impl Conf {
     }
 
     fn bool(&self, name: &str) -> Result<Option<bool>> {
-        self.get(name, "true or false", toml::Value::as_bool)
+        self.get(name, "true or false", Value::as_bool)
     }
 
     fn int<T: TryFrom<i64>>(&self, name: &str) -> Result<Option<T>> {
@@ -798,7 +799,6 @@ mod tests {
 
     #[test]
     fn the_flag_value_is_toml_when_it_reads_as_toml() {
-        use toml::Value;
         assert_eq!(flag_value("workers", "4"), Value::Integer(4));
         assert_eq!(flag_value("cache", "false"), Value::Boolean(false));
         assert_eq!(

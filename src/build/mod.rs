@@ -37,6 +37,10 @@ use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
 use crate::store::path::StorePath;
 
+use crate::store::drv::Derivation;
+use crate::store::drv::DerivationOutput;
+use crate::store::hash::Hash;
+use crate::store::hash::HashFormat;
 use backend::Backend;
 use event::{BuildEvent, Kind};
 use render::{Renderer, Style};
@@ -534,8 +538,6 @@ fn event_sink<'a>(
 /// holds the hash in base 16, so the scan is over bytes and only a derivation
 /// that could match is parsed.
 fn has_output_hash(d: &backend::Drv, specified: &str) -> bool {
-    use crate::store::drv::{Derivation, DerivationOutput};
-    use crate::store::hash::{Hash, HashFormat};
     let Ok(want) = Hash::parse_any(specified, None) else {
         return false;
     };
@@ -568,6 +570,8 @@ fn strip_hash(drv_path: &str) -> &str {
 mod tests {
     use super::render::tests::Sink;
     use super::*;
+    use crate::remote::event::Log;
+    use crate::remote::event::Started;
 
     pub(super) fn drv(name: &str) -> StorePath {
         StorePath::parse(&format!(
@@ -630,7 +634,6 @@ mod tests {
             batch: &backend::Batch<'_>,
             on_event: &mut dyn FnMut(Event),
         ) -> Result<HashMap<String, backend::Status>> {
-            use crate::remote::event::{Log, Started};
             let live = std::sync::atomic::AtomicUsize::new(0);
             let over = self.peak.clone();
             let limit = self.limit;

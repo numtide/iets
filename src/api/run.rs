@@ -10,6 +10,7 @@ use crate::trace::run::Cache;
 
 use super::EvalArgs;
 use super::build::Plan;
+use crate::error::Error;
 
 /// What one run produced: what the caller asked for, an error that was
 /// reported and its exit code, or something this frontend does not serve,
@@ -137,7 +138,6 @@ impl Run {
         self,
         f: impl FnOnce(&mut Evaluator, Option<Cache>) -> crate::error::Result<T> + Send + 'static,
     ) -> Result<Outcome<T>, StackError> {
-        use crate::error::Error;
         self.go(move |ev, cache| match f(ev, cache) {
             Ok(t) => Outcome::Ok(t),
             Err(Error::Unsupported(m)) => Outcome::Unsupported(m),

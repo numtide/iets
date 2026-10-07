@@ -7,6 +7,8 @@
 use super::{Level, LintId, Where};
 use crate::eval::{EvalResult, Evaluator, Pos};
 use crate::runtime::{Cell, Ctx, Kind, Taint, Value, Word};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 
 /// The message for a reference to the global `name`, when it is `currentTime`.
 pub fn current_time(name: &[u8]) -> Option<String> {
@@ -106,7 +108,6 @@ pub fn dir_copy_unfiltered(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalRes
 /// The nearest project root at or above `path` (`crate::project`). Every
 /// probe is a `Stat` observation, so a new marker is a cache miss.
 fn project_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let dir = crate::compile::canon_path(path);
     let at = std::path::Path::new(std::ffi::OsStr::from_bytes(&dir));
     let root = crate::project::find_with(at, |m| {

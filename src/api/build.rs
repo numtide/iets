@@ -25,6 +25,7 @@ use crate::store::source::SourceOrigin;
 pub use crate::build::render::Style;
 pub use crate::remote::plan::Plan;
 pub use crate::remote::worker::{Options, Transport};
+use crate::store::drv::Derivation;
 
 /// One derivation and one of its outputs a command asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,7 +81,6 @@ pub fn plan_with(
 /// One derivation read back from its ATerm text, as the table [`plan_with`]
 /// takes: a `.drv` file, or an entry of a `--dump-drvs` directory.
 pub fn drv_info(path: &StorePath, text: Vec<u8>) -> Result<DrvInfo> {
-    use crate::store::drv::Derivation;
     let drv = Derivation::parse(&text, Derivation::name_from_path(path)?)?;
     let mut references = drv.input_srcs;
     references.extend(drv.input_drvs.into_keys());

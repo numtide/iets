@@ -6,6 +6,8 @@ use crate::api::installable::drv_roots;
 use crate::cli::help::{arg_error, each_arg, unknown_flag};
 use crate::cli::{EvalArgs, EvalFlags, Input, Run, eval_flag, evaluate, report};
 use crate::error::{Error, Result};
+use crate::remote::worker::Connection;
+use crate::remote::worker::Transport;
 use crate::store::drv::{Derivation, DrvError, load_derivation_from_store};
 use crate::store::path::StorePath;
 
@@ -185,7 +187,6 @@ fn closure_diff(
     a: &StorePath,
     b: &StorePath,
 ) -> Result<i32> {
-    use crate::remote::worker::{Connection, Transport};
     // the closure is read where the outputs are, so this is the local daemon
     // and not the `builder` setting
     let url = o.builder.as_deref().unwrap_or("daemon");

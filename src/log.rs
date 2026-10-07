@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::{Value, json};
 
 use crate::session::Session;
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Where one session's messages go and what it saw on the way.
 #[derive(Default)]
@@ -283,7 +285,6 @@ impl Log {
 }
 
 pub(crate) fn open_sink(path: &std::path::Path) -> std::io::Result<Box<dyn Write + Send>> {
-    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
     if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
         return Ok(Box::new(std::os::unix::net::UnixStream::connect(path)?));
     }

@@ -230,8 +230,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::api::render::Report;
     use crate::cli::render::Text;
     use crate::store::drv::Derivation;
+    use crate::store::hash::HashAlgo;
+    use crate::store::hash::hash_bytes;
+    use crate::store::path::IngestionMethod;
 
     /// The loader a test uses: the derivations it made, by path.
     #[derive(Default)]
@@ -375,8 +379,6 @@ mod tests {
 
     #[test]
     fn an_input_source_an_added_input_drv_and_a_fixed_output_show_up() {
-        use crate::store::hash::{HashAlgo, hash_bytes};
-        use crate::store::path::IngestionMethod;
         let mut s = Store::default();
         let dep = s.add(drv("dep", &[], &[]));
         let (mut a, mut b) = (drv("top", &[], &[]), drv("top", &[], &[]));
@@ -407,7 +409,6 @@ mod tests {
 
     #[test]
     fn json_names_what_differs() {
-        use crate::api::render::Report;
         let mut s = Store::default();
         let a = s.add(drv("foo", &[], &[("x", "1")]));
         let b = s.add(drv("foo", &[], &[("x", "2")]));

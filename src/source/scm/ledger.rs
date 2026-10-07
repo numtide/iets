@@ -87,10 +87,13 @@ impl Scm for Ledger {
 
 mod tests {
     use super::*;
+    use crate::builtins::store_hooks::open;
     use crate::eval::{EvalConfig, Evaluator, Pos};
     use crate::flake::{fetch::emit_tree_attrs, parse_flake_ref};
     use crate::runtime::{Ctx, Taint, Word};
+    use crate::source::scm::{count_key, rev_count};
     use crate::source::{AttrVal, Attrs, SourceRef, Tree, tree};
+    use crate::trace::validate::validate;
 
     const FLAKE: &str = "{ outputs = _: { }; }\n";
 
@@ -220,7 +223,6 @@ mod tests {
     /// shows where the answer comes from.
     #[test]
     fn the_count_is_lazy_and_kept_by_revision() {
-        use crate::source::scm::{count_key, rev_count};
         let (root, _) = fixture("count");
         fs::write(root.join(".ledger/head"), "x12 1700000000\n").unwrap();
         let store = crate::trace::store::Store::locate(root.parent().unwrap().to_str()).unwrap();
@@ -253,7 +255,6 @@ mod tests {
 
     #[test]
     fn an_untracked_file_is_the_error_of_nix() {
-        use crate::builtins::store_hooks::open;
         let (root, _) = fixture("untracked");
         let mut ev = Evaluator::new();
         let store = read_tree(&mut ev, &root).path.to_full_string();
@@ -272,7 +273,6 @@ mod tests {
 
     #[test]
     fn a_change_of_the_ledger_is_a_change_of_the_working_tree() {
-        use crate::trace::validate::validate;
         let (root, _) = fixture("trace");
         let mut ev = EvalConfig::new().trace(true).build();
         read_tree(&mut ev, &root);

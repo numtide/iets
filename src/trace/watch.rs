@@ -3,6 +3,8 @@
 //! Selected for a watcher that compares modification times, which is all a
 //! file watcher has. A consumer that can do better picks by `kind`.
 
+use super::Obs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// A watcher stats every path it holds, and a caller that writes them into
@@ -26,8 +28,6 @@ pub struct Watched {
 /// edit changes and few shells depend on: only what the run read out of it
 /// is watched. Environment variables and resolved links have no file.
 pub fn watched(obs: &[super::Obs], skip: &[&Path]) -> Vec<Watched> {
-    use super::Obs;
-    use std::os::unix::ffi::OsStrExt;
     let kept = |b: &[u8]| {
         let p = PathBuf::from(std::ffi::OsStr::from_bytes(b));
         (!skip.iter().any(|s| p.starts_with(s))).then_some(p)
@@ -102,10 +102,10 @@ fn members(p: &Path, filtered: Option<&super::Filtered>, out: &mut Vec<(PathBuf,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::Filtered;
 
     #[test]
     fn only_the_paths_an_mtime_can_speak_for() {
-        use crate::trace::{Filtered, Obs};
         let d = std::env::temp_dir().join(format!("iets-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         for sub in [".git", "src/keep", "src/drop"] {

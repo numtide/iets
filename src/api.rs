@@ -14,9 +14,15 @@ pub mod value;
 pub mod watch;
 
 use crate::eval::{Error, EvalConfig, Evaluator, Pos};
+use crate::provenance::describe_pos;
+use crate::provenance::rewrite_msg;
 use crate::runtime::Word;
 use crate::store::path::StorePath;
+use crate::trace::key::Key;
+use crate::trace::key::has_relative_path;
 use crate::trace::run::Cache;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 
 /// Everything one evaluation needs. `EvalArgs::new()` holds the defaults;
 /// `crate::cli::parse_eval_args` fills it from a command line.
@@ -158,7 +164,6 @@ pub fn flake_ref(f: &str, cwd: &[u8]) -> crate::error::Result<flake::FlakeRef> {
 /// the store paths inside the messages name the local file the source was
 /// copied from, when one is known (docs/explanation/provenance.md).
 pub fn report_of(ev: &Evaluator, e: &Error) -> crate::log::Report {
-    use crate::provenance::{describe_pos, rewrite_msg};
     let at = |pos: Pos| describe_pos(ev, pos).unwrap_or_else(|| ev.describe_pos(pos));
     ev.lints.flush();
     // a lint message resolves its own paths (lint::Evaluator::lint_shown_path)
@@ -184,7 +189,6 @@ pub fn report(ev: &Evaluator, e: &Error) -> i32 {
 /// The directory the `iets.toml` walk starts from: the entry file's
 /// directory, the flake directory, or cwd for an expression.
 pub fn entry_dir(a: &EvalArgs) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
     let cwd = cwd();
     let bytes = match &a.input {
         Some(Input::File(f)) => crate::eval::dir_of(&abs_path(f, &cwd)).to_vec(),
@@ -208,7 +212,6 @@ pub fn entry_dir(a: &EvalArgs) -> std::path::PathBuf {
 /// root would let an evaluation read an untracked file by its absolute path
 /// (docs/explanation/flakes-and-sources.md).
 pub fn project_root(a: &EvalArgs) -> Option<Vec<u8>> {
-    use std::os::unix::ffi::OsStringExt;
     if matches!(a.input, Some(Input::Flake(_))) {
         return None;
     }
@@ -307,7 +310,6 @@ pub fn cwd() -> Vec<u8> {
 
 /// [`abs_path`] as a path.
 pub fn abs_pathbuf(f: &str, cwd: &[u8]) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
     std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&abs_path(f, cwd)))
 }
 
@@ -377,7 +379,6 @@ pub fn setup_cache_more(
     cfg: &EvalConfig,
     more: &[String],
 ) -> Option<Cache> {
-    use crate::trace::key::{Key, has_relative_path};
     if a.no_tracing_cache || a.dump_drvs.is_some() {
         return None;
     }

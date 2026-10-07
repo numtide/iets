@@ -15,6 +15,9 @@ use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::force::{T_ATTRS_WHNF, fanout};
 use crate::runtime::{AttrsObj, Value, Word};
 use crate::trace::run::Cache;
+use ErrorKind as K;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 
 const NAME: &str = "nix";
 const BOLD: &[u8] = b"\x1b[0;1m";
@@ -323,7 +326,6 @@ fn visit(
 
 /// eval-error.hh: the errors `catch (EvalError &)` in search.cc swallows.
 fn swallowed(e: &Error) -> bool {
-    use ErrorKind as K;
     matches!(
         e.kind,
         K::Eval
@@ -433,7 +435,6 @@ fn show(path: &[Vec<u8>]) -> String {
 
 /// The file `import` would read: a directory resolves to its `default.nix`.
 fn entry_file(p: Vec<u8>) -> String {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let mut p = p;
     if std::path::Path::new(std::ffi::OsStr::from_bytes(&p)).is_dir() {
         p.extend_from_slice(b"/default.nix");

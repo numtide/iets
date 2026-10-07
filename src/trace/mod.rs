@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::store::hash::HashAlgo;
+use crate::store::nar::FileType as F;
 use sha2::{Digest, Sha256};
 
 pub type Digest32 = [u8; 32];
@@ -784,7 +786,6 @@ pub fn tree_rehash(
     root: &Path,
     accepted: Option<&HashSet<PathBuf>>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
-    use crate::store::hash::HashAlgo;
     let mut fp = TreeFp::new(root).ok_or_else(|| io::Error::other("tree is gone"))?;
     let mut filter = |p: &Path, t: crate::store::nar::FileType| -> bool {
         let keep = accepts(accepted, p);
@@ -800,7 +801,6 @@ pub fn tree_rehash(
 }
 
 fn nar_kind(t: crate::store::nar::FileType) -> Kind {
-    use crate::store::nar::FileType as F;
     match t {
         F::Regular => Kind::Regular,
         F::Directory => Kind::Directory,

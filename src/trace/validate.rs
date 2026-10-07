@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use super::{DirBuf, Kind, Obs, dir_hash, mtime_ns, stat_kind};
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
+use crate::store::hash::HashAlgo;
+use crate::store::hash::Hasher;
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -70,7 +72,6 @@ fn kind_name(k: Kind) -> &'static str {
 /// sha256 of a file's bytes without holding them: a rehash pass over a big `nixpkgs` file
 /// would otherwise allocate the whole file to read it once.
 fn file_sha256(p: &Path) -> std::io::Result<super::Digest32> {
-    use crate::store::hash::{HashAlgo, Hasher};
     let mut h = Hasher::new(HashAlgo::Sha256);
     std::io::copy(&mut fs::File::open(p)?, &mut h)?;
     Ok(super::hash_to_digest(&h.finish()))

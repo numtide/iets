@@ -10,6 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::cachefs;
+use std::io::Read;
 
 /// The one file of an entry directory.
 pub const ENTRY: &str = "entry";
@@ -65,7 +66,6 @@ impl Entry {
     /// decode. The check covers the key, so an entry copied from another one
     /// is not an entry here either.
     fn parse(file: fs::File, len: u64, key: &str) -> Option<Entry> {
-        use std::io::Read;
         let mut data = Vec::with_capacity(len as usize + 1);
         (&file).read_to_end(&mut data).ok()?;
         if data.len() < HEADER || data[0] != VERSION {

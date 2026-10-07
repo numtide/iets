@@ -4,11 +4,32 @@ use std::sync::Arc;
 
 use crate::api::installable;
 use crate::api::installable::drv_roots;
+use crate::build::backend::Backend;
+use crate::build::backend::Batch;
+use crate::build::backend::Job;
+use crate::build::backend::Worker;
+use crate::build::upload::PlanUpload;
+use crate::build::upload::Uploader;
+use crate::builtins::derivation::DrvInfo;
+use crate::builtins::derivation::load_drv_traced;
 use crate::cli::help::{arg_error, each_arg};
 use crate::cli::{EvalArgs, Input, Run, abs_path, cwd, evaluate, parse_eval_args, report, run_for};
+use crate::devenv;
 use crate::error::Error as CrateError;
+use crate::eval::ErrorKind;
 use crate::eval::{Error, Evaluator, Pos};
+use crate::remote::event::Event;
+use crate::remote::worker::Connection;
+use crate::remote::worker::Transport;
+use crate::remote::worker::failed_event;
+use crate::store::drv::Derivation;
+use crate::store::path::STORE_DIR;
+use crate::store::path::StorePath;
+use crate::store::source::SourceOrigin;
 use crate::trace::run::Cache;
+use std::collections::BTreeSet;
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 
 struct DevEnvArgs {
     transport: crate::remote::worker::Transport,
@@ -65,7 +86,6 @@ impl GcRoot {
 /// (`docs/explanation/caching.md`). `NIX_GCROOT` is not this root: that one
 /// holds the closure only while the shell runs, which is what nix does with it.
 pub fn flake_shell_root(f: &str, transport: &crate::remote::worker::Transport) -> GcRoot {
-    use std::os::unix::ffi::OsStrExt;
     let Ok(fr) = crate::api::flake_ref(f, &cwd()) else {
         return GcRoot::None;
     };
@@ -170,7 +190,6 @@ struct EventSink {
 
 impl EventSink {
     fn event(&mut self, e: crate::remote::event::Event) {
-        use crate::remote::event::Event;
         match e {
             Event::Log(l) => {
                 let line = self.prov.rewrite_str(&String::from_utf8_lossy(&l.line));
@@ -289,7 +308,6 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
         let hit = crate::devenv::CachedResult::decode(&bytes)?;
         match dev_env_hit(&d, &hit) {
             Ok(true) => {
-                use std::io::Write;
                 c.replay_warnings();
                 let _ = std::io::stdout().write_all(&hit.bytes);
                 let _ = std::io::stdout().flush();
@@ -316,7 +334,6 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
 /// A cache hit is usable when the env output (and the files the script names) still exist;
 /// the GC root is refreshed when it does not point at the output.
 fn dev_env_hit(d: &DevEnvArgs, hit: &crate::devenv::CachedResult) -> crate::error::Result<bool> {
-    use crate::remote::worker::{Connection, Transport};
     let present = match &d.transport {
         Transport::Unix(_) => std::path::Path::new(&hit.out_path).exists(),
         Transport::Ssh { .. } | Transport::Grpc(_) => {
@@ -341,8 +358,6 @@ pub(crate) fn ensure_gc_root(
     out_path: &str,
     conn: Option<&mut crate::remote::worker::Connection>,
 ) -> crate::error::Result<()> {
-    use crate::remote::worker::Connection;
-    use crate::store::path::STORE_DIR;
     if std::fs::read_link(root).ok().as_deref() == Some(std::path::Path::new(out_path)) {
         return Ok(());
     }
@@ -502,7 +517,6 @@ fn dev_env_full(
     })();
     match r {
         Ok(out) => {
-            use std::io::Write;
             let _ = std::io::stdout().write_all(&out);
             let _ = std::io::stdout().flush();
             if timings {
@@ -517,17 +531,6 @@ fn dev_env_full(
 /// Evaluates the shell, derives and builds its `-env` derivation through the daemon and
 /// reads the environment back. The error is already reported; `Err` is the exit code.
 fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevEnv, i32> {
-    use crate::build::backend::{Backend, Batch, Job, Worker};
-    use crate::build::upload::{PlanUpload, Uploader};
-    use crate::builtins::derivation::{DrvInfo, load_drv_traced};
-    use crate::devenv;
-    use crate::eval::ErrorKind;
-    use crate::remote::worker::failed_event;
-    use crate::store::drv::Derivation;
-    use crate::store::path::StorePath;
-    use crate::store::source::SourceOrigin;
-    use std::collections::BTreeSet;
-
     let t0 = std::time::Instant::now();
     let timings = a.timings;
     let f = match &a.input {
@@ -684,8 +687,6 @@ fn read_env_output(
     out_paths: &[String],
     sink: &mut EventSink,
 ) -> crate::error::Result<(String, Vec<u8>)> {
-    use crate::remote::worker::Transport;
-    use crate::store::path::StorePath;
     for p in out_paths {
         let bytes = match transport {
             Transport::Unix(_) => {

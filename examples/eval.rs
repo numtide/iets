@@ -6,6 +6,7 @@
 
 use iets::api::{self, EvalArgs, Input};
 use iets::eval::Pos;
+use std::io::Write;
 
 fn main() -> std::process::ExitCode {
     // a frontend owns the run state and says where messages go
@@ -55,7 +56,6 @@ fn main() -> std::process::ExitCode {
         match iets::print::print_json(ev, v, &mut out, &mut ctx, true, Pos::NONE) {
             Ok(()) => {
                 out.push(b'\n');
-                use std::io::Write;
                 std::io::stdout().write_all(&out).expect("write stdout");
                 0
             }

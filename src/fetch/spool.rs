@@ -32,6 +32,7 @@ use crate::error::{Error, Result};
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar::{FileType, NAR_MAX_DEPTH, PathFilter, TreeWriter};
 use crate::treestore::pack::{Id, Packs};
+use std::os::unix::fs::OpenOptionsExt;
 
 /// One directory's entries, in the byte order a NAR wants them. A sorted vector,
 /// not a map: a full nixpkgs holds 38 000 directories of two or three entries
@@ -142,7 +143,6 @@ fn show(parts: &[Vec<u8>]) -> String {
 /// the open is exclusive, so a name another user can guess cannot make this
 /// truncate and write a file of theirs.
 pub fn scratch(tag: &str) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = std::env::temp_dir();
     let mut last = None;
     for _ in 0..8 {

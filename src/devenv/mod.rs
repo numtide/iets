@@ -14,6 +14,8 @@ use crate::store::drv::{
 };
 use crate::store::hash::{HashAlgo, hash_bytes};
 use crate::store::path::{StorePath, make_text_path};
+use serde_json::Map;
+use serde_json::Value as J;
 
 /// src/nix/get-env.sh, verbatim: the builder script of the `-env` derivation. Nix embeds
 /// the file through `get-env.sh.gen.hh`, a raw string literal whose opening delimiter is
@@ -206,7 +208,6 @@ impl BuildEnvironment {
 
     /// BuildEnvironment::toJSON. Keys sort bytewise, as nlohmann's `std::map` does.
     pub fn to_json(&self) -> serde_json::Value {
-        use serde_json::{Map, Value as J};
         let mut vars = Map::new();
         for (name, value) in &self.vars {
             let mut info = Map::new();

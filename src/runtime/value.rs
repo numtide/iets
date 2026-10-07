@@ -10,6 +10,9 @@ use super::word::{
 use crate::compile::ir::{Ir, LambdaIr};
 use crate::eval::Pos;
 use crate::syntax::symbol::Sym;
+#[cfg(feature = "stats2")]
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -381,7 +384,6 @@ impl ThunkObj {
 #[cfg(feature = "stats2")]
 #[inline]
 fn mark_byte(p: *const u8, f: impl Fn(u8) -> u8) {
-    use std::sync::atomic::{AtomicU8, Ordering};
     // SAFETY: `p` is a flags byte inside a live arena object, viewed as an
     // atomic byte.
     let a = unsafe { &*(p as *const AtomicU8) };
@@ -428,7 +430,7 @@ impl AttrsObj {
 
     #[inline]
     fn len_raw(&self) -> u32 {
-        self.len.load(std::sync::atomic::Ordering::Relaxed)
+        self.len.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -473,8 +475,7 @@ impl AttrsObj {
             return n as usize;
         }
         let n = self.iter().count();
-        self.len
-            .store(n as u32, std::sync::atomic::Ordering::Relaxed);
+        self.len.store(n as u32, Ordering::Relaxed);
         n
     }
 
@@ -690,7 +691,7 @@ impl EnvObj {
         // atomic; the low bits are free (8-byte aligned) and masked by `up()`.
         unsafe {
             let a = &*(&self.up as *const *const EnvObj as *const std::sync::atomic::AtomicUsize);
-            a.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+            a.fetch_or(bit, Ordering::Relaxed);
         }
     }
 }
@@ -1218,13 +1219,12 @@ impl Arena {
             out.init_from(n, e);
             n += 1;
         }
-        out.len
-            .store(n as u32, std::sync::atomic::Ordering::Relaxed);
+        out.len.store(n as u32, Ordering::Relaxed);
         // SAFETY: nothing was allocated since `out`, and `out` never had
         // more than `n` of its `cap` entries written.
         unsafe { self.shrink_last((cap - n) * size_of::<Attr>(), Stat::AttrsUpd) };
         let out: &'static AttrsObj = out;
-        a.len.store(n as u32, std::sync::atomic::Ordering::Relaxed);
+        a.len.store(n as u32, Ordering::Relaxed);
         u.flat.set(Word::from_ref(out));
         out
     }

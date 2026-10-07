@@ -12,6 +12,8 @@ use crate::cli::help::{self, arg_error, each_arg};
 use crate::cli::{EvalArgs, Input, evaluate, parse_eval_args, report, run_for};
 use crate::error::Error as CrateError;
 use crate::eval::{Error, Evaluator};
+use crate::jobs::line::Job;
+use crate::jobs::line::Line;
 use crate::runtime::Word;
 use crate::store::path::StorePath;
 
@@ -446,7 +448,6 @@ fn cache_status(
     transport: &crate::remote::worker::Transport,
     targets: &[Target],
 ) -> crate::error::Result<Vec<serde_json::Value>> {
-    use crate::jobs::line::{Job, Line};
     let mut lines: Vec<Line> = Vec::new();
     for t in targets {
         let drv = crate::store::drv::load_derivation_from_store(&t.drv)

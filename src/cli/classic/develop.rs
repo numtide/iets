@@ -11,6 +11,7 @@ use std::process::Command;
 use super::{Argv, Common, fallback};
 use crate::cli::{Input, parse_eval_args};
 use crate::devenv::escape_shell_arg_always as esc;
+use std::os::unix::fs::DirBuilderExt;
 
 const NAME: &str = "nix";
 
@@ -173,7 +174,6 @@ fn run(
 /// A fresh directory in `$TMPDIR` that only this user can enter, made with
 /// exclusive creation so it is never something that was already there.
 fn private_dir() -> crate::error::Result<std::path::PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
     let tmp = std::env::temp_dir();
     for _ in 0..16 {
         let nanos = std::time::SystemTime::now()

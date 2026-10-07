@@ -10,6 +10,7 @@ pub mod flakeref;
 
 use std::path::{Path, PathBuf};
 
+use crate::builtins::store_hooks::locate;
 use crate::error::{Error, Result};
 use crate::eval::{Error as EvalError, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::runtime::Word;
@@ -275,7 +276,6 @@ pub fn eval_flake_value(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
 /// for `.git` only when it has a base directory, and getFlake passes none.
 /// A virtual copy stands for its local tree.
 pub fn get_flake(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
-    use crate::builtins::store_hooks::locate;
     let s = ev.force_string_no_ctx(
         args[0],
         pos,

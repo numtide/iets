@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use crate::trace::store::Entry;
+use crate::trace::store::Part;
 pub use crate::trace::watch::{MAX, Watched};
 
 /// The watchable paths of the entry file at `entry`, in the order the run
@@ -12,7 +14,6 @@ pub use crate::trace::watch::{MAX, Watched};
 /// `<cache>/trace/<key>/entry`, so its cache root is three levels up, and a
 /// caller that used `--cache-dir` therefore passes nothing extra.
 pub fn watch_paths(entry: &Path) -> crate::error::Result<Vec<Watched>> {
-    use crate::trace::store::{Entry, Part};
     let obs = Entry::open(entry)
         .and_then(|e| e.part(Part::Readset))
         .and_then(|b| crate::trace::wire::decode_readset(&b));

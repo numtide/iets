@@ -287,6 +287,8 @@ macro_rules! bail {
     };
 }
 pub(crate) use bail;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 
 pub const DEFAULT_SYSTEM: &str = "x86_64-linux";
 
@@ -805,7 +807,6 @@ impl Evaluator {
             && std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_symlink())
             && crate::builtins::store_hooks::locate(self, &p).is_none()
         {
-            use std::os::unix::ffi::{OsStrExt, OsStringExt};
             for _ in 0..1024 {
                 let Ok(target) = std::fs::read_link(std::ffi::OsStr::from_bytes(&p)) else {
                     break;

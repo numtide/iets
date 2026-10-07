@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::runtime::Word;
 use crate::syntax::symbol::Sym;
+use ::toml::Value as T;
+use std::fmt::Write as _;
 
 /// The `parse-toml-timestamps` experimental feature.
 pub fn set_parse_toml_timestamps(on: bool) {
@@ -164,7 +166,6 @@ fn quote_run(b: &[u8], i: usize, q: u8) -> usize {
 }
 
 fn convert(ev: &mut Evaluator, v: ::toml::Value, pos: Pos) -> EvalResult<Word> {
-    use ::toml::Value as T;
     Ok(match v {
         T::String(s) => {
             no_nul(s.as_bytes(), pos)?;
@@ -238,7 +239,6 @@ fn subsecond_precision(ns: u32) -> u32 {
 }
 
 fn format_datetime(d: &::toml::value::Datetime) -> String {
-    use std::fmt::Write as _;
     let mut s = String::new();
     if let Some(date) = d.date {
         let _ = write!(s, "{:04}-{:02}-{:02}", date.year, date.month, date.day);

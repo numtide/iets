@@ -8,6 +8,7 @@ pub mod text;
 use serde_json::Value;
 
 use crate::api::render::Report;
+use std::io::Write;
 
 /// Everything a command writes on stdout goes through here. Nothing is
 /// added: `b` is the output. A write that fails ends the process: exit 0 is
@@ -28,7 +29,6 @@ pub fn bytes_lossy(b: &[u8]) {
 }
 
 fn write(b: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
     let mut out = std::io::stdout();
     out.write_all(b)?;
     out.flush()

@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use super::value::{AttrsObj, EnvObj, ListObj, StringObj};
 use crate::syntax::symbol::fx_bytes;
+use std::fmt::Write;
 
 pub const SIZE_BUCKETS: [&str; 11] = [
     "0", "1", "2", "3-4", "5-8", "9-16", "17-32", "33-64", "65-128", "129-256", "257+",
@@ -226,7 +227,6 @@ impl Census {
     }
 
     pub(crate) fn report(&self, out: &mut String) {
-        use std::fmt::Write;
         let _ = writeln!(out, "--- census (IETS_STATS=2) ---");
         let _ = writeln!(out, "envs by slot count (count, bytes):");
         for (i, (c, b)) in self.env_hist.iter().enumerate() {

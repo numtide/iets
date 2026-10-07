@@ -1,9 +1,11 @@
 //! `iets cache dump` (also `cache-dump`): the read set of a tracing-cache entry as text.
 
+use crate::trace::Obs;
+use crate::trace::store::Entry;
+use crate::trace::store::Part;
+
 /// One line per observation of an `entry` file, for debugging misses.
 pub fn cmd_cache_dump(file: &str) -> i32 {
-    use crate::trace::Obs;
-    use crate::trace::store::{Entry, Part};
     let obs = Entry::open(std::path::Path::new(file))
         .and_then(|e| e.part(Part::Readset))
         .and_then(|b| crate::trace::wire::decode_readset(&b));

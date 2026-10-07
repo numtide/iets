@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, FileInfo, Pos};
 use crate::log::Site;
 use crate::syntax::symbol::{FxHashMap, FxHasher};
+use std::os::unix::ffi::OsStrExt;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub enum Level {
@@ -498,7 +499,6 @@ impl Config {
     /// `name = { level = "warn", max-bytes = 1000 }` for a lint with knobs,
     /// plus `scope`, `roots` (relative to the file) and `inputs.<node>`.
     pub fn apply_toml(&mut self, text: &str, origin: &Path) -> Result<(), String> {
-        use std::os::unix::ffi::OsStrExt;
         let from = origin.display().to_string();
         let at = |m: String| format!("{from}: {m}");
         let table: toml::Table = text.parse().map_err(|e| at(format!("{e}")))?;
@@ -574,7 +574,6 @@ impl Config {
         roots: &[Vec<u8>],
         scope: Option<Scope>,
     ) -> Result<Config, String> {
-        use std::os::unix::ffi::OsStrExt;
         let mut c = Config::default();
         if let Some(dir) = start {
             c.add_root(dir.as_os_str().as_bytes());

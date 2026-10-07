@@ -16,9 +16,13 @@
 //! on a sibling worker or fails a run. The one exception is `wait_lock`, for a
 //! download a sibling is already doing.
 
+use io::Write;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -62,7 +66,6 @@ const FILE_MODE: u32 = 0o600;
 
 /// `create_dir_all` with [`DIR_MODE`] on every component it makes.
 pub fn create_dir(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(DIR_MODE)
@@ -74,7 +77,6 @@ pub fn create_dir(path: &Path) -> io::Result<()> {
 /// it: tightening is the whole repair, and it costs the run nothing, where
 /// refusing the directory would cost every entry in it.
 fn tighten(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let Ok(md) = fs::metadata(path) else { return };
     if md.permissions().mode() & 0o077 != 0 {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(DIR_MODE));
@@ -244,8 +246,6 @@ fn stamp_age(bytes: &[u8]) -> Option<Duration> {
 /// one rename without first joining it into one buffer. `tag` separates
 /// concurrent writers of one name inside one process.
 pub fn write_atomic(dir: &Path, name: &str, tag: u64, chunks: &[&[u8]]) -> io::Result<()> {
-    use io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = dir.join(format!(".{name}.{}.{tag}.tmp", std::process::id()));
     let write = || -> io::Result<()> {
         let mut f = fs::OpenOptions::new()
@@ -302,7 +302,6 @@ pub fn checksum(key: &str, parts: &[&[u8]]) -> [u8; SUM] {
 /// what it names must be a regular file, and its length must be one an entry
 /// can have. `O_NONBLOCK` keeps the open of a FIFO from waiting for a writer.
 pub fn open_entry(path: &Path) -> Option<(fs::File, fs::Metadata)> {
-    use std::os::unix::fs::OpenOptionsExt;
     let f = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -505,7 +504,6 @@ pub fn write_lock(root: &Path) -> Option<WriteLock> {
 }
 
 fn open_lock(path: &Path) -> io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1074,7 +1072,6 @@ mod tests {
     /// sibling holds, and the two read differently to whoever sees the line.
     #[test]
     fn a_lock_that_cannot_be_opened_is_not_a_busy_lock() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tmp("lockerr");
         ready(&d);
         let held = try_write_lock(&d).expect("open").expect("first lock");

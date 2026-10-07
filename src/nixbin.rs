@@ -1,6 +1,7 @@
 //! The real Nix binaries. Under the classic symlink farm, `nix` on `PATH` is
 //! iets itself, so every subprocess and the fallback resolve past it.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// Written by the farm derivation next to its `bin/`: the directory that
@@ -8,7 +9,6 @@ use std::path::{Path, PathBuf};
 const REAL_DIR_FILE: &str = "share/iets/real-nix-bin";
 
 fn executable(p: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
 }
 
@@ -107,6 +107,7 @@ pub fn nix() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn farm_marker_is_found_through_two_hops() {
@@ -131,8 +132,6 @@ mod tests {
     /// real nix, whichever one is running.
     #[test]
     fn every_iets_build_is_skipped() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = std::env::temp_dir().join(format!("iets-nixbin-two-{}", std::process::id()));
         let (x, y, real) = (tmp.join("x"), tmp.join("y"), tmp.join("real"));
         let exe = |p: &Path| {

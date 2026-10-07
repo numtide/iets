@@ -7,6 +7,9 @@
 use std::path::Path;
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::lint::Level;
+use crate::lint::LintId;
+use crate::lint::purity::tree_level;
 use crate::runtime::{Ctx, Taint, Value, Word};
 use crate::source::{
     AttrVal, Attrs, SourceRef, Tree, bool_attr, int_attr, last_modified_date, parse_nar_hash,
@@ -320,7 +323,6 @@ pub fn emit_tree_attrs(
     source: Option<&str>,
     pos: Pos,
 ) -> EvalResult<Word> {
-    use crate::lint::{Level, LintId, purity::tree_level};
     let (sp, a) = (&tree.path, &tree.attrs);
     let mut entries: Vec<(Sym, Pos, Word)> = Vec::with_capacity(10);
     let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
@@ -387,6 +389,8 @@ pub fn emit_tree_attrs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::cache::deserialize;
+    use crate::compile::cache::serialize;
     use crate::eval::EvalConfig;
     use crate::lint::Config;
     use crate::store::path::StorePath;
@@ -632,7 +636,6 @@ mod tests {
 
     #[test]
     fn an_entry_of_the_compiled_file_cache_keeps_the_site() {
-        use crate::compile::cache::{deserialize, serialize};
         let session = crate::session::Session::new();
         let _entered = session.enter();
         let mut ev = Evaluator::new();

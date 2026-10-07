@@ -18,6 +18,7 @@ pub use force::{
     defer, fanout_attrs_coerce, fanout_list, fanout_list_coerce, force_deep, force_thunk,
     import_thunk, journal,
 };
+use std::sync::atomic::Ordering::Relaxed;
 
 /// Per-fiber evaluator state. `on` is false on the sequential path.
 #[derive(Clone)]
@@ -117,7 +118,6 @@ pub fn try_run<R: Send + 'static>(
                 }
             }
             if ev.session().settings().par_stats >= 1 {
-                use std::sync::atomic::Ordering::Relaxed;
                 // SAFETY: the main fiber still owns the slot; evaluation is
                 // over, so nothing else reads it.
                 let slot = unsafe { &*slot };

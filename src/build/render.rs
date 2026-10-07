@@ -446,8 +446,9 @@ impl Renderer {
         } else {
             self.failed_line(&b.short, b.pos.as_deref(), b.elapsed(), reason)
         };
-        if b.streaming {
-            // The log is already on screen.
+        if b.streaming && ok {
+            // the log is already on screen; a failure repeats its tail, whose
+            // cause came before the lines the stall showed
             self.line(verdict);
             return;
         }
@@ -906,5 +907,21 @@ mod tests {
         r.event(&ev(Kind::Phase("configure".into())));
         r.heartbeat();
         assert!(text(&s).contains("⏵ 1 building: checks.x.a (0s, configure)"));
+    }
+
+    #[test]
+    fn a_stalled_build_that_fails_still_shows_its_cause() {
+        let (mut r, s) = ci(false);
+        r.event(&ev(Kind::Started));
+        r.event(&ev(Kind::Log(b"error: the cause".to_vec())));
+        for _ in 0..STALL_TAIL {
+            r.event(&ev(Kind::Log(b"waiting".to_vec())));
+        }
+        r.running.get_mut("/nix/store/a.drv").unwrap().streaming = true;
+        r.event(&ev(Kind::Failed {
+            reason: "status 1".into(),
+            log_tail: vec![],
+        }));
+        assert!(text(&s).contains("checks.x.a> error: the cause"));
     }
 }

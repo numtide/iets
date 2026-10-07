@@ -530,8 +530,15 @@ Nix 2.34:
     block, verdict, heartbeat) are not put out; the records carry them.
   - With a `grpc://` builder iets makes the records itself. There is
     one build activity per derivation from the start of its scheduling,
-    and a derivation the cache already has also gets one. Its uploads
-    have no copy activities.
+    and a derivation the cache already has also gets one. Its upload is
+    one `copying N paths` activity, with no `copying path` under it.
+  - The evaluation is an `evaluating …` activity of type 0
+    (`actUnknown`). Nix has none.
+  - A flake input iets downloads itself has a `downloading '<url>'`
+    activity (`actFileTransfer`), with the compressed bytes as its
+    progress. A `git` or `hg` input that the nix on `PATH` fetches has
+    a `fetching input '<name>' with nix` activity (`actFetchTree`), and
+    that nix's own records come under it.
   - The `--timings` and `IETS_STATS` lines stay plain text.
 - **`iets build --dry-run --json`** prints the plan (`willBuild`,
   `willSubstitute`, `unknown`, `downloadSize`, `narSize`). `nix build

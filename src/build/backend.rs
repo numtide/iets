@@ -399,6 +399,16 @@ impl Backend for Worker {
         let sp = StorePath::parse(store_path)?;
         let dest = dir.join(sp.base_name());
         let t0 = Instant::now();
+        let what = format!(
+            "copying path '{store_path}' from '{}'",
+            self.transport.uri()
+        );
+        let _act = crate::log::Activity::new(
+            crate::log::LVL_INFO,
+            crate::log::ACT_COPY_PATH,
+            &what,
+            vec![store_path.into()],
+        );
         self.conn.nar_from_path(store_path, &mut |_| {}, &mut |r| {
             crate::store::nar::restore_path(r, &dest)
         })?;

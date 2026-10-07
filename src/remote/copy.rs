@@ -160,6 +160,6 @@ impl Copying {
             _ => format!("copying path '{path}' from '{from}' to '{to}'"),
         };
         let f = vec![path.into(), from.as_str().into(), to.as_str().into()];
-        Activity::new(LVL_INFO, ACT_COPY_PATH, &text, f)
+        Activity::under(self.all.0, LVL_INFO, ACT_COPY_PATH, &text, f)
     }
 }

@@ -229,10 +229,12 @@ fn build_eval(
     t0: std::time::Instant,
     cache: Option<Cache>,
 ) -> i32 {
+    let evaluating = crate::cli::evaluating(&a);
     let roots = match resolve(ev, a) {
         Ok(r) => r,
         Err(e) => return report(ev, &e),
     };
+    drop(evaluating);
     let eval_time = t0.elapsed();
     if b.timings {
         eprintln!(

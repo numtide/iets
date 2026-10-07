@@ -29,6 +29,7 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
     let raw = a.raw;
     let t0 = std::time::Instant::now();
     let timings = a.timings;
+    let evaluating = crate::cli::evaluating(&a);
     let v = match evaluate(ev, a) {
         Ok(v) => v,
         Err(e) => return report(ev, &e),
@@ -62,6 +63,7 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
             crate::print::print_ambiguous(ev, v, 1, &mut out, &mut seen, 0)
         })()
     };
+    drop(evaluating);
     if ev.session().settings().stats >= 1 {
         ev.print_stats();
     }

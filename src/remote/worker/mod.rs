@@ -483,6 +483,10 @@ impl Drop for Connection {
     /// The ssh child exits on EOF of its stdin, which lives inside `to`; swap it out before
     /// waiting, or the wait never returns.
     fn drop(&mut self) {
+        // a daemon that went away mid-op never stopped these
+        for (_, id) in self.ids.drain() {
+            crate::log::stop(id);
+        }
         let _ = self.to.flush();
         if let Some(mut c) = self.child.take() {
             let sink: Box<dyn Write + Send> = Box::new(io::sink());

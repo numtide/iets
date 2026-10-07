@@ -310,3 +310,23 @@ pub fn evaluate(ev: &mut Evaluator, a: EvalArgs) -> Result<Word, Box<Error>> {
     }
     crate::api::evaluate(ev, a)
 }
+
+/// Nix has no activity for evaluation, so this is `actUnknown`.
+pub fn evaluating(a: &EvalArgs) -> crate::log::Activity {
+    let what = match &a.input {
+        Some(Input::Flake(f) | Input::File(f)) => format!("'{f}'"),
+        Some(Input::Expr(_)) => "the expression".into(),
+        None => String::new(),
+    };
+    let attr = a
+        .attr
+        .as_ref()
+        .map(|p| format!(" -A {p}"))
+        .unwrap_or_default();
+    crate::log::Activity::new(
+        crate::log::LVL_TALKATIVE,
+        crate::log::ACT_UNKNOWN,
+        &format!("evaluating {what}{attr}"),
+        vec![],
+    )
+}

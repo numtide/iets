@@ -23,7 +23,8 @@ use crate::build::backend::{Backend, Batch, Phase, Status, local};
 use crate::build::fanout;
 use crate::error::{Error, Result};
 use crate::log::{
-    ACT_BUILD, ACT_BUILDS, ACT_COPY_PATHS, ACT_REALISE, Activity, LVL_ERROR, LVL_INFO, RES_PROGRESS,
+    ACT_BUILD, ACT_BUILDS, ACT_COPY_PATH, ACT_COPY_PATHS, ACT_REALISE, ACT_UNKNOWN, Activity,
+    LVL_ERROR, LVL_INFO, LVL_TALKATIVE, RES_PROGRESS,
 };
 use crate::remote::event::{Event, Started};
 use crate::remote::plan::{Object, Plan};
@@ -237,7 +238,11 @@ impl Backend for Grpc {
         }
         self.t.substitute_paths += paths.len();
         let t0 = Instant::now();
+        let url = self.c.cfg.url();
+        let n = paths.len();
         let _ = on_event;
+        let what = format!("substituting {n} paths on '{url}'");
+        let _act = Activity::new(LVL_TALKATIVE, ACT_UNKNOWN, &what, vec![]);
         let r = build::substitute(&mut self.c, paths, &mut self.t);
         self.t.substitute += t0.elapsed();
         r
@@ -249,6 +254,7 @@ impl Backend for Grpc {
             return Ok(0);
         }
         let t0 = Instant::now();
+        let _copying = crate::remote::copy::Copying::new(objects.len(), "local", &self.c.cfg.url());
         let bytes = build::add_multiple(&mut self.c, objects, &mut self.t)?;
         self.t.add += t0.elapsed();
         self.t.add_paths += objects.len();
@@ -306,6 +312,8 @@ impl Backend for Grpc {
 
     fn fetch(&mut self, store_path: &str, dir: &Path) -> Result<()> {
         let t0 = Instant::now();
+        let what = format!("copying path '{store_path}' from '{}'", self.c.cfg.url());
+        let _act = Activity::new(LVL_INFO, ACT_COPY_PATH, &what, vec![store_path.into()]);
         let paths = [StorePath::parse(store_path)?];
         build::fetch_into_dir(&mut self.c, &paths, dir, &mut self.t)?;
         self.t.fetch += t0.elapsed();

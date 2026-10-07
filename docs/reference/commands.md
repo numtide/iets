@@ -42,6 +42,11 @@ stdout and exit 0.
   progress, the `--timings` lines, the `IETS_STATS` lines, a classic
   fallback note. With `--log-format internal-json` every stderr line is
   one `@nix ` JSON record (`docs/reference/errors.md`).
+- **Progress.** A terminal gets a status line with what runs now: eval,
+  fetches, substitutions, uploads, builds. A pipe gets a `⏵` line after
+  5 s and every 30 s; a transfer without new bytes for 10 s says `no data
+  for N`. `--log-format bar` and `raw` choose. Under a Nix name a pipe
+  gets Nix's `copying path …...` lines instead.
 - **Exit codes** are in `docs/reference/errors.md`. In short: 0 success,
   1 any error, 2 a usage error of a native command, 100/101/102/104 a
   failed build under `iets build`. `iets diff` follows `diff(1)`

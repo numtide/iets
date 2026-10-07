@@ -58,6 +58,7 @@ fn main() {
     if let Some(i) = argv.iter().position(|a| a == "--log-format") {
         let _ = iets::log::set_format(argv.get(i + 1).map_or("", String::as_str));
     }
+    iets::log::show_progress();
     // `version` and `help` read no setting, so a settings file with a
     // mistake in it does not stop them
     if classic_name().is_none() {

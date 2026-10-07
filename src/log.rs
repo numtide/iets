@@ -33,13 +33,81 @@ pub struct Log {
     want_mismatch: Mutex<Option<String>>,
     /// Where messages go. `None` writes nowhere: a library says nothing
     /// unless the host asked for it. `iets` points it at stderr.
-    err: Mutex<Option<Box<dyn Write + Send>>>,
+    err: Mutex<Out>,
+    pub progress: crate::progress::Board,
+}
+
+#[derive(Default)]
+struct Out {
+    w: Option<Box<dyn Write + Send>>,
+    status: String,
+    shown: bool,
+    /// A status line drawn here would join a line its writer has not ended.
+    mid_line: bool,
+}
+
+impl Out {
+    fn write(&mut self, bytes: &[u8]) {
+        self.take_down();
+        if let Some(w) = self.w.as_mut() {
+            let _ = w.write_all(bytes);
+        }
+        if let Some(&last) = bytes.last() {
+            self.mid_line = last != b'\n';
+        }
+        self.draw();
+    }
+
+    fn take_down(&mut self) {
+        if self.shown
+            && let Some(w) = self.w.as_mut()
+        {
+            let _ = w.write_all(b"\r\x1b[K");
+        }
+        self.shown = false;
+    }
+
+    fn draw(&mut self) {
+        let Some(w) = self.w.as_mut() else {
+            return;
+        };
+        if !self.shown && !self.mid_line && !self.status.is_empty() {
+            let _ = w.write_all(fit(&self.status).as_bytes());
+            self.shown = true;
+        }
+        let _ = w.flush();
+    }
+}
+
+/// `line` cut to the terminal's width: a status line that wraps cannot be
+/// taken down with one carriage return.
+fn fit(line: &str) -> String {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let cols = match unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut ws) } {
+        0 if ws.ws_col > 1 => usize::from(ws.ws_col),
+        _ => 80,
+    };
+    line.chars().take(cols - 1).collect()
 }
 
 impl Log {
     /// Sends every message to `w`.
     pub fn write_to(&self, w: Box<dyn Write + Send>) {
-        *self.err.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
+        self.writer().w = Some(w);
+    }
+
+    fn writer(&self) -> std::sync::MutexGuard<'_, Out> {
+        self.err.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The status line under the output; empty takes it down.
+    pub fn set_status(&self, line: String) {
+        let mut o = self.writer();
+        if o.status != line {
+            o.take_down();
+            o.status = line;
+            o.draw();
+        }
     }
 
     /// What `iets` itself does, and what a host that wants Nix's own
@@ -50,16 +118,12 @@ impl Log {
 
     /// `bytes` as they are, for output a caller already formatted.
     pub fn err(&self, bytes: &[u8]) {
-        if let Some(w) = self.err.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            let _ = w.write_all(bytes);
-        }
+        self.writer().write(bytes);
     }
 
     /// One line, in place of `eprintln!`.
     pub fn errln(&self, text: &str) {
-        if let Some(w) = self.err.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            let _ = writeln!(w, "{text}");
-        }
+        self.writer().write(format!("{text}\n").as_bytes());
     }
 }
 
@@ -93,8 +157,13 @@ impl Write for SessionOut {
 pub fn set_format(f: &str) -> Result<(), String> {
     let s = cur();
     match f {
-        "raw" | "raw-with-logs" | "bar" | "bar-with-logs" => {
+        "raw" | "raw-with-logs" => {
             s.log.json.store(false, Ordering::Relaxed);
+            s.log.progress.set_mode(crate::progress::Mode::Lines);
+        }
+        "bar" | "bar-with-logs" => {
+            s.log.json.store(false, Ordering::Relaxed);
+            s.log.progress.set_mode(crate::progress::Mode::Bar);
         }
         "internal-json" => s.log.json.store(true, Ordering::Relaxed),
         _ => return Err(format!("option 'log-format' has an invalid value '{f}'")),
@@ -246,11 +315,17 @@ fn out(v: &Value, text: Option<&str>) {
 /// iets emits itself.
 pub const LVL_ERROR: u64 = 0;
 pub const LVL_INFO: u64 = 3;
+pub const LVL_TALKATIVE: u64 = 4;
+pub const ACT_UNKNOWN: u64 = 0;
 pub const ACT_COPY_PATH: u64 = 100;
+pub const ACT_FILE_TRANSFER: u64 = 101;
 pub const ACT_REALISE: u64 = 102;
 pub const ACT_COPY_PATHS: u64 = 103;
 pub const ACT_BUILDS: u64 = 104;
 pub const ACT_BUILD: u64 = 105;
+pub const ACT_SUBSTITUTE: u64 = 108;
+pub const ACT_QUERY_PATH_INFO: u64 = 109;
+pub const ACT_FETCH_TREE: u64 = 112;
 pub const RES_BUILD_LOG_LINE: u64 = 101;
 pub const RES_SET_PHASE: u64 = 104;
 pub const RES_PROGRESS: u64 = 105;
@@ -258,7 +333,29 @@ pub const RES_PROGRESS: u64 = 105;
 /// Whether activity records go anywhere, so nobody builds one for nothing.
 pub fn activities() -> bool {
     let s = cur();
+    records(&s) || drawn(&s)
+}
+
+fn records(s: &Session) -> bool {
     s.log.json.load(Ordering::Relaxed) || s.log.sink().is_some()
+}
+
+/// Not under internal-json: its records carry the progress.
+fn drawn(s: &Session) -> bool {
+    s.log.progress.mode() != crate::progress::Mode::Off && !s.log.json.load(Ordering::Relaxed)
+}
+
+/// loggers.cc:makeDefaultLogger, unless `--log-format` chose.
+pub fn show_progress() {
+    let s = cur();
+    if s.log.progress.mode() != crate::progress::Mode::Off {
+        return;
+    }
+    let tty = stderr_is_tty() && std::env::var("TERM").is_ok_and(|t| t != "dumb");
+    s.log.progress.set_mode(match tty {
+        true => crate::progress::Mode::Bar,
+        false => crate::progress::Mode::Lines,
+    });
 }
 
 /// logging.cc:Activity: the pid in the high half, a counter below.
@@ -284,32 +381,75 @@ fn result_record(id: u64, ty: u64, f: Vec<Value>) -> Value {
 
 /// logging.cc:JSONLogger::startActivity.
 pub fn start(id: u64, level: u64, ty: u64, text: &str, f: Vec<Value>, parent: u64) {
-    if activities() {
-        out(&start_record(id, level, ty, text, f, parent), None);
+    let s = cur();
+    if drawn(&s)
+        && let Some(line) = s.log.progress.start(id, level, ty, text, parent)
+    {
+        s.log.errln(&line);
+    }
+    if records(&s) {
+        s.log
+            .out(&start_record(id, level, ty, text, f, parent), None);
     }
 }
 
 /// logging.cc:JSONLogger::stopActivity.
 pub fn stop(id: u64) {
-    if activities() {
-        out(&json!({"action": "stop", "id": id}), None);
+    let s = cur();
+    if drawn(&s) && s.log.progress.stop(id) {
+        s.log.set_status(String::new());
+    }
+    if records(&s) {
+        s.log.out(&json!({"action": "stop", "id": id}), None);
     }
 }
 
 /// logging.cc:JSONLogger::result.
 pub fn result(id: u64, ty: u64, f: Vec<Value>) {
-    if activities() {
-        out(&result_record(id, ty, f), None);
+    let s = cur();
+    if drawn(&s) {
+        s.log.progress.result(id, ty, &f);
+    }
+    if records(&s) {
+        s.log.out(&result_record(id, ty, f), None);
     }
 }
 
-/// An activity of iets's own, without a parent; it stops when dropped.
+/// Status line only: Nix has no record for it.
+pub fn detail(id: u64, text: &str) {
+    let s = cur();
+    if drawn(&s) {
+        s.log.progress.detail(id, text);
+    }
+}
+
+/// No status line until it drops: a child may prompt on the terminal.
+pub struct Suspended(Arc<Session>);
+
+pub fn suspend() -> Suspended {
+    let s = cur();
+    s.log.progress.suspend();
+    s.log.set_status(String::new());
+    Suspended(s)
+}
+
+impl Drop for Suspended {
+    fn drop(&mut self) {
+        self.0.log.progress.resume();
+    }
+}
+
+/// An activity of iets's own; it stops when dropped.
 pub struct Activity(pub u64);
 
 impl Activity {
     pub fn new(level: u64, ty: u64, text: &str, f: Vec<Value>) -> Activity {
+        Activity::under(0, level, ty, text, f)
+    }
+
+    pub fn under(parent: u64, level: u64, ty: u64, text: &str, f: Vec<Value>) -> Activity {
         let id = activity_id();
-        start(id, level, ty, text, f, 0);
+        start(id, level, ty, text, f, parent);
         Activity(id)
     }
 

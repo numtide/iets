@@ -7,6 +7,7 @@
 //! The `narHash` is known before the fetch, so the tree names itself and the
 //! input store refuses anything that does not hash to it.
 
+use std::io::Read;
 use std::path::Path;
 
 use super::{AttrVal, Attrs, Tree, parse_nar_hash, str_attr, to_url};
@@ -138,7 +139,13 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
     let Some(conn) = ev.store.get() else {
         return false;
     };
-    match conn.substitute_paths(std::slice::from_ref(&store_path.to_string()), &mut |_| {}) {
+    // the daemon's own lines, such as a substituter it retries
+    let mut said = |e: crate::remote::event::Event| {
+        if let crate::remote::event::Event::Log(l) = e {
+            crate::log::line(&String::from_utf8_lossy(&l.line));
+        }
+    };
+    match conn.substitute_paths(std::slice::from_ref(&store_path.to_string()), &mut said) {
         Ok(valid) => valid.iter().any(|p| p == store_path),
         Err(e) => {
             crate::log::line(&format!("iets: cannot substitute '{store_path}': {e}"));
@@ -402,11 +409,28 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
         "(builtins.fetchTree (builtins.fromJSON {})).outPath",
         nix_string_literal(&attrs_to_json(attrs))
     );
-    let out = std::process::Command::new(&nix)
+    let act = crate::log::Activity::new(
+        crate::log::LVL_TALKATIVE,
+        crate::log::ACT_FETCH_TREE,
+        &format!("fetching input '{name}' with nix"),
+        vec![],
+    );
+    let cannot = |e: std::io::Error| {
+        Error::boxed(
+            ErrorKind::Io,
+            format!("iets: cannot run nix to fetch input '{name}': {e}"),
+            pos,
+        )
+    };
+    // git may ask for credentials on the terminal, as under Nix
+    let suspended = crate::log::suspend();
+    let mut child = std::process::Command::new(&nix)
         .env("IETS_FETCHING", "1")
         .args([
             "--extra-experimental-features",
             "nix-command flakes",
+            "--log-format",
+            "internal-json",
             "eval",
             "--raw",
             "--impure",
@@ -414,24 +438,29 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
             &expr,
         ])
         .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| {
-            Error::boxed(
-                ErrorKind::Io,
-                format!("iets: cannot run nix to fetch input '{name}': {e}"),
-                pos,
-            )
-        })?;
-    crate::session::Session::current().log.err(&out.stderr);
-    if !out.status.success() {
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(cannot)?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let read_out = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        stdout.read_to_end(&mut v).map(|_| v)
+    });
+    let said = relay(child.stderr.take().expect("piped"), &act);
+    let status = child.wait().map_err(cannot)?;
+    let stdout = read_out
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("the reader panicked")))
+        .map_err(cannot)?;
+    drop((act, suspended));
+    if !status.success() {
         let msg = format!(
             "iets: nix could not fetch input '{name}' ({})",
             to_url(attrs)
         );
         // fetchers.cc:Input::checkLocks
-        if str_attr(attrs, "type") == Some("git")
-            && String::from_utf8_lossy(&out.stderr).contains("NAR hash mismatch in input")
-        {
+        if str_attr(attrs, "type") == Some("git") && said.contains("NAR hash mismatch in input") {
             let mut e = Error::new(ErrorKind::HashMismatch, msg, pos);
             e.hint = Some(
                 "git gave a different tree than the lock names: a .gitattributes filter \
@@ -443,7 +472,7 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
         }
         bail!(ErrorKind::Eval, pos, "{msg}");
     }
-    let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let got = String::from_utf8_lossy(&stdout).trim().to_string();
     if got != full {
         bail!(
             ErrorKind::Eval,
@@ -452,6 +481,77 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
         );
     }
     Ok(())
+}
+
+/// Nix's records go under `act`; git's `\r` redraws go to a terminal as they
+/// are, as under Nix, or into `act`'s detail. Returns the text, for the
+/// hash mismatch check.
+fn relay(from: impl Read, act: &crate::log::Activity) -> String {
+    use serde_json::Value;
+    let session = crate::session::Session::current();
+    let terminal = session.log.progress.mode() == crate::progress::Mode::Bar && !crate::log::json();
+    let mut said = String::new();
+    let mut ids = std::collections::HashMap::new();
+    let mut seg = Vec::new();
+    for b in std::io::BufReader::new(from).bytes() {
+        let Ok(b) = b else { break };
+        if b != b'\n' && b != b'\r' {
+            seg.push(b);
+            continue;
+        }
+        let text = String::from_utf8_lossy(&seg).into_owned();
+        seg.clear();
+        if b == b'\r' {
+            match terminal {
+                true => session.log.err(format!("{text}\r").as_bytes()),
+                false => crate::log::detail(act.0, text.trim()),
+            }
+            continue;
+        }
+        let Some(v) = text
+            .strip_prefix("@nix ")
+            .and_then(|j| serde_json::from_str::<Value>(j).ok())
+        else {
+            if !text.is_empty() {
+                crate::log::line(&text);
+                said.push_str(&text);
+                said.push('\n');
+            }
+            continue;
+        };
+        let n = |k: &str| v[k].as_u64().unwrap_or(0);
+        let fields = || v["fields"].as_array().cloned().unwrap_or_default();
+        match v["action"].as_str() {
+            Some("start") => {
+                let id = crate::log::activity_id();
+                ids.insert(n("id"), id);
+                let up = ids.get(&n("parent")).copied().unwrap_or(act.0);
+                let text = v["text"].as_str().unwrap_or("");
+                crate::log::start(id, n("level"), n("type"), text, fields(), up);
+            }
+            Some("stop") => {
+                if let Some(id) = ids.remove(&n("id")) {
+                    crate::log::stop(id);
+                }
+            }
+            Some("result") => {
+                if let Some(&id) = ids.get(&n("id")) {
+                    crate::log::result(id, n("type"), fields());
+                }
+            }
+            Some("msg") => {
+                let msg = v["msg"].as_str().unwrap_or("");
+                crate::log::line(msg);
+                said.push_str(msg);
+                said.push('\n');
+            }
+            _ => {}
+        }
+    }
+    for (_, id) in ids {
+        crate::log::stop(id);
+    }
+    said
 }
 
 #[cfg(test)]

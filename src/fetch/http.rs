@@ -390,9 +390,26 @@ fn drain(
     limits: Limits,
     sink: &mut dyn Write,
 ) -> Result<u64> {
+    use crate::log::{ACT_FILE_TRANSFER, Activity, LVL_TALKATIVE, RES_PROGRESS};
+    let shown = shown(url);
+    // filetransfer.cc:TransferItem::act
+    let act = Activity::new(
+        LVL_TALKATIVE,
+        ACT_FILE_TRANSFER,
+        &format!("downloading '{shown}'"),
+        vec![shown.as_str().into()],
+    );
+    let mut told = std::time::Instant::now() - Duration::from_millis(100);
     let mut buf = vec![0; 64 << 10];
     let mut out = 0u64;
     loop {
+        if told.elapsed() >= Duration::from_millis(100) {
+            told = std::time::Instant::now();
+            act.result(
+                RES_PROGRESS,
+                vec![read_in.get().into(), 0.into(), 0.into(), 0.into()],
+            );
+        }
         let n = match read.read(&mut buf) {
             Ok(0) => return Ok(out),
             Ok(n) => n,

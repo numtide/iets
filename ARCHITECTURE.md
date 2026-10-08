@@ -161,7 +161,7 @@ divergence and library entry point — is under `docs/reference/`.
 
 ## Testing
 
-`cargo test` for the units. `nix flake check` adds clippy, fmt, the examples,
+`cargo test` for the units. `nix flake check` adds clippy, fmt, ast-grep, the examples,
 the NixOS module and the scripts, in two ways. The scripts that need no
 `nix-daemon` run in the build sandbox. The scripts that need a daemon and a
 store to write to run in a NixOS test container (`nix/e2e-test.nix`,
@@ -211,7 +211,7 @@ the farm execs the real nix for whatever it does not implement,
 
 - Rust 2024. Every `unsafe` block names the invariant it relies on.
 - No comments that restate code. Comments explain why.
-- `cargo clippy` clean, `cargo fmt`.
+- `cargo clippy` clean, `cargo fmt`, `ast-grep scan` clean (`nix/ast-grep`).
 - Commit small, descriptive messages.
 
 ## Constraints on evaluator changes

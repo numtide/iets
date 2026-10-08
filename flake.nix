@@ -31,7 +31,7 @@
     in {
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.cargo pkgs.rustc pkgs.clippy pkgs.rustfmt pkgs.hyperfine pkgs.nix pkgs.perf pkgs.jq pkgs.nushell pkgs.direnv ];
+          packages = [ pkgs.cargo pkgs.rustc pkgs.clippy pkgs.rustfmt pkgs.hyperfine pkgs.nix pkgs.perf pkgs.jq pkgs.nushell pkgs.direnv pkgs.ast-grep ];
         };
       });
       nixosModules.default = import ./nix/module.nix self;
@@ -68,6 +68,8 @@
           # the library facade: every example links the library only (docs/reference/library.md)
           examples = lint "examples" pkgs.cargo "build --examples --release";
           fmt = lint "fmt" pkgs.rustfmt "fmt --check";
+          # nix/ast-grep, through sgconfig.yml
+          ast-grep = pkgs.runCommand "iets-ast-grep" { nativeBuildInputs = [ pkgs.ast-grep ]; } "cd ${self} && ast-grep scan && touch $out";
           diff-e2e = nuScript "diff-e2e";
           langtests = nuScript "langtests";
           linttest = nuScript "linttest";

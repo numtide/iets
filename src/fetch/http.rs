@@ -288,10 +288,7 @@ fn tls() -> Result<Arc<rustls::ClientConfig>> {
 /// into `sink` as it arrives; the number of bytes written. A `file://` URL is
 /// read from the file system instead. Nothing buffers the whole body.
 /// `headers` are credentials: they go only where [`redirect`] lets them.
-///
-/// `IETS_OFFLINE=1` makes any download an error. A run that has every input in
-/// the input store then costs nothing and needs nothing; a run that is missing
-/// one says which URL it wanted.
+/// `IETS_OFFLINE=1` makes any download an error that names the URL.
 pub fn get_decompressed(
     url: &str,
     headers: &[(String, String)],

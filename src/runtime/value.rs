@@ -549,19 +549,13 @@ impl AttrsObj {
 /// The leaf slot that stands for an exhausted stream while the tree is built.
 const SENTINEL: usize = MAX_LEAVES as usize;
 
-/// Merging iterator over the flat leaves of a set, lowest priority first;
-/// on equal syms the last leaf wins (`b` over `a`).
-///
-/// More than one leaf runs a loser tree over the leaf heads: `tree[0]` is
-/// the current winner and `tree[i]`, for `i` in `1..n`, is the loser of the
-/// match between the two subtrees under node `i`, the parent of leaf `s`
-/// being `(s + n) / 2`. That invariant is what makes an advance cost one
-/// root path, `ceil(log2 n)` comparisons, instead of a rescan of every
-/// head. The key of leaf `i` is `(sym + 1) << 3 | (7 - i)`, so equal syms
-/// put the last leaf first: the winner is the entry that wins the `//` and
-/// the duplicates that follow it are dropped. Key 0 is left free for the
-/// sentinel and an exhausted leaf keys as `u64::MAX`, so neither can tie
-/// with a real head.
+/// Merging iterator over the flat leaves of a set, lowest priority first; on
+/// equal syms the last leaf wins (`b` over `a`). More than one leaf runs a loser
+/// tree: `tree[0]` is the winner and `tree[i]` the loser of the match under node
+/// `i`, the parent of leaf `s` being `(s + n) / 2`, so an advance costs one root
+/// path instead of a rescan of every head. Leaf `i` keys as
+/// `(sym + 1) << 3 | (7 - i)`, which puts the last leaf first on equal syms. Key
+/// 0 is the sentinel and `u64::MAX` an exhausted leaf, so neither ties with a head.
 pub struct AttrIter {
     leaves: [&'static [Attr]; SENTINEL + 1],
     keys: [u64; SENTINEL + 1],

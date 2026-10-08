@@ -305,10 +305,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 pub const DEFAULT_SYSTEM: &str = "x86_64-linux";
 
-/// Everything that is fixed before evaluation starts. `parallel::try_run`
-/// clones the evaluator for every helper fiber, and a field set after that
-/// clone is the main fiber's alone, so the evaluator has no setter: a
-/// setting goes here (docs/explanation/evaluation.md).
+/// Everything fixed before evaluation starts. A field set after `try_run` clones
+/// the evaluator is one fiber's alone, so there is no setter (docs/explanation/evaluation.md).
 ///
 /// ```compile_fail
 /// let mut ev = iets::eval::Evaluator::new();
@@ -674,13 +672,11 @@ impl Evaluator {
         Ok((ir, used_home, diags))
     }
 
-    /// `compile_source` for an imported file, through the IR cache when it
-    /// is on: an entry keyed on the source and the compile-time lint levels
-    /// the file gets (after the scope rule, so a store file under `scope =
-    /// "root"` keys like an unlinted one) is loaded instead of parsing and
-    /// compiling, and a fresh compile writes one. The entry carries the
-    /// lint warnings the compile produced, so a load reports them again,
-    /// and the file's `# iets: allow` table, which the runtime lints check.
+    /// `compile_source` for an imported file, through the IR cache when it is on.
+    /// An entry is keyed on the source and the compile-time lint levels the file
+    /// gets after the scope rule, so a store file under `scope = "root"` keys like
+    /// an unlinted one. It carries the compile's lint warnings, which a load
+    /// reports again, and the file's `# iets: allow` table for the runtime lints.
     /// Files with `~/` paths bypass it. Embedded corepkgs are never linted.
     pub fn compile_file(
         &mut self,

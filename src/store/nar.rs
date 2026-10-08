@@ -253,13 +253,11 @@ impl<'a> NarSink<'a> {
 }
 
 /// The one NAR writer: every NAR byte iets produces is framed here.
-///
 /// A tree that is walked — a directory on disk, an indexed archive, a string —
 /// drives it with the nodes it finds, in NAR order, and keeps its own
 /// traversal. The framing, the buffering and the content copy are this type's.
-/// Each call writes one whole thing: `regular` and `symlink` close their node,
-/// `dir` opens one and `end_dir` closes it, and `entry`/`end_entry` wrap the
-/// child between them.
+/// `regular` and `symlink` close their node, `dir` opens one and `end_dir`
+/// closes it, and `entry`/`end_entry` wrap the child between them.
 pub struct TreeWriter<'a> {
     sink: NarSink<'a>,
 }

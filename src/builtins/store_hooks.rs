@@ -74,12 +74,10 @@ pub fn resolve(ev: &Evaluator, path: &[u8]) -> SrcPath {
 /// Whether a pure evaluation may read `path` (eval.cc: rootFS is the store
 /// behind an allow list): under a store path this evaluation added or a fetch
 /// found on disk, or inside this run's project. Always true when impure.
-///
-/// The project is iets's own entry, and it is an allow list, not a copy of a
-/// tree: a path keeps naming the checkout, so `toString ./x` and every
-/// position name the file the user edits. A path that reaches a derivation
-/// that way is the one thing the checkout location can break, and
-/// `impure-path-in-drv` reports it (docs/explanation/flakes-and-sources.md).
+/// The project is an allow list, not a copy: a path keeps naming the checkout,
+/// so positions name the file the user edits. Only a path that reaches a
+/// derivation depends on where the checkout is, and `impure-path-in-drv`
+/// reports it (docs/explanation/flakes-and-sources.md).
 pub fn allowed(ev: &Evaluator, path: &[u8]) -> bool {
     !ev.pure() || ev.known.under(path).is_some() || ev.in_project(path)
 }
@@ -94,13 +92,11 @@ pub enum Follow {
 }
 
 /// Mirrors source-accessor.cc:resolveSymlinks. A store path this evaluation
-/// made holds no bytes, so the kernel resolves a link below it against the
-/// local tree the path stands for: a relative target leaves the store copy
-/// and an absolute one lands wherever it points. Walking the text of the
-/// path instead puts every target where the store copy would put it, and the
-/// tree's filter and [`allowed`] then judge the result. A link the filter
-/// hides, or one a pure evaluation may not read, is left alone, as
-/// `maybeLstat` leaves it (filtering-source-accessor.cc).
+/// made holds no bytes, so the kernel would resolve a link below it against the
+/// local tree it stands for. Walking the text of the path instead puts every
+/// target where the store copy would, and the tree's filter and [`allowed`]
+/// judge the result. A link the filter hides, or one a pure evaluation may not
+/// read, is left alone, as `maybeLstat` leaves it (filtering-source-accessor.cc).
 pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> EvalResult<Vec<u8>> {
     let split = |p: &[u8], out: &mut Vec<Vec<u8>>| {
         out.extend(

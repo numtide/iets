@@ -22,6 +22,29 @@
 //! comes from a `&'static` arena object, so no safe path invents an
 //! address; the two raw-bit entries are `from_bits`, which is `unsafe`,
 //! and `imm_from_bits`, which admits immediates only.
+//!
+//! Outside the crate the bits cannot be invented:
+//!
+//! ```compile_fail,E0423
+//! let w = iets::runtime::Word(8);
+//! ```
+//!
+//! and the word cannot be dereferenced:
+//!
+//! ```compile_fail,E0624
+//! fn f(w: iets::runtime::Word) -> iets::runtime::Value {
+//!     w.view()
+//! }
+//! ```
+//!
+//! Reading one through `api::value`:
+//!
+//! ```no_run
+//! let mut ev = iets::eval::Evaluator::new();
+//! let mut e = iets::api::value::Eval::new(&mut ev);
+//! let v = e.eval_expr("1 + 1", b"/").unwrap();
+//! assert_eq!(e.force(v).unwrap().as_int(), Some(2));
+//! ```
 
 use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,30 +52,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::value::{LambdaObj, MapDesc, ThunkApp2Obj, ThunkAppObj, ThunkObj};
 
 /// One evaluator value, tagged as above.
-///
-/// Outside the crate the bits cannot be invented:
-///
-/// ```compile_fail,E0423
-/// let w = iets::runtime::Word(8);
-/// ```
-///
-/// and the word cannot be dereferenced:
-///
-/// ```compile_fail,E0624
-/// fn f(w: iets::runtime::Word) -> iets::runtime::Value {
-///     w.view()
-/// }
-/// ```
-///
-/// A frontend takes a `Word` from `api::evaluate`, passes it back to the
-/// library, and reads it through `api::value`:
-///
-/// ```no_run
-/// let mut ev = iets::eval::Evaluator::new();
-/// let mut e = iets::api::value::Eval::new(&mut ev);
-/// let v = e.eval_expr("1 + 1", b"/").unwrap();
-/// assert_eq!(e.force(v).unwrap().as_int(), Some(2));
-/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Word(u64);
@@ -114,7 +113,6 @@ impl Word {
     /// The word those bits stand for.
     ///
     /// # Safety
-    ///
     /// `bits` must be the `bits()` of a word this evaluator built: either
     /// an immediate, or a tagged pointer to an arena object of that tag's
     /// kind. Bits from anywhere else make `view` dereference an address of

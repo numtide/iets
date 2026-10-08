@@ -119,10 +119,9 @@ pub unsafe fn init_ctx(ev: &mut Evaluator, slot: *mut Slot) {
 /// Exclusive borrow of the slot this evaluator's fiber runs on.
 ///
 /// # Safety
-/// The borrow must not outlive the call it is passed to, and no other
-/// borrow of the slot may be live across it. One fiber owns a slot at a
-/// time, established by the scheduler: a slot is resumed by a single
-/// worker, and `init_ctx` binds it to the evaluator that fiber runs
+/// The borrow must not outlive the call it is passed to, and no other borrow of
+/// the slot may be live across it. One fiber owns a slot at a time: a single
+/// worker resumes it, and `init_ctx` binds it to the evaluator that fiber runs
 /// (docs/explanation/evaluation.md).
 #[inline]
 pub unsafe fn ev_slot(ev: &Evaluator) -> &'static mut Slot {

@@ -24,10 +24,8 @@ pub struct Watched {
     pub kind: &'static str,
 }
 
-/// The watchable paths of `obs`, in the order the run read them. `skip`
-/// names roots that never change under a watcher (the Nix store, iets's own
-/// stores).
-///
+/// The watchable paths of `obs`, in the order the run read them. `skip` names
+/// roots that never change under a watcher (the Nix store, iets's own stores).
 /// A tree that lies inside another tree is a path the expression copied, so
 /// its members follow. An outermost tree is the flake's source, which every
 /// edit changes and few shells depend on: only what the run read out of it

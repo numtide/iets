@@ -208,16 +208,12 @@ pub fn entry_dir(a: &EvalArgs) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(&bytes))
 }
 
-/// The project this run's sources belong to: the root at or above
-/// [`entry_dir`] that `crate::project` finds, else that directory itself. A
-/// pure evaluation reads below it, and it is part of the tracing-cache key,
-/// so a marker that appears above the entry asks for a new entry instead of
-/// replaying one that another root allowed.
-///
-/// A flake gets none. Its root tree is already a virtual store copy with the
-/// tracked files as its filter, and the flake directory as a second, unfiltered
-/// root would let an evaluation read an untracked file by its absolute path
-/// (docs/explanation/flakes-and-sources.md).
+/// The project this run's sources belong to: the root `crate::project` finds
+/// at or above [`entry_dir`], else that directory. A pure evaluation reads below
+/// it. It is part of the tracing-cache key, so a marker that appears above the
+/// entry asks for a new entry. A flake gets none: its root tree is already a
+/// filtered store copy, and an unfiltered second root would let it read an
+/// untracked file by its absolute path (docs/explanation/flakes-and-sources.md).
 pub fn project_root(a: &EvalArgs) -> Option<Vec<u8>> {
     if matches!(a.input, Some(Input::Flake(_))) {
         return None;

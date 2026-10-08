@@ -126,11 +126,8 @@ impl Arena {
     /// tail of the current chunk.
     ///
     /// # Safety
-    ///
-    /// Every reference and `Word` over memory allocated since `m` must be
-    /// dead. The next allocation hands the same bytes out again, as a
-    /// different type; `alloc` would then return a second `&'static mut`
-    /// to memory a live reference still names.
+    /// Every reference and `Word` over memory allocated since `m` must be dead:
+    /// the next allocation hands the same bytes out again, as a different type.
     #[inline]
     pub(crate) unsafe fn release(&mut self, m: Mark) {
         if self.end == m.end {

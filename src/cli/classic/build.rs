@@ -115,15 +115,12 @@ fn run(ev: &mut Evaluator, b: &Build) -> error::Result<Built> {
     Ok(Built::Ready(roots, Box::new(plan), Box::new(prov)))
 }
 
-/// `--no-out-link` asks for no symlink, and in nix that means the output is
-/// collectable the moment the run ends: the opt-out protects nothing. Here it
-/// keeps a root in iets's roots store instead — the workflow the flag is for,
-/// without a `result` in the tree — keyed on the working directory, the files
-/// and attributes asked for, and the name the symlink would have had, so a
-/// second build replaces its own roots in place. It is a divergence from Nix,
-/// invisible on stdout and stderr (`docs/reference/divergences.md`), and
-/// `build-gc-root = false` turns it off. The links go on the local daemon,
-/// which is where `out_links` brought the outputs.
+/// In nix `--no-out-link` leaves the output collectable the moment the run
+/// ends. Here it keeps a root in iets's roots store, keyed on the working
+/// directory, the files and attributes asked for, and the name the symlink
+/// would have had, so a second build replaces its own roots. This diverges from
+/// Nix (`docs/reference/divergences.md`); `build-gc-root = false` turns it off.
+/// The links go on the local daemon, where `out_links` brought the outputs.
 fn keep_outputs(b: &Build, kept: &[(String, String)]) {
     let mut key: Vec<Vec<u8>> = vec![b"nix-build".to_vec(), cwd()];
     key.extend(b.c.files.iter().map(|f| f.as_bytes().to_vec()));

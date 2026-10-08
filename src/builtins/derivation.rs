@@ -1065,8 +1065,7 @@ mod tests {
     /// 'ca-derivations dynamic-derivations'`, over
     ///   producer = name: derivation { inherit name; system = "x86_64-linux";
     ///     builder = "/bin/sh"; args = [ "-c" "echo done > $out" ];
-    ///     __contentAddressed = true; outputHashMode = "text";
-    ///     outputHashAlgo = "sha256"; };
+    ///     __contentAddressed = true; outputHashMode = "text"; outputHashAlgo = "sha256"; };
     ///   one = builtins.outputOf (producer "p.drv").outPath "out";
     ///   two = builtins.outputOf (builtins.outputOf (producer "q.drv.drv").outPath "out") "out";
     #[test]

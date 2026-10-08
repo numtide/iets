@@ -335,17 +335,12 @@ pub enum Rejected {
 }
 
 /// Puts a tree in, under the store path `name` and `expect` name together.
-///
-/// `expect` is the hash the caller already knows — a lock entry's `narHash`,
-/// a derivation's `outputHash` — and there is no form of this call without
-/// it. The tree is hashed here and refused unless it is the one that was
-/// asked for, so an entry's name is always its content address and nothing
-/// that lacks a prior hash can be admitted. That is the whole of the store's
-/// trust model: no signature, no trusted builder, no daemon.
-///
-/// The bytes go into a new pack, except those some pack already holds; the
-/// pack and then the index are renamed into place, so a reader sees either no
-/// entry or a whole one, and a sibling that got there first wins.
+/// `expect` is a hash the caller already knows, a lock entry's `narHash` or a
+/// derivation's `outputHash`. The tree is hashed here and refused unless it
+/// matches, so an entry's name is always its content address. That is the whole
+/// trust model: no signature, no trusted builder, no daemon. New bytes go into
+/// a new pack; the pack and then the index are renamed into place, so a reader
+/// sees no entry or a whole one, and a sibling that got there first wins.
 pub fn put(
     name: &str,
     expect: &Hash,

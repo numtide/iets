@@ -202,16 +202,13 @@ impl Write for ChunkShip {
     }
 }
 
-/// `AddMultipleToStore`: one zstd stream whose decompressed bytes are the
-/// worker-protocol `AddMultipleToStore` framing (a count, then each
-/// `ValidPathInfo` at 1.16 followed by its NAR) — the same `write_object` the
-/// worker transport writes. Like the C++ sink, the stream is flushed once, at
-/// the end; the reader decodes a partial frame fine.
-///
-/// `check_sigs` is false because every path we send is content-addressed, so
-/// the daemon recomputes its address. A caller holding only a `write` token
-/// gets `CheckSigs` forced on server-side anyway (daemon/main.cc), which those
-/// paths still pass.
+/// `AddMultipleToStore`: one zstd stream of the worker-protocol framing (a
+/// count, then each `ValidPathInfo` at 1.16 followed by its NAR), from the same
+/// `write_object` the worker transport uses. Like the C++ sink, the stream is
+/// flushed once, at the end; the reader decodes a partial frame fine.
+/// `check_sigs` is false because every path sent is content-addressed, so the
+/// daemon recomputes its address. For a `write` token the server forces
+/// `CheckSigs` on anyway (daemon/main.cc), which those paths still pass.
 pub fn add_multiple(c: &mut Client, objects: &[&Object], t: &mut Timings) -> Result<u64> {
     let deadline = Instant::now() + Duration::from_secs(c.cfg.connect_timeout);
     let mut pause = Duration::from_millis(500);
@@ -729,12 +726,11 @@ pub fn fetch_into_dir(
 
 /// Registers `paths` and their closure in the local nix-daemon so an out-link
 /// points at a real local store path. The local daemon substitutes first: a
-/// farm publishes its outputs to a binary cache under the cache key, while a
-/// worker's own path infos carry only the worker's key. What it cannot
-/// substitute comes from the remote: `QueryPathInfos` for the closure, then
-/// `FetchNars` for what the local store lacks, written straight into one
-/// worker-protocol `AddMultipleToStore` with each path's `ValidPathInfo`,
-/// signatures included, so the daemon checks them as `nix copy --from` does.
+/// farm publishes outputs under the cache key, while a worker's path infos carry
+/// only the worker's key. The rest comes from the remote: `QueryPathInfos` for
+/// the closure, then `FetchNars` for what the local store lacks, written into
+/// one `AddMultipleToStore` with each path's `ValidPathInfo`, signatures
+/// included, so the daemon checks them as `nix copy --from` does.
 pub fn register(
     c: &mut Client,
     paths: &[StorePath],

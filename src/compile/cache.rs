@@ -72,16 +72,12 @@ impl IrCache {
     }
 
     /// Everything the compiler folds out of the evaluator's configuration is
-    /// here, or the entry of one configuration answers another one.
-    /// `fold_builtins_select` and the global-variable fold store a string,
-    /// path, float or int constant by content, so `builtins.currentSystem`
-    /// (`system`), `builtins.storeDir` (`store_dir`) and the `impureOnly`
-    /// names that `pure` removes all belong in the key; `builtins.nixVersion`
-    /// and `builtins.langVersion` follow the build id. Every other constant is
-    /// stored by name and looked up in the live tables on load, so the search
-    /// path is not in the key, and a `~/` literal is never cached at all.
-    /// `lint_key` is `lint::Config::compile_key`: the compile-time lint
-    /// levels, whose warnings the entry carries.
+    /// here, or the entry of one configuration answers another one. The folds
+    /// store a constant by content, so `system`, `store_dir` and `pure` (which
+    /// removes the `impureOnly` names) are in the key; `nixVersion` and
+    /// `langVersion` follow the build id. Every other constant is looked up by name
+    /// on load, and a `~/` literal is never cached. `lint_key` is
+    /// `lint::Config::compile_key`, whose warnings the entry carries.
     pub fn key(
         &self,
         path: &[u8],
@@ -1370,13 +1366,12 @@ mod tests {
         assert!(!loads(&huge), "a count past the entry misses");
     }
 
-    /// Every changed byte of a real entry, over every source shape the
-    /// decoder has an invariant for. What the decoder accepts is evaluated
-    /// deeply: the decoder's job is that no entry can make the evaluator read
-    /// a slot, a `with` env or an inherit env that is not there, and those
-    /// faults are a panic or a SIGSEGV, not a wrong value. A changed byte
-    /// that names another symbol is a well-formed entry for another program,
-    /// and the store's integrity check — not the decoder — is what stops it
+    /// Every changed byte of a real entry, over every source shape the decoder
+    /// has an invariant for. What it accepts is evaluated deeply: no entry may
+    /// make the evaluator read a slot, a `with` env or an inherit env that is not
+    /// there, and those faults are a panic or a SIGSEGV, not a wrong value. A byte
+    /// that names another symbol is a well-formed entry for another program, which
+    /// the store's integrity check stops
     /// (`a_changed_byte_of_a_stored_entry_is_a_miss`).
     #[test]
     fn a_changed_byte_never_makes_the_evaluator_read_past_its_env() {

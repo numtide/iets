@@ -67,10 +67,8 @@ impl Grpc {
     }
 }
 
-/// A `Want` and a `BuildDerivation` per derivation of the batch's closure, at most
-/// `max-builds` in flight, a derivation only once every input
-/// derivation of it is done.
-///
+/// A `Want` and a `BuildDerivation` per derivation of the batch's closure, at
+/// most `max-builds` in flight, a derivation only once its inputs are done.
 /// Derivations whose outputs the store already reports valid are skipped. The
 /// C++ plugin sends them anyway and lets the niks3 claim answer `AlreadyValid`,
 /// which costs one RPC per derivation; one extra `QueryValidPaths` over the

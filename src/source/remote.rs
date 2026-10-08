@@ -142,12 +142,10 @@ impl LazyStore {
 
 /// fetchers.cc:getAccessorUnchecked: a locked input carries `__final`, so Nix
 /// substitutes its store path before it runs any fetcher. An expression cannot
-/// mark an input final (`fetchFinalTree` is an internal primop), so iets
-/// substitutes the tree itself first, and only then fetches. One
-/// `QueryValidPaths` with the substitute flag does it: the daemon runs
+/// mark an input final, so iets substitutes the tree itself before it fetches.
+/// One `QueryValidPaths` with the substitute flag does it: the daemon runs
 /// `Store::substitutePaths` and answers with the paths it now has
-/// (daemon.cc:performOp, worker-protocol.hh:wopQueryValidPaths, >= 1.27).
-/// Nothing is evaluated and no derivation is built.
+/// (daemon.cc:performOp, >= 1.27). Nothing is evaluated or built.
 fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
     let Some(conn) = ev.store.get() else {
         return false;
@@ -168,14 +166,12 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
 }
 
 /// A remote input's tree must be readable at its store path so `import` reads
-/// exactly what Nix reads. `/nix/store` is checked first and used when it has
-/// the tree. Otherwise the user-level input store is, and a tarball-shaped
-/// input that is in neither is downloaded into it, so evaluation needs no
-/// daemon: reads come out of the spool by offset (`crate::treestore`). A daemon
-/// that is reachable is still asked to substitute first, because a local copy
-/// beats a download; when there is none the step is skipped without a word. A
-/// `git` or `hg` input still goes through Nix's own `fetchTree`, which does
-/// write `/nix/store`. Never called for the root tree or a `path` input.
+/// exactly what Nix reads. `/nix/store` is used when it has the tree, then the
+/// user-level input store; a tarball-shaped input in neither is downloaded into
+/// that, and reads come out of the spool by offset (`crate::treestore`). A
+/// reachable daemon is asked to substitute first, since a local copy beats a
+/// download. A `git` or `hg` input still goes through Nix's `fetchTree`, which
+/// writes `/nix/store`. Never called for the root tree or a `path` input.
 pub fn ensure_readable(
     ev: &mut Evaluator,
     sp: &StorePath,

@@ -439,17 +439,13 @@ fn realise(s: &Shell, transport: &Transport, options: &Options, r: Ready, cores:
     }
 }
 
-/// Keeps what this entry realised alive: one link in iets's roots store per
-/// path, so the next `nix collect-garbage` leaves them and the next entry
-/// rebuilds nothing. `nix-shell` builds the derivation's inputs and not the
-/// derivation, and no store path holds them all, so there is one link each —
-/// the same idea nix-direnv has to spell out with `nix-store --add-root`.
-///
-/// The links are keyed on what the user asked for and on the path's place in
-/// the sorted list, so two projects keep two sets, and one project replaces
-/// its own set in place; a set that shrank leaves links the TTL sweep takes.
-/// Best effort and silent, as in [`crate::cli::devenv::keep_root`]: a root is
-/// not part of what `nix-shell` prints.
+/// Keeps what this entry realised alive, so that the next entry rebuilds
+/// nothing. `nix-shell` builds the derivation's inputs and not the derivation,
+/// and no store path holds them all, so iets's roots store gets one link each.
+/// The links are keyed on what the user asked for and the path's place in the
+/// sorted list: a project replaces its own set in place, and the TTL sweep takes
+/// what a set that shrank leaves. Best effort and silent, as in
+/// [`crate::cli::devenv::keep_root`].
 fn keep_inputs(
     w: &mut Worker,
     r: &Ready,

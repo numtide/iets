@@ -201,11 +201,9 @@ pub fn count_read(ev: &mut Evaluator, cell: &Cell, pos: Pos) -> EvalResult<Word>
 }
 
 /// The marks in `ctx`, the context that the value of attribute `key` gave
-/// derivation `drv_name`. The tree metadata (`self.rev`) is one finding
-/// that names them all, at the strictest of their levels. `site` is
-/// `Pos::NONE` when the derivation has no position the scope sees: the
-/// level of this lint comes from the tree, so the finding then goes to
-/// `attr_pos`, out of scope or not.
+/// derivation `drv_name`. The tree metadata (`self.rev`) is one finding that
+/// names them all, at the strictest of their levels. The level comes from the
+/// tree, so with `site` `Pos::NONE` the finding goes to `attr_pos`, in scope or not.
 // `derivationStrict` tests each attribute of each derivation: the report
 // stays out of that loop
 #[cold]

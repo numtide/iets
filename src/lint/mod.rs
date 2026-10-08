@@ -877,14 +877,13 @@ impl Evaluator {
         self.lint_site(id, pos, None, None, msg)
     }
 
-    /// Any fiber reports: the site set keeps a warning to one line, so a
-    /// helper reporting a site the demand path reaches again costs
-    /// nothing, and bailing like `trace` does (docs/explanation/evaluation.md, Effects)
-    /// cost 15 % of the wall on nixos-desktop at 4 workers. A site the
-    /// scope silences enters the set too; an `error` site never does, so
-    /// every fiber that reaches it fails. A `level` is that of the tree a
-    /// value comes from, where the location of the site does not decide. A
-    /// finding of `tree` is one for the tree, so the site set does not see it.
+    /// Any fiber reports: the site set keeps a warning to one line, and bailing
+    /// like `trace` does (docs/explanation/evaluation.md, Effects) cost 15 % of the
+    /// wall on nixos-desktop at 4 workers. A site the scope silences enters the set
+    /// too; an `error` site never does, so every fiber that reaches it fails. A
+    /// `level` is that of the tree a value comes from, where the location of the
+    /// site does not decide. A finding of `tree` is one for the tree, so the site
+    /// set does not see it.
     #[inline(never)]
     fn lint_site(
         &mut self,

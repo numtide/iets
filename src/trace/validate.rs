@@ -233,12 +233,10 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
 
 /// Validates every observation on `threads` threads. On success the
 /// refreshed entries are written back into `obs`.
-///
-/// The [`Mismatch`] names the lowest-indexed observation that failed, not the
-/// first one a thread reported, so one change always names the same thing.
-/// The threads still stop at the first failure: every index below it was
-/// already handed out, and a thread finishes the check it started before it
-/// breaks, so the lowest failing index is always among the ones seen.
+/// The [`Mismatch`] names the lowest-indexed observation that failed, so one
+/// change always names the same thing. The threads still stop at the first
+/// failure: every index below it was already handed out, and a thread finishes
+/// the check it started, so the lowest failing index is among the ones seen.
 pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);

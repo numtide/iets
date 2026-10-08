@@ -97,7 +97,6 @@ fn main() {
         best * 1e3,
         mean * 1e3
     );
-    io::stdout().flush().ok();
 }
 
 struct Counter(u64);

@@ -95,5 +95,5 @@ fn the_sink_is_its_own_knob() {
     );
     let written = fs::read_to_string(&file).expect("the events file");
     assert!(written.contains(r#""event":"store-add""#), "{written}");
-    fs::remove_dir_all(&dir).ok();
+    let _ = fs::remove_dir_all(&dir);
 }

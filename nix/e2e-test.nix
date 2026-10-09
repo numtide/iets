@@ -1,8 +1,14 @@
 # scripts/<name>.nu in a NixOS test container: a real nix-daemon, a writable
 # store, the real nix on PATH and no network.
-{ self, nixpkgs, pkgs, iets, name, packages ? [ ], env ? "" }:
+# With `coverage`, `iets` is an instrumented build: each process writes its
+# profile, and $out/cov holds them all after the run.
+{ self, nixpkgs, pkgs, iets, name, packages ? [ ], env ? "", coverage ? false }:
 let
+  inherit (pkgs) lib;
   system = pkgs.stdenv.hostPlatform.system;
+  profile = lib.optionalString coverage "LLVM_PROFILE_FILE=/tmp/cov/%p-%m.profraw";
+  prepare = lib.optionalString coverage ''machine.succeed("mkdir -m 1777 /tmp/cov")'';
+  collect = lib.optionalString coverage ''machine.copy_from_machine("/tmp/cov", "cov")'';
   # nixpkgs/shell.nix imports this tree through a sha256-pinned fetchTarball;
   # the same store path, so the container's nix finds it and fetches nothing.
   pin = (pkgs.lib.importJSON "${nixpkgs}/ci/pinned.json").pins.nixpkgs;
@@ -82,6 +88,8 @@ pkgs.testers.runNixOSTest {
       # a git checkout, as in the dev shell: the scripts read this flake as git+file
       machine.succeed("cp -r ${self} /home/alice/iets && chmod -R u+w /home/alice/iets && chown -R alice /home/alice/iets")
       machine.succeed("runuser -l alice -c 'cd iets && git init -q && git add -A && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m e2e'")
-      machine.succeed("runuser -l alice -c 'cd iets && IETS=${iets}/bin/iets NIXPKGS=${nixpkgs} E2E_OFFLINE=1 ${env} nu scripts/${name}.nu' >&2")
+      ${prepare}
+      machine.succeed("runuser -l alice -c 'cd iets && IETS=${iets}/bin/iets NIXPKGS=${nixpkgs} E2E_OFFLINE=1 ${profile} ${env} nu scripts/${name}.nu' >&2")
+      ${collect}
     '';
 }

@@ -45,6 +45,9 @@
         inherit (fuzz pkgs) fuzz-diff fuzzers;
         fuzz-parse-campaign = (fuzz pkgs).campaign { target = "parse"; };
         fuzz-nar-campaign = (fuzz pkgs).campaign { target = "nar-gen"; };
+      } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+        # line coverage of the e2e tests in NixOS containers (nix/coverage.nix)
+        coverage-e2e = import ./nix/coverage.nix { inherit self nixpkgs pkgs; iets = iets pkgs; };
       });
       checks = forAll (pkgs:
         let

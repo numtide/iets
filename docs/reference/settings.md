@@ -7,14 +7,9 @@ iets reads two settings files. `nix.conf` is Nix's, shared with the real
 nix behind the classic fallback; `iets.toml` is iets's own, in TOML, and
 no nix ever sees it.
 
-Every `IETS_*` variable is read once at startup into one `Settings`
-struct (`src/settings.rs`), together with the `iets.toml` files and the
-`--iets-option` flag. A `Session` owns it, not a static: read it with
-`ev.session().settings()` where an evaluator is at hand, else
-`session::Session::current().settings()` (`docs/reference/library.md`).
-`Session::load_settings` reads the files; until then a session has the
-environment knobs alone. Nothing reads the environment at its point of
-use, so a knob cannot change halfway through a run.
+iets reads every `IETS_*` variable, the `iets.toml` files and the
+`--iets-option` flag once, at startup. A change to the environment during
+a run has no effect.
 
 ## Environment variables
 
@@ -74,11 +69,11 @@ arena, and was always the whole run.
 | `IETS_NO_FALLBACK` | `no-fallback` | Boolean | off | A classic command fails instead of running the real Nix (`docs/reference/classic.md`). |
 | `IETS_FETCHING` | | set = on | off | Set on the Nix subprocess that fetches a flake input, so a recursive fetch is an error, not a loop. |
 | `IETS_OFFLINE` | | set = on | off | Any download is an error. A flake whose inputs the input store already holds still evaluates. |
-| `IETS_SESSION_ID` | | string | a new UUIDv7 | The `sid` of every JSON log record (`docs/reference/errors.md`). `eval-jobs` sets it on its workers. `src/log.rs` reads it, not `Settings`: a settings error is itself a record. |
+| `IETS_SESSION_ID` | | string | a new UUIDv7 | The `sid` of every JSON log record (`docs/reference/errors.md`). `eval-jobs` sets it on its workers. A settings error carries it too. |
 | | `fix-hashes` | `ask`, `always`, `never` | `ask` | See **fix-hashes** below. |
 
-`IETS_BUILD_ID` is not a setting: the build script bakes it in
-(`src/trace/key.rs`), and it keys the caches to the binary.
+`IETS_BUILD_ID` is not a setting: it is fixed when iets is built, and it
+keys the caches to the binary.
 
 ### The measurement scripts
 
@@ -135,13 +130,12 @@ without the tracing cache lists the files. Files read with `readFile` or
 
 `--iets-option NAME VALUE` sets any `iets.toml` setting for one run. Every
 iets command and every classic name accepts it, and it never reaches the
-real nix: it leaves the argv before a classic fallback execs
-(`src/main.rs`).
+real nix: it leaves the argv before a classic fallback execs.
 
 VALUE is a TOML value when it reads as a boolean, an integer, a quoted
 string or an array, and the text itself otherwise: `--iets-option workers
 4`, `--iets-option fix-hashes always` and `--iets-option builder
-ssh-ng://bld1` need no quotes. Text for `source-map` is a
+ssh-ng://buildhost` need no quotes. Text for `source-map` is a
 whitespace-separated list.
 
 A command that starts a second iets passes the pairs on: `eval-jobs`
@@ -150,12 +144,12 @@ was given holds in the workers too.
 
 # `iets.toml`
 
-`src/settings.rs` reads iets's own settings. The format is TOML: the
+The format is TOML: the
 settings are top-level keys with the names below, and `[lint]` is a table
 (`docs/reference/lints.md`).
 
 ```toml
-builder = "ssh-ng://bld1"
+builder = "ssh-ng://buildhost"
 workers = 4
 no-fallback = true
 fix-hashes = "never"
@@ -307,13 +301,13 @@ and a remote `builder`'s outputs are copied back first
 (`docs/reference/classic.md`).
 
 `builder` may name several places. Each one declares what it accepts, and
-a derivation goes to the first that accepts it: order is the policy, since
-there is no cost model yet (`docs/executors-proposal.md`).
+a derivation goes to the first that accepts it. Order is the policy;
+there is no cost model.
 
 ```toml
 builder = [
   { url = "daemon", systems = ["x86_64-linux"] },
-  { url = "ssh-ng://bld1", systems = ["aarch64-linux"], features = ["kvm"] },
+  { url = "ssh-ng://buildhost", systems = ["aarch64-linux"], features = ["kvm"] },
 ]
 ```
 
@@ -324,20 +318,20 @@ the only one that knows. A derivation no place accepts is an error that
 names every place and what it declared, before anything is uploaded.
 
 `--builder` carries one string, so it separates places with `;`
-(`--builder 'daemon; ssh-ng://bld1'`), as nix.conf's `builders` separates
+(`--builder 'daemon; ssh-ng://buildhost'`), as nix.conf's `builders` separates
 machines. A URL's own query string uses `&`, never `;`. A classic name
 addresses one store, as the tool it stands in for does, so it takes the
 first place and warns about the rest.
 
 # `nix.conf`
 
-`src/config.rs` reads Nix's settings files. It copies Nix 2.34.8:
-`src/libstore/globals.cc:loadConfFile` for discovery,
-`src/libutil/configuration.cc:parseConfigFiles` for the line syntax.
+iets reads Nix's settings files as Nix 2.34.8 does:
+`globals.cc:loadConfFile` for discovery, `configuration.cc:parseConfigFiles`
+for the line syntax.
 
 ## Files and order
 
-`Config::load(overrides)` applies these in order. Later wins.
+iets applies these in order. Later wins.
 
 1. `$NIX_CONF_DIR/nix.conf`, default `/etc/nix/nix.conf`.
 2. The user files, lowest precedence first. `loadConfFile` walks the list
@@ -365,17 +359,16 @@ A file that is missing or unreadable is skipped, not an error.
 - `extra-<name> = value` appends to a list setting. For a setting that is
   not a list, the pair is kept under its literal name, as Nix keeps it in
   `unknownSettings`.
-- An unknown setting is kept and readable with `Config::str`. Nix warns
+- An unknown setting is kept. Nix warns
   about it, and so does iets, with the same text (**What is applied**,
   class 5).
 
 ## Values
 
-Raw strings, with typed accessors: `str`, `int`, `bool` (`true`/`yes`/`1`
-and `false`/`no`/`0`) and `list` (whitespace-separated). Typed getters
-carry Nix's defaults: `store` (`auto`), `system` (the build target),
-`max_jobs` (`auto` = CPU count), `cores` (`0` = all), `keep_going` and
-`keep_failed`.
+A Boolean is `true`/`yes`/`1` or `false`/`no`/`0`. A list is
+whitespace-separated. The defaults are Nix's: `store` is `auto`, `system`
+is the build target, `max-jobs` is `auto` (the CPU count) and `cores` is
+`0` (all).
 
 `$NIX_PATH`, even an empty one, replaces the `nix-path` setting of every
 file, as `configuration.cc:192` does.
@@ -390,15 +383,28 @@ with exit 1. iets gives the same text at the same place:
 | `max-jobs` | an integer, and `auto` | `configuration setting 'max-jobs' should be 'auto' or an integer` |
 | an integer | digits, with a `K`, `M`, `G` or `T` suffix for 2^10, 2^20, 2^30 or 2^40 | `setting 'NAME' has invalid value 'V'` |
 
-Some integer settings live in a 32-bit field in Nix, so a value above
-4294967295 is an error for them (`cores`, `max-jobs` and the others in
-`NARROW`). `src/config.rs` has the three lists: `BOOLS`, `INTS`, `NARROW`.
+Nix holds some integer settings in 32 bits, so a value above 4294967295
+is an error for them:
+
+- `build-poll-interval`
+- `cores`
+- `download-attempts`
+- `download-speed`
+- `eval-attrset-update-layer-rhs-threshold`
+- `eval-profiler-frequency`
+- `id-count`
+- `max-call-depth`
+- `max-jobs`
+- `max-substitution-jobs`
+- `narinfo-cache-meta-ttl`
+- `narinfo-cache-negative-ttl`
+- `narinfo-cache-positive-ttl`
+- `start-id`
+- `tarball-ttl`
 
 ## What is applied
 
 Nix has about 130 settings. For iets each one is in one of five classes.
-`src/config.rs` has the lists: `KNOWN`, `ALIASES`, `CLIENT` and
-`UNIMPLEMENTED`.
 
 **1. iets reads it.**
 
@@ -417,11 +423,10 @@ Nix has about 130 settings. For iets each one is in one of five classes.
 An old name is its setting: `build-cores` is `cores`, `binary-caches` is
 `substituters`, and so on for the 23 aliases of Nix 2.34.8.
 
-**2. It goes to the daemon.** `worker::Options` carries `max-jobs`,
-`cores`, `keep-going`, `keep-failed`, `substitute`, `fallback` and
-`max-silent-time` as the fields of `SetOptions`, built with
-`Options::try_from(&config)`. The daemon takes these fields from its
-client, so the last two must be the client's values: a client that sends 0
+**2. It goes to the daemon.** `max-jobs`, `cores`, `keep-going`,
+`keep-failed`, `substitute`, `fallback` and `max-silent-time` go as the
+fields of the daemon's `SetOptions` operation. The daemon takes these
+fields from its client, so the last two must be the client's values: a client that sends 0
 turns the administrator's `max-silent-time` off.
 
 Every other setting that acts in the store goes into the override map of
@@ -438,7 +443,7 @@ goes as `extra-NAME`, which the daemon appends to its own value.
 
 The classic names do this. iets's own commands (`iets
 eval`, `build`, `eval-jobs`, `print-dev-env`, `diff`) send
-`Options::default()` and no overrides. There, a store setting given with
+Nix's defaults and no overrides. There, a store setting given with
 `--option` is one warning:
 
 ```
@@ -450,7 +455,7 @@ same warning, with the reason `a grpc:// builder
 takes no settings; its URL has 'max-builds'`. `store` and `system` still
 apply.
 
-**3. It holds by construction.** The rest of `CLIENT`. No message.
+**3. It holds by construction.** No message.
 
 | Setting | Why it holds |
 |:---|:---|
@@ -462,7 +467,7 @@ apply.
 | `eval-profile-file`, `eval-profiler-frequency` | they only act with `eval-profiler`, which is in class 4; `IETS_PROFILE_TO` and `IETS_PROFILE_HZ` are the knobs that act. |
 | `eval-attrset-update-layer-rhs-threshold`, `preallocate-contents`, `use-case-hack` | they tune Nix's own data structures and file writes. No result changes. |
 
-**4. iets has nothing for it.** `UNIMPLEMENTED`. It counts when the value
+**4. iets has nothing for it.** It counts when the value
 is not Nix's default, from any file or from `--option`. Then
 `nix-instantiate`, `nix-build`, `nix-shell` and the `nix` subcommands fall
 back to the real nix, which applies it (`iets: falling back to nix-build:
@@ -502,8 +507,7 @@ Nix prints nothing for these, so the warning is a divergence on stderr
 
 **5. Nix does not know it.** `warning: unknown setting 'NAME'`, Nix's own
 text (configuration.cc:`warnUnknownSettings`), once per name, with the code
-`unknown-setting`. The value is kept and readable with `Config::str`, and
-it never reaches a daemon: the override map takes the settings of Nix
+`unknown-setting`. The value is kept, and it never reaches a daemon: the override map takes the settings of Nix
 2.34.8 only. So a `nix.conf` written for a fork of Nix, with settings of
 its own, gives these warnings and changes no result. Such a setting as a
 flag (`--NAME`) is an unknown flag: a usage error, or a fallback under a
@@ -513,9 +517,8 @@ Two limits. A setting of the system `nix.conf` that is both a client and a
 store setting (`netrc-file`, `ssl-cert-file`, `http2`, the `download-*`
 group) acts in the daemon only: iets's own fetcher does not read it. Use
 `NIX_SSL_CERT_FILE` for the CA bundle. The
-fetcher still retries a transient HTTP status the way Nix does, with the
-defaults `download-attempts` and `RETRY_TIME_MS_DEFAULT` have: five
-attempts, from 250 ms, doubled each time, and from a minute for a 429. A
+fetcher still retries a transient HTTP status the way Nix does, with
+Nix's defaults: five attempts, from 250 ms, doubled each time, and from a minute for a 429. A
 404, a 410 and an authorisation failure are final. And
 `extra-platforms`, `system-features` and the other store settings change
 what the *daemon* builds, not what iets evaluates.
@@ -525,9 +528,7 @@ what the *daemon* builds, not what iets evaluates.
 `pure-eval` as Nix 2.34.8 has it (`eval-settings.hh`, `eval.cc`,
 `primops.cc`, `fetchTree.cc`, `flake-primops.cc`). An evaluation in this
 mode depends only on its locked inputs. The answers and the error
-messages are Nix's; the test `eval::tests::pure_eval_answers_like_nix`
-holds them, and `scripts/classic-e2e.nu` compares the defaults below
-against the real nix.
+messages are Nix's.
 
 ## When it is on
 
@@ -586,13 +587,5 @@ Nix's:
 
 ## Caches
 
-`pure-eval` is part of the tracing-cache key. The IR cache needs nothing:
-an entry that names `__currentSystem` finds no such global in a pure run,
-is dropped and recompiled, and the compile reports the undefined
-variable.
-
-An entry that does not decode is dropped and recompiled the same way. That
-holds for every byte sequence, not only for an entry iets wrote: the
-decoders validate constants, indices, nesting and counts, so a truncated or
-crafted entry in the cache directory is a miss and never a crash
-(`docs/explanation/caching.md`).
+`pure-eval` is part of the tracing-cache key. The IR cache gives the
+right answer in both modes without it (`docs/explanation/caching.md`).

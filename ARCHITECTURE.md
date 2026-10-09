@@ -121,7 +121,10 @@ Around it:
 - `devenv/`: `print-dev-env`.
 - `provenance.rs`: store paths and derivations back to local trees and
   source positions.
-- `config.rs`: `nix.conf`. `settings.rs`: `iets.toml` and every `IETS_*`
+- `config.rs`: `nix.conf`. Its lists `KNOWN`, `ALIASES`, `CLIENT` and
+  `UNIMPLEMENTED` put each Nix setting in a class of
+  `docs/reference/settings.md`; `BOOLS`, `INTS` and `NARROW` type the
+  values. `settings.rs`: `iets.toml` and every `IETS_*`
   variable. `ignored.rs`: the warning for a flag or a setting that has no
   effect.
 - `nixbin.rs`: the real Nix binaries behind the classic fallback.

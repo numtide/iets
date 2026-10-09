@@ -86,6 +86,19 @@ struct FilesInner {
     next_base: u32,
 }
 
+impl FilesInner {
+    fn push(&mut self, path: &[u8], src: &[u8]) -> FileId {
+        let id = FileId(self.list.len() as u32);
+        let base = self.next_base;
+        self.next_base = base
+            .checked_add(src.len() as u32 + 1)
+            .expect("sources exceed 4 GiB");
+        let info = FileInfo::new(path.to_vec(), src, base);
+        self.list.push(Box::leak(Box::new(info)));
+        id
+    }
+}
+
 /// Append-only table of loaded files: path, global base offset and line
 /// table only, never the source text. Entries are leaked so references
 /// outlive every lock.
@@ -107,26 +120,22 @@ impl Files {
         })))
     }
 
-    /// Register `src` under `path`, or return the existing id. A pseudo-file
-    /// (`«string»`, `«arg»`) is new each time: two of them share a name, not
-    /// a text, and positions in the second would be read against the first.
+    /// Register the file at `path`, or return its id: every compile of one
+    /// path reads the same text.
     pub fn add(&self, path: &[u8], src: &[u8]) -> FileId {
         let mut g = self.0.lock().unwrap();
-        let pseudo = path.starts_with("\u{ab}".as_bytes());
-        if !pseudo && let Some(id) = g.ids.get(path) {
+        if let Some(id) = g.ids.get(path) {
             return *id;
         }
-        let id = FileId(g.list.len() as u32);
-        let base = g.next_base;
-        g.next_base = base
-            .checked_add(src.len() as u32 + 1)
-            .expect("sources exceed 4 GiB");
-        g.list
-            .push(Box::leak(Box::new(FileInfo::new(path.to_vec(), src, base))));
-        if !pseudo {
-            g.ids.insert(path.to_vec(), id);
-        }
+        let id = g.push(path, src);
+        g.ids.insert(path.to_vec(), id);
         id
+    }
+
+    /// Register a text that `path` only names (`«string»`, `«arg»`): two
+    /// texts may share a name.
+    pub fn add_text(&self, path: &[u8], src: &[u8]) -> FileId {
+        self.0.lock().unwrap().push(path, src)
     }
 
     pub fn get(&self, i: usize) -> Option<&'static FileInfo> {

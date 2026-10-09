@@ -1290,7 +1290,7 @@ mod tests {
         let file = ev.add_file(PATH, SRC.as_bytes());
         let base = ev.files[file.0 as usize].base;
         let ir = ev
-            .compile_source(PATH, SRC.as_bytes().to_vec(), b"/t", None)
+            .compile_file(PATH, SRC.as_bytes().to_vec(), b"/t")
             .expect("compile");
         let bytes = serialize(&ev, ir, base, &[], &Allows::default()).expect("entry");
         (ev, bytes, base, SRC.len() as u32)
@@ -1391,7 +1391,7 @@ mod tests {
             let base = ev.files[file.0 as usize].base;
             let span = src.len() as u32;
             let ir = ev
-                .compile_source(&path, src.as_bytes().to_vec(), b"/t", None)
+                .compile_file(&path, src.as_bytes().to_vec(), b"/t")
                 .expect("compile");
             let bytes = serialize(&ev, ir, base, &[], &Allows::default()).expect("entry");
             let want = strict_print(&mut ev, ir);

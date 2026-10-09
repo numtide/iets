@@ -643,9 +643,7 @@ mod tests {
         let src = "t:\n  { s = t; }.s.revCount + { inherit (t) revCount; }.revCount";
         let file = ev.add_file(b"/t/f.nix", src.as_bytes());
         let base = ev.files[file.0 as usize].base;
-        let ir = ev
-            .compile_source(b"/t/f.nix", src.into(), b"/t", None)
-            .unwrap();
+        let ir = ev.compile_file(b"/t/f.nix", src.into(), b"/t").unwrap();
         let allows = Allows::default();
         let entry = serialize(&ev, ir, base, &[], &allows).unwrap();
         let (ir, _, _) = deserialize(&mut ev, &entry, base, src.len() as u32, false).unwrap();

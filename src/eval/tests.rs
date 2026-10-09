@@ -288,3 +288,13 @@ fn derivation_keeps_env_and_args_that_are_not_utf8() {
         assert_eq!(eval_str(&src), format!(r#""/nix/store/{want}""#), "{attrs}");
     }
 }
+
+/// `nix-instantiate --eval --arg a $'\n\n1' --arg b '  throw "b"'` names
+/// `«string»:1:3` for the throw (Nix 2.34.8).
+#[test]
+fn a_second_pseudo_file_keeps_its_own_positions() {
+    let mut ev = Evaluator::new();
+    ev.eval_string("\n\n1", b"/").expect("eval");
+    let e = ev.eval_string("  throw \"b\"", b"/").unwrap_err();
+    assert_eq!(ev.describe_pos(e.pos), "«string»:1:3");
+}

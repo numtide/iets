@@ -3,7 +3,7 @@
 The stable error codes, the exit codes, the `--log-format internal-json`
 record shape, the activity records and the `json-log-path` setting.
 
-Every error goes through one reporter (`src/log.rs`). It prints Nix's
+Every error goes through one reporter. It prints Nix's
 plain text, or with `--log-format internal-json` one `@nix` JSON record.
 It also sets the exit code. The `iets` command sends it to stderr; a
 library host sets its own sink, or none, on its `Session`
@@ -13,8 +13,10 @@ record and the exit code. Agents read the `hint`.
 ## Error codes
 
 Each error has a stable kebab-case `code`. The code comes from the error
-kind: `ErrorKind` in `src/eval/error.rs` for evaluation errors, `Error`
-in `src/error.rs` for the rest, and the daemon's build status for builds.
+kind. The Kind column names it for a library host: a variant of
+`eval::ErrorKind` for evaluation errors, of `error::Error` for the rest
+(`docs/reference/library.md`), or the daemon's build status for builds.
+A dash means the code has no kind of its own.
 
 | Code | Kind | What went wrong |
 | --- | --- | --- |
@@ -30,12 +32,12 @@ in `src/error.rs` for the rest, and the daemon's build status for builds.
 | `parse` | `ErrorKind::Parse` | a syntax error |
 | `lint` | `ErrorKind::Lint` | a lint at level `error`; at `warn`, a level-1 record |
 | `hash-mismatch` | `ErrorKind::HashMismatch`, build status | a fetched tree or a fixed-output build whose hash is not the one given |
-| `hash-fixed` | `fix-hashes` | a level-3 record: the hash `fix-hashes` wrote, at the file, line and column it changed, with the byte span and the new text |
-| `ignored-flag` | `src/ignored.rs` | a level-1 record: a flag that has no effect, and why (docs/reference/divergences.md) |
-| `ignored-setting` | `src/config.rs` | a level-1 record: a Nix setting that has no effect, and why (docs/reference/settings.md) |
-| `unknown-setting` | `src/config.rs` | a level-1 record: a setting Nix 2.34.8 does not know either, with Nix's text |
-| `unknown-lint` | `src/lint/mod.rs` | a level-1 record: a lint name in an `iets.toml` or in `IETS_LINT` that the registry does not have (docs/reference/lints.md) |
-| `cache-invalidated` | `src/trace/run.rs` | a level-3 record: what changed under a tracing cache entry, so the run evaluates again |
+| `hash-fixed` | — | a level-3 record: the hash `fix-hashes` wrote, at the file, line and column it changed, with the byte span and the new text |
+| `ignored-flag` | — | a level-1 record: a flag that has no effect, and why (docs/reference/divergences.md) |
+| `ignored-setting` | — | a level-1 record: a Nix setting that has no effect, and why (docs/reference/settings.md) |
+| `unknown-setting` | — | a level-1 record: a setting Nix 2.34.8 does not know either, with Nix's text |
+| `unknown-lint` | — | a level-1 record: a lint name in an `iets.toml` or in `IETS_LINT` that the registry does not have (docs/reference/lints.md) |
+| `cache-invalidated` | — | a level-3 record: what changed under a tracing cache entry, so the run evaluates again |
 | `io` | `ErrorKind::Io`, `Error::Io` | a file that cannot be read or written |
 | `unsupported` | `ErrorKind::Unsupported`, `Error::Unsupported` | a feature iets does not have; classic mode falls back to Nix |
 | `cancelled` | `ErrorKind::Cancelled` | a parallel helper was stopped; never reaches the user |
@@ -46,8 +48,8 @@ in `src/error.rs` for the rest, and the daemon's build status for builds.
 | `protocol` | `Error::Protocol` | bad data from another process (daemon, worker) |
 | `cache` | `Error::Cache` | the tracing cache |
 | `plan` | `Error::Plan` | a derivation closure that cannot be built |
-| `no-results` | `iets search` | no package matched every regex (docs/reference/commands.md) |
-| `no-output` | `iets build` | a root put no store path on stdout: nothing to build, no build result, or no such output (docs/reference/commands.md) |
+| `no-results` | — | `iets search`: no package matched every regex (docs/reference/commands.md) |
+| `no-output` | — | `iets build`: a root put no store path on stdout: nothing to build, no build result, or no such output (docs/reference/commands.md) |
 | `build-failed` | build status | a build that failed |
 
 ## Exit codes
@@ -301,16 +303,14 @@ The names are the fields of Nix's `MissingPaths`.
 
 `iets plumbing missing` prints the same object, and
 `iets plumbing build` the outcomes of the same dispatch, from derivation
-paths instead of an installable (docs/reference/plumbing.md). Both, and
-`iets build`, go through one call, `api::build::Dispatch`.
+paths instead of an installable (docs/reference/plumbing.md).
 
 ### `sid`: the session
 
 Every record carries `sid`, activity records included, on stderr and in the
 `json-log-path` file. It lets a program that reads several streams group
 the records of one run.
-This is an iets extension: Nix 2.34.8 has no such field. The key and the
-default value have the shape Determinate Nix uses (`sid`, a UUIDv7).
+This is an iets extension: Nix 2.34.8 has no such field.
 
 - By default each session makes a new UUIDv7, for example
   `019e037b-f603-7443-8071-cfd8585ec8c6`. It starts with the time in

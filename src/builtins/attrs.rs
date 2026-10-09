@@ -1,13 +1,11 @@
 //! Attribute set primops.
 
-use std::collections::HashMap;
-
 use super::Registry;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::purity;
 use crate::runtime::Word;
 use crate::runtime::arena::Stat;
-use crate::syntax::symbol::Sym;
+use crate::syntax::symbol::{FxHashMap, FxHashSet, Sym};
 use crate::{parallel, print};
 
 pub fn register(r: &mut Registry) {
@@ -176,7 +174,7 @@ fn list_to_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
     )?;
     parallel::fanout_list(ev, l); // parallel
     let mut entries: Vec<(Sym, Pos, Word)> = Vec::with_capacity(l.len as usize);
-    let mut seen: HashMap<Sym, ()> = HashMap::new();
+    let mut seen: FxHashSet<Sym> = FxHashSet::default();
     for c in l.cells() {
         let w = c.get();
         let a = ev.force_attrs(
@@ -198,7 +196,7 @@ fn list_to_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
             "while evaluating the `name` attribute of an element of the list passed to builtins.listToAttrs",
         )?;
         let sym = ev.sym(name);
-        if seen.insert(sym, ()).is_some() {
+        if !seen.insert(sym) {
             continue;
         }
         let Some(v) = a.get(ev.s.value) else {
@@ -226,7 +224,7 @@ fn zip_attrs_with(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
         "while evaluating the second argument passed to builtins.zipAttrsWith",
     )?;
     parallel::fanout_list(ev, l); // parallel
-    let mut groups: HashMap<Sym, Vec<Word>> = HashMap::new();
+    let mut groups: FxHashMap<Sym, Vec<Word>> = FxHashMap::default();
     let mut order: Vec<Sym> = Vec::new();
     for c in l.cells() {
         let w = c.get();
@@ -295,7 +293,7 @@ fn group_by(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         "while evaluating the second argument passed to builtins.groupBy",
     )?;
     parallel::fanout_list(ev, l); // parallel
-    let mut groups: HashMap<Sym, Vec<Word>> = HashMap::new();
+    let mut groups: FxHashMap<Sym, Vec<Word>> = FxHashMap::default();
     for c in l.cells() {
         let elem = c.get();
         let r = ev.call1(f, elem, pos)?;

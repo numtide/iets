@@ -81,7 +81,8 @@ The evaluator:
   census).
 - `eval/`: the tree-walking evaluator over IR — `force`, apply, the `with`
   chain, operators, equality, `coerce.rs`, `error.rs`.
-- `builtins/`: primops, one file per family.
+- `builtins/`: primops, one file per family. `store_hooks.rs` maps each
+  store path the evaluator reads to its bytes.
 - `parallel/`: worker threads, fibers, work-stealing deques, the thunk
   claim protocol.
 - `store/`: pure functions. Nix base32, the four hash algorithms, NAR

@@ -99,7 +99,7 @@ pub const PAGES: &[Page] = &[
     ),
     embedded(
         "builtins",
-        "the primop API and every builtin",
+        "every builtin, and how to add one",
         include_str!("../../docs/reference/builtins.md"),
     ),
     embedded(

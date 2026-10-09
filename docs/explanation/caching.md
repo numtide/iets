@@ -320,6 +320,18 @@ Some things make a run uncacheable rather than wrong: `builtins.currentTime`
 and every network fetcher without a hash. `currentTime` is a lazy thunk over
 an internal primop, so the mark happens only if the program forces it.
 
+`builtins.exec` is the third, and the mark is on the whole run, not on the
+file that called it. The tracing cache has no unit smaller than a run, and
+a value built from what a program printed is that program's answer
+everywhere it flows. Recording it as an observation would not help: the
+only validator is to run the program again, which is the cost and the
+effect a hit exists to skip, and an entry must never start a program of
+its own choosing (above). So a run marks itself at the first call that
+reaches a program, and a run that only mentions `exec` stays cacheable. The
+setting is in the key, because `builtins ? exec` answers it. The IR cache
+never sees the output: it is compiled as a `«string»`, as `--expr` is, and
+the IR cache holds files.
+
 An entry is one file, `entry`, in a directory named by the key. The file
 starts with a version byte, the number of parts, the checksum over the key
 and the rest of the file, and a table of the parts — where each one is and

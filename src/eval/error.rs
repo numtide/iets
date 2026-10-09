@@ -41,6 +41,8 @@ pub enum ErrorKind {
     Lint,
     /// A fetched tree whose hash is not the one the lock or the call named.
     HashMismatch,
+    /// A program `builtins.exec` ran that failed or did not start.
+    Exec,
 }
 
 impl ErrorKind {
@@ -62,6 +64,7 @@ impl ErrorKind {
             ErrorKind::Unsupported => "unsupported",
             ErrorKind::Lint => "lint",
             ErrorKind::HashMismatch => "hash-mismatch",
+            ErrorKind::Exec => "exec",
         }
     }
 }

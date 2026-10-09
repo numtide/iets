@@ -107,10 +107,13 @@ impl Files {
         })))
     }
 
-    /// Register `src` under `path`, or return the existing id.
+    /// Register `src` under `path`, or return the existing id. A pseudo-file
+    /// (`«string»`, `«arg»`) is new each time: two of them share a name, not
+    /// a text, and positions in the second would be read against the first.
     pub fn add(&self, path: &[u8], src: &[u8]) -> FileId {
         let mut g = self.0.lock().unwrap();
-        if let Some(id) = g.ids.get(path) {
+        let pseudo = path.starts_with("\u{ab}".as_bytes());
+        if !pseudo && let Some(id) = g.ids.get(path) {
             return *id;
         }
         let id = FileId(g.list.len() as u32);
@@ -120,7 +123,9 @@ impl Files {
             .expect("sources exceed 4 GiB");
         g.list
             .push(Box::leak(Box::new(FileInfo::new(path.to_vec(), src, base))));
-        g.ids.insert(path.to_vec(), id);
+        if !pseudo {
+            g.ids.insert(path.to_vec(), id);
+        }
         id
     }
 

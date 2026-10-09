@@ -386,6 +386,10 @@ pub fn setup_cache_more(
     }
     let cwd = cwd();
     let mut k = Key::new(subcommand);
+    // `builtins ? exec` reads it; a run that calls `exec` is never written
+    if crate::config::native_code() {
+        k.field("native-code", b"1");
+    }
     if cfg.is_pure() {
         k.field("pure-eval", b"1");
         if let Some(root) = project_root(a) {

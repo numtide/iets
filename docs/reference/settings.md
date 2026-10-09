@@ -406,6 +406,7 @@ Nix has about 130 settings. For iets each one is in one of five classes.
 | `store` | the last fallback for `builder` |
 | `system` | `builtins.currentSystem` under the classic names; the `system=` default of a `grpc://` URL. iets's own commands use the system iets was built for |
 | `pure-eval` | see **`pure-eval`** below |
+| `allow-unsafe-native-code-during-evaluation` | off by default, as in Nix. On, iets's own commands have `builtins.exec`, refused in pure mode (`--impure`), and a classic name falls back to the real nix (`docs/reference/divergences.md`). Turning it on grants every expression the run evaluates the full authority of the iets process, so a boundary meant to confine the evaluation confines it no more than it confines that process |
 | `nix-path` | the search path after `-I`, when `NIX_PATH` is not in the environment. `--option nix-path` replaces `NIX_PATH`, and `--option extra-nix-path` adds to it, as in Nix (`configuration.cc:192`). Nix's channel defaults are not applied |
 | `show-trace` | the same as `--show-trace` |
 | `json-log-path` | `docs/reference/errors.md` |
@@ -489,7 +490,6 @@ warning: setting 'restrict-eval' is ignored: iets has no restricted mode, so eve
 | `trace-function-calls` | `false` | iets has no function-call trace |
 | `eval-profiler` | `disabled` | iets has an evaluation profiler, under `IETS_PROFILE` (`docs/reference/profile.md`). This setting is not wired to it: it arrives through nix.conf, which no evaluator-wide knob reads yet. |
 | `debugger-on-trace`, `debugger-on-warn`, `ignore-try` | `false` | iets has no debugger |
-| `allow-unsafe-native-code-during-evaluation` | `false` | iets has no `builtins.exec` and no `builtins.importNative` |
 | `plugin-files` | empty | iets loads no plugins |
 | `lint-absolute-path-literals`, `lint-short-path-literals`, `lint-url-literals`, `warn-short-path-literals` | `ignore`, `false` | iets does not read it; `iets eval` has the `--lint` flags |
 | `log-lines` | 25 | iets prints the last 200 lines of a failed build |

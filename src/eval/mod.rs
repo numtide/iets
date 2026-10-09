@@ -1873,12 +1873,30 @@ impl Evaluator {
         if let Some(w) = self.globals.table.get(&sym) {
             return Ok(*w);
         }
-        bail!(
+        let name = self.interner.name_str(sym);
+        let mut e = Error::new(
             ErrorKind::UndefinedVar,
+            format!("undefined variable '{name}'"),
             pos,
-            "undefined variable '{}'",
-            self.interner.name_str(sym)
-        )
+        );
+        e.hint = builtins::exec::hint(name);
+        Err(Box::new(e))
+    }
+
+    /// `attribute 'NAME' missing`, with the fix when `attrs` is `builtins`.
+    #[cold]
+    fn missing_attr(&self, attrs: &AttrsObj, name: Sym, pos: Pos) -> Box<Error> {
+        let name = self.interner.name_str(name);
+        let msg = format!("attribute '{name}' missing");
+        let mut e = Error::new(ErrorKind::MissingAttr, msg, pos);
+        if self
+            .globals
+            .builtins
+            .is_some_and(|b| std::ptr::eq(b, attrs))
+        {
+            e.hint = builtins::exec::hint(name);
+        }
+        Box::new(e)
     }
 
     fn attr_name(&mut self, env: &'static EnvObj, elem: &AttrElemIr) -> EvalResult<Sym> {
@@ -1919,12 +1937,7 @@ impl Evaluator {
                     let attrs = self.force_attrs(v, pos, "while selecting an attribute")?;
                     match attrs.get(name) {
                         Some(a) => a,
-                        None => bail!(
-                            ErrorKind::MissingAttr,
-                            pos,
-                            "attribute '{}' missing",
-                            self.interner.name_str(name)
-                        ),
+                        None => return Err(self.missing_attr(attrs, name, pos)),
                     }
                 }
             };
@@ -1953,9 +1966,8 @@ impl Evaluator {
             let name = self.attr_name(env, elem)?;
             let Some(a) = v.as_attrs().and_then(|a| a.get(name)) else {
                 let Some(d) = s.default else {
-                    self.force_attrs(v, s.pos, "while selecting an attribute")?;
-                    let name = self.interner.name_str(name);
-                    bail!(ErrorKind::MissingAttr, s.pos, "attribute '{name}' missing");
+                    let attrs = self.force_attrs(v, s.pos, "while selecting an attribute")?;
+                    return Err(self.missing_attr(attrs, name, s.pos));
                 };
                 if v.as_attrs().is_none() {
                     or_non_attrs(self, v, s.pos)?;
@@ -1999,12 +2011,7 @@ impl Evaluator {
                 let attrs = self.force_attrs(v, pos, "while selecting an attribute")?;
                 match attrs.get(sym) {
                     Some(a) => a,
-                    None => bail!(
-                        ErrorKind::MissingAttr,
-                        pos,
-                        "attribute '{}' missing",
-                        self.interner.name_str(sym)
-                    ),
+                    None => return Err(self.missing_attr(attrs, sym, pos)),
                 }
             }
         };

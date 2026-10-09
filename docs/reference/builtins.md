@@ -135,6 +135,8 @@ hashString, hashFile, convertHash, floor, ceil, genericClosure, getEnv, break,
 toJSON, fromJSON, toXML, fromTOML (`--extra-experimental-features
 parse-toml-timestamps` for datetimes), currentTime. Divergences:
 `docs/reference/divergences.md`.
+exec: only with `allow-unsafe-native-code-during-evaluation`, and only impure
+(`exec.rs`, `docs/reference/settings.md`). importNative is not implemented.
 constants: true, false, null, builtins, currentSystem, nixVersion,
 langVersion, storeDir, nixPath, derivation (from corepkgs/derivation.nix).
 derivation: derivationStrict, placeholder, `import` of a `.drv` store path.

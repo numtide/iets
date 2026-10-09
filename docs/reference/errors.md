@@ -30,6 +30,7 @@ in `src/error.rs` for the rest, and the daemon's build status for builds.
 | `parse` | `ErrorKind::Parse` | a syntax error |
 | `lint` | `ErrorKind::Lint` | a lint at level `error`; at `warn`, a level-1 record |
 | `hash-mismatch` | `ErrorKind::HashMismatch`, build status | a fetched tree or a fixed-output build whose hash is not the one given |
+| `exec` | `ErrorKind::Exec` | a program `builtins.exec` ran exited non-zero, died of a signal or did not start |
 | `hash-fixed` | `fix-hashes` | a level-3 record: the hash `fix-hashes` wrote, at the file, line and column it changed, with the byte span and the new text |
 | `ignored-flag` | `src/ignored.rs` | a level-1 record: a flag that has no effect, and why (docs/reference/divergences.md) |
 | `ignored-setting` | `src/config.rs` | a level-1 record: a Nix setting that has no effect, and why (docs/reference/settings.md) |
@@ -350,6 +351,11 @@ A hint is there only when it is certain:
   track is Nix's error (git.cc:`makeNotAllowedError`, `Path 'F' in the
   repository "R" is not tracked by Git.`), and the hint is the
   `git -C "R" add "F"` that makes it visible.
+- A missing `builtins.exec`, `exec` or `__exec` (code `missing-attr` or
+  `undefined-var`) when the setting is off names it: `builtins.exec needs
+  '--option allow-unsafe-native-code-during-evaluation true'`. The text
+  prints it on the line after the error, where Nix prints its own
+  suggestion.
 
-A missing attribute or an undefined variable has no hint: iets has no
+Any other missing attribute or undefined variable has no hint: iets has no
 did-you-mean suggestion for them yet.

@@ -375,6 +375,41 @@ The user setting `pure = false` restores Nix's defaults for the native
 commands. A project `iets.toml` may not set it
 (`docs/reference/settings.md`).
 
+## `builtins.exec`
+
+`allow-unsafe-native-code-during-evaluation` gives iets's own commands
+`builtins.exec`, with the semantics of Nix 2.34.8 (primops.cc:`prim_exec`,
+processes.cc:`runProgram2`, `statusToString`): the same argument rules, the
+same error messages, the same child (`execvp` on `PATH`, the evaluator's
+working directory and environment, stdin and stderr inherited), and stdout
+parsed as a `«string»` whose relative paths resolve against `/`. Four
+things differ.
+
+- **Pure evaluation refuses it.** Nix does not check: `nix eval` with the
+  setting runs the program although `nix eval` is pure. Running an
+  arbitrary program is the opposite of an evaluation that depends only on
+  its locked inputs, and iets's own commands are pure by default, so iets
+  answers `'builtins.exec' is not allowed in pure evaluation mode (use
+  '--impure' to override)`. `builtins ? exec` stays `true`, as it is for
+  `storePath`.
+- **A classic name falls back.** Under `nix`, `nix-instantiate`,
+  `nix-build` and `nix-shell` the setting turned on is a reason to run the
+  real nix. With it Nix also has `builtins.importNative`, which iets does
+  not implement, and runs `exec` in pure mode; the fallback keeps both
+  answers Nix's.
+- **Nothing is built.** A string with a derivation output in its context is
+  an `unsupported` error, as an import from derivation is, and so is a
+  store path that iets holds only in memory or as a local tree (`"${./x}"`):
+  the child could not read it. Nix builds and copies them first.
+- **The fix is printed.** Without the setting, `builtins.exec`, `exec` under
+  `with builtins` and `__exec` are missing, as in Nix, and the line under
+  the error is `builtins.exec needs '--option
+  allow-unsafe-native-code-during-evaluation true'` where Nix suggests a
+  similar name. The record carries it as `hint`.
+
+A run that calls `exec` is not written to the tracing cache
+(`docs/explanation/caching.md`).
+
 ## Classic mode
 
 `nix-instantiate`, `nix-build` and `nix-eval-jobs` under Nix's own names

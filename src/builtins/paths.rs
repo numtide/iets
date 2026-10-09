@@ -87,7 +87,7 @@ unsupported!(
     "iets: network fetchers are not supported (builtins.fetchClosure)"
 );
 
-fn lossy(b: &[u8]) -> Cow<'_, str> {
+pub(super) fn lossy(b: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 

@@ -635,7 +635,10 @@ impl Report {
                 None => s.push_str(&format!("\n       … {m}")),
             }
         }
-        if let Some(h) = self.hint.as_ref().filter(|_| self.code == "usage") {
+        // Nix prints a did-you-mean line under these three; iets prints the
+        // fix only when it is certain
+        let shown = matches!(self.code, "usage" | "missing-attr" | "undefined-var");
+        if let Some(h) = self.hint.as_ref().filter(|_| shown) {
             s.push('\n');
             s.push_str(h);
         }
@@ -1047,9 +1050,9 @@ mod tests {
         let text = r.text();
         assert_eq!(
             text,
-            "error: attribute 'abd' missing\n       at /a/b.nix:3:7\n       … while calling 'f' at «string»:1:9"
+            "error: attribute 'abd' missing\n       at /a/b.nix:3:7\n       … while calling 'f' at «string»:1:9\ndid you mean 'abc'?"
         );
-        let want = r#"{"action":"msg","code":"missing-attr","column":7,"file":"/a/b.nix:3:7","hint":"did you mean 'abc'?","level":0,"line":3,"msg":"error: attribute 'abd' missing\n       at /a/b.nix:3:7\n       … while calling 'f' at «string»:1:9","raw_msg":"attribute 'abd' missing"}"#;
+        let want = r#"{"action":"msg","code":"missing-attr","column":7,"file":"/a/b.nix:3:7","hint":"did you mean 'abc'?","level":0,"line":3,"msg":"error: attribute 'abd' missing\n       at /a/b.nix:3:7\n       … while calling 'f' at «string»:1:9\ndid you mean 'abc'?","raw_msg":"attribute 'abd' missing"}"#;
         assert_eq!(r.record(&text).to_string(), want);
         let s = Session::new();
         let _entered = s.enter();

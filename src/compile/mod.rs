@@ -330,13 +330,7 @@ impl<'a> Compiler<'a> {
                         }
                         ir
                     }
-                    None => {
-                        return err(
-                            ErrorKind::UndefinedVar,
-                            format!("undefined variable '{}'", self.interner.name_str(sym)),
-                            pos,
-                        );
-                    }
+                    None => return Err(self.undefined(sym, pos)),
                 }
             }
             Expr::Select {
@@ -1100,12 +1094,16 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(self.alloc(ir))
             }
-            None => err(
-                ErrorKind::UndefinedVar,
-                format!("undefined variable '{}'", self.interner.name_str(var)),
-                pos,
-            ),
+            None => Err(self.undefined(var, pos)),
         }
+    }
+
+    fn undefined(&self, var: Sym, pos: Pos) -> Box<Error> {
+        let name = self.interner.name_str(var);
+        let msg = format!("undefined variable '{name}'");
+        let mut e = Error::new(ErrorKind::UndefinedVar, msg, pos);
+        e.hint = crate::builtins::exec::hint(name);
+        Box::new(e)
     }
 
     /// A binding's value; names lambdas after their binding.

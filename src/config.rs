@@ -166,11 +166,6 @@ const UNIMPLEMENTED: &[(&str, &str, &str)] = &[
         "true",
         "iets evaluates a dirty Git tree as it is",
     ),
-    (
-        "allow-unsafe-native-code-during-evaluation",
-        "false",
-        "iets has no builtins.exec and no builtins.importNative",
-    ),
     ("allowed-uris", "", NO_RESTRICTED_MODE),
     ("debugger-on-trace", "false", NO_DEBUGGER),
     ("debugger-on-warn", "false", NO_DEBUGGER),
@@ -236,6 +231,7 @@ const CLIENT: &[&str] = &[
     "access-tokens",
     "allow-dirty-locks",
     "allow-import-from-derivation",
+    "allow-unsafe-native-code-during-evaluation",
     "bash-prompt",
     "bash-prompt-prefix",
     "bash-prompt-suffix",
@@ -316,6 +312,14 @@ pub fn xp_on(feature: &str) -> bool {
         .nix_conf
         .get()
         .is_some_and(|c| (c.list("experimental-features").iter()).any(|f| f == feature))
+}
+
+/// `allow-unsafe-native-code-during-evaluation` is on for this run: iets's
+/// own commands get `builtins.exec`. Off before the settings are read.
+pub fn native_code() -> bool {
+    let c = Session::current();
+    let c = c.nix_conf.get();
+    c.is_some_and(|c| c.bool(crate::builtins::exec::SETTING).ok().flatten() == Some(true))
 }
 
 /// configuration.cc:BaseSetting<bool>::parse.
@@ -460,12 +464,21 @@ impl Config {
 
     /// The first `UNIMPLEMENTED` setting with a value of its own that is a
     /// reason for a classic name to fall back: the real nix applies it.
+    /// `allow-unsafe-native-code-during-evaluation` is one too: under it Nix
+    /// also has `builtins.importNative` and runs `exec` in pure mode, and a
+    /// classic name answers as Nix does (docs/reference/divergences.md).
     pub fn left_to_nix(&self) -> Option<&'static str> {
         let set = |(name, default, _): &&(&'static str, &str, &str)| {
             let differs = |v: &str| !same_value(v, default);
             !WARN_ONLY.contains(name) && self.str(name).is_some_and(differs)
         };
-        UNIMPLEMENTED.iter().find(set).map(|(name, _, _)| *name)
+        let native = crate::builtins::exec::SETTING;
+        let native = (self.bool(native).ok().flatten() == Some(true)).then_some(native);
+        UNIMPLEMENTED
+            .iter()
+            .find(set)
+            .map(|(name, _, _)| *name)
+            .or(native)
     }
 
     /// One note for each setting that has no effect: Nix's own text for a
@@ -902,6 +915,9 @@ mod tests {
         assert_eq!(c("restrict-eval = false\nmax-call-depth = 10000\n"), None);
         assert_eq!(c("accept-flake-config = true\nlog-lines = 5\n"), None);
         assert_eq!(c("sandbox = false\neval-cache = false\n"), None);
+        let native = "allow-unsafe-native-code-during-evaluation";
+        assert_eq!(c(&format!("{native} = true\n")), Some(native));
+        assert_eq!(c(&format!("{native} = false\n")), None);
     }
 
     #[test]

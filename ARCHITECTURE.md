@@ -89,7 +89,10 @@ The evaluator:
   serialization and hashing, store paths, ATerm derivations,
   `hashDerivationModulo`, `drvdiff.rs`; `locate.rs` finds derivation roots
   and local-store sources, `source.rs` holds where the bytes of a path are
-  and the origin each source came from.
+  and the origin each source came from. `nar.rs` is the whole NAR
+  codec. Its reader follows nix-community/go-nix PR #123: one buffered
+  window per side, token groups matched as fixed byte strings, and no
+  allocation per entry.
 - `corepkgs/`: `derivation.nix` and `fetchurl.nix`, embedded from Nix
   2.34.8.
 - `print.rs`: the `nix-instantiate --eval` printer, and JSON.

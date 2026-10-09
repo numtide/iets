@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::{error, fmt, fs, mem, str};
+
+use crate::syntax::symbol::FxHashMap;
 
 use super::hash::{
     Hash, HashAlgo, HashError, HashFormat, base16_encode_into, base16_encode_into_bytes, hash_bytes,
@@ -102,7 +105,26 @@ pub enum DrvHashKind {
 }
 
 /// Memo of `hash_derivation_modulo` per .drv path (derivations.cc:drvHashes).
-pub type DrvHashCache = BTreeMap<StorePath, DrvHash>;
+#[derive(Default)]
+pub struct DrvHashCache(FxHashMap<StorePath, Arc<DrvHash>>);
+
+impl DrvHashCache {
+    pub fn new() -> DrvHashCache {
+        DrvHashCache::default()
+    }
+
+    pub fn get(&self, p: &StorePath) -> Option<&Arc<DrvHash>> {
+        self.0.get(p)
+    }
+
+    pub fn insert(&mut self, p: StorePath, h: Arc<DrvHash>) {
+        self.0.insert(p, h);
+    }
+
+    pub fn contains_key(&self, p: &StorePath) -> bool {
+        self.0.contains_key(p)
+    }
+}
 
 /// Reads a .drv that is not in the cache. Mirrors Store::readInvalidDerivation.
 pub type DrvLoader<'a> = dyn FnMut(&StorePath) -> Result<Derivation, DrvError> + 'a;
@@ -728,7 +750,7 @@ pub fn hash_derivation_modulo(
     mask_outputs: bool,
     cache: &mut DrvHashCache,
     loader: &mut DrvLoader<'_>,
-) -> Result<DrvHash, DrvError> {
+) -> Result<Arc<DrvHash>, DrvError> {
     if drv.is_fixed() {
         let mut hashes = BTreeMap::new();
         let mut payload = String::with_capacity(256);
@@ -751,10 +773,10 @@ pub fn hash_derivation_modulo(
                 hash_bytes(HashAlgo::Sha256, payload.as_bytes()),
             );
         }
-        return Ok(DrvHash {
+        return Ok(Arc::new(DrvHash {
             hashes,
             kind: DrvHashKind::Regular,
-        });
+        }));
     }
 
     let mut kind = if drv
@@ -802,7 +824,7 @@ pub fn hash_derivation_modulo(
         Ok::<_, DrvError>(hash_bytes(HashAlgo::Sha256, s))
     })?;
     let hashes = drv.outputs.keys().map(|k| (k.clone(), hash)).collect();
-    Ok(DrvHash { hashes, kind })
+    Ok(Arc::new(DrvHash { hashes, kind }))
 }
 
 /// Mirrors derivations.cc:pathDerivationModulo (memoized by .drv path).
@@ -810,13 +832,13 @@ pub fn path_derivation_modulo(
     drv_path: &StorePath,
     cache: &mut DrvHashCache,
     loader: &mut DrvLoader<'_>,
-) -> Result<DrvHash, DrvError> {
+) -> Result<Arc<DrvHash>, DrvError> {
     if let Some(h) = cache.get(drv_path) {
-        return Ok(h.clone());
+        return Ok(Arc::clone(h));
     }
     let drv = loader(drv_path)?;
     let h = hash_derivation_modulo(&drv, false, cache, loader)?;
-    cache.insert(drv_path.clone(), h.clone());
+    cache.insert(drv_path.clone(), Arc::clone(&h));
     Ok(h)
 }
 
@@ -838,7 +860,7 @@ pub fn finalize_input_addressed_outputs(
     cache: &mut DrvHashCache,
     loader: &mut DrvLoader<'_>,
 ) -> Result<(), DrvError> {
-    let mut hashes_modulo: Option<DrvHash> = None;
+    let mut hashes_modulo: Option<Arc<DrvHash>> = None;
     let names: Vec<String> = drv.outputs.keys().cloned().collect();
     for name in names {
         let out = drv.outputs[&name].clone();

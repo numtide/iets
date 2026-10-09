@@ -8,6 +8,7 @@ pub mod drvshow;
 pub mod fetch;
 pub mod flake;
 pub mod installable;
+pub mod lock;
 pub mod render;
 pub mod run;
 pub mod value;

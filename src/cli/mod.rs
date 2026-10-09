@@ -13,6 +13,7 @@ pub mod docs;
 pub mod eval;
 pub mod help;
 pub mod jobs;
+pub mod lock;
 pub mod parse;
 pub mod plumbing;
 pub mod prefetch;

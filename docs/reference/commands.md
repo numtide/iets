@@ -25,6 +25,7 @@ iets COMMAND [ARGS...]
 | `search` | print the packages that match every regular expression |
 | `diff` | print what differs between two derivations |
 | `prefetch` | print the hash of a URL or of a fixed-output derivation |
+| `lock` | record the hash of a URL in `iets.lock`, for `nix/lock.nix` |
 | `eval-jobs` | print a jobset's derivations as JSON lines |
 | `print-dev-env` | print the bash of a flake's devShell |
 | `lint` | print the lint registry and the levels a run would use |
@@ -573,6 +574,51 @@ ways:
   hashes (`docs/explanation/flakes-and-sources.md`).
 
 `iets plumbing fetch` is the same operation, and always prints the object.
+
+## `lock`
+
+```
+iets lock [--file FILE] [--unpack] [--update] URL...
+```
+
+Fetch each URL, hash it as `iets prefetch` does, and record the hash in a
+lock file that `nix/lock.nix` reads. Evaluation never writes this file;
+this command is the only writer
+(`docs/explanation/locked-hashes.md`).
+
+```
+$ iets lock --unpack https://github.com/numtide/treefmt/archive/v2.0.0.tar.gz
+$ cat iets.lock
+{
+  "unpack": {
+    "https://github.com/numtide/treefmt/archive/v2.0.0.tar.gz": "sha256-Ckvpb2at7lg7AB0XNtIxeo8lWXX+04MVHHKoUs876dg="
+  },
+  "version": 1
+}
+```
+
+| Flag | Effect |
+|:---|:---|
+| `--file FILE` | the lock file (default: `iets.lock` in the current directory) |
+| `--unpack` | record the NAR hash of the unpacked tarball, under `unpack`; without it, the flat hash, under `file` |
+| `--update` | replace an entry whose URL now serves something else |
+
+**The file.** A JSON object: `version` (1), and an object per mode,
+`file` and `unpack`, from URL to SRI SHA-256 hash. Keys are sorted, one
+entry per line, so a change is one line in a diff. A missing file is
+created.
+
+**An entry that is already there.** The URL is fetched again. The same
+hash changes nothing. A different hash is an error that says the remote
+changed and names the `--update` command, unless you gave `--update`.
+
+**All or nothing.** Every URL is fetched before the file is written. If
+one fetch fails or one remote changed, the file stays as it was.
+
+**Output.** Nothing on stdout.
+
+Exit: 0 when every entry is recorded, 1 when a fetch failed or a remote
+changed, 2 for a bad command line.
 
 ## `eval-jobs`
 

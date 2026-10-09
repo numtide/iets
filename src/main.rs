@@ -142,6 +142,7 @@ fn main() {
             "print-dev-env" => cli::devenv::cmd_print_dev_env(&rest),
             "plumbing" => cli::plumbing::main(&rest),
             "prefetch" => cli::prefetch::cmd_prefetch(&rest),
+            "lock" => cli::lock::cmd_lock(&rest),
             "search" => cli::search::cmd_search(&rest),
             "lint" => cli::cmd_lint(&rest),
             "parse" => cli::parse::main(&rest),

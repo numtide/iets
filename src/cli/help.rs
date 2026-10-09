@@ -4,7 +4,7 @@
 use std::process::exit;
 use std::sync::RwLock;
 
-use crate::cli::{classic, docs, plumbing, prefetch, render};
+use crate::cli::{classic, docs, lock, plumbing, prefetch, render};
 use crate::log;
 
 pub const OVERVIEW: &str = "\
@@ -20,6 +20,7 @@ commands:
   eval-jobs      print a jobset's derivations as JSON lines (nix-eval-jobs)
   print-dev-env  print the environment of a flake's devShell, for direnv
   prefetch       print the hash of a URL or of a fixed-output derivation
+  lock           record the hash of a URL in iets.lock, for nix/lock.nix
   lint           list the lints and the levels a run would use
   parse          parse Nix files and print or check the syntax tree
   cache          sweep old cache entries, or dump a cache entry's read set
@@ -228,7 +229,7 @@ its own entry with --entry-to.
 ";
 
 pub const COMMANDS: &str =
-    "eval build search diff eval-jobs print-dev-env prefetch plumbing lint parse cache";
+    "eval build search diff eval-jobs print-dev-env prefetch lock plumbing lint parse cache";
 
 /// The native command being parsed, "iets" before the command word; unset
 /// under a classic name.
@@ -252,6 +253,7 @@ fn parts(cmd: Option<&str>) -> Option<[&'static str; 2]> {
         "eval-jobs" => [EVAL_JOBS, ""],
         "print-dev-env" => [PRINT_DEV_ENV, ""],
         "prefetch" => [prefetch::HELP, INPUT],
+        "lock" => [lock::HELP, ""],
         "plumbing" => [plumbing::HELP, INPUT],
         "lint" => [LINT, ""],
         "parse" => [PARSE, ""],

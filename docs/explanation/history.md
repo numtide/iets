@@ -7,6 +7,14 @@ default live on that feature's page, not here.
 Why keep a page of failed experiments? It stops the same idea from being
 tried a third time, and it shows you how high the bar was.
 
+## 2026-10-09: fetchers that read `iets.lock` themselves
+
+Priced and not built. The idea: `builtins.fetchTarball url`, with no hash,
+looks the hash up in `iets.lock`. It saves one `import` line, and an
+expression that relies on it does not evaluate on Nix. The lock is a Nix
+file instead, `nix/lock.nix`, which evaluates the same on both
+(`docs/explanation/locked-hashes.md`).
+
 ## 2026-09-27: the machine settings file
 
 iets used to read `/etc/iets/iets.toml` (or `$IETS_CONF_DIR/iets.toml`)

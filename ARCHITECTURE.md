@@ -179,6 +179,7 @@ What each command is written against. The operation layer is
 | `iets eval-jobs` | `jobs` | the worker/collector process model, `--max-memory-size`, the summary line |
 | `iets print-dev-env` | `resolve`, `dev-env` | the bash rendering, the direnv cache, the GC root |
 | `iets prefetch` | `fetch` | the `--json` shape choice |
+| `iets lock` | `fetch`, then `api::lock` writes the file | the flags |
 | `iets lint`, `iets parse`, `iets cache` | none | already thin over the library |
 | `nix-instantiate` | `resolve` (get-drvs walk), `plan` | Nix argv parsing, `--add-root`, out-links, the exec fallback |
 | `nix-build` | `resolve`, `plan`, `build` | `result` symlinks, `--add-root`, Nix's exit codes, the fallback |

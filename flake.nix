@@ -2,7 +2,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.crane.url = "github:ipetkov/crane";
   # the reference stays on its own nixpkgs, where nix is 2.34.8
-  inputs.nix-conformance.url = "git+ssh://git@github.com/numtide/nix-conformance";
+  inputs.nix-conformance.url = "github:numtide/nix-conformance";
   outputs = { self, nixpkgs, crane, nix-conformance }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];

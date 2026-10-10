@@ -22,15 +22,15 @@
       "locked": {
         "lastModified": 1791583640,
         "narHash": "sha256-ybsywis04rckuPGo31BUoUIw766s1dVHgg5QJzyIV34=",
-        "ref": "refs/heads/main",
+        "owner": "numtide",
+        "repo": "nix-conformance",
         "rev": "4cd33a49e6b7f2a2c33c8a5ed90aa1799c7988d5",
-        "revCount": 17,
-        "type": "git",
-        "url": "ssh://git@github.com/numtide/nix-conformance"
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "ssh://git@github.com/numtide/nix-conformance"
+        "owner": "numtide",
+        "repo": "nix-conformance",
+        "type": "github"
       }
     },
     "nixpkgs": {

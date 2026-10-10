@@ -106,11 +106,21 @@ a shell that never evaluated. Fix the error on stderr and reload.
 
 ## NixOS module
 
-On NixOS you can skip `use_iets`: import `nixosModules.default` instead. The
-module installs iets and swaps nix-direnv's `use flake` for this
+On NixOS you can skip `use_iets`: import `nixosModules.default` and set
+`iets.direnv.enable = true`:
+
+```nix
+{
+  imports = [ iets.nixosModules.default ];
+  iets.direnv.enable = true;
+}
+```
+
+The option turns on direnv and swaps nix-direnv's `use flake` for this
 repository's own `direnvrc`, so your `.envrc` keeps saying `use flake`. It
 takes a local flake reference with an optional `#attr`, and the flake needs
-a `flake.lock`.
+a `flake.lock`. The option is off by default: the module alone doesn't touch
+direnv.
 
 ## Other shells
 

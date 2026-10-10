@@ -7,6 +7,9 @@ in
   options.iets.classic.enable = lib.mkEnableOption
     "the iets classic command names ahead of nix in the system path";
 
+  options.iets.direnv.enable = lib.mkEnableOption
+    "direnv with iets's `use flake` (nix/direnvrc) in place of nix-direnv's";
+
   config = {
     environment.systemPackages = [ packages.default ]
       # buildEnv resolves a collision with nix's own bin/nix-instantiate by
@@ -18,9 +21,8 @@ in
       ++ lib.optional config.iets.classic.enable
         (lib.hiPrio (self.lib.mkClassic pkgs packages.default config.nix.package));
 
-    programs.direnv = {
+    programs.direnv = lib.mkIf config.iets.direnv.enable {
       enable = true;
-      # `use flake` is iets's (./direnvrc); nix-direnv is not loaded.
       nix-direnv.enable = false;
       direnvrcExtra = builtins.readFile ./direnvrc;
     };

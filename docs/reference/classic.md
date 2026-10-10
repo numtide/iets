@@ -39,8 +39,9 @@ Some things stay local whatever `builder` says:
 
 ## The NixOS module
 
-`nix/module.nix` installs `packages.default` and the direnv hook. Set
-`iets.classic.enable` (default `false`) to also install the classic names:
+`nix/module.nix` installs `packages.default`. Set `iets.direnv.enable` for the
+direnv hook ([Use iets with direnv](../how-to/use-with-direnv.md#nixos-module)).
+Set `iets.classic.enable` (default `false`) to also install the classic names:
 
 ```nix
 {

@@ -306,7 +306,6 @@ in an `iets` output.
 | `daemon-e2e.nu` | `iets build` over the worker protocol | check, container; not by hand on a host whose store refuses `nix-store --delete` |
 | `build-e2e.nu` | `iets build` over an attribute tree: the verdicts, the exit code, `--json` | check, container |
 | `grpc-e2e.nu` | `iets build` over `grpc://` | by hand |
-| `fetchclosure-e2e.nu` | `builtins.fetchClosure` against the real nix, through two scratch daemons and `file://` caches | check, container |
 | `flaketest.nu` | flake evaluation and the input store against `nix eval` | check, container, less the 3 cases that need the network (`online` in `lib.nu`); all 39 by hand |
 | `plumbing-e2e.nu` | `iets plumbing`, one case per op | check, container |
 | `prefetch-e2e.nu` | `iets prefetch` against `nix store prefetch-file` and `nix hash` | check, container |

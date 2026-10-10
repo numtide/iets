@@ -372,10 +372,10 @@ building the producer, and evaluation does not build.
 
 ## Network fetchers
 
-`builtins.fetchurl`, `builtins.fetchGit` and `builtins.fetchClosure` work,
-with the differences in this section. `builtins.fetchMercurial` always fails
-in iets's own commands. It is still in `builtins`, so
-`builtins ? fetchMercurial` is true, and code that checks for it before it
+`builtins.fetchurl` and `builtins.fetchGit` work, with the differences in
+this section. `builtins.fetchClosure` and `builtins.fetchMercurial` always
+fail in iets's own commands. They are still in `builtins`, so
+`builtins ? fetchMercurial` is true, and code that checks for one before it
 calls it gets the error. Under a classic name the call falls back to the real
 nix. `fetchTarball` and `fetchTree` work for some inputs;
 `docs/reference/builtins.md` lists which.
@@ -401,19 +401,8 @@ differs from Nix in these ways:
 - In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev`
   fails.
 
-`builtins.fetchClosure` reads the `.narinfo` files and NARs from
-`fromStore` and sends them to the eval store's nix-daemon, which checks the
-signatures. Under a classic name it needs the `fetch-closure` feature, as in
-Nix 2.34.8. It fails when the eval store is not a nix-daemon (`local`,
-`grpc://`), when a NAR is compressed with other than `xz`, `zstd`, `bzip2`,
-`gzip` or `none`, and when the cache needs a netrc file. It differs from Nix
-in these ways:
-
-- It contacts the cache only when a path is missing from the eval store.
-- It checks each NAR's hash and size before it rewrites the NAR.
-- A `file://` cache without `nix-cache-info` is an error.
-- It downloads every missing NAR before it sends any to the daemon.
-- It keeps no disk cache of `.narinfo` files.
+`builtins.fetchClosure` is not supported. Under a classic name with the
+`fetch-closure` feature, the call falls back to the real nix.
 
 Observe it: `iets eval -E 'builtins.fetchMercurial ./.'` fails, and
 `iets eval -E '(builtins.fetchGit ./.).rev'` in a clean git checkout prints

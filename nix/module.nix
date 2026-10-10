@@ -8,7 +8,11 @@ in
     "the iets classic command names ahead of nix in the system path";
 
   options.iets.direnv.enable = lib.mkEnableOption
-    "direnv with iets's `use flake` (nix/direnvrc) in place of nix-direnv's";
+    "iets's `use flake` (nix/direnvrc) in direnv, in place of nix-direnv's"
+    // {
+      default = config.programs.direnv.enable;
+      defaultText = lib.literalExpression "config.programs.direnv.enable";
+    };
 
   config = {
     environment.systemPackages = [ packages.default ]
@@ -21,10 +25,14 @@ in
       ++ lib.optional config.iets.classic.enable
         (lib.hiPrio (self.lib.mkClassic pkgs packages.default config.nix.package));
 
+    # direnv itself stays the host's choice. direnvrcExtra is sourced after
+    # nix-direnv, so iets's use_flake wins even where a host keeps nix-direnv.
     programs.direnv = lib.mkIf config.iets.direnv.enable {
-      enable = true;
-      nix-direnv.enable = false;
+      nix-direnv.enable = lib.mkDefault false;
       direnvrcExtra = builtins.readFile ./direnvrc;
     };
+
+    warnings = lib.optional (config.iets.direnv.enable && !config.programs.direnv.enable)
+     "iets.direnv.enable does nothing while programs.direnv.enable is false.";
   };
 }

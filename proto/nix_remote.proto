@@ -1,4 +1,5 @@
 // Vendored verbatim from github.com/Mic92/nix-grpc-store proto/nix_remote.proto at rev 4f6d239e834f96bd1544a8b243d46c41a892016e.
+// Copyright (c) 2026 Jörg Thalheim. MIT licence: https://github.com/Mic92/nix-grpc-store/blob/main/LICENSE
 syntax = "proto3";
 
 package nix.remote;

@@ -2,5 +2,9 @@ target/
 result
 result-*
 .direnv/
-bench/results/
+bench/results/*
+!bench/results/eval-*.svg
+!bench/results/env.txt
+!bench/results/nixos-*.json
+!bench/results/nixos-*.md
 *.profraw

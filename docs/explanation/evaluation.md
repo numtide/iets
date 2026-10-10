@@ -336,44 +336,18 @@ sequential path would have reported.
 
 ## Speed
 
-Measured on 2026-09-26 on an idle 32-core machine, against Nix 2.34.8 on
-the same nixpkgs, with identical derivation paths:
+The numbers are in the README's [Benchmarks](../../README.md#benchmarks)
+section, and the raw results are in `bench/results/`. `bench/run.nu`
+measures them again.
 
-| workload | iets | nix 2.34.8 |
-|---|---:|---:|
-| nixos-minimal, instructions | 7.2 G | 19.4 G |
-| nixos-desktop, instructions | 9.4 G | 25.8 G |
-| nixos-desktop, wall, 1 worker | 0.92 s | 2.20 s |
-| nixos-desktop, wall, 4 workers | 0.45 s | 2.20 s |
+iets runs fewer instructions than Nix and gives the same derivation paths.
+Part of that comes from the compiled-file cache: a second evaluation skips
+the files it already compiled. `--no-ir-cache` turns it off, to compare the
+evaluators alone.
 
-That is about 2.7× fewer instructions, and 2.4× to 4.9× faster in wall
-time. The instruction ratio is stable. The wall ratio depends on how many
-workers the critical chain can use.
-
-The iets column uses a warm compiled-file cache, which is what a second
-evaluation of a tree gets. That cache is worth 2.23 G instructions on
-desktop, 19 % of the run, so with `--no-ir-cache` the ratio falls to 2.07×
-on minimal and 2.22× on desktop. Nix has no equivalent to turn off, so 2.7×
-compares the products and 2.1× compares the evaluators.
-
-Measured again on 2026-10-10 at commit c7766f63, on a busy 16-core EPYC
-virtual machine, with the nixpkgs of `flake.lock` and
-`perf stat -e instructions:u`:
-
-| workload | iets, 1 worker | iets, 1 worker, `--no-ir-cache` | iets, 4 workers | nix 2.34.8 |
-|---|---:|---:|---:|---:|
-| nixos-minimal, instructions | 7.2 G | 9.3 G | 8.1 G | 20.5 G |
-| nixos-desktop, instructions | 9.2 G | 11.4 G | 10.5 G | 26.8 G |
-| nixos-desktop, wall | 1.95 s | | 1.40 s | 3.65 s |
-
-At one worker that's 2.9× fewer instructions, and 2.2× to 2.4× without the
-compiled-file cache. Four workers spend more instructions on coordination,
-so the ratio there is 2.5× to 2.6×. On the busy machine, the wall time was
-1.9× faster at one worker and 2.6× at four.
-
-In short: iets runs 2× to 3× fewer instructions than Nix 2.34.8 on these
-workloads. How much faster that is in wall time depends on the machine and
-the worker count, from about 2× to about 5×.
+More workers finish an evaluation sooner, but they spend instructions to
+coordinate. So the gain in wall time depends on the machine more than the
+gain in instructions does.
 
 ### Search speed
 

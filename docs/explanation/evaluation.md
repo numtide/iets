@@ -349,6 +349,39 @@ More workers finish an evaluation sooner, but they spend instructions to
 coordinate. So the gain in wall time depends on the machine more than the
 gain in instructions does.
 
+### What the benchmarks leave out
+
+Our benchmarks don't show the full picture. They time two NixOS systems,
+`nixos-minimal` and `nixos-desktop`. Both are module-system evaluations
+of nixpkgs through `NIX_PATH`. Don't let the name fool you: `nixos-desktop`
+has a few services and command-line packages, and no desktop. So the
+numbers tell you how iets does on one kind of work, and that kind suits it.
+
+[fix](https://github.com/psyclyx/fix)'s benchmark suite covers more: synthetic
+hot paths, JSON output of wide trees, and several configurations on one
+command line. We ran iets 0.1.0 (a48ee8d7) through it on 2026-10-11, with
+no caches on either side. iets was faster than Nix on nineteen of twenty
+workloads, and slower than fix on six:
+
+| workload | fix | iets | why |
+|---|---|---|---|
+| shared-mfe | 13 ms | 109 ms | fix moves work that doesn't depend on a function's argument out of the function; iets does it on every call |
+| wide-call-tree | 17 ms | 82 ms | fix reuses the result of the same call; iets computes `fib 22` 96 times |
+| string-churn | 363 ms | 616 ms | every new string goes into the string table, which grows without limit; iets is slower than Nix (424 ms) here too |
+| module-option-shape | 13 ms | 20 ms | partly startup: four workers start about 2 ms slower than one |
+| math-heavy | 722 ms | 900 ms | `+` on integers goes through the general concatenation path |
+| fixpoint-heavy | 18 ms | 22 ms | partly startup, as above |
+
+All nineteen of its fixtures give the same JSON under iets as under Nix.
+
+Two more things to keep in mind when you read a speed claim. With the
+tracing cache on, a repeated evaluation doesn't evaluate at all: it
+replays the result, about 13 ms on every one of fix's synthetic workloads.
+That measures the cache, not the evaluator, so compare it only with
+another result cache. And the default of four workers makes a sequential
+evaluation slower, not faster: string-churn took 0.66 s with four workers
+and 0.52 s with one.
+
 ### Search speed
 
 `iets search` caches an index of the packages it finds. These numbers are

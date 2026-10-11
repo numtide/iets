@@ -369,8 +369,30 @@ pub fn arg_error(msg: impl AsRef<str>) -> ! {
 }
 
 pub fn unknown_flag(flag: &str) -> ! {
-    let maybe = command().and_then(|c| suggest(flag, flags(c)));
+    let maybe = command().and_then(|c| match flag {
+        "--store" if takes_builder(c) => Some("--builder"),
+        _ => suggest(flag, flags(c)),
+    });
     fail(&format!("unknown flag '{flag}'"), maybe)
+}
+
+/// `--option store URL` under a command that has `--builder`. Nix would build
+/// on `URL`, so a warning and a build on the `builder` setting would be the
+/// wrong answer (docs/reference/divergences.md).
+pub fn refuse_store_setting(overrides: &[(String, String)]) {
+    if let Some(c) = command()
+        && takes_builder(c)
+        && overrides.iter().any(|(k, _)| k == "store")
+    {
+        fail(
+            &format!("iets {c} does not read the setting 'store'"),
+            Some("--builder"),
+        )
+    }
+}
+
+fn takes_builder(cmd: &str) -> bool {
+    flags(cmd).contains(&"--builder")
 }
 
 pub fn unknown_command(word: &str) -> ! {

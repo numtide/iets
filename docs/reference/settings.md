@@ -228,9 +228,12 @@ stream that decompresses to more than 1000 times its size, past its first
 
 **`builder`** is where derivations are built. iets has no local store of
 its own, so `auto` and an empty value both mean the local daemon.
-`iets build --builder`, `iets print-dev-env --builder`, a classic `--store`
-and `--option store` win over it. Registration always goes to the local
-daemon (`docs/reference/classic.md`, "Where the builds go").
+`iets build --builder` and `iets print-dev-env --builder` win over it, and
+so do a classic name's `--store` and `--option store`. The native commands
+refuse `--store` and `--option store` with a hint that names `--builder`
+(`docs/reference/divergences.md`). Under a classic name, registration always
+goes to the local daemon (`docs/reference/classic.md`, "Where the builds
+go").
 
 `builder` may name several places. Each one says what it accepts, and a
 derivation goes to the first place that accepts it. The order is the

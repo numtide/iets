@@ -183,6 +183,7 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
             _ => set_positional(&mut a, s),
         }
     });
+    help::refuse_store_setting(&f.overrides);
     // for its warnings, and for the session's copy that the fetcher reads
     if let Err(e) = config::Config::load_native(&f.overrides) {
         process::exit(e.report())

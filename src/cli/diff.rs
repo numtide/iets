@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::api::flake;
 use crate::api::installable::drv_roots;
 use crate::api::render::Closure;
-use crate::cli::help::{arg_error, each_arg, unknown_flag};
+use crate::cli::help::{arg_error, each_arg, refuse_store_setting, unknown_flag};
 use crate::cli::{self, EvalArgs, EvalFlags, Input, Run, eval_flag, evaluate, render, report};
 use crate::config;
 use crate::error::{Error, Result};
@@ -81,6 +81,7 @@ fn parse(argv: &[String]) -> (Opts, Vec<Side>) {
             _ => pos.push(s.to_string()),
         }
     });
+    refuse_store_setting(&f.overrides);
     let _ = config::Config::load_native(&f.overrides);
     // one side: the positional `p` (a .drv in the store, a flake reference
     // or a file), or `-E EXPR`, with the attribute `attr` selected

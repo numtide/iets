@@ -7,7 +7,7 @@ use crate::api::{self, build};
 use crate::build::backend::{Backend, Batch, Job, Worker};
 use crate::build::upload::{PlanUpload, Uploader};
 use crate::builtins::derivation::{DrvInfo, load_drv_traced};
-use crate::cli::help::{arg_error, each_arg};
+use crate::cli::help::{arg_error, each_arg, unknown_flag};
 use crate::cli::{
     self, EvalArgs, Input, Run, abs_path, cwd, evaluate, parse_eval_args, report, run_for,
 };
@@ -224,6 +224,7 @@ pub fn cmd_print_dev_env(argv: &[String]) -> i32 {
         "--builder" => url = Some(next()),
         "--gc-root" => gc_root = Some(next()),
         "--entry-to" => entry_to = Some(next()),
+        "--store" => unknown_flag(s),
         "--workers" | "--cache-dir" | "-I" | "--include" | "--log-format" => {
             let v = next();
             rest.extend([s.to_string(), v]);

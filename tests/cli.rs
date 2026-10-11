@@ -69,6 +69,18 @@ fn a_bad_command_line_names_the_problem() {
         ),
         (&["build"], "nothing to evaluate"),
         (&["build", "--what"], "unknown flag '--what'"),
+        (
+            &["build", "--store", "ssh-ng://h", "x.nix"],
+            "error: unknown flag '--store'\ndid you mean '--builder'?\n",
+        ),
+        (
+            &["print-dev-env", "--store", "ssh-ng://h", "."],
+            "did you mean '--builder'?",
+        ),
+        (
+            &["build", "--option", "store", "ssh-ng://h", "x.nix"],
+            "error: iets build does not read the setting 'store'\ndid you mean '--builder'?\n",
+        ),
         (&["cache", "dunp"], "did you mean 'dump'?"),
     ] {
         let o = iets(args);

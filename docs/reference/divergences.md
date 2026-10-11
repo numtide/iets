@@ -736,8 +736,30 @@ store, and `nix build` makes no link (`createOutLinksMaybe` in
 stay on the builder. This is deliberate. A CI run needs the verdict, not
 the bytes. With `-o PATH`, it acts like `--builders`: the closure comes
 back, and `PATH` links each output with Nix's names. The classic names
-follow Nix: `nix build` and `nix-build` always bring the outputs back
-(`docs/reference/classic.md`).
+always bring the outputs back unless `--no-link` is given
+(`docs/reference/classic.md`). For `nix build --store ssh-ng://host`, that
+differs from Nix: Nix exits 0 and makes no link, and iets makes `result`.
+
+## `--store` on the native commands
+
+`iets build`, `print-dev-env`, `diff` and `plumbing` have no `--store`.
+`--store URL` there is the usage error `unknown flag '--store'`, with the
+hint `did you mean '--builder'?`. `--option store URL` is the usage error
+`iets build does not read the setting 'store'`, with the same hint. The
+classic names take `--store` with Nix's meaning.
+
+| you want | Nix | `iets build` |
+|---|---|---|
+| build on a host, leave the outputs there | `--store ssh-ng://host --eval-store auto` | `--builder ssh-ng://host` |
+| build on a host, link `result` locally | `--builders ssh-ng://host` | `--builder ssh-ng://host -o result` |
+| the outputs as plain files, no store | no flag; `nix store dump-path` piped to `nix-store --restore` | `--fetch-to DIR` |
+| a chroot store under `DIR` | `--store local?root=DIR` | no counterpart |
+
+`--builder` is not an alias of `--store`. iets writes nothing during
+evaluation, where Nix writes to the eval store. With `-o`, iets makes the
+link Nix leaves out for a remote store. `--builder` takes only `daemon`,
+`unix://`, `ssh-ng://` and `grpc://`. `docs/explanation/builder-not-store.md`
+has the reasons.
 
 ## Error text on stderr
 

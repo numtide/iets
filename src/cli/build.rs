@@ -382,11 +382,12 @@ fn build_roots(
                 }
             }
         }
-    } else if let Some(prefix) = &b.out_link {
+    }
+    if let Some(prefix) = &b.out_link {
         if let Err(e) = d.d.out_links(&out_links(prefix, &outcomes)) {
             return e.report();
         }
-    } else {
+    } else if b.fetch_to.is_none() {
         // the caller reads these paths off stdout and uses them afterwards, so a
         // collection in between must not take them. `--fetch-to` already has
         // the bytes outside the store and keeps no root here.

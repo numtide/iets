@@ -222,9 +222,10 @@ your use of the printed paths must not delete them, so every printed
 output gets a link in iets's roots store, keyed on the working directory,
 the installable and the output. The same command replaces its own roots
 (`docs/explanation/caching.md`). `build-gc-root = false` keeps none. Two
-cases never keep a root: `--fetch-to DIR`, which already has the
-bytes outside the store, and a remote builder, whose outputs are not in the
-local store.
+cases never keep a root: `--fetch-to DIR` without `-o`, which already has
+the bytes outside the store, and a remote builder, whose outputs are not in
+the local store. `--fetch-to` and `-o` combine: `DIR` gets the bytes, and
+`-o` links the outputs in the local store.
 
 **Outputs from a remote builder.** Without `-o`, the outputs stay on the
 builder, and the printed paths are not valid locally. This suits CI, which

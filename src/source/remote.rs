@@ -148,6 +148,33 @@ impl LazyStore {
         }
         self.conn.as_mut()
     }
+
+    /// The connection, for an operation that cannot do without the eval
+    /// store, and the store as the log names it. The error says what to set.
+    pub fn require(&mut self, what: &str) -> result::Result<(&mut Connection, String), String> {
+        let session = Session::current();
+        let url = nix_conf(&session).store();
+        let t = match Transport::parse(&url) {
+            Some(Transport::Grpc(_)) | None => {
+                return Err(format!(
+                    "iets: {what} adds paths through a nix-daemon, and the eval store '{url}' \
+                     is not one; set 'store' to 'daemon', 'unix://PATH' or 'ssh-ng://HOST'"
+                ));
+            }
+            Some(t) => t,
+        };
+        if self.conn.is_none() {
+            self.tried = true;
+            let c = Connection::open(&t, &mut |_| {}).map_err(|e| {
+                format!(
+                    "iets: {what} cannot reach the eval store '{}': {e}",
+                    t.uri()
+                )
+            })?;
+            self.conn = Some(c);
+        }
+        Ok((self.conn.as_mut().expect("opened above"), t.uri()))
+    }
 }
 
 /// The eval store's answers about what in `/nix/store` is valid, when it is a
@@ -527,7 +554,7 @@ fn adopt_file(ev: &mut Evaluator, sp: &StorePath, entry: &StoredTree, flat: Hash
 
 /// nix.conf, read once: `store` for the eval store and `access-tokens` for the
 /// forge headers. The file cannot change under a running evaluation.
-fn nix_conf(s: &Session) -> &config::Config {
+pub(crate) fn nix_conf(s: &Session) -> &config::Config {
     s.nix_conf
         .get_or_init(|| config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty()))
 }

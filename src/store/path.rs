@@ -281,7 +281,7 @@ pub fn make_fixed_output_path(
         return make_text_path(name, hash, references);
     }
     if hash.algo == HashAlgo::Sha256 && method == IngestionMethod::Recursive {
-        return make_store_path(&make_type("source".into(), references, false), hash, name);
+        return make_source_path(hash, name, references, false);
     }
     if !references.is_empty() {
         return Err(StorePathError(format!(
@@ -295,6 +295,60 @@ pub fn make_fixed_output_path(
     payload.push(':');
     let digest = hash_bytes(HashAlgo::Sha256, payload.as_bytes());
     make_store_path("output:out", &digest, name)
+}
+
+/// store-dir-config.cc:makeFixedOutputPath for a recursive sha256 hash, the
+/// one kind that may name other paths and, with `self_ref`, itself.
+pub fn make_source_path(
+    hash: &Hash,
+    name: &str,
+    references: &BTreeSet<StorePath>,
+    self_ref: bool,
+) -> Result<StorePath, StorePathError> {
+    make_store_path(
+        &make_type("source".into(), references, self_ref),
+        hash,
+        name,
+    )
+}
+
+/// store-dir-config.cc:makeFixedOutputPathFromCA: the path that a store object
+/// named `name`, with content address `ca` (`text:` or `fixed:[r:]`, as the
+/// worker protocol carries it) and these references, must have.
+/// `references` may hold `self_path`.
+pub fn path_from_ca(
+    ca: &str,
+    name: &str,
+    self_path: &StorePath,
+    references: &BTreeSet<StorePath>,
+) -> Result<StorePath, StorePathError> {
+    let bad = || StorePathError(format!("'{ca}' is not a content address"));
+    let (method, rest) = match ca.split_once(':').ok_or_else(bad)? {
+        ("text", rest) => (IngestionMethod::Text, rest),
+        ("fixed", rest) => match rest.strip_prefix("r:") {
+            Some(rest) => (IngestionMethod::Recursive, rest),
+            None => (IngestionMethod::Flat, rest),
+        },
+        _ => return Err(bad()),
+    };
+    let (algo, digest) = rest.split_once(':').ok_or_else(bad)?;
+    let algo = HashAlgo::parse(algo).ok_or_else(bad)?;
+    let hash = Hash::parse_non_sri_unprefixed(digest, algo).map_err(|e| StorePathError(e.0))?;
+    let self_ref = references.contains(self_path);
+    let mut others = references.clone();
+    others.remove(self_path);
+    match method {
+        IngestionMethod::Text if self_ref => Err(StorePathError(format!(
+            "text store object '{self_path}' cannot refer to itself"
+        ))),
+        IngestionMethod::Recursive if algo == HashAlgo::Sha256 => {
+            make_source_path(&hash, name, &others, self_ref)
+        }
+        _ if self_ref => Err(StorePathError(format!(
+            "fixed output derivation '{name}' is not allowed to refer to other store paths"
+        ))),
+        _ => make_fixed_output_path(method, &hash, name, &others),
+    }
 }
 
 /// Mirrors store-dir-config.cc:makeFixedOutputPathFromCA for TextInfo (builtins.toFile, .drv files).
@@ -520,5 +574,32 @@ mod tests {
     fn a_multibyte_char_across_the_hash_part_is_an_error() {
         let p = format!("/nix/store/{}é-x", "a".repeat(31));
         assert!(StorePath::parse(&p).is_err());
+    }
+
+    // nix path-info after builtins.fetchClosure rewrote hello and copied a toFile pair
+    #[test]
+    fn a_content_address_gives_the_path() {
+        let hello =
+            StorePath::parse("/nix/store/slnkrxkaf7xvkpbnxmykgmh2rch6slwr-hello-2.12.3").unwrap();
+        let refs = set(&[
+            "/nix/store/jfhlzbsxw5rfkbkabdgy4qrdq19llsba-glibc-2.42-67",
+            "/nix/store/slnkrxkaf7xvkpbnxmykgmh2rch6slwr-hello-2.12.3",
+        ]);
+        let ca = "fixed:r:sha256:0q6iskiwf8297phdcxmfjfyf5h31jbvaij4rrxa26hixc0asyghi";
+        assert_eq!(
+            path_from_ca(ca, hello.name(), &hello, &refs),
+            Ok(hello.clone())
+        );
+        let text =
+            StorePath::parse("/nix/store/1a75az3hkkj61v3jd9vbqxnh38dncjcj-fcb-13021").unwrap();
+        let refs = set(&["/nix/store/5h9rkqm1qggf9iq71mpqsycwin6i782m-fca-13021"]);
+        let ca = "text:sha256:0n1d25kr1150rcbj9i2v9y9qwrv0mqlp1990p9wkyxqpr1nsr9jm";
+        assert_eq!(
+            path_from_ca(ca, text.name(), &text, &refs),
+            Ok(text.clone())
+        );
+        let with_self = set(&["/nix/store/1a75az3hkkj61v3jd9vbqxnh38dncjcj-fcb-13021"]);
+        assert!(path_from_ca(ca, text.name(), &text, &with_self).is_err());
+        assert!(path_from_ca("nope", text.name(), &text, &refs).is_err());
     }
 }

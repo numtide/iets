@@ -3,7 +3,8 @@
 //! fetchers and flake primops are registered so `builtins ? fetchMercurial`
 //! holds, but they fail when called; only `fetchurl`, `fetchTree` on a
 //! locked input, `fetchTarball` with a `sha256`, `fetchGit`, `getFlake`,
-//! `parseFlakeRef` and `flakeRefToString` work (`flake`).
+//! `parseFlakeRef` and `flakeRefToString` work (`flake`), and `fetchClosure`
+//! (`fetch_closure`).
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
@@ -17,6 +18,7 @@ use std::{fs, io};
 use rustix::io::Errno;
 
 use super::Registry;
+use super::fetch_closure::fetch_closure;
 use super::store_hooks::{self, At, Follow};
 use super::{fetch, fetch_git};
 use crate::compile::canon_path;
@@ -86,10 +88,6 @@ unsupported!(
     hint: "use `builtins.fetchTree { type = \"hg\"; url = \"…\"; rev = \"…\"; narHash = \"…\"; }` \
      or an hg flake input, or run it as nix-instantiate, nix-build or nix-shell, \
      which fall back to Nix"
-);
-unsupported!(
-    fetch_closure,
-    "iets: network fetchers are not supported (builtins.fetchClosure)"
 );
 
 fn lossy(b: &[u8]) -> Cow<'_, str> {
@@ -426,7 +424,7 @@ fn base_name(p: &[u8]) -> &[u8] {
 }
 
 /// A store path as a string whose context is that path.
-fn store_path_string(ev: &mut Evaluator, sp: &StorePath) -> Word {
+pub(super) fn store_path_string(ev: &mut Evaluator, sp: &StorePath) -> Word {
     let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
     let ctx = ev.arena.alloc_slice(&[Ctx::Opaque(full)]);
     ev.arena.mk_string_static(full, ctx)

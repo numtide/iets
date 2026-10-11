@@ -31,6 +31,7 @@ pub use remote::LazyStore;
 pub(crate) use remote::{
     ensure_readable, fetch_file, fetch_git_with_nix, store_commit, valid_in_store,
 };
+pub(crate) use remote::nix_conf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttrVal {

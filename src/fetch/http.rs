@@ -291,6 +291,29 @@ pub fn get(
     decompress: bool,
     sink: &mut dyn Write,
 ) -> Result<u64> {
+    fetch(url, headers, limits, decompress, false, sink).map(Option::unwrap_or_default)
+}
+
+/// [`get`] without decompression, for a file a binary cache may not have:
+/// `None` on a 404 or a 403, which binary-cache-store.cc reads as no such
+/// file, and for a `file://` URL that names nothing.
+pub fn get_if_found(
+    url: &str,
+    headers: &[(String, String)],
+    limits: Limits,
+    sink: &mut dyn Write,
+) -> Result<Option<u64>> {
+    fetch(url, headers, limits, false, true, sink)
+}
+
+fn fetch(
+    url: &str,
+    headers: &[(String, String)],
+    limits: Limits,
+    decompress: bool,
+    missing_ok: bool,
+    sink: &mut dyn Write,
+) -> Result<Option<u64>> {
     let undo = |r: Box<dyn Read>| {
         if decompress {
             decompress_reader(r)
@@ -306,19 +329,22 @@ pub fn get(
     let read_in = Rc::new(Cell::new(0));
     if let Some(path) = file_path(url) {
         let path = worker::percent_decode(path.split(['?', '#']).next().unwrap_or(path));
-        let file = File::open(&path).map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
+        let file = match File::open(&path) {
+            Err(e) if missing_ok && e.kind() == ErrorKind::NotFound => return Ok(None),
+            r => r.map_err(|e| Error::io(format!("cannot read '{path}'"), e))?,
+        };
         let raw = Counted(Box::new(file), read_in.clone());
-        return drain(url, undo(Box::new(raw))?, &read_in, limits, sink);
+        return drain(url, undo(Box::new(raw))?, &read_in, limits, sink).map(Some);
     }
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
     let target = url.to_string();
     let sent = headers.to_vec();
-    let download = thread::spawn(move || -> Result<()> {
+    let download = thread::spawn(move || -> Result<bool> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
-        rt.block_on(stream(&target, &sent, limits, tx))
+        rt.block_on(stream(&target, &sent, limits, missing_ok, tx))
     });
     let queued = Queued {
         rx,
@@ -327,10 +353,10 @@ pub fn get(
     };
     let read = undo(Box::new(Counted(Box::new(queued), read_in.clone())))
         .and_then(|r| drain(url, r, &read_in, limits, sink));
-    download
+    let found = download
         .join()
         .map_err(|_| Error::Store("the download thread panicked".into()))??;
-    read
+    Ok(found.then_some(read?))
 }
 
 /// The reading half of the queue: hyper's frames, one after the other.
@@ -419,13 +445,15 @@ fn drain(
     }
 }
 
-/// Follows redirects and pushes the frames of the 200 into `tx`.
+/// Follows redirects and pushes the frames of the 200 into `tx`. False when
+/// `missing_ok` and the server has no such file.
 async fn stream(
     url: &str,
     headers: &[(String, String)],
     limits: Limits,
+    missing_ok: bool,
     tx: tokio::sync::mpsc::Sender<result::Result<Vec<u8>, String>>,
-) -> Result<()> {
+) -> Result<bool> {
     let first = Url::parse(url)?;
     let mut sent = headers.to_vec();
     sent.extend(first.basic());
@@ -463,7 +491,7 @@ async fn stream(
                     }
                 }
                 driver.abort();
-                return sent;
+                return sent.map(|()| true);
             }
             301 | 302 | 303 | 307 | 308 => {
                 driver.abort();
@@ -478,6 +506,10 @@ async fn stream(
                 credentials = redirect(&first, &Url::parse(&current)?, &Url::parse(&next)?)
                     .map_err(|why| bad(&next, why))?;
                 current = next;
+            }
+            404 | 403 if missing_ok => {
+                driver.abort();
+                return Ok(false);
             }
             other => {
                 driver.abort();
@@ -1018,6 +1050,34 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/");
         let e = get_decompressed(&url, &[], limits(), &mut Vec::new()).unwrap_err();
         assert!(e.to_string().contains("HTTP status 404"), "{e}");
+    }
+
+    /// binary-cache-store.cc reads a 404 or a 403 as a file the cache has not got.
+    #[test]
+    fn a_missing_file_is_none_when_asked() {
+        for status in ["404 Not Found", "403 Forbidden"] {
+            let (port, _) = serve(1, move |_, c| respond(c, status, "", b""));
+            let url = format!("http://127.0.0.1:{port}/x.narinfo");
+            assert_eq!(
+                get_if_found(&url, &[], limits(), &mut Vec::new()).unwrap(),
+                None
+            );
+        }
+        let (port, _) = serve(1, |_, c| {
+            respond(c, "200 OK", "", b"StoreDir: /nix/store\n")
+        });
+        let url = format!("http://127.0.0.1:{port}/nix-cache-info");
+        let mut out = Vec::new();
+        assert_eq!(
+            get_if_found(&url, &[], limits(), &mut out).unwrap(),
+            Some(21)
+        );
+        assert_eq!(out, b"StoreDir: /nix/store\n");
+        let gone = format!("file://{}/no-such-file", env::temp_dir().display());
+        assert_eq!(
+            get_if_found(&gone, &[], limits(), &mut Vec::new()).unwrap(),
+            None
+        );
     }
 
     /// deflate tops out near 1032:1, so the bomb is zstd.

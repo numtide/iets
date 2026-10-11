@@ -1,17 +1,18 @@
 //! `builtins.fetchurl` of a `file://` URL, against the store paths and the
 //! messages of `nix eval` (Nix 2.34.8) for the same file.
 
+mod hermetic;
+
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::{env, fs};
 
 const BYTES: &[u8] = b"hello fetchurl\n";
 const SHA256: &str = "113a52l57f2jv9fh9igj2xh2mi0is40flxbkqi69wbh7nlybkcbm";
 
 fn iets(cache: &Path, offline: bool, args: &[&str]) -> Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_iets"));
+    let mut c = hermetic::iets();
     c.args(args)
-        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("IETS_CACHE_DIR", cache)
         .env("IETS_CACHE", "0");
     if offline {

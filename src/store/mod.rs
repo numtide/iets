@@ -7,4 +7,5 @@ pub mod hash;
 pub mod locate;
 pub mod nar;
 pub mod path;
+pub mod rewrite;
 pub mod source;

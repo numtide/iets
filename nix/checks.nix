@@ -21,6 +21,8 @@ in
   # the tests that need a live /nix/store are #[ignore]d; run them
   # with `cargo test -- --ignored` in the dev shell.
   test = craneLib.cargoNextest withDev;
+  # the same tests with .drv files read by harmonia-store-aterm (Cargo.toml)
+  test-harmonia-aterm = craneLib.cargoNextest (withDev // { cargoExtraArgs = "--locked --features harmonia-aterm"; });
   # nextest runs no doctests
   doctest = craneLib.cargoDocTest withDev;
   doc = craneLib.cargoDoc (withDev // { RUSTDOCFLAGS = "-D warnings"; });

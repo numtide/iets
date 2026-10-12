@@ -1,6 +1,8 @@
 { lib, stdenv, iets, ietsStatic, classic, fuzz, coverage }:
 {
   default = iets;
+  # .drv files read by harmonia-store-aterm (Cargo.toml)
+  harmonia-aterm = iets.override { extraArgs.cargoExtraArgs = "--locked --features harmonia-aterm"; };
   inherit classic;
   # one musl file that needs nothing on the machine (docs/explanation/static-build.md)
   static = ietsStatic;

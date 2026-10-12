@@ -42,6 +42,11 @@ bzip2 = "0.6"
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 
+harmonia-store-aterm = { git = "https://github.com/nix-community/harmonia", rev = "c1be8eba70b3d06cd502056719d119c95e36c9d8", optional = true }
+harmonia-store-content-address = { git = "https://github.com/nix-community/harmonia", rev = "c1be8eba70b3d06cd502056719d119c95e36c9d8", optional = true }
+harmonia-store-derivation = { git = "https://github.com/nix-community/harmonia", rev = "c1be8eba70b3d06cd502056719d119c95e36c9d8", optional = true }
+harmonia-store-path = { git = "https://github.com/nix-community/harmonia", rev = "c1be8eba70b3d06cd502056719d119c95e36c9d8", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
@@ -57,6 +62,8 @@ windows-sys = { version = "0.61", features = [
 [features]
 # Memory census behind IETS_STATS=2 (docs/reference/settings.md); off the hot path when unset.
 stats2 = []
+# Read .drv files with harmonia-store-aterm instead of the parser in src/store/drv.rs.
+harmonia-aterm = ["dep:harmonia-store-aterm", "dep:harmonia-store-content-address", "dep:harmonia-store-derivation", "dep:harmonia-store-path"]
 
 [build-dependencies]
 sha2 = "0.10"

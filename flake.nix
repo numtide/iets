@@ -17,7 +17,14 @@
         inherit pkgs nixpkgs nix-conformance;
         craneSrc = crane;
         craneLib = crane.mkLib pkgs;
-        commonArgs = { pname = "iets"; inherit version; strictDeps = true; };
+        commonArgs = {
+          pname = "iets";
+          inherit version;
+          strictDeps = true;
+          # a fixed-output fetch: the farm evaluator refuses builtins.fetchGit
+          outputHashes."git+https://github.com/nix-community/harmonia?rev=c1be8eba70b3d06cd502056719d119c95e36c9d8#c1be8eba70b3d06cd502056719d119c95e36c9d8" =
+            "sha256-N30ulmYkeIoFrVmyeioItVFCuI78VW/jL9lD0LCJvYo=";
+        };
         sources = final.callPackage ./nix/sources.nix { };
         iets = final.callPackage ./nix/iets.nix { };
         ietsStatic = (scopeFor pkgs.pkgsStatic).iets;

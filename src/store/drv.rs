@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(feature = "harmonia-aterm"))]
+use std::mem;
 use std::sync::Arc;
-use std::{error, fmt, fs, mem, str};
+use std::{error, fmt, fs, str};
 
 use crate::syntax::symbol::FxHashMap;
 
@@ -11,6 +13,9 @@ use super::path::{
     DRV_EXTENSION, IngestionMethod, StorePath, StorePathError, make_fixed_output_path,
     make_output_path, make_text_path, output_path_name, store_dir,
 };
+
+#[cfg(feature = "harmonia-aterm")]
+mod harmonia;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrvError(pub String);
@@ -422,8 +427,14 @@ impl Derivation {
                 .all(|o| matches!(o, DerivationOutput::Fixed { .. }))
     }
 
+    #[cfg(feature = "harmonia-aterm")]
+    pub fn parse(s: &[u8], name: &str) -> Result<Derivation, DrvError> {
+        harmonia::parse(s, name)
+    }
+
     /// Mirrors derivations.cc:parseDerivation, both the traditional `Derive(...)`
     /// form and `DrvWithVersion("xp-dyn-drv",...)`.
+    #[cfg(not(feature = "harmonia-aterm"))]
     pub fn parse(s: &[u8], name: &str) -> Result<Derivation, DrvError> {
         let mut p = Parser { s, pos: 0 };
         let mut drv = Derivation {
@@ -565,6 +576,7 @@ impl Derivation {
 }
 
 /// Mirrors derivations.cc:parseDerivationOutput(store, pathS, hashAlgoStr, hashS).
+#[cfg(not(feature = "harmonia-aterm"))]
 fn parse_output(path: &str, hash_algo: &str, hash: &str) -> Result<DerivationOutput, DrvError> {
     if hash_algo.is_empty() {
         if path.is_empty() {
@@ -603,11 +615,13 @@ fn parse_output(path: &str, hash_algo: &str, hash: &str) -> Result<DerivationOut
     Ok(DerivationOutput::Fixed { method, hash })
 }
 
+#[cfg(not(feature = "harmonia-aterm"))]
 struct Parser<'a> {
     s: &'a [u8],
     pos: usize,
 }
 
+#[cfg(not(feature = "harmonia-aterm"))]
 impl Parser<'_> {
     fn peek(&self) -> Option<u8> {
         self.s.get(self.pos).copied()
@@ -1276,6 +1290,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "harmonia-aterm"))]
     fn string_escapes_roundtrip() {
         let mut s = Vec::new();
         print_string(&mut s, b"a\"b\\c\nd\re\tf$g");

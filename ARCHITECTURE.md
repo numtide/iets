@@ -301,7 +301,7 @@ in an `iets` output.
 | `linttest.nu` | the lints on their fixtures | check, sandbox |
 | `cachetest.nu` | the tracing cache's hits and misses | check, container |
 | `difftest.nu`, `drvdiff.nu` | one expression against `nix-instantiate`; the first differing derivation | by hand |
-| `diff-e2e.nu` | `iets diff` on two small derivations | check, sandbox |
+| `tests/diff.rs` | `iets diff` on two small derivations | `cargo test` |
 | `classic-e2e.nu` | the classic names against the real nix, stdout byte for byte | check, container |
 | `daemon-e2e.nu` | `iets build` over the worker protocol | check, container; not by hand on a host whose store refuses `nix-store --delete` |
 | `build-e2e.nu` | `iets build` over an attribute tree: the verdicts, the exit code, `--json` | check, container |

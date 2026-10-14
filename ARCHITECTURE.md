@@ -295,7 +295,7 @@ in an `iets` output.
 
 | script | what it compares | runs |
 |---|---|---|
-| `langtests.nu` | Nix 2.34.8's functional tests, `tests/lang/` | check, sandbox |
+| `tests/langtests.rs` | Nix 2.34.8's functional tests, `tests/lang/` | `cargo test` |
 | `corpus.nu` | `tests/corpus/` against `.exp` from `nix-instantiate` (`--update` rewrites them) | by hand |
 | `partest.nu` | 1 against N workers | check, sandbox |
 | `linttest.nu` | the lints on their fixtures | check, sandbox |

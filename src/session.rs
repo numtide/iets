@@ -85,6 +85,17 @@ impl Session {
         self.settings.get_or_init(Settings::default)
     }
 
+    /// The environment settings with `IETS_STATS` at `level`, for a test that
+    /// reads the arena totals under its own session.
+    #[cfg(test)]
+    pub(crate) fn set_stats_for_test(&self, level: u8) {
+        let s = Settings {
+            stats: level,
+            ..Settings::default()
+        };
+        let _ = self.settings.set(s);
+    }
+
     /// Reads the `iets.toml` settings files and applies the `--iets-option` pairs.
     /// Call it once, on an entered session, before anything reads a setting.
     pub fn load_settings(&self, options: &[(String, String)]) -> error::Result<()> {

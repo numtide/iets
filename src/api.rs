@@ -10,6 +10,9 @@ pub mod flake;
 pub mod installable;
 pub mod render;
 pub mod run;
+
+#[cfg(test)]
+mod concurrent_eval;
 pub mod value;
 pub mod watch;
 

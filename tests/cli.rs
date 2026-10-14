@@ -276,3 +276,16 @@ fn build_evaluates_every_installable() {
     let _ = fs::remove_dir_all(&d);
     assert!(log.contains("eval: 2 derivations"), "{log}");
 }
+
+/// Installables in another order are one job and one cache entry.
+#[test]
+fn build_cache_ignores_installable_order() {
+    let d = env::temp_dir().join(format!("iets-build-order-{}", process::id()));
+    two_checks(&d.join("flake"));
+    let cache = d.join("cache");
+    let first = build_unreachable(&d.join("flake"), Some(&cache), &[A, B]);
+    let second = build_unreachable(&d.join("flake"), Some(&cache), &[B, A]);
+    let _ = fs::remove_dir_all(&d);
+    assert!(first.contains("cache: wrote"), "{first}");
+    assert!(second.contains("eval: skipped"), "{second}");
+}

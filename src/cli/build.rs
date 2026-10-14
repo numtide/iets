@@ -139,7 +139,8 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
     (b, a)
 }
 
-/// One `EvalArgs` per installable, in order.
+/// One `EvalArgs` per installable, sorted and without repeats, so every order
+/// of the same set is one job and one cache entry.
 fn installables(a: &EvalArgs) -> Vec<EvalArgs> {
     let mut all: Vec<EvalArgs> = Vec::new();
     for input in a.more.iter().cloned().chain(a.input.clone()) {
@@ -151,7 +152,19 @@ fn installables(a: &EvalArgs) -> Vec<EvalArgs> {
     if all.is_empty() {
         all.push(a.clone());
     }
+    all.sort_by_cached_key(label);
+    all.dedup_by_key(|a| label(a));
     all
+}
+
+fn label(a: &EvalArgs) -> Vec<u8> {
+    let mut l = match &a.input {
+        Some(Input::Flake(f) | Input::File(f) | Input::Expr(f)) => f.as_bytes().to_vec(),
+        None => Vec::new(),
+    };
+    l.push(0);
+    l.extend(a.attr.clone().unwrap_or_default().into_bytes());
+    l
 }
 
 /// What names this run's roots: the tag, the working directory and the
@@ -160,13 +173,7 @@ fn installables(a: &EvalArgs) -> Vec<EvalArgs> {
 /// previous root behind for the TTL to sweep.
 fn root_key(all: &[EvalArgs]) -> Vec<Vec<u8>> {
     let mut key = vec![b"build".to_vec(), crate::cli::cwd()];
-    for a in all {
-        key.push(match &a.input {
-            Some(Input::Flake(f) | Input::File(f) | Input::Expr(f)) => f.as_bytes().to_vec(),
-            None => Vec::new(),
-        });
-        key.push(a.attr.clone().unwrap_or_default().into_bytes());
-    }
+    key.extend(all.iter().map(label));
     key
 }
 
@@ -550,6 +557,18 @@ mod tests {
     use crate::store::path::StorePath;
     use crate::sys;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn installables_are_sorted_without_repeats() {
+        let flake = |f: &str| Input::Flake(f.into());
+        let a = EvalArgs {
+            more: vec![flake(".#b"), flake(".#a"), flake(".#b")],
+            input: Some(flake(".#c")),
+            ..EvalArgs::new()
+        };
+        let names: Vec<_> = installables(&a).iter().map(label).collect();
+        assert_eq!(names, [b".#a\0", b".#b\0", b".#c\0"]);
+    }
 
     fn outcome(success: bool, skipped: bool, outputs: &[&str]) -> Outcome {
         Outcome {

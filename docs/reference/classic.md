@@ -50,14 +50,23 @@ Set `iets.classic.enable` (default `false`) to also install the classic names:
 }
 ```
 
-The names go into `environment.systemPackages` with `lib.hiPrio`, so they
-win over Nix's own `bin/nix-instantiate` and the rest in every shell, login
-or not.
+The module sets `nix.package` to Nix with the classic names in front. That
+puts them in the system path and in every NixOS module that runs Nix from
+`nix.package`, including `nixos-rebuild`. The daemon and the store tools are
+still the real Nix.
 
-The real Nix is not in the system path, so the classic package writes the
-Nix it was built for into `share/iets/real-nix-bin`, and a fallback finds it
-there. The module builds the classic package for `config.nix.package`.
-`IETS_NIX_BIN_DIR` overrides it.
+Since the module now sets `nix.package`, choose the real Nix with
+`iets.classic.nix` (default `pkgs.nix`):
+
+```nix
+{ pkgs, ... }:
+{
+  iets.classic.nix = pkgs.nixVersions.latest;
+}
+```
+
+The classic package records the real Nix in `share/iets/real-nix-bin`, where
+the fallback finds it. `IETS_NIX_BIN_DIR` overrides it.
 
 ## What each name handles
 

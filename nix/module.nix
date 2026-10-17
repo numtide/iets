@@ -2,10 +2,19 @@ self:
 { config, lib, pkgs, ... }:
 let
   packages = self.packages.${pkgs.stdenv.hostPlatform.system};
+  cfg = config.iets.classic;
 in
 {
   options.iets.classic.enable = lib.mkEnableOption
-    "the iets classic command names ahead of nix in the system path";
+    "the iets classic command names in front of Nix";
+
+  options.iets.classic.nix = lib.mkPackageOption pkgs "nix" {
+    example = "nixVersions.latest";
+    extraDescription = ''
+      The real Nix behind the classic names. It provides the daemon, the
+      store tools and the fallback. Set this instead of `nix.package`.
+    '';
+  };
 
   options.iets.direnv.enable = lib.mkEnableOption
     "iets's `use flake` (nix/direnvrc) in direnv, in place of nix-direnv's"
@@ -15,15 +24,20 @@ in
     };
 
   config = {
-    environment.systemPackages = [ packages.default ]
-      # buildEnv resolves a collision with nix's own bin/nix-instantiate by
-      # meta.priority, lower wins, so hiPrio (-10) is what puts the farm's
-      # symlinks in system-path instead. The farm links the one iets this
-      # flake ships, never a rebuild against the host's pkgs, and is built for this host's
-      # nix: the loser of the collision leaves the system path, and the
-      # fallback finds it through the farm's own marker, with no environment.
-      ++ lib.optional config.iets.classic.enable
-        (lib.hiPrio (self.lib.mkClassic pkgs packages.default config.nix.package));
+    environment.systemPackages = [ packages.default ];
+
+    # nixos-rebuild only sees nix.package. NixOS reads pname and version, and
+    # the system path takes the manual from extraOutputsToInstall.
+    nix.package = lib.mkIf cfg.enable (pkgs.buildEnv {
+      name = "iets-classic-nix-${cfg.nix.version}";
+      paths = [
+        (lib.hiPrio (self.lib.mkClassic pkgs packages.default cfg.nix))
+        cfg.nix
+      ];
+      inherit (config.environment) extraOutputsToInstall;
+      passthru = { inherit (cfg.nix) pname version; };
+      meta.mainProgram = "nix";
+    });
 
     # direnv itself stays the host's choice. direnvrcExtra is sourced after
     # nix-direnv, so iets's use_flake wins even where a host keeps nix-direnv.

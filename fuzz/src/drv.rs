@@ -408,8 +408,14 @@ pub fn generate(u: &mut Unstructured) -> Vec<u8> {
 }
 
 /// The kind for two ATerms that differ: the first field in which the
-/// derivations read back from them differ.
+/// derivations read back from them differ. `__json` is compared as bytes,
+/// because Nix writes an input's output name without escapes
+/// (nix-conformance `nix-bugs/drv-round-trip`), and such an ATerm does not
+/// read back.
 fn field(nix: &[u8], iets: &[u8]) -> &'static str {
+    if without_json(nix).is_some_and(|n| Some(n) == without_json(iets)) {
+        return "aterm-json";
+    }
     let (Ok(n), Ok(i)) = (Derivation::parse(nix, "x"), Derivation::parse(iets, "x")) else {
         return "aterm";
     };
@@ -427,9 +433,45 @@ fn field(nix: &[u8], iets: &[u8]) -> &'static str {
         "aterm-args"
     } else if n.env != i.env {
         "aterm-env"
-    } else if n.structured_attrs != i.structured_attrs {
-        "aterm-json"
     } else {
         "aterm"
+    }
+}
+
+/// The ATerm with the value of `__json` cut out.
+fn without_json(aterm: &[u8]) -> Option<Vec<u8>> {
+    const KEY: &[u8] = br#"("__json",""#;
+    let start = aterm.windows(KEY.len()).position(|w| w == KEY)? + KEY.len();
+    let mut rest = aterm[start..].iter().enumerate();
+    while let Some((k, &c)) = rest.next() {
+        match c {
+            b'\\' => _ = rest.next(),
+            b'"' => return Some([&aterm[..start], &aterm[start + k..]].concat()),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::field;
+
+    /// An ATerm whose input output name holds a raw `"`, as Nix writes it,
+    /// so it does not read back, with `json` as the value of `__json`.
+    fn unreadable(json: &str) -> Vec<u8> {
+        format!(
+            r#"Derive([("out","","","")],[("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a.drv",["a"b"])],[],"s","/b",[],[("__json","{json}"),("out","")])"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn only_a_json_difference_is_json() {
+        let nix = unreadable(r#"{\"k\":2}"#);
+        let iets = unreadable(r#"{\"k\":1,\"k\":2}"#);
+        assert_eq!(field(&nix, &iets), "aterm-json");
+        let other = String::from_utf8(iets).unwrap().replace("/b", "/c");
+        assert_eq!(field(&nix, other.as_bytes()), "aterm");
     }
 }

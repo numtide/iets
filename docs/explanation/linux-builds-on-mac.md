@@ -13,8 +13,8 @@ writable shared store is unsound on a Mac, and the
 [case collision](#the-shared-writable-store) shows why. The prototype in
 `scripts/linux-on-mac/` built a derivation in a guest and registered it in
 mac02's store, with the same NAR hash as the farm's build of that
-derivation. It isn't wired to `iets build` yet; [What is left](#what-is-left)
-says what that takes.
+derivation. It isn't wired to `iets build` yet;
+[The guest daemon](#the-guest-daemon) says what that takes.
 
 ## The design
 
@@ -78,7 +78,10 @@ The host daemon owns the store, and the guest only reads it. This answers
 both halves of the first question.
 
 **Who owns the store during the build.** The host daemon. The guest sees
-the store through a read-only share and builds into its own memory. Only
+the store through a read-only share and builds into its own memory. A
+daemon in the guest is a build front end with the host daemon as its
+upstream, and it never opens the host's database
+([The guest daemon](#the-guest-daemon)). Only
 `AddToStoreNar` makes the output valid, and the daemon checks the NAR hash
 and applies the case hack on the way in.
 
@@ -161,35 +164,71 @@ user. A user who isn't trusted needs one of these:
 The answer is "nothing" for an admin who installed Nix and is trusted, and
 one line of configuration otherwise.
 
-## What is left
+## The guest daemon
 
-The prototype proves the store side. `iets build` doesn't drive it yet,
-because iets has no transport that runs a local program as a builder.
-`ssh-ng://` with `remote-program` is the closest, but it starts `ssh`.
+The prototype's driver script does a daemon's job badly. The guest should
+run a real worker-protocol daemon with a classic backend and a sandbox,
+and the launcher should expose it to iets as a Unix socket. Then iets
+reaches it with the `unix://` builder it already has, and iets gains no
+local builds and no daemon of its own.
 
-The front end is a worker-protocol server on standard input and output.
-It forwards every operation to the host daemon, except a build of a Linux
-derivation, which it runs in a guest as described in
-[The design](#the-design). iets then needs a builder URL that starts that
-program, the way `ssh-ng://` starts `nix-daemon --stdio`.
+The daemon must not share the host's database. Locks don't cross the
+share. In a test on mac02, the host held `flock` on one file in the
+shared directory and `fcntl` on another, and the guest then took `flock`
+on both at once. Both are locks that SQLite depends on. Nix also runs
+SQLite in WAL mode, and WAL keeps its index in a shared-memory file. Two
+kernels can't share that memory over virtio-fs without DAX, and the
+framework offers no DAX window. The case collision in
+[The shared writable store](#the-shared-writable-store) rules out the
+store files as well. So the guest daemon writes nothing that the host
+reads as a store or a database.
 
-That server is a builder daemon, and `ARCHITECTURE.md` lists "local
-builds" and "a builder daemon of our own" as non-goals. It belongs in its
-own program, with iets as its client, the same way iets is a client of a
-gRPC store. A daemon that already implements the worker protocol in Rust
-is the natural home for it.
+The daemon is a build front end over an upstream store. These are the
+requirements for it:
 
-The guest also needs the parts of a Nix build that the prototype skips:
+- **Upstream store.** The host daemon is the upstream, reached through a
+  socket that the launcher forwards over vsock. Path info (validity,
+  references, NAR hash) comes from the upstream. File contents come from
+  the read-only store share, at the same `/nix/store` paths.
+- **Writes.** `AddToStore`, `AddToStoreNar` and `AddMultipleToStore` go to
+  the upstream. A built output goes to the upstream as one
+  `AddToStoreNar` after the build succeeds, and only then is it valid
+  anywhere.
+- **Local state.** Outputs being built live in an overlay. The upper
+  layer is guest memory or a guest disk image, never the share, so it is
+  case-sensitive. A database, if the backend needs one, lives there too.
+  It holds only in-flight paths and is thrown away with the guest.
+- **Locking mode.** Normal POSIX locks and WAL on the guest-local
+  database. The daemon refuses to open a database on a FUSE file system
+  (`statfs` magic `0x65735546`, which virtio-fs reports), so a wrong
+  configuration fails at start instead of corrupting a store.
+- **The big lock.** Only the host daemon holds the garbage-collector lock
+  and collects. The guest daemon never collects. For the input closure,
+  it asks the upstream for temporary roots (`AddTempRoot`) on its
+  connection, which the host daemon drops when the connection closes.
+- **Guest death.** Nothing to recover. The upstream connection closes, the
+  host daemon drops the temporary roots, and no output was added. The
+  next build boots a new guest.
+- **Uids.** The guest's uids never reach the host, because the guest writes
+  no host file. Builds run as the guest's build users, under the rootless
+  sandbox, inside the guest.
+- **Lifetime.** One guest per connection. The launcher boots it on
+  `accept` and stops it on close. The 0.16 s boot makes keeping a guest
+  warm unnecessary.
 
-- `__structuredAttrs`, `exportReferencesGraph` and `passAsFile`;
-- the reference checks (`allowedReferences` and the like);
-- `/etc/passwd`, `/etc/group` and `/dev/shm` in the guest;
-- a network device for fixed-output derivations only.
+The guest also needs the parts of a Nix build that the prototype skips.
+A real sandbox gives them: `__structuredAttrs`, `exportReferencesGraph`,
+`passAsFile`, the reference checks, `/etc/passwd` and `/dev/shm`, and a
+network device only for fixed-output derivations.
 
 The prototype shares the whole store, so the builder can read paths
-outside its closure. The framework's `VZMultipleDirectoryShare` can share
-only the closure, one directory per input path, and keep the guest as
-tight as the Linux sandbox.
+outside its closure. The guest daemon's sandbox closes that: it
+bind-mounts only the closure into the build.
+
+With that daemon, the user runs `iets build --builder
+unix:///<launcher socket>` on a Linux derivation. iets uploads what the
+upstream lacks, the guest builds it, and the output is valid in the host
+store when the build returns. No part of this is in iets.
 
 ## The prototype
 

@@ -1,6 +1,21 @@
 let
   spore = builtins.getFlake "github:numtide/spore/cdd7f2b17df9c3185e729ea9798384d4d54c05c8";
   pkgs = import spore.inputs.nixpkgs { system = "aarch64-linux"; };
+  pkgsX86 = import spore.inputs.nixpkgs { system = "x86_64-linux"; };
+  # spore's hcloud-aarch64 config plus binfmt_misc, which Rosetta registers through
+  configfile = pkgs.stdenv.mkDerivation {
+    name = "vm-kernel-config";
+    inherit (pkgs.linux) src;
+    nativeBuildInputs = pkgs.linux.nativeBuildInputs ++ [ pkgs.bc pkgs.flex pkgs.bison pkgs.perl ];
+    buildPhase = ''
+      cp ${spore}/platforms/hcloud-aarch64/kernel.config .config
+      patchShebangs scripts/config
+      scripts/config --enable BINFMT_MISC
+      make ARCH=arm64 olddefconfig
+      grep -q '^CONFIG_BINFMT_MISC=y' .config
+    '';
+    installPhase = "cp .config $out";
+  };
   init = pkgs.writeText "init" ''
     #!/bin/sh
     mount -t proc proc /proc
@@ -22,7 +37,7 @@ let
   '';
 in
 {
-  kernel = spore.packages.aarch64-linux.hcloud-kernel;
+  kernel = import "${spore}/common/kernel.nix" { inherit pkgs configfile; };
   initrd = pkgs.runCommand "vm-initrd" { nativeBuildInputs = [ pkgs.cpio ]; } ''
     mkdir -p root/bin root/proc root/sys root/dev root/nix root/job root/tmp root/build
     cp ${pkgs.pkgsStatic.busybox}/bin/busybox root/bin/
@@ -46,4 +61,15 @@ in
       ln -s ${pkgs.bash}/bin/bash $out/sh
     '' ];
   };
+  testX86 = derivation {
+    name = "iets-vm-proof-x86";
+    system = "x86_64-linux";
+    builder = "${pkgsX86.bash}/bin/bash";
+    args = [ "-c" ''
+      export PATH=${pkgsX86.coreutils}/bin
+      echo "kernel: $(cat /proc/sys/kernel/osrelease) uname -m: $(uname -m)"
+      echo hello from an x86_64-linux build > $out
+    '' ];
+  };
+  helloX86 = pkgsX86.hello;
 }

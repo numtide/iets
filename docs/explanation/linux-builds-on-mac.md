@@ -21,9 +21,9 @@ derivation. It isn't wired to `iets build` yet;
 The host daemon owns the store from start to end. The guest has no store
 database and no daemon. Each part does one job:
 
-- **The kernel and the initrd.** spore's `hcloud-aarch64` kernel boots
-  unchanged: virtio-fs, overlayfs and the virtio console are built in, and
-  it loads no modules. The initrd is 1.6 MiB: a static busybox and a
+- **The kernel and the initrd.** spore's `hcloud-aarch64` kernel config
+  plus `CONFIG_BINFMT_MISC`: virtio-fs, overlayfs and the virtio console
+  are built in, and it loads no modules. The initrd is 1.6 MiB: a static busybox and a
   20-line `/init`. The kernel `Image` is 16 MiB. Both are store paths.
 - **The launcher.** A 40-line Swift program on the Virtualization
   framework boots the kernel directly, with no firmware and no disk. It
@@ -129,14 +129,26 @@ shares the Rosetta runtime into the guest as a directory
 `binfmt_misc` for x86_64 ELF files. mac02 reports Rosetta for Linux as
 installed (`availability` 2).
 
-This wasn't run end to end. spore's kernel has no `CONFIG_BINFMT_MISC`,
-so the guest kernel needs that one option added. An output built under
-translation gets the same store path as one built on x86_64 hardware. A
-translation bug would therefore end up in a path that looks native. For
-that reason, `x86_64-linux` should be a separate system feature that the
-user can see, and the farm should rebuild a sample natively to check it.
-An Intel Mac can't run an aarch64 guest, and it gets no `aarch64-linux`
-support.
+The guest registers Rosetta with the flags `FP`. `F` opens the
+interpreter at registration, so a build sandbox doesn't need to see it.
+`P` keeps `argv[0]`. Without `P`, Rosetta replaces `argv[0]` with the
+path it was given. GNU Hello's `operand-1` test then printed `./hello:`
+where it expects `hello:`, and its `atexit-1` test failed as well. With
+`FP`, both pass.
+
+mac02 rebuilt `hello` 2.12.3 for `x86_64-linux` from source in the guest
+(4 vCPUs, 4 GiB). Configure, compile and the test suite ran under
+translation in 172 s, and every test passed except the one that skips by
+design. The output's NAR hash, `sha256-gqssVX3zprSd1xA4Yc1DOZGdGvtw/YBxhUO06ynY4dg=`,
+is the one the public NixOS binary cache holds for the same store path,
+which x86_64 hardware built.
+
+An output built under translation gets the same store path as one built
+on x86_64 hardware. A translation bug would therefore end up in a path
+that looks native, and one matching package doesn't rule that out. So
+`x86_64-linux` should be a separate system feature that the user can see,
+and the farm should rebuild a sample natively to check it. An Intel Mac
+can't run an aarch64 guest, and it gets no `aarch64-linux` support.
 
 ## What a user installs
 
@@ -212,6 +224,9 @@ requirements for it:
 - **Uids.** The guest's uids never reach the host, because the guest writes
   no host file. Builds run as the guest's build users, under the rootless
   sandbox, inside the guest.
+- **Rosetta.** For `x86_64-linux`, the guest registers Rosetta with
+  `binfmt_misc` flags `FP` before the first build, and the sandbox needs
+  no path to it.
 - **Lifetime.** One guest per connection. The launcher boots it on
   `accept` and stops it on close. The 0.16 s boot makes keeping a guest
   warm unnecessary.
@@ -241,7 +256,9 @@ The files are in `scripts/linux-on-mac/`:
   vm.entitlements vmrun`.
 - `vmbuild.py DRV` boots a guest, runs the build, imports the outputs and
   prints the timings. `--kill-after SECONDS` kills the guest, for the
-  ownership test.
+  ownership test. `VM_CPUS` and `VM_MEM_MIB` size the guest. An
+  `x86_64-linux` derivation gets the Rosetta share. The driver writes
+  `.attrs.json` and `.attrs.sh` for structured attributes.
 
 The run on mac02 that this page describes:
 

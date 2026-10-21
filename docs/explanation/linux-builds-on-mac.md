@@ -13,8 +13,8 @@ writable shared store is unsound on a Mac, and the
 [case collision](#the-shared-writable-store) shows why. The prototype in
 `scripts/linux-on-mac/` built a derivation in a guest and registered it in
 mac02's store, with the same NAR hash as the farm's build of that
-derivation. It isn't wired to `iets build` yet;
-[The guest daemon](#the-guest-daemon) says what that takes.
+derivation. It isn't wired to `iets build` yet. The daemon's own hook,
+[`external-builders`](#the-daemons-helper-hook), is the shortest way there.
 
 ## The design
 
@@ -176,7 +176,55 @@ user. A user who isn't trusted needs one of these:
 The answer is "nothing" for an admin who installed Nix and is trusted, and
 one line of configuration otherwise.
 
+## The daemon's helper hook
+
+Nix 2.32 and later have an experimental hook for this, `external-builders`.
+For a derivation whose system the setting lists, the host daemon runs a
+helper program instead of the builder. It passes the path of a JSON file
+that holds the builder, the arguments, the full environment, the input
+closure (`inputPaths`), the output paths, the store directory and a build
+directory on the host. The daemon does everything else as for a local
+build: scheduling, substitution, locks, temporary roots, structured
+attributes, `passAsFile`, `exportReferencesGraph`, reference scanning,
+output checks and registration. The helper writes each output at its
+path in `realStoreDir` and exits with the build's status.
+
+This makes the guest daemon and a front end unnecessary. The helper is
+the launcher plus the guest from [The design](#the-design):
+
+- It shares `realStoreDir` read-only and the build directory into the
+  guest, and runs the build there.
+- It gets each output back as a NAR and unpacks it with
+  `nix-store --restore`. On a Mac this applies `use-case-hack`, and the
+  daemon's dump reverses it, so the NAR hash is the guest's.
+- It writes `\2` and a newline to standard error when the build starts,
+  as the daemon expects from a builder.
+
+The daemon starts the helper as a build user, such as `_nixbld1`. On
+mac02, `_nixbld1` started a guest with the Rosetta share, with no user
+session and `HOME=/var/empty`.
+
+The cost is configuration. Two lines of `nix.conf`, which only root can
+edit, and a daemon restart:
+
+```
+extra-experimental-features = external-builders
+external-builders = [{"systems": ["aarch64-linux", "x86_64-linux"], "program": "/nix/store/…/bin/helper", "args": []}]
+```
+
+Any client of the daemon then builds Linux derivations, `iets build
+--builder daemon` included, and nothing needs `trusted-users`. A daemon
+that runs a hook it was configured to run trusts nothing new.
+
+`scripts/linux-on-mac/helper.py` is this helper as a prototype. It hasn't
+run behind a daemon: the test needs a second daemon with its own store on
+mac02, and that wasn't done.
+
 ## The guest daemon
+
+This section is the alternative to [the hook](#the-daemons-helper-hook) for a
+daemon without it.
+
 
 The prototype's driver script does a daemon's job badly. The guest should
 run a real worker-protocol daemon with a classic backend and a sandbox,

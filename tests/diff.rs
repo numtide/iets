@@ -4,6 +4,8 @@
 
 mod hermetic;
 
+use hermetic::{Iets, bin};
+
 use rstest::rstest;
 use serde_json::Value;
 use std::fs;
@@ -48,8 +50,9 @@ in {
     work
 }
 
-fn diff(work: &Path, args: &[&str]) -> Run {
-    let o = hermetic::iets()
+fn diff(bin: &Iets, work: &Path, args: &[&str]) -> Run {
+    let o = bin
+        .cmd()
         .current_dir(work)
         .arg("diff")
         .args(args)
@@ -62,10 +65,10 @@ fn diff(work: &Path, args: &[&str]) -> Run {
     }
 }
 
-#[test]
-fn the_text_names_the_env_the_source_and_the_input_drv() {
+#[rstest]
+fn the_text_names_the_env_the_source_and_the_input_drv(bin: Iets) {
     let w = demo();
-    let r = diff(w.path(), &["-A", "a", "-A", "b", "demo.nix"]);
+    let r = diff(&bin, w.path(), &["-A", "a", "-A", "b", "demo.nix"]);
     assert_eq!(r.rc, 1, "{}", r.out);
     for want in [
         "env GREETING:",
@@ -80,10 +83,14 @@ fn the_text_names_the_env_the_source_and_the_input_drv() {
     }
 }
 
-#[test]
-fn the_json_object_names_the_same_differences() {
+#[rstest]
+fn the_json_object_names_the_same_differences(bin: Iets) {
     let w = demo();
-    let r = diff(w.path(), &["-A", "a", "-A", "b", "--json", "demo.nix"]);
+    let r = diff(
+        &bin,
+        w.path(),
+        &["-A", "a", "-A", "b", "--json", "demo.nix"],
+    );
     assert_eq!(r.rc, 1, "{}", r.out);
     let j: Value = serde_json::from_str(&r.out).expect("JSON on stdout");
     assert_eq!(j["equal"], false);
@@ -128,26 +135,26 @@ fn the_json_object_names_the_same_differences() {
 #[case::an_unknown_flag_is_a_usage_error(&["-A", "a", "-A", "b", "--bogus"], 2, "unknown flag")]
 #[case::equal_derivations_exit_0(&["-A", "a", "-A", "c"], 0, "are the same derivation")]
 #[case::depth_zero_stops_at_the_input_derivation(&["-A", "a", "-A", "b", "--depth", "0"], 1, "stopped: depth")]
-fn exit_code(#[case] args: &[&str], #[case] rc: i32, #[case] want: &str) {
+fn exit_code(bin: Iets, #[case] args: &[&str], #[case] rc: i32, #[case] want: &str) {
     let w = demo();
-    let r = diff(w.path(), &[args, &["demo.nix"]].concat());
+    let r = diff(&bin, w.path(), &[args, &["demo.nix"]].concat());
     let text = if rc == 2 { &r.err } else { &r.out };
     assert_eq!(r.rc, rc, "{}{}", r.out, r.err);
     assert!(text.contains(want), "{text}");
 }
 
-#[test]
-fn two_installables_are_one_evaluation_each() {
+#[rstest]
+fn two_installables_are_one_evaluation_each(bin: Iets) {
     let w = demo();
     fs::write(w.path().join("a.nix"), "(import ./demo.nix).a\n").expect("write a.nix");
     fs::write(w.path().join("b.nix"), "(import ./demo.nix).b\n").expect("write b.nix");
-    let r = diff(w.path(), &["a.nix", "b.nix"]);
+    let r = diff(&bin, w.path(), &["a.nix", "b.nix"]);
     assert_eq!(r.rc, 1, "{}", r.out);
     assert!(r.out.contains("input drv changed: diffdep"), "{}", r.out);
 }
 
-#[test]
-fn an_env_name_that_repeats_the_derivation_name_is_left_out() {
+#[rstest]
+fn an_env_name_that_repeats_the_derivation_name_is_left_out(bin: Iets) {
     let w = demo();
     fs::write(
         w.path().join("named.nix"),
@@ -161,18 +168,18 @@ in { one = mk "ux-one"; two = mk "ux-two"; three = mk "ux-one" // { }; }
 "#,
     )
     .expect("write named.nix");
-    let r = diff(w.path(), &["-A", "one", "-A", "two", "named.nix"]);
+    let r = diff(&bin, w.path(), &["-A", "one", "-A", "two", "named.nix"]);
     assert_eq!(r.rc, 1, "{}", r.out);
     assert!(r.out.contains("name: ux-one -> ux-two"), "{}", r.out);
     assert!(!r.out.contains("env name"), "{}", r.out);
 }
 
-#[test]
-fn dash_f_is_the_positional_file() {
+#[rstest]
+fn dash_f_is_the_positional_file(bin: Iets) {
     let w = demo();
-    let want = diff(w.path(), &["-A", "a", "-A", "b", "demo.nix"]);
+    let want = diff(&bin, w.path(), &["-A", "a", "-A", "b", "demo.nix"]);
     for flag in ["-f", "--file"] {
-        let r = diff(w.path(), &["-A", "a", "-A", "b", flag, "demo.nix"]);
+        let r = diff(&bin, w.path(), &["-A", "a", "-A", "b", flag, "demo.nix"]);
         assert_eq!((r.rc, &r.out), (want.rc, &want.out), "{flag}");
     }
 }

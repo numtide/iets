@@ -15,7 +15,7 @@ use std::{env, fs, thread};
 
 use tempfile::TempDir;
 
-use crate::hermetic;
+use crate::hermetic::{self, Iets};
 
 pub mod classic;
 
@@ -32,6 +32,7 @@ pub struct Store {
     daemon: Child,
     shell: PathBuf,
     nonce: String,
+    bin: Iets,
 }
 
 pub fn which(prog: &str) -> Option<PathBuf> {
@@ -99,6 +100,7 @@ impl Store {
             daemon,
             shell: resolved("bash"),
             nonce,
+            bin: hermetic::bin(),
         };
         store.write_pkgs();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -202,7 +204,7 @@ impl Store {
 
     /// iets started as `prog`, a link to it under another name.
     pub fn iets_as(&self, prog: impl AsRef<OsStr>) -> Command {
-        let mut c = hermetic::iets_as(prog);
+        let mut c = self.bin.cmd_as(prog);
         Store::env(self.dir(), &mut c);
         c.current_dir(self.dir());
         c

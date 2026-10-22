@@ -3,14 +3,16 @@
 
 mod hermetic;
 
+use hermetic::{Iets, bin};
+use rstest::rstest;
 use std::path::Path;
 use std::process::Output;
 use std::{env, fs};
 use tempfile::tempdir;
 
 /// `groups` is `IETS_EVENTS`; the sink stays stderr, which is its default.
-fn eval(expr: &str, groups: Option<&str>) -> Output {
-    let mut c = hermetic::iets();
+fn eval(bin: &Iets, expr: &str, groups: Option<&str>) -> Output {
+    let mut c = bin.cmd();
     c.args(["eval", "--no-cache", "--raw", "-E", expr])
         .env_remove("IETS_EVENTS_TO");
     match groups {
@@ -20,8 +22,8 @@ fn eval(expr: &str, groups: Option<&str>) -> Output {
     c.output().expect("run iets")
 }
 
-fn stderr(expr: &str, groups: Option<&str>) -> String {
-    let o = eval(expr, groups);
+fn stderr(bin: &Iets, expr: &str, groups: Option<&str>) -> String {
+    let o = eval(bin, expr, groups);
     assert_eq!(
         o.status.code(),
         Some(0),
@@ -33,9 +35,9 @@ fn stderr(expr: &str, groups: Option<&str>) -> String {
 
 const TO_FILE: &str = r#""${builtins.toFile "t" "hi"}""#;
 
-#[test]
-fn a_text_add_names_its_size_and_its_position() {
-    let err = stderr(TO_FILE, Some("store"));
+#[rstest]
+fn a_text_add_names_its_size_and_its_position(bin: Iets) {
+    let err = stderr(&bin, TO_FILE, Some("store"));
     let line = err.lines().next().unwrap_or_default();
     assert!(line.contains(r#""event":"store-add""#), "{err}");
     assert!(line.contains(r#""kind":"text""#), "{err}");
@@ -45,8 +47,8 @@ fn a_text_add_names_its_size_and_its_position() {
     assert!(line.contains(r#""at":"«string»:1:4""#), "{err}");
 }
 
-#[test]
-fn a_tree_add_names_the_local_path_it_copied() {
+#[rstest]
+fn a_tree_add_names_the_local_path_it_copied(bin: Iets) {
     // A Nix path has forward slashes, and a drive is its first component
     let native = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").replace('\\', "/");
     let src = if native.starts_with('/') {
@@ -55,7 +57,7 @@ fn a_tree_add_names_the_local_path_it_copied() {
         format!("/{native}")
     };
     // A path literal cannot hold the colon of a drive
-    let err = stderr(&format!(r#""${{/. + "{src}"}}""#), Some("store"));
+    let err = stderr(&bin, &format!(r#""${{/. + "{src}"}}""#), Some("store"));
     assert!(err.contains(r#""kind":"tree""#), "{err}");
     // `from` is where the file is on disk, written as a JSON string
     let on_disk = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -63,22 +65,22 @@ fn a_tree_add_names_the_local_path_it_copied() {
     assert!(err.contains(&format!(r#""from":"{on_disk}""#)), "{err}");
 }
 
-#[test]
-fn all_takes_the_cold_groups() {
-    assert!(stderr(TO_FILE, Some("all")).contains("store-add"));
-    assert!(stderr(TO_FILE, Some("store,fetch")).contains("store-add"));
+#[rstest]
+fn all_takes_the_cold_groups(bin: Iets) {
+    assert!(stderr(&bin, TO_FILE, Some("all")).contains("store-add"));
+    assert!(stderr(&bin, TO_FILE, Some("store,fetch")).contains("store-add"));
 }
 
-#[test]
-fn a_group_nobody_named_says_nothing() {
-    assert_eq!(stderr(TO_FILE, None), "");
-    assert_eq!(stderr(TO_FILE, Some("fetch")), "");
-    assert_eq!(stderr(TO_FILE, Some("")), "");
+#[rstest]
+fn a_group_nobody_named_says_nothing(bin: Iets) {
+    assert_eq!(stderr(&bin, TO_FILE, None), "");
+    assert_eq!(stderr(&bin, TO_FILE, Some("fetch")), "");
+    assert_eq!(stderr(&bin, TO_FILE, Some("")), "");
 }
 
-#[test]
-fn a_group_that_does_not_exist_is_a_settings_error() {
-    let o = eval(TO_FILE, Some("store,stor"));
+#[rstest]
+fn a_group_that_does_not_exist_is_a_settings_error(bin: Iets) {
+    let o = eval(&bin, TO_FILE, Some("store,stor"));
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(
         err.contains("IETS_EVENTS: 'stor' is not an event group"),
@@ -88,11 +90,12 @@ fn a_group_that_does_not_exist_is_a_settings_error() {
     assert_ne!(o.status.code(), Some(0), "{err}");
 }
 
-#[test]
-fn the_sink_is_its_own_knob() {
+#[rstest]
+fn the_sink_is_its_own_knob(bin: Iets) {
     let dir = tempdir().unwrap();
     let file = dir.path().join("e.jsonl");
-    let o = hermetic::iets()
+    let o = bin
+        .cmd()
         .args(["eval", "--no-cache", "--raw", "-E", TO_FILE])
         .env("IETS_EVENTS", "store")
         .env("IETS_EVENTS_TO", &file)

@@ -5,6 +5,9 @@
 
 mod hermetic;
 
+use hermetic::{Iets, bin};
+use rstest::rstest;
+
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::process::Command;
@@ -297,8 +300,8 @@ fn an_input_observation_marks_its_entry_as_used() {
     );
 }
 
-#[test]
-fn cache_gc_removes_entries_past_the_ttl() {
+#[rstest]
+fn cache_gc_removes_entries_past_the_ttl(bin: Iets) {
     let dir = tempdir().unwrap();
     let path = dir.path().to_str().expect("utf-8 path");
     let store = Store::locate(Some(path)).expect("store");
@@ -317,7 +320,8 @@ fn cache_gc_removes_entries_past_the_ttl() {
     assert!(ir.join(&ir_key[2..]).exists(), "an IR entry to sweep");
 
     let gc = |args: &[&str]| {
-        let out = hermetic::iets()
+        let out = bin
+            .cmd()
             .args(["cache", "gc", "--cache-dir"])
             .arg(dir.path())
             .args(args)

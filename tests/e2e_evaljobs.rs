@@ -9,6 +9,9 @@
 mod e2e;
 mod hermetic;
 
+use hermetic::{Iets, bin};
+use rstest::rstest;
+
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -438,11 +441,11 @@ fn flags_match_nix_eval_jobs() {
 
 /// Every internal-json record of one run carries one `sid`, and
 /// IETS_SESSION_ID sets it (docs/reference/errors.md).
-#[test]
-fn one_session_id_per_run() {
+#[rstest]
+fn one_session_id_per_run(bin: Iets) {
     let e = r#"{ a = builtins.trace "a" (derivation { name = "a"; system = "x"; builder = ":"; }); b = builtins.trace "b" (derivation { name = "b"; system = "x"; builder = ":"; }); }"#;
     let sids = |id: Option<&str>| -> Vec<String> {
-        let mut c = hermetic::iets();
+        let mut c = bin.cmd();
         if let Some(id) = id {
             c.env("IETS_SESSION_ID", id);
         }
@@ -465,17 +468,17 @@ fn one_session_id_per_run() {
     assert!(sids(Some("run-42")).iter().all(|s| s == "run-42"));
 }
 
-fn ci() -> Command {
-    let mut c = hermetic::iets();
+fn ci(bin: &Iets) -> Command {
+    let mut c = bin.cmd();
     c.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs"))
         .args(["eval-jobs", "--workers", "2", "--no-instantiate"]);
     c
 }
 
 /// Every line from a worker carries the `stats` nixbot reads.
-#[test]
-fn every_line_has_stats() {
-    let o = ok(ci().arg("ci.nix"));
+#[rstest]
+fn every_line_has_stats(bin: Iets) {
+    let o = ok(ci(&bin).arg("ci.nix"));
     let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout)
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -496,9 +499,9 @@ fn every_line_has_stats() {
 
 /// `--verbose` and `--debug` are one warning each, from the main process;
 /// `--max-jobs` and `--quiet` hold (docs/reference/divergences.md).
-#[test]
-fn ignored_flags_warn_once() {
-    let o = ci()
+#[rstest]
+fn ignored_flags_warn_once(bin: Iets) {
+    let o = ci(&bin)
         .args([
             "--verbose",
             "--debug",
@@ -528,11 +531,11 @@ fn ignored_flags_warn_once() {
 /// `--iets-option` leaves the argv before any command sees it, so the
 /// collector puts it back for every worker. Only a worker that read
 /// `cache-dir` makes the directory.
-#[test]
-fn iets_options_reach_the_workers() {
+#[rstest]
+fn iets_options_reach_the_workers(bin: Iets) {
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("opt-cache");
-    let mut c = hermetic::iets();
+    let mut c = bin.cmd();
     c.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs"))
         .args(["eval-jobs", "--iets-option", "cache-dir"])
         .arg(&cache)

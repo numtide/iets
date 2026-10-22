@@ -3,26 +3,29 @@
 
 mod hermetic;
 
+use hermetic::{Iets, bin};
+use rstest::rstest;
+
 use std::process::Output;
 
 /// The binary, run from `/`, where there is no `docs/`.
-fn run(args: &[&str]) -> Output {
-    hermetic::iets()
+fn run(bin: &Iets, args: &[&str]) -> Output {
+    bin.cmd()
         .args(args)
         .current_dir("/")
         .output()
         .expect("iets runs")
 }
 
-fn stdout(args: &[&str]) -> String {
-    let o = run(args);
+fn stdout(bin: &Iets, args: &[&str]) -> String {
+    let o = run(bin, args);
     assert!(o.status.success(), "{args:?}: {:?}", o.status);
     String::from_utf8(o.stdout).expect("utf-8")
 }
 
-#[test]
-fn help_lists_the_topics() {
-    let s = stdout(&["help"]);
+#[rstest]
+fn help_lists_the_topics(bin: Iets) {
+    let s = stdout(&bin, &["help"]);
     assert!(s.contains("usage: iets COMMAND"));
     assert!(s.contains("topics:"));
     for t in ["settings", "errors", "lints", "divergences", "caching"] {
@@ -30,38 +33,38 @@ fn help_lists_the_topics() {
     }
 }
 
-#[test]
-fn a_topic_prints_its_page() {
-    let s = stdout(&["help", "settings"]);
+#[rstest]
+fn a_topic_prints_its_page(bin: Iets) {
+    let s = stdout(&bin, &["help", "settings"]);
     assert!(s.starts_with("# Settings"), "{}", &s[..40.min(s.len())]);
     assert!(s.contains("IETS_WORKERS"));
 
-    let s = stdout(&["help", "errors"]);
+    let s = stdout(&bin, &["help", "errors"]);
     assert!(s.contains("| `build-failed` |"));
 
-    let s = stdout(&["help", "divergences"]);
+    let s = stdout(&bin, &["help", "divergences"]);
     assert!(s.contains("builtins.fromTOML"));
 }
 
-#[test]
-fn a_command_wins_over_a_topic_of_the_same_name() {
-    let s = stdout(&["help", "plumbing"]);
+#[rstest]
+fn a_command_wins_over_a_topic_of_the_same_name(bin: Iets) {
+    let s = stdout(&bin, &["help", "plumbing"]);
     assert!(s.contains("usage: iets plumbing OP"));
     assert!(s.contains("'iets help reference/plumbing'"));
 
-    let s = stdout(&["help", "reference/plumbing"]);
+    let s = stdout(&bin, &["help", "reference/plumbing"]);
     assert!(s.starts_with("# Plumbing operations"));
 }
 
-#[test]
-fn a_page_the_binary_does_not_carry_names_its_path() {
-    let s = stdout(&["help", "caching"]);
+#[rstest]
+fn a_page_the_binary_does_not_carry_names_its_path(bin: Iets) {
+    let s = stdout(&bin, &["help", "caching"]);
     assert!(s.contains("docs/explanation/caching.md"));
 }
 
-#[test]
-fn an_unknown_topic_is_a_usage_error_with_a_suggestion() {
-    let o = run(&["help", "settigns"]);
+#[rstest]
+fn an_unknown_topic_is_a_usage_error_with_a_suggestion(bin: Iets) {
+    let o = run(&bin, &["help", "settigns"]);
     assert_eq!(o.status.code(), Some(2));
     let e = String::from_utf8(o.stderr).expect("utf-8");
     assert!(e.contains("unknown command or topic 'settigns'"), "{e}");

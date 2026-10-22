@@ -3,10 +3,14 @@
 
 mod hermetic;
 
-#[test]
-fn store_dir_follows_nix_store_dir() {
+use hermetic::{Iets, bin};
+use rstest::rstest;
+
+#[rstest]
+fn store_dir_follows_nix_store_dir(bin: Iets) {
     let expr = r#"[ builtins.storeDir (derivation { name = "x"; system = "x"; builder = "/b"; }).drvPath ]"#;
-    let o = hermetic::iets()
+    let o = bin
+        .cmd()
         .env("NIX_STORE_DIR", "/tmp/other/store")
         .args(["eval", "--json", "--strict", "--expr", expr])
         .output()
@@ -20,14 +24,15 @@ fn store_dir_follows_nix_store_dir() {
 
 // Windows has no daemon socket
 #[cfg(unix)]
-#[test]
-fn daemon_socket_follows_nix_state_dir() {
+#[rstest]
+fn daemon_socket_follows_nix_state_dir(bin: Iets) {
     let drv = r#"derivation { name = "x"; system = "x"; builder = "/b"; }"#;
     for args in [
         &["build", "--expr", drv][..],
         &["nix-instantiate", "--expr", drv],
     ] {
-        let o = hermetic::iets()
+        let o = bin
+            .cmd()
             .env("NIX_STATE_DIR", "/nonexistent/state")
             .args(args)
             .output()

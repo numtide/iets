@@ -3,6 +3,9 @@
 
 mod hermetic;
 
+use hermetic::{Iets, bin};
+use rstest::rstest;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::Stdio;
@@ -10,8 +13,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-#[test]
-fn a_pipe_hears_of_a_run_that_takes_five_seconds() {
+#[rstest]
+fn a_pipe_hears_of_a_run_that_takes_five_seconds(bin: Iets) {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/x", server.local_addr().unwrap());
     let (heard, wait) = mpsc::channel::<()>();
@@ -27,7 +30,8 @@ fn a_pipe_hears_of_a_run_that_takes_five_seconds() {
     });
     let cache = tempfile::tempdir().unwrap();
     let zero = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    let mut child = hermetic::iets()
+    let mut child = bin
+        .cmd()
         .env("IETS_PROGRESS", "true")
         .env("IETS_CACHE_DIR", cache.path())
         .env("IETS_CACHE", "0")

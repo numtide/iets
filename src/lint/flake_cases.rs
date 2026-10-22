@@ -3,18 +3,15 @@
 
 use crate::cli::run::{Host, Outcome, run};
 use crate::sys;
+use rstest::{fixture, rstest};
 use std::path::{Path, PathBuf};
-use std::{env, fs, process};
+use std::{env, fs};
+use tempfile::{TempDir, tempdir};
 
 struct Scratch {
     work: PathBuf,
     dir: String,
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.work);
-    }
+    _tmp: TempDir,
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -44,9 +41,10 @@ fn internal(p: &Path) -> String {
     String::from_utf8_lossy(&sys::path_to_internal(p)).into_owned()
 }
 
-fn scratch(tag: &str) -> Scratch {
-    let work = env::temp_dir().join(format!("iets-lintflake-{tag}-{}", process::id()));
-    let _ = fs::remove_dir_all(&work);
+#[fixture]
+fn scratch() -> Scratch {
+    let tmp = tempdir().unwrap();
+    let work = tmp.path().to_path_buf();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lint/scope/flake");
     copy_tree(&src.join("root"), &work.join("root"));
     copy_tree(&src.join("dep"), &work.join("dep"));
@@ -71,7 +69,11 @@ fn scratch(tag: &str) -> Scratch {
         fs::write(dir.join(f), text).unwrap();
     }
     let dir = internal(&dir);
-    Scratch { work, dir }
+    Scratch {
+        work,
+        dir,
+        _tmp: tmp,
+    }
 }
 
 fn eval(s: &Scratch, attr: &str, flags: &[&str]) -> Outcome {
@@ -99,13 +101,12 @@ fn no_lint(r: &Outcome) -> bool {
     !r.stderr.contains("warning: [")
 }
 
-#[test]
-fn an_input_is_silent_until_the_scope_or_the_inputs_table_opens_it() {
-    let s = scratch("scope");
-    let root_site = format!("at {}/flake.nix:4:25", s.dir);
-    let dep_site = format!("at {}/dep/flake.nix:1:33", internal(&s.work));
+#[rstest]
+fn an_input_is_silent_until_the_scope_or_the_inputs_table_opens_it(scratch: Scratch) {
+    let root_site = format!("at {}/flake.nix:4:25", scratch.dir);
+    let dep_site = format!("at {}/dep/flake.nix:1:33", internal(&scratch.work));
     let warn = ["--lint", "url-literal=warn"];
-    let r = eval(&s, "value", &warn);
+    let r = eval(&scratch, "value", &warn);
     assert_eq!(r.stdout, "http://dep.examplehttp://root.example");
     assert!(
         r.stderr.contains(&root_site) && !r.stderr.contains(&dep_site),
@@ -113,7 +114,7 @@ fn an_input_is_silent_until_the_scope_or_the_inputs_table_opens_it() {
         r.stderr
     );
     let r = eval(
-        &s,
+        &scratch,
         "value",
         &["--lint", "url-literal=warn", "--lint-scope", "all"],
     );
@@ -123,11 +124,11 @@ fn an_input_is_silent_until_the_scope_or_the_inputs_table_opens_it() {
         r.stderr
     );
     fs::write(
-        s.work.join("root/iets.toml"),
+        scratch.work.join("root/iets.toml"),
         "[lint.inputs.dep]\nurl-literal = \"warn\"\n",
     )
     .unwrap();
-    let r = eval(&s, "value", &warn);
+    let r = eval(&scratch, "value", &warn);
     assert!(
         r.stderr.contains(&root_site) && r.stderr.contains(&dep_site),
         "{}",
@@ -135,17 +136,16 @@ fn an_input_is_silent_until_the_scope_or_the_inputs_table_opens_it() {
     );
 }
 
-#[test]
-fn a_copy_under_the_root_or_an_input_is_not_a_recopy() {
-    let s = scratch("copies");
-    let r = eval(&s, "file", &COPIES);
+#[rstest]
+fn a_copy_under_the_root_or_an_input_is_not_a_recopy(scratch: Scratch) {
+    let r = eval(&scratch, "file", &COPIES);
     assert!(
         r.stdout.starts_with("/nix/store/") && no_lint(&r),
         "{}",
         r.stderr
     );
     let r = eval(
-        &s,
+        &scratch,
         "inputFile",
         &[&["--lint-scope", "all"], &COPIES[..]].concat(),
     );
@@ -156,13 +156,12 @@ fn a_copy_under_the_root_or_an_input_is_not_a_recopy() {
     );
 }
 
-#[test]
-fn a_directory_under_the_root_is_dir_copy_flake_not_path_copy() {
-    let s = scratch("dir");
-    let r = eval(&s, "dir", &COPIES);
+#[rstest]
+fn a_directory_under_the_root_is_dir_copy_flake_not_path_copy(scratch: Scratch) {
+    let r = eval(&scratch, "dir", &COPIES);
     let msg = format!(
         "warning: [dir-copy-flake] directory \'{}/sub\' of the flake tree is copied to the store as \'/nix/store/",
-        s.dir
+        scratch.dir
     );
     assert!(r.stderr.contains(&msg), "{}", r.stderr);
     assert!(
@@ -176,7 +175,7 @@ fn a_directory_under_the_root_is_dir_copy_flake_not_path_copy() {
         "{}",
         r.stderr
     );
-    let r = eval(&s, "dir", &["--lint", "dir-copy-flake=error"]);
+    let r = eval(&scratch, "dir", &["--lint", "dir-copy-flake=error"]);
     assert_eq!(r.rc, 1, "{}", r.stderr);
     assert!(
         r.stderr.contains(&msg.replace("warning:", "error:")),
@@ -193,7 +192,7 @@ fn a_pre_existing_store_path_is_still_a_recopy() {
         eprintln!("skipped: no Nix store on this machine");
         return;
     };
-    let s = scratch("store");
+    let s = scratch();
     let f = s.work.join("root/flake.nix");
     let text = fs::read_to_string(&f).unwrap();
     fs::write(&f, text.replace("@STORE@", &store_path)).unwrap();
@@ -210,10 +209,9 @@ fn a_pre_existing_store_path_is_still_a_recopy() {
     );
 }
 
-#[test]
-fn the_roots_metadata_in_a_derivation_is_reported_by_default() {
-    let s = scratch("meta");
-    let r = eval(&s, "meta.drvPath", &[]);
+#[rstest]
+fn the_roots_metadata_in_a_derivation_is_reported_by_default(scratch: Scratch) {
+    let r = eval(&scratch, "meta.drvPath", &[]);
     let meta = "warning: [tree-meta-in-drv] derivation \'meta\': attribute";
     assert!(r.stderr.contains(&format!("{meta} \'v\' holds \'self.lastModifiedDate\', a value that changes with every commit or edit")), "{}", r.stderr);
     assert!(
@@ -223,11 +221,12 @@ fn the_roots_metadata_in_a_derivation_is_reported_by_default() {
         r.stderr
     );
     assert!(
-        r.stderr.contains(&format!("at {}/flake.nix:9:69", s.dir)),
+        r.stderr
+            .contains(&format!("at {}/flake.nix:9:69", scratch.dir)),
         "{}",
         r.stderr
     );
-    let r = eval(&s, "wrapped.drvPath", &[]);
+    let r = eval(&scratch, "wrapped.drvPath", &[]);
     assert!(
         r.stderr
             .contains("derivation \'wrapped\': attribute \'v\' holds \'self.narHash\'"),
@@ -235,34 +234,39 @@ fn the_roots_metadata_in_a_derivation_is_reported_by_default() {
         r.stderr
     );
     assert!(
-        r.stderr
-            .contains(&format!("at {}/dep/flake.nix:2:79", internal(&s.work))),
+        r.stderr.contains(&format!(
+            "at {}/dep/flake.nix:2:79",
+            internal(&scratch.work)
+        )),
         "{}",
         r.stderr
     );
 }
 
-#[test]
-fn the_level_of_tree_meta_comes_from_the_flag_the_env_and_the_user_file() {
-    let s = scratch("metalevel");
-    let r = eval(&s, "meta.drvPath", &["--lint", "tree-meta-in-drv=error"]);
+#[rstest]
+fn the_level_of_tree_meta_comes_from_the_flag_the_env_and_the_user_file(scratch: Scratch) {
+    let r = eval(
+        &scratch,
+        "meta.drvPath",
+        &["--lint", "tree-meta-in-drv=error"],
+    );
     assert!(
         r.rc == 1 && r.stderr.contains("error: [tree-meta-in-drv]"),
         "{}",
         r.stderr
     );
     let off = Host::default().env([("IETS_LINT", "family:purity=off")]);
-    let r = eval_with(&s, "meta.drvPath", &[], &off);
+    let r = eval_with(&scratch, "meta.drvPath", &[], &off);
     assert!(r.rc == 0 && no_lint(&r), "{}", r.stderr);
-    let user = s.work.join("user/iets");
+    let user = scratch.work.join("user/iets");
     fs::create_dir_all(&user).unwrap();
     fs::write(
         user.join("iets.toml"),
         "[lint]\ntree-meta-in-drv = \"error\"\n",
     )
     .unwrap();
-    let host = Host::default().env([("XDG_CONFIG_HOME", s.work.join("user"))]);
-    let r = eval_with(&s, "meta.drvPath", &[], &host);
+    let host = Host::default().env([("XDG_CONFIG_HOME", scratch.work.join("user"))]);
+    let r = eval_with(&scratch, "meta.drvPath", &[], &host);
     assert!(
         r.rc == 1 && r.stderr.contains("error: [tree-meta-in-drv]"),
         "{}",
@@ -270,14 +274,13 @@ fn the_level_of_tree_meta_comes_from_the_flag_the_env_and_the_user_file() {
     );
 }
 
-#[test]
-fn an_input_or_an_allowed_site_is_silent_and_the_scope_opens_the_input() {
-    let s = scratch("metascope");
+#[rstest]
+fn an_input_or_an_allowed_site_is_silent_and_the_scope_opens_the_input(scratch: Scratch) {
     for attr in ["allowed.drvPath", "depMeta.drvPath"] {
-        let r = eval(&s, attr, &[]);
+        let r = eval(&scratch, attr, &[]);
         assert!(r.rc == 0 && no_lint(&r), "{attr}: {}", r.stderr);
     }
-    let r = eval(&s, "depMeta.drvPath", &["--lint-scope", "all"]);
+    let r = eval(&scratch, "depMeta.drvPath", &["--lint-scope", "all"]);
     assert!(
         r.stderr.contains(
             "holds \'inputs.dep.narHash\', a value that changes with every update of the lock file"
@@ -287,15 +290,14 @@ fn an_input_or_an_allowed_site_is_silent_and_the_scope_opens_the_input() {
     );
 }
 
-#[test]
-fn the_project_file_sets_tree_meta_per_tree() {
-    let s = scratch("metatoml");
+#[rstest]
+fn the_project_file_sets_tree_meta_per_tree(scratch: Scratch) {
     fs::write(
-        s.work.join("root/iets.toml"),
+        scratch.work.join("root/iets.toml"),
         "[lint]\ntree-meta-in-drv = \"off\"\n[lint.inputs.dep]\ntree-meta-in-drv = \"warn\"\n",
     )
     .unwrap();
-    let r = eval(&s, "depMeta.drvPath", &[]);
+    let r = eval(&scratch, "depMeta.drvPath", &[]);
     assert!(
         r.stderr
             .contains("derivation \'dep-meta\': attribute \'v\' holds \'inputs.dep.narHash\'"),
@@ -303,19 +305,19 @@ fn the_project_file_sets_tree_meta_per_tree() {
         r.stderr
     );
     assert!(
-        r.stderr.contains(&format!("at {}/flake.nix:11:76", s.dir)),
+        r.stderr
+            .contains(&format!("at {}/flake.nix:11:76", scratch.dir)),
         "{}",
         r.stderr
     );
-    let r = eval(&s, "meta.drvPath", &[]);
+    let r = eval(&scratch, "meta.drvPath", &[]);
     assert!(r.rc == 0 && no_lint(&r), "{}", r.stderr);
 }
 
-#[test]
-fn a_tree_meta_finding_is_a_record_with_a_span_on_a_cache_hit_too() {
-    let s = scratch("metacache");
-    let cache = s.work.join("cache").display().to_string();
-    let target = format!("{}#meta.drvPath", s.dir);
+#[rstest]
+fn a_tree_meta_finding_is_a_record_with_a_span_on_a_cache_hit_too(scratch: Scratch) {
+    let cache = scratch.work.join("cache").display().to_string();
+    let target = format!("{}#meta.drvPath", scratch.dir);
     let args = [
         "eval",
         "--raw",

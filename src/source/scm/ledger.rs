@@ -153,15 +153,23 @@ mod tests {
     use crate::trace::store;
     use crate::trace::validate::validate;
     use crate::trace::watch::watched;
+    use rstest::{fixture, rstest};
+    use tempfile::{TempDir, tempdir};
 
     const FLAKE: &str = "{ outputs = _: { }; }\n";
 
     /// A working tree with three tracked files, one untracked file and the
     /// revision `r12`; `plain` holds the tracked files and nothing else.
-    fn fixture(tag: &str) -> (PathBuf, PathBuf) {
-        let d = sys::temp_dir().join(format!("iets-ledger-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        let (root, plain) = (d.join("tree"), d.join("plain"));
+    struct Ledger {
+        root: PathBuf,
+        plain: PathBuf,
+        _dir: TempDir,
+    }
+
+    #[fixture]
+    fn ledger() -> Ledger {
+        let d = tempdir().unwrap();
+        let (root, plain) = (d.path().join("tree"), d.path().join("plain"));
         for top in [&root, &plain] {
             fs::create_dir_all(top.join("sub")).unwrap();
             for f in ["flake.nix", "sub/flake.nix", "sub/lib.nix"] {
@@ -173,7 +181,11 @@ mod tests {
         let tracked = "flake.nix\nsub/flake.nix\nsub/lib.nix\n";
         fs::write(root.join(".ledger/tracked"), tracked).unwrap();
         fs::write(root.join(".ledger/head"), "r12 1700000000\n").unwrap();
-        (root, plain)
+        Ledger {
+            root,
+            plain,
+            _dir: d,
+        }
     }
 
     fn source(root: &Path) -> SourceRef {
@@ -197,9 +209,9 @@ mod tests {
         a
     }
 
-    #[test]
-    fn a_directory_in_a_working_tree_is_found() {
-        let (root, _) = fixture("detect");
+    #[rstest]
+    fn a_directory_in_a_working_tree_is_found(ledger: Ledger) {
+        let Ledger { root, _dir, .. } = ledger;
         let r = parse_flake_ref(&format!("{}/sub#x", internal(&root)), b"/", None).unwrap();
         let tracked = SourceRef::Tracked {
             scm: &Ledger,
@@ -216,9 +228,9 @@ mod tests {
         assert_eq!(r.source, SourceRef::Path(root.join("sub")));
     }
 
-    #[test]
-    fn the_tracked_files_and_the_metadata_are_the_tree() {
-        let (root, plain) = fixture("tree");
+    #[rstest]
+    fn the_tracked_files_and_the_metadata_are_the_tree(ledger: Ledger) {
+        let Ledger { root, plain, _dir } = ledger;
         let hash = |d: &Path| nar::nar_hash(d).unwrap().to_sri();
         let t = read_tree(&mut Evaluator::new(), &root);
         assert_eq!(t.subdir, "sub");
@@ -250,9 +262,9 @@ mod tests {
         assert!(t.counter.is_none());
     }
 
-    #[test]
-    fn the_metadata_has_the_mark_of_its_tree() {
-        let (root, _) = fixture("mark");
+    #[rstest]
+    fn the_metadata_has_the_mark_of_its_tree(ledger: Ledger) {
+        let Ledger { root, _dir, .. } = ledger;
         let mut ev = Evaluator::new();
         let t = read_tree(&mut ev, &root);
         let info = emit_tree_attrs(&mut ev, &t, Some("self"), Pos::NONE).unwrap();
@@ -280,9 +292,9 @@ mod tests {
 
     /// `x12` is a revision that the ledger cannot count, so a count of it
     /// shows where the answer comes from.
-    #[test]
-    fn the_count_is_lazy_and_kept_by_revision() {
-        let (root, _) = fixture("count");
+    #[rstest]
+    fn the_count_is_lazy_and_kept_by_revision(ledger: Ledger) {
+        let Ledger { root, _dir, .. } = ledger;
         fs::write(root.join(".ledger/head"), "x12 1700000000\n").unwrap();
         let store = store::Store::locate(root.parent().unwrap().to_str()).unwrap();
         assert!(crate::cachefs::prepare(
@@ -312,9 +324,9 @@ mod tests {
         assert_eq!(rev_count(&Trace::default(), &Ledger, &root, "r13"), Ok(13));
     }
 
-    #[test]
-    fn a_name_resolves_to_a_revision_and_a_revision_has_a_tree() {
-        let (root, _) = fixture("commit");
+    #[rstest]
+    fn a_name_resolves_to_a_revision_and_a_revision_has_a_tree(ledger: Ledger) {
+        let Ledger { root, _dir, .. } = ledger;
         fs::create_dir_all(root.join(".ledger/revs")).unwrap();
         fs::write(root.join(".ledger/refs"), "main r12\nv1 r3\n").unwrap();
         fs::write(root.join(".ledger/revs/r3"), "1600000000\na=1\nsub/b=2\n").unwrap();
@@ -345,9 +357,9 @@ mod tests {
         assert!(trace.take().is_empty());
     }
 
-    #[test]
-    fn an_untracked_file_is_the_error_of_nix() {
-        let (root, _) = fixture("untracked");
+    #[rstest]
+    fn an_untracked_file_is_the_error_of_nix(ledger: Ledger) {
+        let Ledger { root, _dir, .. } = ledger;
         let mut ev = Evaluator::new();
         let store = read_tree(&mut ev, &root).path.to_full_string();
         assert!(open(&ev, format!("{store}/sub/lib.nix").as_bytes(), Pos::NONE).is_ok());
@@ -363,9 +375,9 @@ mod tests {
         assert_eq!((e.msg, e.hint), (msg, Some(format!("run '{add}'"))));
     }
 
-    #[test]
-    fn a_change_of_the_ledger_is_a_change_of_the_working_tree() {
-        let (root, _) = fixture("trace");
+    #[rstest]
+    fn a_change_of_the_ledger_is_a_change_of_the_working_tree(ledger: Ledger) {
+        let Ledger { root, _dir, .. } = ledger;
         let mut ev = EvalConfig::new().trace(true).build();
         read_tree(&mut ev, &root);
         let mut obs = ev.trace().take();

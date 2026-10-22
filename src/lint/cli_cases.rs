@@ -4,7 +4,8 @@
 use crate::cli::run::{Host, run};
 use crate::sys;
 use std::path::{Path, PathBuf};
-use std::{env, fs, process};
+use std::{env, fs};
+use tempfile::{TempDir, tempdir};
 
 const URL_WARN: &str = "warning: [url-literal] URL literals are discouraged. Consider using a string literal \"http://example.com\" instead";
 
@@ -16,10 +17,11 @@ fn file(f: &str) -> String {
     dir().join(f).display().to_string()
 }
 
-fn cache(tag: &str) -> String {
-    let d = env::temp_dir().join(format!("iets-lintcli-{tag}-{}", process::id()));
-    let _ = fs::remove_dir_all(&d);
-    d.display().to_string()
+/// A cache directory, removed with the `TempDir`.
+fn cache() -> (TempDir, String) {
+    let d = tempdir().unwrap();
+    let path = d.path().display().to_string();
+    (d, path)
 }
 
 #[test]
@@ -92,7 +94,7 @@ fn an_unknown_name_in_iets_lint_is_a_record() {
 
 #[test]
 fn a_warning_is_replayed_on_a_cache_hit() {
-    let c = cache("replay");
+    let (_c, c) = cache();
     let args = [
         "eval",
         "--strict",
@@ -104,7 +106,6 @@ fn a_warning_is_replayed_on_a_cache_hit() {
         &file("url-literal.nix"),
     ];
     let (r1, r2) = (run(&args, &Host::default()), run(&args, &Host::default()));
-    let _ = fs::remove_dir_all(&c);
     let warns = |e: &str| {
         e.lines()
             .filter(|l| l.starts_with("warning:"))
@@ -118,7 +119,7 @@ fn a_warning_is_replayed_on_a_cache_hit() {
 
 #[test]
 fn a_finding_record_has_the_span_and_the_edit_on_a_cache_hit_too() {
-    let c = cache("record");
+    let (_c, c) = cache();
     let args = [
         "eval",
         "--strict",
@@ -132,7 +133,6 @@ fn a_finding_record_has_the_span_and_the_edit_on_a_cache_hit_too() {
         &file("url-literal.nix"),
     ];
     let (r1, r2) = (run(&args, &Host::default()), run(&args, &Host::default()));
-    let _ = fs::remove_dir_all(&c);
     let has = |e: &str| {
         e.contains("\"end\":18,")
             && e.contains("\"replacement\":\"\\\"http://example.com\\\"\",\"sid\":")
@@ -171,7 +171,7 @@ fn a_finding_at_error_has_the_span_and_no_edit() {
 
 #[test]
 fn the_scope_is_part_of_the_cache_key() {
-    let c = cache("scope");
+    let (_c, c) = cache();
     let f = file("scope/root/main.nix");
     let r1 = run(
         &[
@@ -199,7 +199,6 @@ fn the_scope_is_part_of_the_cache_key() {
         ],
         &Host::default(),
     );
-    let _ = fs::remove_dir_all(&c);
     assert!(!r1.stderr.contains("warning: ["), "{}", r1.stderr);
     assert!(!r2.stderr.contains("cache: hit"), "{}", r2.stderr);
     assert!(r2.stderr.contains("scope/lib/url.nix:1:1"), "{}", r2.stderr);
@@ -207,8 +206,9 @@ fn the_scope_is_part_of_the_cache_key() {
 
 #[test]
 fn an_allow_comment_is_part_of_the_cache_key_and_a_hit_replays_nothing() {
-    let c = cache("allow");
-    let work = PathBuf::from(cache("allowsrc"));
+    let (_c, c) = cache();
+    let (_work, work) = cache();
+    let work = PathBuf::from(work);
     fs::create_dir_all(&work).unwrap();
     let main = work.join("main.nix").display().to_string();
     fs::copy(file("allow/own-line.nix"), &main).unwrap();
@@ -230,8 +230,6 @@ fn an_allow_comment_is_part_of_the_cache_key_and_a_hit_replays_nothing() {
     let (r1, r2) = (go(), go());
     fs::write(&main, "http://example.com\n").unwrap();
     let r3 = go();
-    let _ = fs::remove_dir_all(&c);
-    let _ = fs::remove_dir_all(&work);
     assert!(r2.stderr.contains("cache: hit"), "{}", r2.stderr);
     assert!(!r1.stderr.contains("warning: [") && !r2.stderr.contains("warning: ["));
     assert!(
@@ -244,7 +242,7 @@ fn an_allow_comment_is_part_of_the_cache_key_and_a_hit_replays_nothing() {
 #[test]
 fn an_allow_table_travels_in_the_ir_cache_entry_and_a_load_stays_silent() {
     for f in ["own-line", "runtime"] {
-        let c = cache(&format!("ir-{f}"));
+        let (_c, c) = cache();
         let host = Host::default().env([("IETS_IR_MIN", "0"), ("IETS_IR_STATS", "1")]);
         let path = file(&format!("allow/{f}.nix"));
         let shown = String::from_utf8_lossy(&sys::path_to_internal(Path::new(&path))).into_owned();
@@ -266,7 +264,6 @@ fn an_allow_table_travels_in_the_ir_cache_entry_and_a_load_stays_silent() {
             )
         };
         let (r1, r2) = (go(), go());
-        let _ = fs::remove_dir_all(&c);
         assert!(
             r1.stderr.contains(&format!("ir-cache store {shown}")),
             "{f}: {}",

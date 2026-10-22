@@ -4,9 +4,11 @@ use super::symbol::Interner;
 use super::{line_col, parse};
 use crate::lint::LintId;
 use crate::lint::allow::bit;
+use rstest::rstest;
 use serde_json::Value;
 
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::thread::Builder;
 
@@ -37,55 +39,42 @@ fn str_value(src: &str) -> String {
     inner.to_string()
 }
 
-#[test]
-fn lang_corpus() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/lang");
-    // These two are scope errors that Nix reports from its resolver, not
-    // from the parser; iets reports them in `compile`.
-    let not_parser_errors = [
-        "parse-fail-undef-var.nix",
-        "parse-fail-regression-20060610.nix",
-    ];
-    // Nix rejects these in its parser; the corpus files them under eval-fail
-    // because `nix-instantiate --eval` is what fails.
-    let parser_errors = [
-        "eval-fail-dynamic-attrs-inherit.nix",
-        "eval-fail-dynamic-attrs-inherit-2.nix",
-        "eval-fail-dynamic-attrs-let.nix",
-        "eval-fail-dynamic-attrs-let-2.nix",
-        "eval-fail-dynamic-attrs-let-3.nix",
-        "eval-fail-path-slash.nix",
-        "eval-fail-string-nul-1.nix",
-        "eval-fail-string-nul-2.nix",
-    ];
-    let mut okay = 0;
-    let mut failed = 0;
-    let mut problems = Vec::new();
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_str().unwrap().to_string();
-        if !name.ends_with(".nix") {
-            continue;
+/// Scope errors that Nix reports from its resolver: iets reports them in
+/// `compile`.
+const NOT_PARSER_ERRORS: &[&str] = &[
+    "parse-fail-undef-var.nix",
+    "parse-fail-regression-20060610.nix",
+];
+
+/// Nix rejects these in its parser. The corpus files them under eval-fail
+/// because `nix-instantiate --eval` is what fails.
+const PARSER_ERRORS: &[&str] = &[
+    "eval-fail-dynamic-attrs-inherit.nix",
+    "eval-fail-dynamic-attrs-inherit-2.nix",
+    "eval-fail-dynamic-attrs-let.nix",
+    "eval-fail-dynamic-attrs-let-2.nix",
+    "eval-fail-dynamic-attrs-let-3.nix",
+    "eval-fail-path-slash.nix",
+    "eval-fail-string-nul-1.nix",
+    "eval-fail-string-nul-2.nix",
+];
+
+// a new file shows up after `touch src/syntax/tests.rs`
+#[rstest]
+fn lang_corpus(#[files("tests/lang/*.nix")] path: PathBuf) {
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let src = fs::read(&path).unwrap();
+    let result = parse(&src, FileId(0), &mut Interner::new());
+    let must_fail = (name.starts_with("parse-fail-") && !NOT_PARSER_ERRORS.contains(&name))
+        || PARSER_ERRORS.contains(&name);
+    match (result, must_fail) {
+        (Ok(_), true) => panic!("{name}: parsed but should fail"),
+        (Err(e), false) => {
+            let (l, c) = line_col(&src, e.span.start);
+            panic!("{name}:{l}:{c}: {}", e.msg);
         }
-        let src = fs::read(&path).unwrap();
-        let mut interner = Interner::new();
-        let result = parse(&src, FileId(0), &mut interner);
-        let must_fail = (name.starts_with("parse-fail-")
-            && !not_parser_errors.contains(&name.as_str()))
-            || parser_errors.contains(&name.as_str());
-        match (result, must_fail) {
-            (Ok(_), false) => okay += 1,
-            (Err(_), true) => failed += 1,
-            (Ok(_), true) => problems.push(format!("{name}: parsed but should fail")),
-            (Err(e), false) => {
-                let (l, c) = line_col(&src, e.span.start);
-                problems.push(format!("{name}:{l}:{c}: {}", e.msg));
-            }
-        }
+        _ => {}
     }
-    assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
-    assert!(okay > 250, "only {okay} files parsed");
-    assert!(failed > 35, "only {failed} parse-fail files failed");
 }
 
 #[test]

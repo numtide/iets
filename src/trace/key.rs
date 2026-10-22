@@ -60,15 +60,17 @@ pub fn has_relative_path(src: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn relative_path_detection() {
-        assert!(has_relative_path("import ./x.nix"));
-        assert!(has_relative_path("{ a = ../y; }"));
-        assert!(!has_relative_path("import /abs/x.nix"));
-        assert!(!has_relative_path("import <nixpkgs>"));
-        assert!(!has_relative_path("\"./not-a-path\""));
-        assert!(has_relative_path("let in ("));
+    #[rstest]
+    #[case("import ./x.nix", true)]
+    #[case("{ a = ../y; }", true)]
+    #[case("import /abs/x.nix", false)]
+    #[case("import <nixpkgs>", false)]
+    #[case("\"./not-a-path\"", false)]
+    #[case("let in (", true)]
+    fn relative_path_detection(#[case] src: &str, #[case] want: bool) {
+        assert_eq!(has_relative_path(src), want);
     }
 
     #[test]

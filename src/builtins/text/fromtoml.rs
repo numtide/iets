@@ -280,26 +280,28 @@ fn format_datetime(d: &::toml::value::Datetime) -> String {
 #[cfg(test)]
 mod tests {
     use super::reject_1_1;
+    use rstest::rstest;
 
     fn ok(doc: &str) -> bool {
         reject_1_1(doc).is_ok()
     }
 
-    #[test]
-    fn inline_tables_stay_on_one_line() {
-        assert!(!ok("a = { b = 1,\n c = 2 }"));
-        assert!(!ok("a = { # hi\n b = 1 }"));
-        assert!(!ok("a = { b = 1, }"));
-        assert!(!ok("a = { b = 1 , }"));
-        assert!(!ok("a = { b = 1, c = { d = 2, } }"));
-        // A newline is fine one container deeper.
-        assert!(ok("a = { b = [1,\n2] }"));
-        assert!(ok("a = { b = \"\"\"x\ny\"\"\" }"));
-        assert!(ok("a = [\n {b = 1},\n]"));
-        assert!(ok("a = { b = 1 }"));
-        // Braces and commas inside strings are not structure.
-        assert!(ok("a = { b = \"}\", c = \",\" }"));
-        assert!(ok("a = { b = ',' }"));
+    #[rstest]
+    #[case("a = { b = 1,\n c = 2 }", false)]
+    #[case("a = { # hi\n b = 1 }", false)]
+    #[case("a = { b = 1, }", false)]
+    #[case("a = { b = 1 , }", false)]
+    #[case("a = { b = 1, c = { d = 2, } }", false)]
+    // a newline is fine one container deeper
+    #[case("a = { b = [1,\n2] }", true)]
+    #[case("a = { b = \"\"\"x\ny\"\"\" }", true)]
+    #[case("a = [\n {b = 1},\n]", true)]
+    #[case("a = { b = 1 }", true)]
+    // braces and commas inside strings are not structure
+    #[case("a = { b = \"}\", c = \",\" }", true)]
+    #[case("a = { b = ',' }", true)]
+    fn inline_tables_stay_on_one_line(#[case] src: &str, #[case] want: bool) {
+        assert_eq!(ok(src), want);
     }
 
     #[test]

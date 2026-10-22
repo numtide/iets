@@ -375,24 +375,23 @@ pub fn rewrite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn fnmatch_basics() {
-        assert!(fnmatch(b"*", b"anything.here"));
-        assert!(fnmatch(b"packages.*", b"packages.constituentA"));
-        assert!(!fnmatch(b"tests.*", b"packages.constituentA"));
-        assert!(fnmatch(b"a?c", b"abc"));
-        assert!(!fnmatch(b"a?c", b"abbc"));
-        assert!(fnmatch(b"a[b-d]c", b"acc"));
-        assert!(!fnmatch(b"a[!b-d]c", b"acc"));
-        assert!(fnmatch(b"a\\*c", b"a*c"));
-        assert!(!fnmatch(b"a\\*c", b"abc"));
-        assert!(fnmatch(
-            b"*.x86_64-linux",
-            b"nixos.tests.login.x86_64-linux"
-        ));
-        assert!(!fnmatch(b"abc", b"abcd"));
-        assert!(fnmatch(b"a*b*c", b"axxbyyc"));
+    #[rstest]
+    #[case(b"*", b"anything.here", true)]
+    #[case(b"packages.*", b"packages.constituentA", true)]
+    #[case(b"tests.*", b"packages.constituentA", false)]
+    #[case(b"a?c", b"abc", true)]
+    #[case(b"a?c", b"abbc", false)]
+    #[case(b"a[b-d]c", b"acc", true)]
+    #[case(b"a[!b-d]c", b"acc", false)]
+    #[case(b"a\\*c", b"a*c", true)]
+    #[case(b"a\\*c", b"abc", false)]
+    #[case(b"*.x86_64-linux", b"nixos.tests.login.x86_64-linux", true)]
+    #[case(b"abc", b"abcd", false)]
+    #[case(b"a*b*c", b"axxbyyc", true)]
+    fn fnmatch_basics(#[case] pattern: &[u8], #[case] name: &[u8], #[case] want: bool) {
+        assert_eq!(fnmatch(pattern, name), want);
     }
 
     #[test]

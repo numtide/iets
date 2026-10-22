@@ -406,6 +406,7 @@ pub fn hash_placeholder(output_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::resolve_store_dir as resolve;
+    use rstest::rstest;
 
     #[test]
     fn the_host_picks_the_store_directory() {
@@ -608,21 +609,22 @@ mod tests {
         assert!(StorePath::parse("/tmp/vxjiwkjkn7x4079qvh1jkl5pn05j2aw0-foo").is_err());
     }
 
-    #[test]
-    fn check_name_rules() {
-        assert!(check_name("hello-2.12").is_ok());
-        assert!(check_name("a+b_c?d=e.f").is_ok());
-        assert!(check_name(".hidden").is_ok());
-        assert!(check_name("..x").is_ok());
-        assert!(check_name("").is_err());
-        assert!(check_name(".").is_err());
-        assert!(check_name("..").is_err());
-        assert!(check_name(".-x").is_err());
-        assert!(check_name("..-x").is_err());
-        assert!(check_name("a b").is_err());
-        assert!(check_name("a/b").is_err());
-        assert!(check_name(&"a".repeat(212)).is_err());
-        assert!(check_name(&"a".repeat(211)).is_ok());
+    #[rstest]
+    #[case("hello-2.12", true)]
+    #[case("a+b_c?d=e.f", true)]
+    #[case(".hidden", true)]
+    #[case("..x", true)]
+    #[case("", false)]
+    #[case(".", false)]
+    #[case("..", false)]
+    #[case(".-x", false)]
+    #[case("..-x", false)]
+    #[case("a b", false)]
+    #[case("a/b", false)]
+    #[case(&"a".repeat(211), true)]
+    #[case(&"a".repeat(212), false)]
+    fn check_name_rules(#[case] name: &str, #[case] ok: bool) {
+        assert_eq!(check_name(name).is_ok(), ok);
     }
 
     #[test]

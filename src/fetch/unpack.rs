@@ -216,6 +216,7 @@ fn singleton(dest: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::collections::BTreeMap;
     use std::{env, io, str};
     use tempfile::tempdir;
@@ -391,14 +392,15 @@ mod tests {
 
     /// An absolute member name loses its root and `..` is applied, as
     /// `CanonPath` applies it; a `..` at the top removes nothing.
-    #[test]
-    fn member_names_are_made_relative_and_cannot_escape() {
-        assert_eq!(member_path(Path::new("/a/b")), Path::new("a/b"));
-        assert_eq!(member_path(Path::new("./a")), Path::new("a"));
-        assert_eq!(member_path(Path::new("a/./b")), Path::new("a/b"));
-        assert_eq!(member_path(Path::new("a/../b")), Path::new("b"));
-        assert_eq!(member_path(Path::new("../outside")), Path::new("outside"));
-        assert_eq!(member_path(Path::new("t/../../esc")), Path::new("esc"));
+    #[rstest]
+    #[case("/a/b", "a/b")]
+    #[case("./a", "a")]
+    #[case("a/./b", "a/b")]
+    #[case("a/../b", "b")]
+    #[case("../outside", "outside")]
+    #[case("t/../../esc", "esc")]
+    fn member_names_are_made_relative_and_cannot_escape(#[case] name: &str, #[case] want: &str) {
+        assert_eq!(member_path(Path::new(name)), Path::new(want));
     }
 
     /// The NAR hash of an unpacked tree is what `nix hash path` prints for it;

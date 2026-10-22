@@ -123,63 +123,34 @@ mod tests {
         String::from_utf8(to_native(s.as_bytes())).unwrap()
     }
 
-    #[test]
-    fn a_drive_is_the_first_component() {
-        assert_eq!(i(r"C:\Users\x"), "/C:/Users/x");
-        assert_eq!(i("C:/Users/x"), "/C:/Users/x");
-        assert_eq!(i(r"c:\Users"), "/C:/Users");
-        assert_eq!(i(r"C:\"), "/C:/");
-    }
-
-    #[test]
-    fn a_bare_drive_is_not_its_root() {
-        assert_eq!(i("C:"), "C:");
-        assert_eq!(i("C:foo"), "C:foo");
-        assert_eq!(n("C:"), "C:");
-    }
-
-    #[test]
-    fn mixed_separators_agree() {
-        assert_eq!(
-            i(r"C:\Users\RUNNER~1\AppData/Local\Temp/repo/read.nix"),
-            "/C:/Users/RUNNER~1/AppData/Local/Temp/repo/read.nix"
-        );
-    }
-
-    #[test]
-    fn network_shares_sit_under_unc() {
-        assert_eq!(i(r"\\host\share\x"), "/UNC/host/share/x");
-        assert_eq!(i(r"\\?\UNC\host\share\x"), "/UNC/host/share/x");
-        assert_eq!(i(r"\\?\unc\host\share\x"), "/UNC/host/share/x");
-        assert_eq!(i(r"\\?\C:\x"), "/C:/x");
-    }
-
-    #[test]
-    fn forward_slashes_make_a_share_too() {
-        assert_eq!(i("//host/share/x"), "/UNC/host/share/x");
-        assert_eq!(i(r"/\host\share"), "/UNC/host/share");
-    }
-
-    #[test]
-    fn a_relative_name_that_starts_with_unc_is_not_a_share() {
-        assert_eq!(i(r"UNC\x"), "UNC/x");
-        assert_eq!(i(r"unc\x"), "unc/x");
-    }
-
-    #[test]
-    fn relative_and_rooted_paths_only_change_separator() {
-        assert_eq!(i(r"a\b\c"), "a/b/c");
-        assert_eq!(i(r"..\a"), "../a");
-        assert_eq!(i(r"\nonexistent\x"), "/nonexistent/x");
-        assert_eq!(i("ab:/x"), "ab:/x");
-    }
-
-    #[test]
-    fn device_paths_are_not_shares_and_survive_a_round_trip() {
-        assert_eq!(i(r"\\.\pipe\x"), "//./pipe/x");
-        assert_eq!(n("//./pipe/x"), r"\\.\pipe\x");
-        assert_eq!(i(r"\\?\Volume{1}\x"), "//?/Volume{1}/x");
-        assert_eq!(n("//?/Volume{1}/x"), r"\\?\Volume{1}\x");
+    /// `to_internal`: a drive or share becomes the first component.
+    #[rstest]
+    #[case::drive(r"C:\Users\x", "/C:/Users/x")]
+    #[case::drive_slash("C:/Users/x", "/C:/Users/x")]
+    #[case::drive_lowercase(r"c:\Users", "/C:/Users")]
+    #[case::drive_root(r"C:\", "/C:/")]
+    #[case::bare_drive("C:", "C:")]
+    #[case::drive_relative("C:foo", "C:foo")]
+    #[case::mixed_separators(
+        r"C:\Users\RUNNER~1\AppData/Local\Temp/repo/read.nix",
+        "/C:/Users/RUNNER~1/AppData/Local/Temp/repo/read.nix"
+    )]
+    #[case::share(r"\\host\share\x", "/UNC/host/share/x")]
+    #[case::verbatim_share(r"\\?\UNC\host\share\x", "/UNC/host/share/x")]
+    #[case::verbatim_share_lowercase(r"\\?\unc\host\share\x", "/UNC/host/share/x")]
+    #[case::verbatim_drive(r"\\?\C:\x", "/C:/x")]
+    #[case::share_forward_slashes("//host/share/x", "/UNC/host/share/x")]
+    #[case::share_mixed_slashes(r"/\host\share", "/UNC/host/share")]
+    #[case::relative_unc(r"UNC\x", "UNC/x")]
+    #[case::relative_unc_lowercase(r"unc\x", "unc/x")]
+    #[case::relative(r"a\b\c", "a/b/c")]
+    #[case::relative_up(r"..\a", "../a")]
+    #[case::rooted(r"\nonexistent\x", "/nonexistent/x")]
+    #[case::not_a_drive("ab:/x", "ab:/x")]
+    #[case::device(r"\\.\pipe\x", "//./pipe/x")]
+    #[case::volume(r"\\?\Volume{1}\x", "//?/Volume{1}/x")]
+    fn the_internal_form(#[case] p: &str, #[case] want: &str) {
+        assert_eq!(i(p), want);
     }
 
     #[rstest]
@@ -189,22 +160,23 @@ mod tests {
         assert_eq!(i(p), p);
     }
 
-    #[test]
-    fn native_names_come_back() {
-        assert_eq!(n("/C:/Users/x"), r"C:\Users\x");
-        assert_eq!(n("/C:/"), r"C:\");
-        assert_eq!(n("/C:"), r"C:\");
-        assert_eq!(n("/UNC/host/share/x"), r"\\host\share\x");
-        assert_eq!(n("a/b"), r"a\b");
-        assert_eq!(n("/nonexistent/x"), r"\nonexistent\x");
-        assert_eq!(n("/"), r"\");
-    }
-
-    #[test]
-    fn a_leading_double_slash_is_not_a_share() {
-        assert_eq!(n("//x"), r"\x");
-        assert_eq!(n("///C:/x"), r"C:\x");
-        assert_eq!(n("//UNC/host/share"), r"\\host\share");
+    /// `to_native`: the inverse.
+    #[rstest]
+    #[case::drive("/C:/Users/x", r"C:\Users\x")]
+    #[case::drive_root("/C:/", r"C:\")]
+    #[case::drive_alone("/C:", r"C:\")]
+    #[case::bare_drive("C:", "C:")]
+    #[case::share("/UNC/host/share/x", r"\\host\share\x")]
+    #[case::relative("a/b", r"a\b")]
+    #[case::rooted("/nonexistent/x", r"\nonexistent\x")]
+    #[case::root("/", r"\")]
+    #[case::device("//./pipe/x", r"\\.\pipe\x")]
+    #[case::volume("//?/Volume{1}/x", r"\\?\Volume{1}\x")]
+    #[case::double_slash("//x", r"\x")]
+    #[case::double_slash_drive("///C:/x", r"C:\x")]
+    #[case::double_slash_unc("//UNC/host/share", r"\\host\share")]
+    fn the_native_form(#[case] p: &str, #[case] want: &str) {
+        assert_eq!(n(p), want);
     }
 
     #[rstest]

@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::{env, error, fs, io};
+use std::{env, error, fs};
 
 use sha2::{Digest, Sha256};
 
@@ -21,38 +21,7 @@ fn hash_tree(h: &mut Sha256, dir: &Path) {
     }
 }
 
-/// One `#[test]` per tests/lang/eval-{okay,fail}-*.nix, so nextest runs and
-/// reports each case on its own. A build without the tests gets none.
-fn lang_cases(out: &Path) -> io::Result<()> {
-    println!("cargo:rerun-if-changed=tests/lang");
-    let mut stems: Vec<String> = fs::read_dir("tests/lang")
-        .into_iter()
-        .flatten()
-        .filter_map(|e| {
-            e.ok()?
-                .file_name()
-                .into_string()
-                .ok()?
-                .strip_suffix(".nix")
-                .map(String::from)
-        })
-        .filter(|s| s.starts_with("eval-okay-") || s.starts_with("eval-fail-"))
-        .collect();
-    stems.sort();
-    let code: String = stems
-        .iter()
-        .map(|stem| {
-            let name = stem
-                .to_ascii_lowercase()
-                .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-            format!("#[test]\nfn {name}() {{\n    run({stem:?});\n}}\n")
-        })
-        .collect();
-    fs::write(out.join("lang_cases.rs"), code)
-}
-
 fn main() -> Result<(), Box<dyn error::Error>> {
-    lang_cases(Path::new(&env::var("OUT_DIR")?))?;
     let fds = protox::compile(["nix_remote.proto"], ["proto"])?;
     tonic_prost_build::configure()
         .build_server(false)

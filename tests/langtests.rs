@@ -6,6 +6,7 @@ mod hermetic;
 
 use iets::sys::path_to_internal;
 use iets::sys::process::signal;
+use rstest::rstest;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -67,10 +68,15 @@ fn check(stem: &str) -> Option<String> {
     })
 }
 
-fn run(stem: &str) {
+// a new case shows up after `touch tests/langtests.rs`
+#[rstest]
+fn lang(
+    #[files("tests/lang/eval-okay-*.nix")]
+    #[files("tests/lang/eval-fail-*.nix")]
+    path: PathBuf,
+) {
+    let stem = path.file_stem().unwrap().to_str().unwrap();
     if let Some(why) = check(stem) {
         panic!("{stem}: {why}");
     }
 }
-
-include!(concat!(env!("OUT_DIR"), "/lang_cases.rs"));

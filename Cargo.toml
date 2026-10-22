@@ -73,4 +73,5 @@ debug = 1
 inherits = "release"
 
 [dev-dependencies]
+rstest = { version = "0.28.0", default-features = false }
 tempfile = "3"

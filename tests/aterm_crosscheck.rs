@@ -3,6 +3,7 @@
 //! `tests/fixtures/aterm` and `INVARIANTS` below), and the hand-written cases
 //! harmonia (github.com/nix-community/harmonia, MIT) checks its ATerm code with.
 
+use rstest::rstest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -86,46 +87,39 @@ fn upstream_bad_drvs_are_rejected() {
 /// Nix's parser benchmark data. Its hashes were blanked to `aaaa…`, which left
 /// the input derivations out of the order Nix prints, so it cannot roundtrip
 /// byte for byte; printing what was parsed must still be a fixpoint.
-#[test]
-fn upstream_bench_drvs_parse_and_reprint_stably() {
+#[rstest]
+#[case::hello("hello.drv", "hello-2.12.2")]
+#[case::firefox("firefox.drv", "firefox")]
+fn upstream_bench_drvs_parse_and_reprint_stably(#[case] file: &str, #[case] name: &str) {
     pin_store_dir("/nix/store");
-    for (file, name) in [("hello.drv", "hello-2.12.2"), ("firefox.drv", "firefox")] {
-        let drv = Derivation::parse(&fixture(file), name).unwrap_or_else(|e| panic!("{file}: {e}"));
-        let printed = drv.unparse().unwrap();
-        let again = Derivation::parse(&printed, name).unwrap();
-        assert_eq!(again, drv, "{file}");
-        assert_eq!(again.unparse().unwrap(), printed, "{file}");
-    }
+    let drv = Derivation::parse(&fixture(file), name).unwrap();
+    let printed = drv.unparse().unwrap();
+    let again = Derivation::parse(&printed, name).unwrap();
+    assert_eq!(again, drv);
+    assert_eq!(again.unparse().unwrap(), printed);
 }
 
 /// The input-addressed fixtures with no input derivations: their output paths
 /// are recomputed from nothing and must be the ones Nix wrote.
-#[test]
-fn upstream_input_addressed_paths_recompute() {
+#[rstest]
+#[case::defaults("ia-advanced-attributes-defaults.drv", "advanced-attributes-defaults")]
+#[case::structured_attrs_defaults(
+    "ia-advanced-attributes-structured-attrs-defaults.drv",
+    "advanced-attributes-structured-attrs-defaults"
+)]
+fn upstream_input_addressed_paths_recompute(#[case] file: &str, #[case] name: &str) {
     pin_store_dir("/nix/store");
-    for (file, name) in [
-        (
-            "ia-advanced-attributes-defaults.drv",
-            "advanced-attributes-defaults",
-        ),
-        (
-            "ia-advanced-attributes-structured-attrs-defaults.drv",
-            "advanced-attributes-structured-attrs-defaults",
-        ),
-    ] {
-        let original = Derivation::parse(&fixture(file), name).unwrap();
-        assert!(original.input_drvs.is_empty(), "{file}");
-        let mut drv = original.clone();
-        for (out, o) in drv.outputs.iter_mut() {
-            *o = DerivationOutput::Deferred;
-            if let Some(v) = drv.env.iter_mut().find(|(k, _)| k == out) {
-                v.1.clear();
-            }
+    let original = Derivation::parse(&fixture(file), name).unwrap();
+    assert!(original.input_drvs.is_empty());
+    let mut drv = original.clone();
+    for (out, o) in drv.outputs.iter_mut() {
+        *o = DerivationOutput::Deferred;
+        if let Some(v) = drv.env.iter_mut().find(|(k, _)| k == out) {
+            v.1.clear();
         }
-        finalize_input_addressed_outputs(&mut drv, &mut DrvHashCache::new(), &mut no_loader)
-            .unwrap_or_else(|e| panic!("{file}: {e}"));
-        assert_eq!(drv, original, "{file}");
     }
+    finalize_input_addressed_outputs(&mut drv, &mut DrvHashCache::new(), &mut no_loader).unwrap();
+    assert_eq!(drv, original);
 }
 
 fn simple(name: &str, outputs: &[(&str, DerivationOutput)], env: &[(&str, &str)]) -> Derivation {
@@ -149,39 +143,38 @@ fn simple(name: &str, outputs: &[(&str, DerivationOutput)], env: &[(&str, &str)]
 
 /// libstore-tests/derivation/invariants.cc: `fillInOutputPaths` on a deferred
 /// output, with the paths Nix computed in `data/derivation/invariants/*-post.json`.
-#[test]
-fn upstream_invariants_fill_in_deferred() {
+#[rstest]
+#[case::empty_env_var(
+    "filled-in-deferred-empty-env-var",
+    "Fill in deferred output with empty env var",
+    Some(""),
+    "bilpz1nq8qi9r3bzsp72n34yjgqg43ws-filled-in-deferred-empty-env-var"
+)]
+#[case::no_env_var(
+    "filled-in-deferred-no-env-var",
+    "Fill in deferred with missing env var",
+    None,
+    "wpk9qrgg77fyswhailap0gicgw98izx9-filled-in-deferred-no-env-var"
+)]
+fn upstream_invariants_fill_in_deferred(
+    #[case] name: &str,
+    #[case] doc: &str,
+    #[case] env_out: Option<&str>,
+    #[case] want: &str,
+) {
     pin_store_dir("/nix/store");
-    for (name, doc, env_out, want) in [
-        (
-            "filled-in-deferred-empty-env-var",
-            "Fill in deferred output with empty env var",
-            Some(""),
-            "bilpz1nq8qi9r3bzsp72n34yjgqg43ws-filled-in-deferred-empty-env-var",
-        ),
-        (
-            "filled-in-deferred-no-env-var",
-            "Fill in deferred with missing env var",
-            None,
-            "wpk9qrgg77fyswhailap0gicgw98izx9-filled-in-deferred-no-env-var",
-        ),
-    ] {
-        let mut env = vec![("__doc", doc)];
-        env.extend(env_out.map(|v| ("out", v)));
-        let mut drv = simple(name, &[("out", DerivationOutput::Deferred)], &env);
-        finalize_input_addressed_outputs(&mut drv, &mut DrvHashCache::new(), &mut no_loader)
-            .unwrap();
-        assert_eq!(
-            drv.outputs["out"],
-            DerivationOutput::InputAddressed(sp(want)),
-            "{name}"
-        );
-        assert_eq!(
-            drv.env_str("out"),
-            Some(format!("/nix/store/{want}").as_str()),
-            "{name}"
-        );
-    }
+    let mut env = vec![("__doc", doc)];
+    env.extend(env_out.map(|v| ("out", v)));
+    let mut drv = simple(name, &[("out", DerivationOutput::Deferred)], &env);
+    finalize_input_addressed_outputs(&mut drv, &mut DrvHashCache::new(), &mut no_loader).unwrap();
+    assert_eq!(
+        drv.outputs["out"],
+        DerivationOutput::InputAddressed(sp(want))
+    );
+    assert_eq!(
+        drv.env_str("out"),
+        Some(format!("/nix/store/{want}").as_str())
+    );
 }
 
 #[test]
@@ -273,35 +266,31 @@ fn upstream_invariants_ca_floating_dependency() {
 }
 
 /// harmonia-store-aterm/tests/roundtrip.rs.
-#[test]
-fn harmonia_cases_roundtrip() {
+#[rstest]
+#[case::plain(
+    r#"Derive([("out","","","")],[],[],"x86_64-linux","/bin/sh",[],[("name","test")])"#,
+    "test"
+)]
+#[case::recursive_hash(
+    r#"Derive([("out","","r:sha256","")],[],[],"x86_64-linux","/bin/sh",[],[("name","test")])"#,
+    "test"
+)]
+#[case::escapes(
+    r#"Derive([("out","","","")],[],[],"x86_64-linux","/bin/sh",[],[("msg","hello\nworld\t\"test\"\\end"),("name","test")])"#,
+    "test"
+)]
+#[case::gnused(
+    r#"Derive([("info","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-gnused-4.9-info","",""),("out","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-gnused-4.9","","")],[("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bootstrap-tools.drv",["out"]),("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-stdenv-linux.drv",["out"])],["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-default-builder.sh"],"x86_64-linux","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bootstrap-tools/bin/bash",["-e","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-stdenv.sh"],[("name","gnused-4.9"),("out","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-gnused-4.9"),("system","x86_64-linux")])"#,
+    "gnused-4.9"
+)]
+#[case::fixed_output(
+    r#"Derive([("out","/nix/store/6fr8dalasgpy0bpykhjq2b9q65lb4j8y-linux-6.16.tar.xz","sha256","1a4be2fe6b5246aa4ac8987a8a4af34c42a8dd7d08b46ab48516bcc1befbcd83")],[],[],"builtin","builtin:fetchurl",[],[("name","linux-6.16.tar.xz")])"#,
+    "linux-6.16.tar.xz"
+)]
+fn harmonia_cases_roundtrip(#[case] input: &str, #[case] name: &str) {
     pin_store_dir("/nix/store");
-    for (input, name) in [
-        (
-            r#"Derive([("out","","","")],[],[],"x86_64-linux","/bin/sh",[],[("name","test")])"#,
-            "test",
-        ),
-        (
-            r#"Derive([("out","","r:sha256","")],[],[],"x86_64-linux","/bin/sh",[],[("name","test")])"#,
-            "test",
-        ),
-        (
-            r#"Derive([("out","","","")],[],[],"x86_64-linux","/bin/sh",[],[("msg","hello\nworld\t\"test\"\\end"),("name","test")])"#,
-            "test",
-        ),
-        (
-            r#"Derive([("info","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-gnused-4.9-info","",""),("out","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-gnused-4.9","","")],[("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bootstrap-tools.drv",["out"]),("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-stdenv-linux.drv",["out"])],["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-default-builder.sh"],"x86_64-linux","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bootstrap-tools/bin/bash",["-e","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-stdenv.sh"],[("name","gnused-4.9"),("out","/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-gnused-4.9"),("system","x86_64-linux")])"#,
-            "gnused-4.9",
-        ),
-        (
-            r#"Derive([("out","/nix/store/6fr8dalasgpy0bpykhjq2b9q65lb4j8y-linux-6.16.tar.xz","sha256","1a4be2fe6b5246aa4ac8987a8a4af34c42a8dd7d08b46ab48516bcc1befbcd83")],[],[],"builtin","builtin:fetchurl",[],[("name","linux-6.16.tar.xz")])"#,
-            "linux-6.16.tar.xz",
-        ),
-    ] {
-        let drv =
-            Derivation::parse(input.as_bytes(), name).unwrap_or_else(|e| panic!("{input}: {e}"));
-        assert_eq!(drv.unparse().unwrap(), input.as_bytes());
-    }
+    let drv = Derivation::parse(input.as_bytes(), name).unwrap();
+    assert_eq!(drv.unparse().unwrap(), input.as_bytes());
 }
 
 /// derivations.cc:parseDerivationOutput only checks that a fixed output's path

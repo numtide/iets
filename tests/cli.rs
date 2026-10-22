@@ -3,6 +3,7 @@
 
 mod hermetic;
 
+use rstest::rstest;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::{env, fs};
@@ -51,46 +52,31 @@ fn help_and_version_go_to_stdout() {
     assert_eq!(v.trim_end(), format!("iets {}", env!("CARGO_PKG_VERSION")));
 }
 
-#[test]
-fn a_bad_command_line_names_the_problem() {
-    for (args, want) in [
-        (&["bogus"][..], "error: unknown command 'bogus'\n"),
-        (
-            &["buidl"],
-            "error: unknown command 'buidl'\ndid you mean 'build'?\n",
-        ),
-        (&["serach", "^"], "did you mean 'search'?"),
-        (
-            &["nix-instantate", "--eval", "-E", "1"],
-            "did you mean 'nix-instantiate'?",
-        ),
-        (
-            &["eval", "--stirct", "-E", "1"],
-            "error: unknown flag '--stirct'\ndid you mean '--strict'?\nrun 'iets eval --help' for the flags\n",
-        ),
-        (
-            &["eval", "--workers", "0", "-E", "1"],
-            "--workers wants a number >= 1, got '0'",
-        ),
-        (&["eval", "-E"], "error: -E needs an expression\n"),
-        (
-            &["eval", "-E", "1", "x.nix"],
-            "-E and FILE cannot be combined",
-        ),
-        (&["build"], "nothing to evaluate"),
-        (&["build", "--what"], "unknown flag '--what'"),
-        (&["cache", "dunp"], "did you mean 'dump'?"),
-    ] {
-        let o = iets(args);
-        let err = text(&o.stderr);
-        assert_eq!(o.status.code(), Some(2), "{args:?}: {err}");
-        assert!(o.stdout.is_empty(), "{args:?}");
-        assert!(err.contains(want), "{args:?}: {err}");
-        assert!(
-            !err.contains("usage:") && !err.contains("falling back"),
-            "{args:?}: {err}"
-        );
-    }
+#[rstest]
+#[case::unknown(&["bogus"], "error: unknown command 'bogus'\n")]
+#[case::typo(&["buidl"], "error: unknown command 'buidl'\ndid you mean 'build'?\n")]
+#[case::typo_with_args(&["serach", "^"], "did you mean 'search'?")]
+#[case::classic_typo(&["nix-instantate", "--eval", "-E", "1"], "did you mean 'nix-instantiate'?")]
+#[case::flag_typo(
+    &["eval", "--stirct", "-E", "1"],
+    "error: unknown flag '--stirct'\ndid you mean '--strict'?\nrun 'iets eval --help' for the flags\n"
+)]
+#[case::zero_workers(&["eval", "--workers", "0", "-E", "1"], "--workers wants a number >= 1, got '0'")]
+#[case::no_expr(&["eval", "-E"], "error: -E needs an expression\n")]
+#[case::expr_and_file(&["eval", "-E", "1", "x.nix"], "-E and FILE cannot be combined")]
+#[case::build_nothing(&["build"], "nothing to evaluate")]
+#[case::build_flag(&["build", "--what"], "unknown flag '--what'")]
+#[case::subcommand_typo(&["cache", "dunp"], "did you mean 'dump'?")]
+fn a_bad_command_line_names_the_problem(#[case] args: &[&str], #[case] want: &str) {
+    let o = iets(args);
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(o.stdout.is_empty());
+    assert!(err.contains(want), "{err}");
+    assert!(
+        !err.contains("usage:") && !err.contains("falling back"),
+        "{err}"
+    );
 }
 
 /// What the system says for a path that is not there.
@@ -306,29 +292,27 @@ fn current_system_is_the_hosts() {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn a_full_stdout_is_an_error() {
+#[rstest]
+#[case::version(&["version"])]
+#[case::parse(&["parse", "multi.nix"])]
+#[case::help(&["--help"])]
+#[case::lint_list(&["lint", "list"])]
+fn a_full_stdout_is_an_error(#[case] args: &[&str]) {
     let d = tempdir().unwrap();
-    let multi = d.path().join("multi.nix");
-    fs::write(&multi, "{ }").unwrap();
-    for a in [
-        &["version"][..],
-        &["parse", multi.to_str().unwrap()],
-        &["--help"],
-        &["lint", "list"],
-    ] {
-        let full = fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/full")
-            .unwrap();
-        let o = hermetic::iets().args(a).stdout(full).output().unwrap();
-        assert_eq!(o.status.code(), Some(1), "{a:?}");
-        assert!(
-            text(&o.stderr).contains("No space left on device"),
-            "{a:?}: {}",
-            text(&o.stderr)
-        );
-    }
+    fs::write(d.path().join("multi.nix"), "{ }").unwrap();
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let o = hermetic::iets()
+        .current_dir(d.path())
+        .args(args)
+        .stdout(full)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let err = text(&o.stderr);
+    assert!(err.contains("No space left on device"), "{err}");
 }
 
 #[test]
@@ -365,20 +349,18 @@ fn eval_says_what_it_does_not_support() {
         "{}",
         text(&o.stderr)
     );
-    for (r, want) in [
-        (
-            "nixpkgs#lib.version",
-            "flake registry references (nixpkgs#…) are not supported",
-        ),
-        (
-            "github:NixOS/nixpkgs#lib.version",
-            "only local paths are supported",
-        ),
-    ] {
-        let o = iets(&["eval", r]);
-        assert_eq!(o.status.code(), Some(1), "{r}");
-        assert!(text(&o.stderr).contains(want), "{r}: {}", text(&o.stderr));
-    }
+}
+
+#[rstest]
+#[case::registry(
+    "nixpkgs#lib.version",
+    "flake registry references (nixpkgs#…) are not supported"
+)]
+#[case::github("github:NixOS/nixpkgs#lib.version", "only local paths are supported")]
+fn eval_says_which_flake_refs_it_does_not_support(#[case] r: &str, #[case] want: &str) {
+    let o = iets(&["eval", r]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains(want), "{}", text(&o.stderr));
 }
 
 /// Every `-A` prints, in order, from one evaluation of the input

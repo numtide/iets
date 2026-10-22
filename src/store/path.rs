@@ -543,34 +543,26 @@ mod tests {
 
     // nix-instantiate --eval --strict -E 'let d = builtins.derivation { name = "fx"; system = "x86_64-linux";
     //   builder = "/bin/sh"; outputHash = "ba78...15ad"; outputHashAlgo = "sha256"; }; in d.outPath'
-    #[test]
-    fn fixed_flat_sha256() {
+    // and for "fr" the same with outputHashMode = "recursive"
+    #[rstest]
+    #[case::flat_sha256(
+        IngestionMethod::Flat,
+        "fx",
+        "/nix/store/rfn4vzwhmb8r4k8gp16g27dqwjji5s37-fx"
+    )]
+    #[case::recursive_sha256(
+        IngestionMethod::Recursive,
+        "fr",
+        "/nix/store/s05rl80bpix1186wb5f471k7fxwwp7lf-fr"
+    )]
+    fn fixed_output_path(#[case] method: IngestionMethod, #[case] name: &str, #[case] want: &str) {
         let h = Hash::parse_any(
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             Some(HashAlgo::Sha256),
         )
         .unwrap();
-        let p = make_fixed_output_path(IngestionMethod::Flat, &h, "fx", &BTreeSet::new()).unwrap();
-        assert_eq!(
-            p.to_string(),
-            "/nix/store/rfn4vzwhmb8r4k8gp16g27dqwjji5s37-fx"
-        );
-    }
-
-    // same as above with outputHashMode = "recursive" and name "fr"
-    #[test]
-    fn fixed_recursive_sha256() {
-        let h = Hash::parse_any(
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            Some(HashAlgo::Sha256),
-        )
-        .unwrap();
-        let p =
-            make_fixed_output_path(IngestionMethod::Recursive, &h, "fr", &BTreeSet::new()).unwrap();
-        assert_eq!(
-            p.to_string(),
-            "/nix/store/s05rl80bpix1186wb5f471k7fxwwp7lf-fr"
-        );
+        let p = make_fixed_output_path(method, &h, name, &BTreeSet::new()).unwrap();
+        assert_eq!(p.to_string(), want);
     }
 
     // same with outputHash = "a9993e364706816aba3e25717850c26c9cd0d89d"; outputHashAlgo = "sha1"; name "fs1"

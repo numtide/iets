@@ -501,18 +501,33 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, HashError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     const ABC_SHA256_HEX: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
-    // nix hash convert --hash-algo sha256 --to nix32 $(printf abc | sha256sum | cut -d' ' -f1)
-    #[test]
-    fn sha256_nix32() {
-        let h = hash_bytes(HashAlgo::Sha256, b"abc");
-        assert_eq!(h.to_base16(), ABC_SHA256_HEX);
-        assert_eq!(
-            h.to_nix32(),
-            "1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s"
-        );
+    // nix hash convert --hash-algo ALGO --to nix32 $(printf abc | ALGOsum | cut -d' ' -f1)
+    #[rstest]
+    #[case::sha256(
+        HashAlgo::Sha256,
+        "1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s"
+    )]
+    #[case::sha1(HashAlgo::Sha1, "kpcd173cq987hw957sx6m0868wv3x6d9")]
+    #[case::md5(HashAlgo::Md5, "3jgzhjhz9zjvbb0kyj7jc500ch")]
+    fn nix32(#[case] algo: HashAlgo, #[case] want: &str) {
+        assert_eq!(hash_bytes(algo, b"abc").to_nix32(), want);
+    }
+
+    // printf abc | ALGOsum, printf '' | sha256sum
+    #[rstest]
+    #[case::sha256(HashAlgo::Sha256, b"abc", ABC_SHA256_HEX)]
+    #[case::sha1(HashAlgo::Sha1, b"abc", "a9993e364706816aba3e25717850c26c9cd0d89d")]
+    #[case::empty_sha256(
+        HashAlgo::Sha256,
+        b"",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )]
+    fn base16(#[case] algo: HashAlgo, #[case] input: &[u8], #[case] want: &str) {
+        assert_eq!(hash_bytes(algo, input).to_base16(), want);
     }
 
     // nix hash convert --hash-algo sha256 --to sri <hex>
@@ -529,21 +544,6 @@ mod tests {
         );
     }
 
-    // nix hash convert --hash-algo sha1 --to nix32 $(printf abc | sha1sum | cut -d' ' -f1)
-    #[test]
-    fn sha1_nix32() {
-        let h = hash_bytes(HashAlgo::Sha1, b"abc");
-        assert_eq!(h.to_base16(), "a9993e364706816aba3e25717850c26c9cd0d89d");
-        assert_eq!(h.to_nix32(), "kpcd173cq987hw957sx6m0868wv3x6d9");
-    }
-
-    // nix hash convert --hash-algo md5 --to nix32 $(printf abc | md5sum | cut -d' ' -f1)
-    #[test]
-    fn md5_nix32() {
-        let h = hash_bytes(HashAlgo::Md5, b"abc");
-        assert_eq!(h.to_nix32(), "3jgzhjhz9zjvbb0kyj7jc500ch");
-    }
-
     // nix hash convert --hash-algo sha512 --to nix32 / --to base64 $(printf abc | sha512sum | cut -d' ' -f1)
     #[test]
     fn sha512_nix32_base64() {
@@ -555,16 +555,6 @@ mod tests {
         assert_eq!(
             h.to_base64(),
             "3a81oZNherrMQXNJriBBMRLm+k6JqX6iCp7u5ktV05ohkpkqJ0/BqDa6PCOj/uu9RU1EI2Q86A4qmslPpUyknw=="
-        );
-    }
-
-    // printf '' | sha256sum
-    #[test]
-    fn empty_sha256() {
-        let h = hash_bytes(HashAlgo::Sha256, b"");
-        assert_eq!(
-            h.to_base16(),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 

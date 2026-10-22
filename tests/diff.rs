@@ -4,6 +4,7 @@
 
 mod hermetic;
 
+use rstest::rstest;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -59,14 +60,6 @@ fn diff(work: &Path, args: &[&str]) -> Run {
         out: String::from_utf8_lossy(&o.stdout).trim_end().to_string(),
         err: String::from_utf8_lossy(&o.stderr).trim_end().to_string(),
     }
-}
-
-#[test]
-fn equal_derivations_exit_0() {
-    let w = demo();
-    let r = diff(w.path(), &["-A", "a", "-A", "c", "demo.nix"]);
-    assert_eq!(r.rc, 0, "{}", r.out);
-    assert!(r.out.contains("are the same derivation"), "{}", r.out);
 }
 
 #[test]
@@ -129,31 +122,18 @@ fn the_json_object_names_the_same_differences() {
     );
 }
 
-#[test]
-fn depth_zero_stops_at_the_input_derivation() {
+/// The exit code, and a line of stdout or (for a usage error) stderr.
+#[rstest]
+#[case::one_side_is_a_usage_error(&["-A", "a"], 2, "error:")]
+#[case::an_unknown_flag_is_a_usage_error(&["-A", "a", "-A", "b", "--bogus"], 2, "unknown flag")]
+#[case::equal_derivations_exit_0(&["-A", "a", "-A", "c"], 0, "are the same derivation")]
+#[case::depth_zero_stops_at_the_input_derivation(&["-A", "a", "-A", "b", "--depth", "0"], 1, "stopped: depth")]
+fn exit_code(#[case] args: &[&str], #[case] rc: i32, #[case] want: &str) {
     let w = demo();
-    let r = diff(
-        w.path(),
-        &["-A", "a", "-A", "b", "--depth", "0", "demo.nix"],
-    );
-    assert_eq!(r.rc, 1, "{}", r.out);
-    assert!(r.out.contains("stopped: depth"), "{}", r.out);
-}
-
-#[test]
-fn one_side_is_a_usage_error() {
-    let w = demo();
-    let r = diff(w.path(), &["-A", "a", "demo.nix"]);
-    assert_eq!(r.rc, 2, "{}", r.err);
-    assert!(r.err.contains("error:"), "{}", r.err);
-}
-
-#[test]
-fn an_unknown_flag_is_a_usage_error() {
-    let w = demo();
-    let r = diff(w.path(), &["-A", "a", "-A", "b", "--bogus", "demo.nix"]);
-    assert_eq!(r.rc, 2, "{}", r.err);
-    assert!(r.err.contains("unknown flag"), "{}", r.err);
+    let r = diff(w.path(), &[args, &["demo.nix"]].concat());
+    let text = if rc == 2 { &r.err } else { &r.out };
+    assert_eq!(r.rc, rc, "{}{}", r.out, r.err);
+    assert!(text.contains(want), "{text}");
 }
 
 #[test]

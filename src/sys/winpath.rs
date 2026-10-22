@@ -149,7 +149,7 @@ mod tests {
     #[case::not_a_drive("ab:/x", "ab:/x")]
     #[case::device(r"\\.\pipe\x", "//./pipe/x")]
     #[case::volume(r"\\?\Volume{1}\x", "//?/Volume{1}/x")]
-    fn the_internal_form(#[case] p: &str, #[case] want: &str) {
+    fn to_internal_form(#[case] p: &str, #[case] want: &str) {
         assert_eq!(i(p), want);
     }
 
@@ -175,7 +175,7 @@ mod tests {
     #[case::double_slash("//x", r"\x")]
     #[case::double_slash_drive("///C:/x", r"C:\x")]
     #[case::double_slash_unc("//UNC/host/share", r"\\host\share")]
-    fn the_native_form(#[case] p: &str, #[case] want: &str) {
+    fn to_native_form(#[case] p: &str, #[case] want: &str) {
         assert_eq!(n(p), want);
     }
 

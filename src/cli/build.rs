@@ -556,6 +556,7 @@ mod tests {
     use crate::build::Outcome;
     use crate::store::path::StorePath;
     use crate::sys;
+    use rstest::rstest;
     use std::collections::BTreeMap;
 
     #[test]
@@ -586,14 +587,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_path_on_stdout_is_silent() {
-        assert_eq!(silence(&[outcome(true, false, &["out"])], &[]), None);
-    }
-
-    #[test]
-    fn a_failed_build_reports_itself() {
-        assert_eq!(silence(&[outcome(false, false, &[])], &[]), None);
+    /// Why a build printed nothing on stdout, if that needs saying.
+    #[rstest]
+    #[case::a_path_on_stdout_is_silent(true, &["out"], &[], None)]
+    #[case::a_failed_build_reports_itself(false, &[], &[], None)]
+    #[case::a_success_with_no_output_path_is_named(true, &[], &[], Some("no output path"))]
+    #[case::an_out_flag_that_matches_nothing_is_named(true, &[], &["dev"], Some("no output dev"))]
+    fn silence_reason(
+        #[case] ok: bool,
+        #[case] outputs: &[&str],
+        #[case] out_flags: &[&str],
+        #[case] want: Option<&str>,
+    ) {
+        let flags: Vec<String> = out_flags.iter().map(|s| s.to_string()).collect();
+        let why = silence(&[outcome(ok, false, outputs)], &flags);
+        match (why, want) {
+            (None, None) => {}
+            (Some(why), Some(want)) => assert!(why.contains(want), "{why}"),
+            (why, _) => panic!("got {why:?}, want {want:?}"),
+        }
     }
 
     #[test]
@@ -606,18 +618,6 @@ mod tests {
     #[test]
     fn no_outcome_at_all_is_named() {
         assert!(silence(&[], &[]).unwrap().contains("no build result"));
-    }
-
-    #[test]
-    fn a_success_with_no_output_path_is_named() {
-        let why = silence(&[outcome(true, false, &[])], &[]).unwrap();
-        assert!(why.contains("no output path"), "{why}");
-    }
-
-    #[test]
-    fn an_out_flag_that_matches_nothing_is_named() {
-        let why = silence(&[outcome(true, false, &[])], &["dev".to_string()]).unwrap();
-        assert!(why.contains("no output dev"), "{why}");
     }
 
     #[test]

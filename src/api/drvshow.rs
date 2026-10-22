@@ -262,12 +262,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case::multi_output(
+    #[case::a_multi_output_derivation(
         r#"Derive([("dev","/nix/store/y7a2ldlsm4a9b89dy8gjq9w2jxrg9ni7-drvshow-multi-dev","",""),("out","/nix/store/glmm5g4k4ni9sqr84qzq47c7z839qy2v-drvshow-multi","","")],[],[],"x86_64-linux","/bin/sh",["-c","echo a > $out; echo b > $dev"],[("builder","/bin/sh"),("dev","/nix/store/y7a2ldlsm4a9b89dy8gjq9w2jxrg9ni7-drvshow-multi-dev"),("name","drvshow-multi"),("out","/nix/store/glmm5g4k4ni9sqr84qzq47c7z839qy2v-drvshow-multi"),("outputs","out dev"),("system","x86_64-linux")])"#,
         "drvshow-multi",
         r#"{"args":["-c","echo a > $out; echo b > $dev"],"builder":"/bin/sh","env":{"builder":"/bin/sh","dev":"/nix/store/y7a2ldlsm4a9b89dy8gjq9w2jxrg9ni7-drvshow-multi-dev","name":"drvshow-multi","out":"/nix/store/glmm5g4k4ni9sqr84qzq47c7z839qy2v-drvshow-multi","outputs":"out dev","system":"x86_64-linux"},"inputs":{"drvs":{},"srcs":[]},"name":"drvshow-multi","outputs":{"dev":{"path":"y7a2ldlsm4a9b89dy8gjq9w2jxrg9ni7-drvshow-multi-dev"},"out":{"path":"glmm5g4k4ni9sqr84qzq47c7z839qy2v-drvshow-multi"}},"system":"x86_64-linux","version":4}"#
     )]
-    #[case::fixed_output_has_no_path(
+    #[case::a_fixed_output_shows_its_content_address_and_no_path(
         r#"Derive([("out","/nix/store/fzwqzgk7sxbw469w1hhbp686hlxgwpkx-drvshow-fod","r:sha1","0000000000000000000000000000000000000000")],[],[],"x86_64-linux","/bin/sh",["-c","echo x > $out"],[("builder","/bin/sh"),("name","drvshow-fod"),("out","/nix/store/fzwqzgk7sxbw469w1hhbp686hlxgwpkx-drvshow-fod"),("outputHash","0000000000000000000000000000000000000000"),("outputHashAlgo","sha1"),("outputHashMode","recursive"),("system","x86_64-linux")])"#,
         "drvshow-fod",
         r#"{"args":["-c","echo x > $out"],"builder":"/bin/sh","env":{"builder":"/bin/sh","name":"drvshow-fod","out":"/nix/store/fzwqzgk7sxbw469w1hhbp686hlxgwpkx-drvshow-fod","outputHash":"0000000000000000000000000000000000000000","outputHashAlgo":"sha1","outputHashMode":"recursive","system":"x86_64-linux"},"inputs":{"drvs":{},"srcs":[]},"name":"drvshow-fod","outputs":{"out":{"hash":"sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=","method":"nar"}},"system":"x86_64-linux","version":4}"#
@@ -277,7 +277,7 @@ mod tests {
         "drvshow-top",
         r#"{"args":["-c","true"],"builder":"/bin/sh","env":{"out":"/nix/store/5railz2b3ssvqdssggdsnga8dyahvbaj-drvshow-top"},"inputs":{"drvs":{"swp3gmqyvz1k2yjkmncfb29zhdhqfjmn-drvshow-dep.drv":{"dynamicOutputs":{},"outputs":["dev"]}},"srcs":["yb554rm2xvp2vbjgyc3zanbxmdaqnnqh-note"]},"name":"drvshow-top","outputs":{"out":{"path":"5railz2b3ssvqdssggdsnga8dyahvbaj-drvshow-top"}},"structuredAttrs":{"builder":"/bin/sh","d":"/nix/store/p4pq1jgwyjlyc13nk7vv65a99jzw1843-drvshow-dep-dev","n":2,"name":"drvshow-top","system":"x86_64-linux","t":"/nix/store/yb554rm2xvp2vbjgyc3zanbxmdaqnnqh-note"},"system":"x86_64-linux","version":4}"#
     )]
-    fn the_json_is_nixs(#[case] aterm: &str, #[case] name: &str, #[case] want: &str) {
+    fn json(#[case] aterm: &str, #[case] name: &str, #[case] want: &str) {
         assert_eq!(json_of(aterm, name), want);
     }
 

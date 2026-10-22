@@ -690,21 +690,21 @@ fn op_fetch(argv: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     /// libcurl reads `file:/abs`, and a lock file may hold that form.
-    #[test]
-    fn a_file_url_needs_one_slash_not_three() {
-        for u in [
-            "file:/a/b",
-            "file:///a/b",
-            "file://localhost/a/b",
-            "http://x/y",
-            "https://x/y",
-        ] {
-            assert!(super::is_url(u), "{u}");
-        }
-        for s in ["/a/b", "./a", "a/b", "fil:/a"] {
-            assert!(!super::is_url(s), "{s}");
-        }
+    #[rstest]
+    #[case("file:/a/b", true)]
+    #[case("file:///a/b", true)]
+    #[case("file://localhost/a/b", true)]
+    #[case("http://x/y", true)]
+    #[case("https://x/y", true)]
+    #[case("/a/b", false)]
+    #[case("./a", false)]
+    #[case("a/b", false)]
+    #[case("fil:/a", false)]
+    fn a_file_url_needs_one_slash_not_three(#[case] s: &str, #[case] want: bool) {
+        assert_eq!(super::is_url(s), want);
     }
 
     #[test]

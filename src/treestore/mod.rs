@@ -550,6 +550,7 @@ pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use tempfile::tempdir;
 
     use crate::store::hash::{HashAlgo, hash_bytes};
@@ -570,33 +571,26 @@ mod tests {
     /// The name an entry gets is the store path the lock's `narHash` implies.
     /// cache.nixos.org serves the last three nixpkgs trees at these paths; a
     /// wrong name asks the daemon for a path no cache holds (#189).
-    #[test]
-    fn a_tree_is_named_by_its_nar_hash() {
-        for (nar_hash, path) in [
-            (
-                "sha256-9i/VTdusq/+NM/tz+J1Re+ojkMB8MBf0QshnYfzHz30=",
-                "/nix/store/z4wkdlk69gck09s64a8ghpn6h7bxhkyy-source",
-            ),
-            (
-                "sha256-vlHUuqAcbcH2RKmHbPiuQzbv1pnzzavXnI62RD0bqCU=",
-                "/nix/store/7j1q60m17gf95k3s0gk2qvjqygnp1q36-source",
-            ),
-            (
-                "sha256-Ft/BRnIqw1MywFoXydKobjjWmDFgDdYtSpJliE8+yUw=",
-                "/nix/store/mkp6xi3vnvrllpmc17337m6sci9chm5l-source",
-            ),
-            (
-                "sha256-m0pDuRJG7EDo9ri+4Ksu83VsI+PlxNC9lNBfydejce4=",
-                "/nix/store/aiapnjc6w07cz0jxy8s3j8cg1vfh1k8b-source",
-            ),
-        ] {
-            let h = Hash::parse_any(nar_hash, None).unwrap();
-            assert_eq!(
-                store_path("source", &h).unwrap().to_full_string(),
-                path,
-                "{nar_hash}"
-            );
-        }
+    #[rstest]
+    #[case(
+        "sha256-9i/VTdusq/+NM/tz+J1Re+ojkMB8MBf0QshnYfzHz30=",
+        "/nix/store/z4wkdlk69gck09s64a8ghpn6h7bxhkyy-source"
+    )]
+    #[case(
+        "sha256-vlHUuqAcbcH2RKmHbPiuQzbv1pnzzavXnI62RD0bqCU=",
+        "/nix/store/7j1q60m17gf95k3s0gk2qvjqygnp1q36-source"
+    )]
+    #[case(
+        "sha256-Ft/BRnIqw1MywFoXydKobjjWmDFgDdYtSpJliE8+yUw=",
+        "/nix/store/mkp6xi3vnvrllpmc17337m6sci9chm5l-source"
+    )]
+    #[case(
+        "sha256-m0pDuRJG7EDo9ri+4Ksu83VsI+PlxNC9lNBfydejce4=",
+        "/nix/store/aiapnjc6w07cz0jxy8s3j8cg1vfh1k8b-source"
+    )]
+    fn a_tree_is_named_by_its_nar_hash(#[case] nar_hash: &str, #[case] path: &str) {
+        let h = Hash::parse_any(nar_hash, None).unwrap();
+        assert_eq!(store_path("source", &h).unwrap().to_full_string(), path);
     }
 
     /// A spooled tarball holding `files` under one top-level directory.

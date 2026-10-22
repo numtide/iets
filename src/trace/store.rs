@@ -240,6 +240,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use tempfile::tempdir;
 
     fn store(d: &Path) -> Store {
@@ -319,24 +320,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bytes_that_are_not_an_entry_are_bad_not_a_panic() {
+    #[rstest]
+    #[case(b"")]
+    #[case(b"\x01")]
+    #[case(b"\x09\x01")]
+    #[case(b"\x01\x04")]
+    #[case(&[
+        1, 1, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    ])]
+    fn bytes_that_are_not_an_entry_are_bad_not_a_panic(#[case] bytes: &[u8]) {
         let d = tempdir().unwrap();
         let s = store(d.path());
         let dir = s.entry_dir(KEY);
         fs::create_dir_all(&dir).expect("dir");
-        for bytes in [
-            b"".as_slice(),
-            b"\x01".as_slice(),
-            b"\x09\x01".as_slice(),
-            b"\x01\x04".as_slice(),
-            &[
-                1, 1, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-                255,
-            ],
-        ] {
-            fs::write(dir.join(ENTRY), bytes).expect("entry");
-            assert!(matches!(s.open(KEY), Opened::Bad), "{bytes:?}");
-        }
+        fs::write(dir.join(ENTRY), bytes).expect("entry");
+        assert!(matches!(s.open(KEY), Opened::Bad));
     }
 }

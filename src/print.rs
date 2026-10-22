@@ -461,10 +461,11 @@ fn print_json_inner(
 #[cfg(test)]
 mod tests {
     use super::{format_g, json_float};
+    use rstest::rstest;
 
-    #[test]
-    fn float_formatting_edge_cases() {
-        for f in [
+    #[rstest]
+    fn float_formatting_is_never_empty(
+        #[values(
             f64::NAN,
             f64::INFINITY,
             f64::NEG_INFINITY,
@@ -475,23 +476,23 @@ mod tests {
             5e-324,
             f64::MIN_POSITIVE,
             1.0,
-            0.1,
-        ] {
-            let g = format_g(f);
-            assert!(!g.is_empty(), "format_g({f}) is empty");
-            let j = json_float(f);
-            assert!(!j.is_empty(), "json_float({f}) is empty");
-        }
-        assert_eq!(format_g(f64::NAN), "nan");
-        assert_eq!(format_g(f64::INFINITY), "inf");
-        assert_eq!(format_g(f64::NEG_INFINITY), "-inf");
-        assert_eq!(format_g(-0.0), "-0");
-        assert_eq!(format_g(1e300), "1e+300");
-        assert_eq!(format_g(5e-324), "4.94066e-324");
-        assert_eq!(json_float(f64::NAN), "null");
-        assert_eq!(json_float(f64::INFINITY), "null");
-        assert_eq!(json_float(-0.0), "-0.0");
-        assert_eq!(json_float(1e300), "1e+300");
-        assert_eq!(json_float(5e-324), "5e-324");
+            0.1
+        )]
+        f: f64,
+    ) {
+        assert!(!format_g(f).is_empty());
+        assert!(!json_float(f).is_empty());
+    }
+
+    #[rstest]
+    #[case(f64::NAN, "nan", "null")]
+    #[case(f64::INFINITY, "inf", "null")]
+    #[case(f64::NEG_INFINITY, "-inf", "null")]
+    #[case(-0.0, "-0", "-0.0")]
+    #[case(1e300, "1e+300", "1e+300")]
+    #[case(5e-324, "4.94066e-324", "5e-324")]
+    fn float_formatting_edge_cases(#[case] f: f64, #[case] g: &str, #[case] json: &str) {
+        assert_eq!(format_g(f), g);
+        assert_eq!(json_float(f), json);
     }
 }

@@ -487,6 +487,7 @@ pub fn each_arg(argv: &[String], mut f: impl FnMut(&str, &mut dyn FnMut() -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn help_fits_80_columns() {
@@ -496,37 +497,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn suggestions_come_from_the_help() {
-        for (cmd, typo, want) in [
-            ("eval", "--stirct", Some("--strict")),
-            ("build", "--no-ir-cach", Some("--no-ir-cache")),
-            ("eval-jobs", "--chunk-dept", Some("--chunk-depth")),
-            ("build", "--keep-goin", Some("--keep-going")),
-            ("build", "\"A", None),
-            ("eval", "-x", None),
-        ] {
-            assert_eq!(suggest(typo, flags(cmd)), want, "{typo}");
-        }
-        assert_eq!(suggest("evl", COMMANDS.split(' ')), Some("eval"));
-        assert_eq!(suggest("bogus", COMMANDS.split(' ')), None);
+    #[rstest]
+    #[case("eval", "--stirct", Some("--strict"))]
+    #[case("build", "--no-ir-cach", Some("--no-ir-cache"))]
+    #[case("eval-jobs", "--chunk-dept", Some("--chunk-depth"))]
+    #[case("build", "--keep-goin", Some("--keep-going"))]
+    #[case("build", "\"A", None)]
+    #[case("eval", "-x", None)]
+    fn suggestions_come_from_the_help(
+        #[case] cmd: &str,
+        #[case] typo: &str,
+        #[case] want: Option<&str>,
+    ) {
+        assert_eq!(suggest(typo, flags(cmd)), want);
     }
 
-    #[test]
-    fn a_mistyped_command_is_suggested() {
-        for (typo, want) in [
-            ("buidl", Some("build")),
-            ("evl", Some("eval")),
-            ("serach", Some("search")),
-            ("verison", Some("version")),
-            ("nix-buidl", Some("nix-build")),
-            ("nix-instantate", Some("nix-instantiate")),
-            ("eval-jbos", Some("eval-jobs")),
-            ("bogus", None),
-            ("x", None),
-        ] {
-            assert_eq!(suggest(typo, command_words()), want, "{typo}");
-        }
+    #[rstest]
+    #[case("buidl", Some("build"))]
+    #[case("evl", Some("eval"))]
+    #[case("serach", Some("search"))]
+    #[case("verison", Some("version"))]
+    #[case("nix-buidl", Some("nix-build"))]
+    #[case("nix-instantate", Some("nix-instantiate"))]
+    #[case("eval-jbos", Some("eval-jobs"))]
+    #[case("bogus", None)]
+    #[case("x", None)]
+    fn a_mistyped_command_is_suggested(#[case] typo: &str, #[case] want: Option<&str>) {
+        assert_eq!(suggest(typo, command_words()), want);
     }
 
     #[test]

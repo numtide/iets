@@ -1225,6 +1225,8 @@ pub fn failed_event(drv_path: &str, reason: &str) -> Event {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     /// A status of 256 truncated to a `u8` is 0, which `success` reads as
     /// Built: a failed build would have been reported as a success.
     #[test]
@@ -1303,17 +1305,18 @@ mod tests {
 
     /// An ssh host that starts with `-` would be an ssh option, so it never
     /// reaches the command line.
+    #[rstest]
+    #[case("ssh-ng://-oProxyCommand=touch%20/tmp/pwned")]
+    #[case("ssh-ng://-l")]
+    #[case("ssh-ng://-u@h")]
+    #[case("ssh-ng://@h")]
+    #[case("ssh-ng://")]
+    fn an_ssh_host_is_never_an_option(#[case] url: &str) {
+        assert_eq!(Transport::parse(url), None);
+    }
+
     #[test]
-    fn an_ssh_host_is_never_an_option() {
-        for url in [
-            "ssh-ng://-oProxyCommand=touch%20/tmp/pwned",
-            "ssh-ng://-l",
-            "ssh-ng://-u@h",
-            "ssh-ng://@h",
-            "ssh-ng://",
-        ] {
-            assert_eq!(Transport::parse(url), None, "{url}");
-        }
+    fn an_ssh_host_that_is_an_option_says_so() {
         let e = Transport::parse_checked("ssh-ng://-oProxyCommand=x", "x86_64-linux").unwrap_err();
         assert!(format!("{e}").contains("must not start with '-'"), "{e}");
     }

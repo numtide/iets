@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::{ErrorKind, EvalConfig, Evaluator};
+use rstest::rstest;
 
 use crate::print;
 
@@ -143,30 +144,26 @@ fn derivation_wrapper_exists() {
     );
 }
 
-#[test]
-fn reading_a_derivation_output_is_unsupported() {
-    let drv = r#"(derivation { name = "x"; system = "x86_64-linux"; builder = "/bin/sh"; })"#;
-    for f in [
+#[rstest]
+fn reading_a_derivation_output_is_unsupported(
+    #[values(
         "import",
         "scopedImport {}",
         "builtins.readFile",
         "builtins.readDir",
         "builtins.pathExists",
         "builtins.readFileType",
-        r#"builtins.hashFile "sha256""#,
-    ] {
-        let mut ev = Evaluator::new();
-        let e = ev
-            .eval_string(&format!("{f} {drv}"), b"/")
-            .and_then(|v| ev.force_deep(v))
-            .unwrap_err();
-        assert_eq!(
-            e.kind,
-            crate::eval::ErrorKind::Unsupported,
-            "{f}: {}",
-            e.msg
-        );
-    }
+        r#"builtins.hashFile "sha256""#
+    )]
+    f: &str,
+) {
+    let drv = r#"(derivation { name = "x"; system = "x86_64-linux"; builder = "/bin/sh"; })"#;
+    let mut ev = Evaluator::new();
+    let e = ev
+        .eval_string(&format!("{f} {drv}"), b"/")
+        .and_then(|v| ev.force_deep(v))
+        .unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Unsupported, "{}", e.msg);
 }
 
 #[test]
@@ -313,24 +310,24 @@ fn pure_eval_answers_like_nix() {
 
 /// Nix fetches without a `sha256` in impure evaluation; iets refuses in every
 /// mode, as unsupported where Nix would fetch.
-#[test]
-fn fetchurl_needs_a_sha256_in_every_mode() {
+#[rstest]
+fn fetchurl_needs_a_sha256_in_every_mode(
+    #[values(true, false)] pure: bool,
+    #[values(
+        r#"builtins.fetchurl "https://example.com/x""#,
+        r#"builtins.fetchurl { url = "https://example.com/x"; name = "y"; }"#
+    )]
+    src: &str,
+) {
     let want = "'fetchurl' requires a 'sha256' argument: run 'iets prefetch https://example.com/x' and pass the hash as 'sha256'";
-    for pure in [true, false] {
-        for src in [
-            r#"builtins.fetchurl "https://example.com/x""#,
-            r#"builtins.fetchurl { url = "https://example.com/x"; name = "y"; }"#,
-        ] {
-            let mut ev = EvalConfig::new().pure(pure).build();
-            let e = ev.eval_string(src, b"/").unwrap_err();
-            let kind = if pure {
-                ErrorKind::Eval
-            } else {
-                ErrorKind::Unsupported
-            };
-            assert_eq!((e.kind, e.msg.as_str()), (kind, want), "{src}");
-        }
-    }
+    let mut ev = EvalConfig::new().pure(pure).build();
+    let e = ev.eval_string(src, b"/").unwrap_err();
+    let kind = if pure {
+        ErrorKind::Eval
+    } else {
+        ErrorKind::Unsupported
+    };
+    assert_eq!((e.kind, e.msg.as_str()), (kind, want));
 }
 
 /// The errors `nix-instantiate --eval` gives before `fetchurl` downloads
@@ -410,28 +407,19 @@ fn from_json_and_toml_reject_null_bytes() {
 
 /// The `.drvPath` answers of `nix-instantiate --eval --strict` (Nix 2.34.8). A
 /// Nix string is bytes, and the `.drv` path hashes them as they are.
-#[test]
-fn derivation_keeps_env_and_args_that_are_not_utf8() {
-    let byte = r#"(builtins.substring 0 1 "é")"#;
-    for (attrs, want) in [
-        (
-            format!("v = {byte};"),
-            "vhkdfhp7f0qfk8j0kx9b54hpn6cyg8m1-x.drv",
-        ),
-        (
-            format!("args = [ {byte} ];"),
-            "qsjvddzs1qqxaf6lm7w8pf66lhmkzb5l-x.drv",
-        ),
-        (
-            format!(r#"v = {byte}; __structuredAttrs = false; passAsFile = [ "v" ];"#),
-            "qxxd6h5v28msmzrnzf9mc1jxfk2d645i-x.drv",
-        ),
-    ] {
-        let src = format!(
-            r#"(derivation {{ name = "x"; builder = "/bin/sh"; system = "x86_64-linux"; {attrs} }}).drvPath"#
-        );
-        assert_eq!(eval_str(&src), format!(r#""/nix/store/{want}""#), "{attrs}");
-    }
+/// `byte` is a string that is not UTF-8.
+#[rstest]
+#[case::env("v = byte;", "vhkdfhp7f0qfk8j0kx9b54hpn6cyg8m1-x.drv")]
+#[case::args("args = [ byte ];", "qsjvddzs1qqxaf6lm7w8pf66lhmkzb5l-x.drv")]
+#[case::pass_as_file(
+    r#"v = byte; __structuredAttrs = false; passAsFile = [ "v" ];"#,
+    "qxxd6h5v28msmzrnzf9mc1jxfk2d645i-x.drv"
+)]
+fn derivation_keeps_env_and_args_that_are_not_utf8(#[case] attrs: &str, #[case] want: &str) {
+    let src = format!(
+        r#"let byte = builtins.substring 0 1 "é"; in (derivation {{ name = "x"; builder = "/bin/sh"; system = "x86_64-linux"; {attrs} }}).drvPath"#
+    );
+    assert_eq!(eval_str(&src), format!(r#""/nix/store/{want}""#));
 }
 
 /// `nix-instantiate --eval --arg a $'\n\n1' --arg b '  throw "b"'` names
@@ -457,14 +445,12 @@ fn update_forces_the_right_operand_first() {
     assert!(eval_err("builtins.tryEval (throw \"x\" // 1)").starts_with("expected a set"));
 }
 
-#[test]
-fn an_invalid_regex_fails_before_the_string_is_forced() {
-    for f in ["match", "split"] {
-        let e = eval_err(&format!(
-            "builtins.tryEval (builtins.{f} \"(\" (throw \"x\"))"
-        ));
-        assert!(e.starts_with("invalid regular expression"), "{f}: {e}");
-    }
+#[rstest]
+fn an_invalid_regex_fails_before_the_string_is_forced(#[values("match", "split")] f: &str) {
+    let e = eval_err(&format!(
+        "builtins.tryEval (builtins.{f} \"(\" (throw \"x\"))"
+    ));
+    assert!(e.starts_with("invalid regular expression"), "{e}");
 }
 
 #[test]

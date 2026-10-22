@@ -1040,6 +1040,7 @@ impl Read for Bytes<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use tempfile::tempdir;
 
     use crate::sys::fs::symlink;
@@ -1169,34 +1170,27 @@ mod tests {
     }
 
     /// The same errors as the tree path, for the same archives.
-    #[test]
-    fn the_errors_match() {
-        for (tag, entries, why) in [
-            (
-                "fifo",
-                vec![("dev", tar::EntryType::Fifo, 0o644u32, &b""[..])],
-                "unsupported file type",
-            ),
-            (
-                "dangling-link",
-                vec![("l", HARD, 0o644u32, &b"missing"[..])],
-                "hard link",
-            ),
-            (
-                "link-to-dir",
-                vec![
-                    ("d/", DIR, 0o755u32, &b""[..]),
-                    ("l", HARD, 0o644, &b"d"[..]),
-                    ("k", REG, 0o644, &b"x"[..]),
-                ],
-                "hard link",
-            ),
-        ] {
-            let (streamed, tree) = both(tag, tar_gz(&entries));
-            let e = streamed.unwrap_err().to_string();
-            assert!(e.contains(why), "{tag}: {e}");
-            assert!(tree.is_err(), "{tag}: the tree path accepted it");
-        }
+    #[rstest]
+    #[case("fifo", vec![("dev", tar::EntryType::Fifo, 0o644, &b""[..])], "unsupported file type")]
+    #[case("dangling-link", vec![("l", HARD, 0o644, &b"missing"[..])], "hard link")]
+    #[case(
+        "link-to-dir",
+        vec![
+            ("d/", DIR, 0o755, &b""[..]),
+            ("l", HARD, 0o644, &b"d"[..]),
+            ("k", REG, 0o644, &b"x"[..]),
+        ],
+        "hard link"
+    )]
+    fn the_errors_match(
+        #[case] tag: &str,
+        #[case] entries: Vec<(&str, tar::EntryType, u32, &[u8])>,
+        #[case] why: &str,
+    ) {
+        let (streamed, tree) = both(tag, tar_gz(&entries));
+        let e = streamed.unwrap_err().to_string();
+        assert!(e.contains(why), "{e}");
+        assert!(tree.is_err(), "the tree path accepted it");
     }
 
     /// The archives the git sink takes and libarchive's extract flags would

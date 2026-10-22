@@ -579,6 +579,7 @@ impl Env {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use tempfile::tempdir;
 
     const NO_ENV: Env = Env(|_| None);
@@ -784,36 +785,31 @@ mod tests {
         assert!(e.to_string().contains("'extra-source-map'"), "{e}");
     }
 
+    #[rstest]
+    #[case(
+        "workers = \"four\"",
+        "'workers' wants an integer, got \"four\" in t.toml"
+    )]
+    #[case("workers = -1", "'workers' wants an integer, got -1")]
+    #[case("cache = \"no\"", "'cache' wants true or false, got \"no\"")]
+    #[case("no-fallback = 1", "'no-fallback' wants true or false, got 1")]
+    #[case(
+        "builder = 4",
+        "'builder' wants a URL, or a list of URLs or {url, systems, features} tables, got 4"
+    )]
+    #[case(
+        "fix-hashes = \"yes\"",
+        "'fix-hashes' wants \"ask\", \"always\" or \"never\""
+    )]
+    #[case("source-map = \"/nix/store/a=/a\"", "'source-map' wants a list")]
+    fn a_wrong_type_names_the_key_and_the_file(#[case] text: &str, #[case] want: &str) {
+        let e = load(text).map(|_| ()).unwrap_err().to_string();
+        assert!(e.contains(want), "{e}");
+        assert!(e.ends_with("in t.toml"), "{e}");
+    }
+
     #[test]
-    fn a_wrong_type_names_the_key_and_the_file() {
-        for (text, want) in [
-            (
-                "workers = \"four\"",
-                "'workers' wants an integer, got \"four\" in t.toml",
-            ),
-            ("workers = -1", "'workers' wants an integer, got -1"),
-            ("cache = \"no\"", "'cache' wants true or false, got \"no\""),
-            (
-                "no-fallback = 1",
-                "'no-fallback' wants true or false, got 1",
-            ),
-            (
-                "builder = 4",
-                "'builder' wants a URL, or a list of URLs or {url, systems, features} tables, got 4",
-            ),
-            (
-                "fix-hashes = \"yes\"",
-                "'fix-hashes' wants \"ask\", \"always\" or \"never\"",
-            ),
-            (
-                "source-map = \"/nix/store/a=/a\"",
-                "'source-map' wants a list",
-            ),
-        ] {
-            let e = load(text).map(|_| ()).unwrap_err().to_string();
-            assert!(e.contains(want), "{text}: {e}");
-            assert!(e.ends_with("in t.toml"), "{text}: {e}");
-        }
+    fn a_syntax_error_names_the_file_first() {
         let e = load("workers = ").map(|_| ()).unwrap_err().to_string();
         assert!(e.starts_with("t.toml: "), "{e}");
     }

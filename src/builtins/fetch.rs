@@ -506,6 +506,7 @@ mod tests {
     use crate::lint::allow::Allows;
     use crate::session::Session;
     use crate::store::path::StorePath;
+    use rstest::rstest;
 
     fn tree(ev: &mut Evaluator, source: &str) -> Word {
         let path = StorePath::parse("/nix/store/00000000000000000000000000000000-source").unwrap();
@@ -688,47 +689,39 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_selection_of_the_count_is_the_site() {
-        for (f, site) in [
-            ("t: t.revCount * 2", "1:4"),
-            ("t: (t.revCount or 0) * 2", "1:5"),
-            ("t: { inherit (t) revCount; }.revCount * 2", "1:18"),
-            ("t: (let inherit (t) revCount; in revCount) * 2", "1:21"),
-            (
-                "t: (rec { inherit (t) revCount; n = revCount * 2; }).n",
-                "1:23",
-            ),
-            ("t: { sourceInfo = t; }.sourceInfo.revCount * 2", "1:4"),
-            ("t: t.\"revCount\" * 2", "1:4"),
-            ("t: t.${\"revCount\"} * 2", "1:4"),
-            ("t: (let s = t; in s.revCount) * 2", "1:19"),
-            (
-                "t: ({ self, ... }: self.revCount) { self = t; } * 2",
-                "1:20",
-            ),
-            ("t: ({ a = 1; } // t).revCount * 2", "1:4"),
-            ("t: builtins.getAttr \"revCount\" t * 2", "1:4"),
-            ("t: builtins.getAttr (\"rev\" + \"Count\") t * 2", "1:4"),
-            ("t:\n  let n = t.revCount; in n + n", "2:11"),
-        ] {
-            let found = reads(Config::default(), &["self"], f);
-            assert_eq!(found, [format!("self {site}")], "{f}");
-        }
+    #[rstest]
+    #[case("t: t.revCount * 2", "1:4")]
+    #[case("t: (t.revCount or 0) * 2", "1:5")]
+    #[case("t: { inherit (t) revCount; }.revCount * 2", "1:18")]
+    #[case("t: (let inherit (t) revCount; in revCount) * 2", "1:21")]
+    #[case("t: (rec { inherit (t) revCount; n = revCount * 2; }).n", "1:23")]
+    #[case("t: { sourceInfo = t; }.sourceInfo.revCount * 2", "1:4")]
+    #[case("t: t.\"revCount\" * 2", "1:4")]
+    #[case("t: t.${\"revCount\"} * 2", "1:4")]
+    #[case("t: (let s = t; in s.revCount) * 2", "1:19")]
+    #[case("t: ({ self, ... }: self.revCount) { self = t; } * 2", "1:20")]
+    #[case("t: ({ a = 1; } // t).revCount * 2", "1:4")]
+    #[case("t: builtins.getAttr \"revCount\" t * 2", "1:4")]
+    #[case("t: builtins.getAttr (\"rev\" + \"Count\") t * 2", "1:4")]
+    #[case("t:\n  let n = t.revCount; in n + n", "2:11")]
+    fn a_selection_of_the_count_is_the_site(#[case] f: &str, #[case] site: &str) {
+        let found = reads(Config::default(), &["self"], f);
+        assert_eq!(found, [format!("self {site}")]);
     }
 
-    #[test]
-    fn a_read_that_is_not_a_selection_has_no_site() {
-        for f in [
-            "t: t.${\"rev\" + \"Count\"} * 2",
-            "t: (with t; revCount) * 2",
-            "t: ({ revCount, ... }: revCount * 2) t",
-            "t: builtins.elemAt (builtins.attrValues (builtins.intersectAttrs { revCount = 1; } t)) 0 * 2",
-            "t: (builtins.fromJSON (builtins.toJSON (builtins.intersectAttrs { revCount = 1; } t))).revCount * 2",
-            "t: (builtins.mapAttrs (n: v: v) t).revCount * 2",
-        ] {
-            assert_eq!(reads(Config::default(), &["self"], f), ["self"], "{f}");
-        }
+    #[rstest]
+    #[case("t: t.${\"rev\" + \"Count\"} * 2")]
+    #[case("t: (with t; revCount) * 2")]
+    #[case("t: ({ revCount, ... }: revCount * 2) t")]
+    #[case(
+        "t: builtins.elemAt (builtins.attrValues (builtins.intersectAttrs { revCount = 1; } t)) 0 * 2"
+    )]
+    #[case(
+        "t: (builtins.fromJSON (builtins.toJSON (builtins.intersectAttrs { revCount = 1; } t))).revCount * 2"
+    )]
+    #[case("t: (builtins.mapAttrs (n: v: v) t).revCount * 2")]
+    fn a_read_that_is_not_a_selection_has_no_site(#[case] f: &str) {
+        assert_eq!(reads(Config::default(), &["self"], f), ["self"]);
     }
 
     #[test]
@@ -764,20 +757,17 @@ mod tests {
         assert_eq!(found(&ev), ["self 2:3"]);
     }
 
-    #[test]
-    fn the_name_on_a_value_that_is_not_a_tree_is_silent() {
-        for f in [
-            "t: { revCount = 14; }.revCount",
-            "t: { revCount = t.lastModified / 86400 * 14; }.revCount",
-            "t: (builtins.zipAttrsWith (n: vs: 14) [ { revCount = 1; } ]).revCount",
-            "t: (builtins.mapAttrs (n: v: v * 2) { revCount = 7; }).revCount",
-            "t: builtins.getAttr \"revCount\" { revCount = 14; }",
-            "t: { revCount = 14; }.revCount or 0",
-            "t: { }.revCount or 14",
-            "t: { }.a.revCount or 14",
-        ] {
-            let all = toml("[lint]\nscope = \"all\"\n");
-            assert!(reads(all, &["self", "inputs.a"], f).is_empty(), "{f}");
-        }
+    #[rstest]
+    #[case("t: { revCount = 14; }.revCount")]
+    #[case("t: { revCount = t.lastModified / 86400 * 14; }.revCount")]
+    #[case("t: (builtins.zipAttrsWith (n: vs: 14) [ { revCount = 1; } ]).revCount")]
+    #[case("t: (builtins.mapAttrs (n: v: v * 2) { revCount = 7; }).revCount")]
+    #[case("t: builtins.getAttr \"revCount\" { revCount = 14; }")]
+    #[case("t: { revCount = 14; }.revCount or 0")]
+    #[case("t: { }.revCount or 14")]
+    #[case("t: { }.a.revCount or 14")]
+    fn the_name_on_a_value_that_is_not_a_tree_is_silent(#[case] f: &str) {
+        let all = toml("[lint]\nscope = \"all\"\n");
+        assert!(reads(all, &["self", "inputs.a"], f).is_empty());
     }
 }

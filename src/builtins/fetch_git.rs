@@ -328,35 +328,42 @@ fn from_nix(ev: &mut Evaluator, args: &Attrs, shown: &str, pos: Pos) -> EvalResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
-    fn only_a_plain_rev_or_ref_is_read_by_iets() {
+    fn only_a_full_lowercase_rev_is_a_rev() {
         let rev = "61c2d57b4c40383bc42bf989900543aaba01d24f";
         assert!(is_rev(rev));
         assert!(!is_rev(NULL_REV));
         assert!(!is_rev(&rev.to_uppercase()));
         assert!(!is_rev(&rev[..7]));
-        for r in ["main", "HEAD", "v1.0", "refs/tags/v1", "a_b+c"] {
-            assert!(is_ref_name(r), "{r}");
-        }
-        for r in [
-            "", "-x", "/a", "a/", "a..b", "a//b", "a b", "a~1", "a^", "x.", ".x",
-        ] {
-            assert!(!is_ref_name(r), "{r}");
-        }
     }
 
-    #[test]
-    fn a_working_tree_is_a_file_url_of_an_absolute_path() {
-        for (url, root) in [
-            ("/r/a b", Some("/r/a b")),
-            ("file:///r/x", Some("/r/x")),
-            ("git+file:///r/x", Some("/r/x")),
-            ("rel/x", None),
-            ("https://x.org/a.git", None),
-        ] {
-            let fixed = flakeref::fix_git_url(url).unwrap();
-            assert_eq!(workdir_root(&fixed).as_deref(), root, "{url}");
-        }
+    #[rstest]
+    fn a_plain_ref_name_is_read_by_iets(
+        #[values("main", "HEAD", "v1.0", "refs/tags/v1", "a_b+c")] r: &str,
+    ) {
+        assert!(is_ref_name(r));
+    }
+
+    #[rstest]
+    fn a_ref_name_git_would_refuse_is_not(
+        #[values("", "-x", "/a", "a/", "a..b", "a//b", "a b", "a~1", "a^", "x.", ".x")] r: &str,
+    ) {
+        assert!(!is_ref_name(r));
+    }
+
+    #[rstest]
+    #[case("/r/a b", Some("/r/a b"))]
+    #[case("file:///r/x", Some("/r/x"))]
+    #[case("git+file:///r/x", Some("/r/x"))]
+    #[case("rel/x", None)]
+    #[case("https://x.org/a.git", None)]
+    fn a_working_tree_is_a_file_url_of_an_absolute_path(
+        #[case] url: &str,
+        #[case] root: Option<&str>,
+    ) {
+        let fixed = flakeref::fix_git_url(url).unwrap();
+        assert_eq!(workdir_root(&fixed).as_deref(), root);
     }
 }

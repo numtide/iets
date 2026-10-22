@@ -777,6 +777,7 @@ fn abs_path(path: &str, base: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn fixtures() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/conf")
@@ -1049,19 +1050,16 @@ mod tests {
         assert_eq!(c.max_jobs().unwrap(), cpus());
     }
 
-    #[test]
-    fn bool_spellings() {
-        for (text, want) in [
-            ("true", true),
-            ("yes", true),
-            ("1", true),
-            ("false", false),
-            ("no", false),
-            ("0", false),
-        ] {
-            let c = from_str(&format!("keep-failed = {text}\n"), "t").unwrap();
-            assert_eq!(c.keep_failed().unwrap(), want, "{text}");
-        }
+    #[rstest]
+    #[case("true", true)]
+    #[case("yes", true)]
+    #[case("1", true)]
+    #[case("false", false)]
+    #[case("no", false)]
+    #[case("0", false)]
+    fn bool_spellings(#[case] text: &str, #[case] want: bool) {
+        let c = from_str(&format!("keep-failed = {text}\n"), "t").unwrap();
+        assert_eq!(c.keep_failed().unwrap(), want);
     }
 
     #[test]

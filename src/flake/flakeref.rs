@@ -504,6 +504,7 @@ pub fn flake_ref_to_string(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     impl Parsed {
         fn get(&self, k: &str) -> Option<&str> {
@@ -597,53 +598,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn round_trips() {
-        for (s, want) in [
-            (
-                "github:NixOS/nixpkgs/23.05?dir=lib",
-                "github:NixOS/nixpkgs/23.05?dir=lib",
-            ),
-            (
-                "github:a/b?rev=ABCDEF0123456789012345678901234567890123",
-                "github:a/b/abcdef0123456789012345678901234567890123",
-            ),
-            ("gitlab:a/b?host=x.org&ref=v1", "gitlab:a/b/v1?host=x.org"),
-            ("nixpkgs/x", "flake:nixpkgs/x"),
-            ("/a b/c?rev=x", "path:/a%20b/c?rev=x"),
-            (
-                "git+https://x.org/a?ref=main&foo=1&shallow=0",
-                "git+https://x.org/a?foo=1&ref=main",
-            ),
-            ("git://x.org/a", "git://x.org/a"),
-            ("git+file:///tmp/x?dir=d", "git+file:///tmp/x?dir=d"),
-            (
-                "https://u:p@x.org:80/a%2f?b=c+d",
-                "https://u:p@x.org:80/a%2F?b=c%2Bd",
-            ),
-            ("tarball+http://x.org/a?b c=1", "http://x.org/a?b%20c=1"),
-        ] {
-            assert_eq!(shown(s), want, "{s}");
-        }
+    #[rstest]
+    #[case(
+        "github:NixOS/nixpkgs/23.05?dir=lib",
+        "github:NixOS/nixpkgs/23.05?dir=lib"
+    )]
+    #[case(
+        "github:a/b?rev=ABCDEF0123456789012345678901234567890123",
+        "github:a/b/abcdef0123456789012345678901234567890123"
+    )]
+    #[case("gitlab:a/b?host=x.org&ref=v1", "gitlab:a/b/v1?host=x.org")]
+    #[case("nixpkgs/x", "flake:nixpkgs/x")]
+    #[case("/a b/c?rev=x", "path:/a%20b/c?rev=x")]
+    #[case(
+        "git+https://x.org/a?ref=main&foo=1&shallow=0",
+        "git+https://x.org/a?foo=1&ref=main"
+    )]
+    #[case("git://x.org/a", "git://x.org/a")]
+    #[case("git+file:///tmp/x?dir=d", "git+file:///tmp/x?dir=d")]
+    #[case("https://u:p@x.org:80/a%2f?b=c+d", "https://u:p@x.org:80/a%2F?b=c%2Bd")]
+    #[case("tarball+http://x.org/a?b c=1", "http://x.org/a?b%20c=1")]
+    fn round_trips(#[case] s: &str, #[case] want: &str) {
+        assert_eq!(shown(s), want);
+    }
+
+    #[rstest]
+    #[case("/a b/c", "file:///a%20b/c")]
+    #[case("rel/x", "file:rel/x")]
+    #[case("file:///a/b", "file:///a/b")]
+    #[case("git+file:///a/b", "file:///a/b")]
+    #[case("git+https://x.org/a.git", "https://x.org/a.git")]
+    #[case("ssh://git@x.org/a", "ssh://git@x.org/a")]
+    fn git_urls_are_fixed_like_nix(#[case] url: &str, #[case] want: &str) {
+        assert_eq!(fix_git_url(url).unwrap(), want);
     }
 
     #[test]
-    fn git_urls_are_fixed_like_nix() {
-        for (url, want) in [
-            ("/a b/c", "file:///a%20b/c"),
-            ("rel/x", "file:rel/x"),
-            ("file:///a/b", "file:///a/b"),
-            ("git+file:///a/b", "file:///a/b"),
-            ("git+https://x.org/a.git", "https://x.org/a.git"),
-            ("ssh://git@x.org/a", "ssh://git@x.org/a"),
-        ] {
-            assert_eq!(fix_git_url(url).unwrap(), want, "{url}");
-        }
+    fn git_urls_nix_refuses_are_refused() {
         assert!(matches!(
             fix_git_url("git@github.com:a/b.git"),
             Err(Error::Unsupported(_))
         ));
         assert!(matches!(fix_git_url("x.org:a/b"), Err(Error::Flake(_))));
+    }
+
+    #[test]
+    fn a_file_url_is_a_local_path() {
         assert_eq!(file_url_path("file:///a%20b/c").as_deref(), Some("/a b/c"));
         assert_eq!(file_url_path("file:rel/x").as_deref(), Some("rel/x"));
         assert_eq!(file_url_path("https://x.org/a"), None);
@@ -672,28 +672,28 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::relative("./foo")]
+    #[case::github_no_repo("github:a")]
+    #[case::github_fragment("github:a/b#x")]
+    #[case::indirect_too_deep("nixpkgs/a/b/c")]
+    #[case::bad_escape("/a#%zz")]
+    fn a_bad_ref_is_an_error(#[case] s: &str) {
+        assert!(matches!(parse_absolute(s), Err(Error::Flake(_))));
+    }
+
+    #[rstest]
+    #[case("foo:bar")]
+    #[case("sourcehut:~a/b")]
+    #[case("hg+https://x.org/a")]
+    #[case("https://[::1]/a")]
+    #[case("https://x%41.org/a")]
+    fn an_unsupported_ref_says_so(#[case] s: &str) {
+        assert!(matches!(parse_absolute(s), Err(Error::Unsupported(_))));
+    }
+
     #[test]
-    fn errors_and_unsupported() {
-        let eval = |s: &str| matches!(parse_absolute(s), Err(Error::Flake(_)));
-        let unsup = |s: &str| matches!(parse_absolute(s), Err(Error::Unsupported(_)));
-        for s in [
-            "./foo",
-            "github:a",
-            "github:a/b#x",
-            "nixpkgs/a/b/c",
-            "/a#%zz",
-        ] {
-            assert!(eval(s), "{s}");
-        }
-        for s in [
-            "foo:bar",
-            "sourcehut:~a/b",
-            "hg+https://x.org/a",
-            "https://[::1]/a",
-            "https://x%41.org/a",
-        ] {
-            assert!(unsup(s), "{s}");
-        }
+    fn attrs_that_cannot_be_a_ref() {
         let hg = attrs(&[("type", st("hg"))]);
         assert!(matches!(attrs_to_string(hg), Err(Error::Unsupported(_))));
         let gh = attrs(&[("type", st("github")), ("owner", st("a"))]);

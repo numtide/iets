@@ -986,33 +986,26 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::sync::atomic::{AtomicPtr, AtomicU64};
 
-    #[test]
-    fn a_task_survives_packing_past_the_old_24_bit_start() {
-        for t in [
-            Task {
-                kind: 7,
-                obj: Word::EMPTY,
-                start: 0,
-                len: 0,
-            },
-            Task {
-                kind: 1,
-                obj: Word::EMPTY,
-                start: 16_777_216,
-                len: 16,
-            },
-            Task {
-                kind: 8,
-                obj: Word::EMPTY,
-                start: u32::MAX,
-                len: LEN_MAX,
-            },
-        ] {
-            let (a, b) = t.pack();
-            assert_eq!(Task::unpack(a, b), t);
-        }
+    #[rstest]
+    #[case(7, 0, 0)]
+    #[case(1, 16_777_216, 16)]
+    #[case(8, u32::MAX, LEN_MAX)]
+    fn a_task_survives_packing_past_the_old_24_bit_start(
+        #[case] kind: u8,
+        #[case] start: u32,
+        #[case] len: u32,
+    ) {
+        let t = Task {
+            kind,
+            obj: Word::EMPTY,
+            start,
+            len,
+        };
+        let (a, b) = t.pack();
+        assert_eq!(Task::unpack(a, b), t);
     }
 
     struct Counter {

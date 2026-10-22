@@ -880,8 +880,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::sys;
     use crate::sys::fs::set_executable;
+    use rstest::rstest;
     use std::env;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     /// Builds the fixture tree used by the shell commands in the test comments:
     /// mkdir -p tree/sub; printf 'hello world\n' > tree/a.txt;
@@ -1007,23 +1009,21 @@ pub(crate) mod tests {
     }
 
     // archive.cc:parse refuses each of these; found by fuzz/ (nar-read)
+    #[rstest]
+    #[case::unsorted(crafted(&[b"b", b"a"], b""))]
+    #[case::duplicate(crafted(&[b"a", b"a"], b""))]
+    #[case::dot_dot(crafted(&[b".."], b""))]
+    #[case::slash(crafted(&[b"a/b"], b""))]
+    #[case::empty_name(crafted(&[], b""))]
+    #[case::nul(crafted(&[], b"a\0b"))]
+    fn readers_refuse_what_nix_refuses(#[case] nar: Vec<u8>) {
+        let d = tempdir().unwrap();
+        assert!(parse_length(&mut nar.as_slice()).is_err());
+        assert!(restore_path(&mut nar.as_slice(), &d.path().join("out")).is_err());
+    }
+
     #[test]
-    fn readers_refuse_what_nix_refuses() {
-        let out = env::temp_dir().join(format!("iets-nar-{}-refuse", std::process::id()));
-        for nar in [
-            crafted(&[b"b", b"a"], b""),
-            crafted(&[b"a", b"a"], b""),
-            crafted(&[b".."], b""),
-            crafted(&[b"a/b"], b""),
-            crafted(&[], b""),
-            crafted(&[], b"a\0b"),
-        ] {
-            assert!(parse_length(&mut nar.as_slice()).is_err());
-            let _ = fs::remove_dir_all(&out);
-            let _ = fs::remove_file(&out);
-            assert!(restore_path(&mut nar.as_slice(), &out).is_err());
-        }
-        let _ = fs::remove_dir_all(&out);
+    fn readers_take_a_sorted_directory() {
         assert!(parse_length(&mut crafted(&[b"a", b"b"], b"").as_slice()).is_ok());
     }
 

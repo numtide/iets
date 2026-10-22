@@ -110,6 +110,7 @@ pub fn anchor_len(comps: &[&[u8]]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[cfg(windows)]
     use crate::compile::canon_path;
@@ -181,11 +182,11 @@ mod tests {
         assert_eq!(n("//?/Volume{1}/x"), r"\\?\Volume{1}\x");
     }
 
-    #[test]
-    fn the_evaluators_form_is_left_alone() {
-        for p in ["/C:/Users/x", "/UNC/host/share", "/", "a/b", "/nonexistent"] {
-            assert_eq!(i(p), p);
-        }
+    #[rstest]
+    fn the_evaluators_form_is_left_alone(
+        #[values("/C:/Users/x", "/UNC/host/share", "/", "a/b", "/nonexistent")] p: &str,
+    ) {
+        assert_eq!(i(p), p);
     }
 
     #[test]
@@ -206,19 +207,20 @@ mod tests {
         assert_eq!(n("//UNC/host/share"), r"\\host\share");
     }
 
-    #[test]
-    fn a_round_trip_is_stable() {
-        for p in [
+    #[rstest]
+    fn a_round_trip_is_stable(
+        #[values(
             r"C:\Users\x",
             r"C:\",
             r"\\host\share\a\b",
             r"a\b",
             r"..\a",
-            r"\\.\pipe\x",
-        ] {
-            let once = to_internal(p.as_bytes());
-            assert_eq!(to_internal(&to_native(&once)), once, "{p}");
-        }
+            r"\\.\pipe\x"
+        )]
+        p: &str,
+    ) {
+        let once = to_internal(p.as_bytes());
+        assert_eq!(to_internal(&to_native(&once)), once);
     }
 
     #[test]

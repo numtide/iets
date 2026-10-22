@@ -922,6 +922,7 @@ fn relay(from: impl Read, act: &Activity, keep_errors: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use tempfile::tempdir;
 
     use std::time::Instant;
@@ -1102,14 +1103,17 @@ mod tests {
         assert!(op < subprocess);
     }
 
-    #[test]
-    fn only_the_archive_types_are_fetched_by_iets() {
-        for ty in ["github", "gitlab", "sourcehut", "tarball"] {
-            assert!(is_tarball_type(&attrs(&[("type", ty)])), "{ty}");
-        }
-        for ty in ["git", "hg", "path", "file"] {
-            assert!(!is_tarball_type(&attrs(&[("type", ty)])), "{ty}");
-        }
+    #[rstest]
+    #[case("github", true)]
+    #[case("gitlab", true)]
+    #[case("sourcehut", true)]
+    #[case("tarball", true)]
+    #[case("git", false)]
+    #[case("hg", false)]
+    #[case("path", false)]
+    #[case("file", false)]
+    fn only_the_archive_types_are_fetched_by_iets(#[case] ty: &str, #[case] want: bool) {
+        assert_eq!(is_tarball_type(&attrs(&[("type", ty)])), want);
     }
 
     #[test]

@@ -507,12 +507,12 @@ fn hash_sources(sources: &[&StorePath], infos: &[SourceOrigin]) -> Result<Vec<Ob
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::nar::tests::fixture_tree;
+    use crate::store::nar::tests::{Tree, tree};
     use crate::store::nar::{nar_hash, nar_size};
+    use rstest::rstest;
 
-    #[test]
-    fn hash_source_matches_nar_hash() {
-        let tree = fixture_tree("plan");
+    #[rstest]
+    fn hash_source_matches_nar_hash(tree: Tree) {
         let (h, size) = hash_source(&SrcPath::fs(tree.clone(), None)).unwrap();
         assert_eq!(h, nar_hash(&tree).unwrap());
         assert_eq!(size, nar_size(&tree).unwrap());

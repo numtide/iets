@@ -878,26 +878,40 @@ pub fn nar_hash_of_string(contents: &[u8]) -> Hash {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::sys;
     use crate::sys::fs::set_executable;
-    use rstest::rstest;
+    use rstest::{fixture, rstest};
     use std::env;
+    use std::ops::Deref;
     use std::path::PathBuf;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
-    /// Builds the fixture tree used by the shell commands in the test comments:
+    /// The tree the shell commands in the test comments build:
     /// mkdir -p tree/sub; printf 'hello world\n' > tree/a.txt;
     /// printf '#!/bin/sh\necho hi\n' > tree/run.sh; chmod +x tree/run.sh;
     /// ln -s a.txt tree/link; : > tree/sub/empty; printf zzz > tree/sub/z
-    pub(crate) fn fixture_tree(tag: &str) -> PathBuf {
-        fixture_tree_with(tag, true)
+    pub(crate) struct Tree {
+        path: PathBuf,
+        _dir: TempDir,
+    }
+
+    impl Deref for Tree {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.path
+        }
+    }
+
+    impl AsRef<Path> for Tree {
+        fn as_ref(&self) -> &Path {
+            &self.path
+        }
     }
 
     /// `exec` is whether `run.sh` has the executable bit, which Windows cannot set.
-    fn fixture_tree_with(tag: &str, exec: bool) -> PathBuf {
-        let dir = sys::temp_dir().join(format!("iets-nar-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let tree = dir.join("tree");
+    #[fixture]
+    pub(crate) fn tree(#[default(true)] exec: bool) -> Tree {
+        let dir = tempdir().unwrap();
+        let tree = dir.path().join("tree");
         fs::create_dir_all(tree.join("sub")).unwrap();
         fs::write(tree.join("a.txt"), b"hello world\n").unwrap();
         fs::write(tree.join("run.sh"), b"#!/bin/sh\necho hi\n").unwrap();
@@ -905,13 +919,15 @@ pub(crate) mod tests {
         symlink("a.txt", tree.join("link")).unwrap();
         fs::write(tree.join("sub/empty"), b"").unwrap();
         fs::write(tree.join("sub/z"), b"zzz").unwrap();
-        tree
+        Tree {
+            path: tree,
+            _dir: dir,
+        }
     }
 
     // nix-store --dump tree | sha256sum ; nix-store --dump tree | wc -c
-    #[test]
-    fn directory_nar() {
-        let tree = fixture_tree_with("dir", false);
+    #[rstest]
+    fn directory_nar(#[with(false)] tree: Tree) {
         assert_eq!(
             nar_hash(&tree).unwrap().to_base16(),
             "5bd341428326a5608117fb128d3114fc3fb6c76de99cd19c10397bdad728beae"
@@ -921,9 +937,8 @@ pub(crate) mod tests {
 
     // the same with `chmod +x tree/run.sh`
     #[cfg(unix)]
-    #[test]
-    fn directory_nar_with_an_executable() {
-        let tree = fixture_tree("dir-x");
+    #[rstest]
+    fn directory_nar_with_an_executable(tree: Tree) {
         assert_eq!(
             nar_hash(&tree).unwrap().to_base16(),
             "9db4d4d873838f1fbb8f363841597d61244beebb19bd10b606ae2a6d4b940ede"
@@ -932,9 +947,8 @@ pub(crate) mod tests {
     }
 
     // nix hash path tree ; nix hash path --base32 tree
-    #[test]
-    fn directory_nar_hash_formats() {
-        let tree = fixture_tree_with("fmt", false);
+    #[rstest]
+    fn directory_nar_hash_formats(#[with(false)] tree: Tree) {
         let h = nar_hash(&tree).unwrap();
         assert_eq!(
             h.to_sri(),
@@ -947,18 +961,16 @@ pub(crate) mod tests {
     }
 
     // nix-store --dump tree/a.txt | sha256sum
-    #[test]
-    fn regular_file_nar() {
-        let tree = fixture_tree("file");
+    #[rstest]
+    fn regular_file_nar(tree: Tree) {
         let expected = "34ca3ac63094d1d5751f741101692a78f95eedf10744b088129fc324dfd0f603";
         assert_eq!(nar_hash(&tree.join("a.txt")).unwrap().to_base16(), expected);
         assert_eq!(nar_hash_of_string(b"hello world\n").to_base16(), expected);
     }
 
     // nix-store --dump tree/run.sh | sha256sum
-    #[test]
-    fn script_nar() {
-        let tree = fixture_tree_with("script", false);
+    #[rstest]
+    fn script_nar(#[with(false)] tree: Tree) {
         assert_eq!(
             nar_hash(&tree.join("run.sh")).unwrap().to_base16(),
             "e519505edb9f77f7f02efefd3c9b29766fdd0f449e9bf932313d39ce249982e9"
@@ -967,9 +979,8 @@ pub(crate) mod tests {
 
     // the same after `chmod +x tree/run.sh`
     #[cfg(unix)]
-    #[test]
-    fn executable_file_nar() {
-        let tree = fixture_tree("exec");
+    #[rstest]
+    fn executable_file_nar(tree: Tree) {
         assert_eq!(
             nar_hash(&tree.join("run.sh")).unwrap().to_base16(),
             "5e0accf02cedede5e4119ffa15e79e79a5fb1fb9bc43c3d434f33227a14477a0"
@@ -977,9 +988,8 @@ pub(crate) mod tests {
     }
 
     // nix-store --dump tree/link | sha256sum
-    #[test]
-    fn symlink_nar() {
-        let tree = fixture_tree("link");
+    #[rstest]
+    fn symlink_nar(tree: Tree) {
         assert_eq!(
             nar_hash(&tree.join("link")).unwrap().to_base16(),
             "8d3c00cfa866e4d1b809772afeac240786246221eb2c574d69c4bba168834e81"
@@ -1028,9 +1038,8 @@ pub(crate) mod tests {
     }
 
     // nix-store --dump tree | nix-store --restore out ; nix-store --dump out | sha256sum
-    #[test]
-    fn restore_roundtrip() {
-        let tree = fixture_tree("restore");
+    #[rstest]
+    fn restore_roundtrip(tree: Tree) {
         let mut nar = Vec::new();
         dump_path(&tree, &mut nar, &mut |_, _| true).unwrap();
         let out = tree.with_file_name("restored");
@@ -1054,9 +1063,8 @@ pub(crate) mod tests {
         assert!(restore_path(&mut &b"nix-archive-2"[..], &out).is_err());
     }
 
-    #[test]
-    fn filter_sees_types_and_paths() {
-        let tree = fixture_tree("filter");
+    #[rstest]
+    fn filter_sees_types_and_paths(tree: Tree) {
         let mut seen = Vec::new();
         let (_, _) = nar_hash_filtered(&tree, HashAlgo::Sha256, &mut |p, t| {
             seen.push((p.strip_prefix(&tree).unwrap().to_path_buf(), t));

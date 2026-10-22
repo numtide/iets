@@ -508,7 +508,8 @@ mod tests {
     use super::*;
     use crate::store::drv::load_derivation_from_store;
     #[cfg(unix)]
-    use crate::store::nar::tests::fixture_tree;
+    use crate::store::nar::tests::{Tree, tree};
+    use rstest::rstest;
 
     fn fixture(name: &str) -> String {
         fs::read_to_string(
@@ -617,9 +618,8 @@ mod tests {
 
     // TODO: the script is for a POSIX shell and the test names its paths that way.
     #[cfg(unix)]
-    #[test]
-    fn rc_script_rewrites_outputs_and_writes_attrs() {
-        let dir = fixture_tree("devenv-rc");
+    #[rstest]
+    fn rc_script_rewrites_outputs_and_writes_attrs(#[from(tree)] dir: Tree) {
         let json: serde_json::Value = serde_json::from_str(
             r#"{
               "bashFunctions": {},

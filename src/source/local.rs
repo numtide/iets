@@ -291,7 +291,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use crate::store::hash;
-    use crate::store::nar::tests::fixture_tree;
+    use crate::store::nar::tests::{Tree, tree};
+    use rstest::rstest;
 
     /// Only the fixed-output path of the hash itself skips the walk: another
     /// hash under the same name, another name, a path below it and a
@@ -318,9 +319,8 @@ mod tests {
         assert_eq!(v, ["/r/a", "/r/a/b", "/r/a/b/c.nix", "/r/d.nix"]);
     }
 
-    #[test]
-    fn max_mtime_covers_root_and_children() {
-        let d = fixture_tree("mtime");
+    #[rstest]
+    fn max_mtime_covers_root_and_children(#[from(tree)] d: Tree) {
         let f = d.join("newest");
         fs::write(&f, b"x").unwrap();
         let later = SystemTime::now() + Duration::from_secs(1000);

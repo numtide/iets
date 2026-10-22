@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use crate::store::nar::nar_hash;
     use crate::store::nar::nar_hash_filtered;
-    use crate::store::nar::tests::fixture_tree;
+    use crate::store::nar::tests::{Tree, tree};
 
     fn set(paths: &[&str]) -> BTreeSet<StorePath> {
         paths.iter().map(|p| StorePath::parse(p).unwrap()).collect()
@@ -482,10 +482,9 @@ mod tests {
         );
     }
 
-    // nix-instantiate --eval -E '"${./tree}"' (tree from nar.rs fixture_tree)
-    #[test]
-    fn path_copy_directory() {
-        let tree = fixture_tree("pathcopy");
+    // nix-instantiate --eval -E '"${./tree}"' (tree from the nar.rs fixture)
+    #[rstest]
+    fn path_copy_directory(tree: Tree) {
         let h = nar_hash(&tree).unwrap();
         let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "tree", &BTreeSet::new())
             .unwrap();
@@ -498,9 +497,8 @@ mod tests {
     }
 
     // nix-instantiate --eval -E '"${./tree/a.txt}"'
-    #[test]
-    fn path_copy_file() {
-        let tree = fixture_tree("pathfile");
+    #[rstest]
+    fn path_copy_file(tree: Tree) {
         let h = nar_hash(&tree.join("a.txt")).unwrap();
         let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "a.txt", &BTreeSet::new())
             .unwrap();
@@ -511,9 +509,8 @@ mod tests {
     }
 
     // nix-instantiate --eval -E '"${builtins.filterSource (p: t: baseNameOf p != "sub") ./tree}"'
-    #[test]
-    fn filter_source() {
-        let tree = fixture_tree("filtersrc");
+    #[rstest]
+    fn filter_source(tree: Tree) {
         let (h, _) = nar_hash_filtered(&tree, HashAlgo::Sha256, &mut |p, _| {
             p.file_name().unwrap() != "sub"
         })
@@ -528,9 +525,8 @@ mod tests {
     }
 
     // nix-instantiate --eval -E '"${builtins.path { path = ./tree; name = "mytree"; }}"'
-    #[test]
-    fn path_with_name() {
-        let tree = fixture_tree("pathname");
+    #[rstest]
+    fn path_with_name(tree: Tree) {
         let h = nar_hash(&tree).unwrap();
         let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "mytree", &BTreeSet::new())
             .unwrap();

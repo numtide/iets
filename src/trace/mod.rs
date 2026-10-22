@@ -847,7 +847,8 @@ mod tests {
 
     use std::time::Instant;
 
-    use crate::store::nar::tests::fixture_tree;
+    use crate::store::nar::tests::{Tree, tree};
+    use rstest::rstest;
 
     #[test]
     fn dedupe_keeps_conflicting_values() {
@@ -912,9 +913,8 @@ mod tests {
 
     /// The fused fingerprint must be byte-identical to the separate walk, or
     /// every cache entry a dump writes would miss on validation.
-    #[test]
-    fn dump_fingerprint_matches_the_separate_walk() {
-        let dir = fixture_tree("trace-fused");
+    #[rstest]
+    fn dump_fingerprint_matches_the_separate_walk(#[from(tree)] dir: Tree) {
         for accepted in [
             None,
             Some(
@@ -937,9 +937,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fingerprint_changes_with_content_size_and_seen_entries() {
-        let dir = fixture_tree("trace-fp");
+    #[rstest]
+    fn fingerprint_changes_with_content_size_and_seen_entries(#[from(tree)] dir: Tree) {
         let (a, sa) = tree_fingerprint(&dir, None).unwrap();
         let (b, sb) = tree_fingerprint(&dir, None).unwrap();
         assert_eq!((a, sa), (b, sb));

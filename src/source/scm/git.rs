@@ -475,8 +475,9 @@ impl Scm for Git {
 mod tests {
     use crate::flake::parse_flake_ref;
     use crate::source::SourceRef;
-    use crate::store::nar::tests::fixture_tree;
+    use crate::store::nar::tests::{Tree, tree};
     use crate::sys;
+    use rstest::rstest;
 
     use std::path::Path;
 
@@ -487,9 +488,8 @@ mod tests {
 
     use std::fs;
 
-    #[test]
-    fn a_directory_in_a_repository_is_found() {
-        let d = fixture_tree("git-root");
+    #[rstest]
+    fn a_directory_in_a_repository_is_found(#[from(tree)] d: Tree) {
         fs::write(d.join("sub/flake.nix"), b"{ outputs = _: {}; }").unwrap();
         fs::create_dir_all(d.join(".git")).unwrap();
         let r = parse_flake_ref(&format!("{}/sub#x", internal(&d)), b"/", None).unwrap();

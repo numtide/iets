@@ -80,6 +80,8 @@ struct State {
     log: Vec<u32>,
     /// Each open frame: where its entries start in `log`, and its stamp.
     frames: Vec<(usize, u32)>,
+    /// The trace of each path copied to the store, for the cache hits.
+    copies: FxHashMap<Vec<u8>, u32>,
     serial: u32,
 }
 
@@ -255,6 +257,15 @@ pub fn edge(t: u32) {
     if t != 0 {
         with(|s| s.edge(t));
     }
+}
+
+/// The trace of the first copy of `path` to the store.
+pub fn copy_trace(path: &[u8]) -> u32 {
+    with(|s| s.copies.get(path).copied().unwrap_or(0))
+}
+
+pub fn set_copy_trace(path: &[u8], t: u32) {
+    with(|s| s.copies.insert(path.to_vec(), t));
 }
 
 fn addr(a: &AttrsObj) -> usize {

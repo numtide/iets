@@ -7,6 +7,7 @@ use super::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::builtins::store_hooks;
 use crate::lint::{LintId, coerce};
 use crate::runtime::{Cell, Ctx, Taint, Value, ValueType, Word};
+use crate::trace::fine;
 
 impl Evaluator {
     /// Coerce a value to a string, collecting context into `ctx`.
@@ -183,7 +184,24 @@ impl Evaluator {
             );
         }
         coerce::store_path_recopy(self, path, pos)?;
-        store_hooks::copy_path_to_store(self, path, pos)
+        if !fine::on() {
+            return store_hooks::copy_path_to_store(self, path, pos);
+        }
+        // a copy is cached, so a later reader takes the trace of the first
+        if self.src_to_store.get(path).is_some() {
+            fine::edge(fine::copy_trace(path));
+            return store_hooks::copy_path_to_store(self, path, pos);
+        }
+        fine::push();
+        let r = store_hooks::copy_path_to_store(self, path, pos);
+        match r {
+            Ok(_) => {
+                let t = fine::pop();
+                fine::set_copy_trace(path, t);
+            }
+            Err(_) => fine::pop_failed(),
+        }
+        r
     }
 
     /// The `==` operator. Nix compares two fresh operand temporaries

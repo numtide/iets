@@ -115,9 +115,9 @@ fn without_a_hash_no_evaluation_fetches_and_prefetch_gives_the_hash(scratch: Scr
     let want = format!(
         "error: 'fetchurl' requires a 'sha256' argument: run 'iets prefetch {url}' and pass the hash as 'sha256'"
     );
-    for flags in [&[][..], &["--impure"][..]] {
+    for (flags, code) in [(&[][..], 1), (&["--impure"][..], 3)] {
         let o = scratch.eval(false, flags, &call);
-        assert_eq!(o.status.code(), Some(1), "{flags:?}: {}", stdout(&o));
+        assert_eq!(o.status.code(), Some(code), "{flags:?}: {}", stdout(&o));
         assert!(stderr(&o).starts_with(&want), "{}", stderr(&o));
     }
 

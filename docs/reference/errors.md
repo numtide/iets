@@ -99,6 +99,7 @@ record's `hint` field.
 | 0 | Success. |
 | 1 | Any error. Also a build failure that has no code of its own. |
 | 2 | A usage error, such as `iets eval --bogus`. Classic mode uses 1, as Nix does. |
+| 3 | A feature iets lacks, such as import from derivation. Classic mode falls back to Nix instead. |
 | 1, 2 | `iets diff` alone follows `diff(1)`: 0 the two are equal, 1 they differ, 2 a usage error or any other failure (`docs/reference/commands.md`). |
 | 100 | A build failed (`PermanentFailure`, `InputRejected`, `DependencyFailed`). |
 | 101 | A build timed out. |

@@ -746,15 +746,16 @@ impl Report {
         v
     }
 
-    /// Prints the report and returns the exit code: 2 for a usage error of
-    /// a native command, 1 for the rest.
+    /// Prints the report and returns the exit code. Classic mode always
+    /// uses 1, as Nix does.
     pub fn emit(&self) -> i32 {
         let text = self.text();
         out(&self.record(&text), Some(&text));
-        if self.code == "usage" && help::command().is_some() {
-            2
-        } else {
-            1
+        match self.code {
+            _ if help::command().is_none() => 1,
+            "usage" => 2,
+            "unsupported" => 3,
+            _ => 1,
         }
     }
 }

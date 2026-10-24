@@ -130,7 +130,7 @@ fn fallbacks() {
         .unwrap();
     c.check(
         "iets eval refuses import from derivation",
-        o.status.code() == Some(1)
+        o.status.code() == Some(3)
             && stderr(&o).contains("import from derivation is not supported"),
         stderr(&o),
     );

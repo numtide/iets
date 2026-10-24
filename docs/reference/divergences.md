@@ -800,6 +800,7 @@ things differ from Nix 2.34:
   classic mode exits 1, as Nix does as a daemon client.
 - **Usage errors** exit 2. Nix exits 1, and so does
   classic mode.
+- **Unsupported features** exit 3. Classic mode falls back to Nix.
 - **`msg`** holds iets's plain text: no ANSI colors, no source
   excerpt. `raw_msg`, `line`, `column` and `file` are the fields to
   compare; they differ from Nix where the text differs. An error that

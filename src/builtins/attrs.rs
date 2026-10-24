@@ -159,7 +159,8 @@ fn map_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     )?;
     let f = args[0];
     let a = ev.arena.flat(a);
-    if a.len_quiet() <= Word::MAP_MAX_IDX + 1 {
+    // a map word's value lands in the set's cell, past the trace of its force
+    if a.len_quiet() <= Word::MAP_MAX_IDX + 1 && !fine::on() {
         // one map word per entry, no thunk object (docs/explanation/evaluation.md)
         return Ok(ev.arena.mk_map_attrs(f, a));
     }

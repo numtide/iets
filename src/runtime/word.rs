@@ -83,6 +83,8 @@ const IMM_NULL: u64 = TAG_IMM;
 const IMM_TRUE: u64 = TAG_IMM | (1 << 3);
 const IMM_FALSE: u64 = TAG_IMM | (2 << 3);
 const IMM_BLACKHOLE: u64 = TAG_IMM | (3 << 3);
+/// `traced`: a forced state, with an id above it.
+const IMM_TRACED: u64 = TAG_IMM | (5 << 3);
 /// Forced state written by a helper fiber. Distinct from `EMPTY` so that a
 /// printer can tell a thunk the demand path forced from one only a helper
 /// forced (docs/explanation/evaluation.md, "Why the answer is identical").
@@ -185,6 +187,23 @@ impl Word {
     #[inline]
     pub(crate) fn is_blackhole(self) -> bool {
         self.0 & 0x7F == IMM_BLACKHOLE
+    }
+
+    /// The forced state of a thunk under the fine trace, which holds the
+    /// trace of the force in bits 8.. (`trace::fine`).
+    #[inline]
+    pub(crate) fn traced(id: u32) -> Word {
+        Word(IMM_TRACED | ((id as u64) << 8))
+    }
+
+    #[inline]
+    pub(crate) fn is_traced(self) -> bool {
+        self.0 & 0xFF == IMM_TRACED
+    }
+
+    #[inline]
+    pub(crate) fn traced_id(self) -> u32 {
+        (self.0 >> 8) as u32
     }
 
     /// The BLACKHOLE a fiber writes while it forces a thunk.

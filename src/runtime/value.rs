@@ -927,7 +927,7 @@ impl Word {
     /// payload: the thunk was not forced and is not being forced.
     #[inline]
     pub(crate) fn thunk_unforced(self, state: Word) -> bool {
-        state.bits() & !FORCED_BITS != 0 && !state.is_blackhole()
+        state.bits() & !FORCED_BITS != 0 && !state.is_blackhole() && !state.is_traced()
     }
 
     /// True when the forced state came from a helper fiber and the demand

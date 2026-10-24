@@ -359,6 +359,9 @@ impl Trace {
     }
 
     pub fn record(&self, o: Obs) {
+        if fine::on() {
+            fine::outside(&o);
+        }
         if let Some(i) = &self.0 {
             i.obs.lock().unwrap().push(o);
         }

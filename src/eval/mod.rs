@@ -1050,7 +1050,8 @@ impl Evaluator {
             return Ok(w);
         }
         let v = self.force_thunk(w)?;
-        if self.par.is_main {
+        // the fine trace keeps the thunk, whose read is an edge to its trace
+        if self.par.is_main && !fine::on() {
             cell.set(v);
         }
         Ok(v)
@@ -1070,6 +1071,9 @@ impl Evaluator {
             );
         }
         if !w.thunk_unforced(st) {
+            if st.is_traced() {
+                fine::edge(st.traced_id());
+            }
             return Ok(w.thunk_value(st));
         }
         state.set(Word::BLACKHOLE);
@@ -1083,15 +1087,25 @@ impl Evaluator {
             }] += 1;
             self.arena.stats.census.note_thunk_forced(w.bits());
         }
+        let traced = fine::push();
         let v = self.run_thunk(w, st);
         match v {
             Ok(v) => {
                 debug_assert!(!v.is_thunk());
-                let done = w.thunk_finish(v, true);
+                let mut done = w.thunk_finish(v, true);
+                if traced {
+                    let id = fine::pop();
+                    if id != 0 {
+                        done = Word::traced(id);
+                    }
+                }
                 state.set(done);
                 Ok(v)
             }
             Err(e) => {
+                if traced {
+                    fine::pop_failed();
+                }
                 state.set(st);
                 Err(e)
             }
@@ -2026,7 +2040,9 @@ impl Evaluator {
                 pos,
                 "while evaluating the first subexpression of a with expression",
             )?;
-            e.slot(0).set(Word::from_ref(attrs));
+            if !fine::on() {
+                e.slot(0).set(Word::from_ref(attrs));
+            }
             if let Some(a) = attrs.get(sym) {
                 return self.force_cell(&a.cell);
             }

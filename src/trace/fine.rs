@@ -1,4 +1,4 @@
-//! The fine trace: what one evaluation read, at the grain of a binding. A
+//! The fine trace: what an evaluation read, at the grain of a binding. A
 //! prototype for incremental evaluation, on only when `IETS_FINE_TRACE`
 //! names the file to write, and only at one worker.
 //!
@@ -13,12 +13,18 @@
 //! provenance of their operands, so a lookup in `pkgs` is a lookup in the
 //! sets and directory listings it was made from. Any other way to make a set
 //! reads its operands through `get` and `iter`, which record as they read.
+//!
+//! Each force of a thunk is a frame. What the frame observes, and an edge
+//! to the trace of each forced thunk it reads, become the thunk's trace,
+//! which its state word holds (`Word::traced`). So one evaluation of many
+//! jobs that share thunks still gives each job all that it depends on.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::panic::Location;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -33,6 +39,8 @@ use crate::trace::{Kind, Obs};
 pub const FINE_MIN: usize = 8;
 /// `AttrsObj::flags` bit: the set has a provenance here.
 pub(crate) const FLAG: u8 = 0x40;
+/// An entry of a frame that is an edge to a trace, not an observation.
+const EDGE: u32 = 1 << 31;
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -43,25 +51,48 @@ static NEXT_LIT: AtomicU32 = AtomicU32::new(0);
 static AT: AtomicU32 = AtomicU32::new(0);
 /// The Nix call stack of that builtin, which is alive while it runs.
 static STACK: AtomicPtr<crate::profile::Stack> = AtomicPtr::new(std::ptr::null_mut());
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+thread_local! {
+    static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+}
 
 #[derive(Default)]
 struct State {
     out: Option<PathBuf>,
     regions: FxHashMap<u32, Region>,
     lits: FxHashMap<u32, Lit>,
-    seen: FxHashSet<u32>,
     provs: Vec<Prov>,
     interned: FxHashMap<Prov, u32>,
     prov_of: FxHashMap<usize, u32>,
-    keys: FxHashSet<(u32, Sym)>,
-    /// Whole reads of a set: the reader in iets and the builtin call in Nix.
-    alls: FxHashMap<u32, (&'static Location<'static>, u32, Vec<u64>)>,
-    /// Files a position of which reached a value, and the last such byte
-    /// offset: an edit after it moves none of them.
-    positions: FxHashMap<Vec<u8>, u32>,
+    /// The reader in iets, the builtin call in Nix and its stack, of the
+    /// first whole read of each set.
+    sites: FxHashMap<u32, (&'static Location<'static>, u32, Vec<u64>)>,
     /// Constants the compiler folded, by bits: their global or builtin name.
     rev: Option<FxHashMap<u64, Sym>>,
+    obs: Vec<O>,
+    obs_ids: FxHashMap<O, u32>,
+    /// The frame that last recorded each observation and each trace.
+    obs_stamp: Vec<u32>,
+    /// Traces: a stamp, a length, then the entries; a trace id is the
+    /// offset of its stamp, and 0 is no trace.
+    nodes: Vec<u32>,
+    /// The entries of the open frames, outermost first.
+    log: Vec<u32>,
+    /// Each open frame: where its entries start in `log`, and its stamp.
+    frames: Vec<(usize, u32)>,
+    serial: u32,
+}
+
+/// One observation.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum O {
+    Region(u32),
+    Key(u32, Sym),
+    All(u32),
+    /// A position at a byte offset of a file reached a value.
+    Pos(Arc<[u8]>, u32),
+    /// What the tracing cache records, as a line of the output.
+    Out(String),
 }
 
 struct Region {
@@ -94,10 +125,14 @@ pub fn init() {
 }
 
 fn start(out: Option<PathBuf>) {
-    *STATE.lock().unwrap() = Some(State {
+    let mut s = State {
         out,
+        nodes: vec![0, 0],
+        serial: 1,
         ..State::default()
-    });
+    };
+    s.frames.push((0, 1));
+    STATE.with(|c| *c.borrow_mut() = Some(s));
     ON.store(true, Ordering::Relaxed);
 }
 
@@ -132,8 +167,94 @@ pub fn new_lit() -> u32 {
 }
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    let mut g = STATE.lock().unwrap();
-    f(g.as_mut().expect("the fine trace is on"))
+    STATE.with(|c| f(c.borrow_mut().as_mut().expect("the fine trace is on")))
+}
+
+impl State {
+    fn stamp(&self) -> u32 {
+        self.frames.last().map_or(0, |f| f.1)
+    }
+
+    fn record(&mut self, o: O) {
+        let id = match self.obs_ids.get(&o) {
+            Some(id) => *id,
+            None => {
+                let id = self.obs.len() as u32;
+                self.obs.push(o.clone());
+                self.obs_ids.insert(o, id);
+                self.obs_stamp.push(0);
+                id
+            }
+        };
+        let st = self.stamp();
+        if self.obs_stamp[id as usize] != st {
+            self.obs_stamp[id as usize] = st;
+            self.log.push(id);
+        }
+    }
+
+    fn edge(&mut self, t: u32) {
+        let st = self.stamp();
+        if self.nodes[t as usize] != st {
+            self.nodes[t as usize] = st;
+            self.log.push(EDGE | t);
+        }
+    }
+}
+
+/// Opens the frame of a force; false when the trace is off.
+#[inline]
+pub fn push() -> bool {
+    if !on() {
+        return false;
+    }
+    with(|s| {
+        s.serial += 1;
+        let st = s.serial;
+        s.frames.push((s.log.len(), st));
+    });
+    true
+}
+
+/// Closes the frame of a force that returned: its trace, which the parent
+/// frame now reads, or 0 for none.
+pub fn pop() -> u32 {
+    with(|s| {
+        let (start, _) = s.frames.pop().expect("an open frame");
+        let n = s.log.len() - start;
+        let t = match n {
+            0 => 0,
+            1 if s.log[start] & EDGE != 0 => s.log[start] & !EDGE,
+            _ => {
+                let t = s.nodes.len() as u32;
+                s.nodes.push(0);
+                s.nodes.push(n as u32);
+                s.nodes.extend_from_slice(&s.log[start..]);
+                t
+            }
+        };
+        s.log.truncate(start);
+        if t != 0 {
+            s.edge(t);
+        }
+        t
+    })
+}
+
+/// Closes the frame of a force that failed: what it read stays with the
+/// parent, which saw the failure.
+pub fn pop_failed() {
+    with(|s| {
+        s.frames.pop();
+    });
+}
+
+/// A read of a forced thunk whose force left trace `t`.
+#[inline]
+pub fn edge(t: u32) {
+    if t != 0 {
+        with(|s| s.edge(t));
+    }
 }
 
 fn addr(a: &AttrsObj) -> usize {
@@ -170,7 +291,7 @@ fn set(s: &mut State, out: &AttrsObj, p: Prov) {
 }
 
 pub fn enter(id: u32) {
-    with(|s| s.seen.insert(id));
+    with(|s| s.record(O::Region(id)));
 }
 
 pub fn lit(out: &AttrsObj, lit: u32) {
@@ -226,7 +347,7 @@ pub fn removed(out: &AttrsObj, src: &AttrsObj, names: &[Sym]) {
 pub fn get(a: &AttrsObj, sym: Sym) {
     with(|s| {
         if let Some(p) = prov(s, a) {
-            s.keys.insert((p, sym));
+            s.record(O::Key(p, sym));
         }
     });
 }
@@ -235,23 +356,36 @@ pub fn get(a: &AttrsObj, sym: Sym) {
 pub fn all(a: &AttrsObj, at: &'static Location<'static>) {
     with(|s| {
         if let Some(p) = prov(s, a) {
-            s.alls.entry(p).or_insert_with(|| {
+            s.sites.entry(p).or_insert_with(|| {
                 let st = STACK.load(Ordering::Relaxed);
                 // SAFETY: `at` stored the stack of the evaluator that is
                 // running the builtin, which outlives the builtin's call.
                 let frames = if st.is_null() { Vec::new() } else { unsafe { (*st).frames().to_vec() } };
                 (at, AT.load(Ordering::Relaxed), frames)
             });
+            s.record(O::All(p));
         }
     });
 }
 
 /// A position at byte `off` of `path` reached a value.
 pub fn position(path: &[u8], off: u32) {
-    with(|s| {
-        let o = s.positions.entry(path.to_vec()).or_insert(off);
-        *o = (*o).max(off);
-    });
+    with(|s| s.record(O::Pos(path.into(), off)));
+}
+
+/// What the tracing cache records.
+pub fn outside(o: &Obs) {
+    let line = match o {
+        Obs::File { path, hash, .. } => format!("F\t{}\t{}", lossy(path), hex(hash)),
+        Obs::Dir { path, hash } => format!("D\t{}\t{}", lossy(path), hex(hash)),
+        Obs::Stat { path, kind, .. } => format!("S\t{}\t{}", lossy(path), kind_name(*kind)),
+        Obs::Tree { root, nar_hash, .. } => format!("T\t{}\t{}", lossy(root), hex(nar_hash)),
+        Obs::Canon { path, .. } => format!("C\t{}", lossy(path)),
+        Obs::Env { name, .. } => format!("E\t{}", lossy(name)),
+        Obs::Cmd { dir, .. } => format!("Q\t{}", lossy(dir)),
+        Obs::Input { entry, .. } => format!("I\t{}", lossy(entry)),
+    };
+    with(|s| s.record(O::Out(line)));
 }
 
 /// After the compile of `path` with `root` as its IR: the regions and the
@@ -710,41 +844,76 @@ fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 
-/// Writes the trace of the run to the file `IETS_FINE_TRACE` named.
-pub fn dump(ev: &Evaluator) {
-    let obs = ev.trace().take();
-    let mut out = String::new();
-    let path = with(|s| {
-        let mut ids: Vec<u32> = s.seen.iter().copied().collect();
-        ids.sort();
-        for id in ids {
-            match s.regions.get(&id) {
-                Some(r) => {
-                    let _ = writeln!(out, "R\t{}\t{}\t{}", lossy(&r.file), r.path, hex(&r.hash));
+impl State {
+    /// The observations of `entries` and of the traces they read, each once.
+    fn flatten(&self, entries: &[u32]) -> Vec<u32> {
+        let mut nodes = FxHashSet::default();
+        let mut obs = FxHashSet::default();
+        let mut stack = entries.to_vec();
+        while let Some(e) = stack.pop() {
+            if e & EDGE == 0 {
+                obs.insert(e);
+                continue;
+            }
+            let t = (e & !EDGE) as usize;
+            if !nodes.insert(t) {
+                continue;
+            }
+            let n = self.nodes[t + 1] as usize;
+            stack.extend_from_slice(&self.nodes[t + 2..t + 2 + n]);
+        }
+        let mut v: Vec<u32> = obs.into_iter().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// `obs` as lines: `R` regions, `P` the provenances the `K` lookups and
+    /// `A` whole reads name, `X` the last position per file, then what the
+    /// tracing cache records.
+    fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
+        let mut out = String::new();
+        let mut regions = Vec::new();
+        let mut keys = Vec::new();
+        let mut alls = Vec::new();
+        let mut pos: FxHashMap<&Arc<[u8]>, u32> = FxHashMap::default();
+        let mut outs = Vec::new();
+        for id in obs {
+            match &self.obs[*id as usize] {
+                O::Region(r) => regions.push(*r),
+                O::Key(p, k) => keys.push((*p, *k)),
+                O::All(p) => alls.push(*p),
+                O::Pos(f, off) => {
+                    let o = pos.entry(f).or_insert(*off);
+                    *o = (*o).max(*off);
                 }
-                None => {
-                    let _ = writeln!(out, "R\t?\t{id}\t");
-                }
+                O::Out(l) => outs.push(l),
             }
         }
-        let mut used = vec![false; s.provs.len()];
-        let mut stack: Vec<u32> = s.keys.iter().map(|k| k.0).chain(s.alls.keys().copied()).collect();
+        regions.sort_unstable();
+        for id in regions {
+            let _ = match self.regions.get(&id) {
+                Some(r) => writeln!(out, "R\t{}\t{}\t{}", lossy(&r.file), r.path, hex(&r.hash)),
+                None => writeln!(out, "R\t?\t{id}\t"),
+            };
+        }
+        let mut used = vec![false; self.provs.len()];
+        let mut stack: Vec<u32> = keys.iter().map(|k| k.0).chain(alls.iter().copied()).collect();
         while let Some(p) = stack.pop() {
             if std::mem::replace(&mut used[p as usize], true) {
                 continue;
             }
-            match &s.provs[p as usize] {
+            match &self.provs[p as usize] {
                 Prov::Union(a, b) => stack.extend([*a, *b]),
                 Prov::Remove(a, _) => stack.push(*a),
                 Prov::Lit(_) | Prov::Dir(_) => {}
             }
         }
-        for (i, p) in s.provs.iter().enumerate() {
+        for (i, p) in self.provs.iter().enumerate() {
             if !used[i] {
                 continue;
             }
             let _ = match p {
-                Prov::Lit(l) => match s.lits.get(l) {
+                Prov::Lit(l) => match self.lits.get(l) {
                     Some(l) => writeln!(out, "P\t{i}\tlit\t{}\t{}\t{}", lossy(&l.file), l.region, l.ordinal),
                     None => writeln!(out, "P\t{i}\tlit?\t{l}"),
                 },
@@ -756,12 +925,13 @@ pub fn dump(ev: &Evaluator) {
                 }
             };
         }
-        let mut keys: Vec<_> = s.keys.iter().collect();
-        keys.sort();
         for (p, k) in keys {
-            let _ = writeln!(out, "K\t{p}\t{}", ev.interner.name_str(*k));
+            let _ = writeln!(out, "K\t{p}\t{}", ev.interner.name_str(k));
         }
-        for (p, (at, nix, frames)) in &s.alls {
+        for p in alls {
+            let Some((at, nix, frames)) = self.sites.get(&p) else {
+                continue;
+            };
             let nix = ev.describe_pos(crate::eval::Pos(*nix));
             let mut st = String::new();
             for f in frames.iter().rev().take(12) {
@@ -769,28 +939,58 @@ pub fn dump(ev: &Evaluator) {
             }
             let _ = writeln!(out, "A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line());
         }
-        for (f, off) in &s.positions {
+        for (f, off) in pos {
             let _ = writeln!(out, "X\t{}\t{off}", lossy(f));
         }
-        s.out.clone()
-    });
-    for o in obs {
-        let _ = match o {
-            Obs::File { path, hash, .. } => writeln!(out, "F\t{}\t{}", lossy(&path), hex(&hash)),
-            Obs::Dir { path, hash } => writeln!(out, "D\t{}\t{}", lossy(&path), hex(&hash)),
-            Obs::Stat { path, kind, .. } => writeln!(out, "S\t{}\t{}", lossy(&path), kind_name(kind)),
-            Obs::Tree { root, nar_hash, .. } => writeln!(out, "T\t{}\t{}", lossy(&root), hex(&nar_hash)),
-            Obs::Canon { path, .. } => writeln!(out, "C\t{}", lossy(&path)),
-            Obs::Env { name, .. } => writeln!(out, "E\t{}", lossy(&name)),
-            Obs::Cmd { dir, .. } => writeln!(out, "Q\t{}", lossy(&dir)),
-            Obs::Input { entry, .. } => writeln!(out, "I\t{}", lossy(&entry)),
+        for l in outs {
+            out.push_str(l);
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named,
+/// and, when `IETS_FINE_JOBS` names a directory and `v` is a list, the
+/// trace of each element to `DIR/INDEX`.
+pub fn dump(ev: &Evaluator, v: Option<Word>) {
+    with(|s| {
+        let all = s.flatten(&s.log[s.frames[0].0..]);
+        if let Some(p) = &s.out
+            && let Err(e) = std::fs::write(p, s.text(ev, &all))
+        {
+            errln!("fine trace: writing {}: {e}", p.display());
+        }
+        let Some(dir) = std::env::var_os("IETS_FINE_JOBS") else {
+            return;
         };
-    }
-    if let Some(p) = path
-        && let Err(e) = std::fs::write(&p, out)
-    {
-        errln!("fine trace: writing {}: {e}", p.display());
-    }
+        let Some(mut v) = v else {
+            return;
+        };
+        if v.is_thunk() {
+            let st = v.thunk_state_cell().get();
+            if v.thunk_unforced(st) || st.is_blackhole() {
+                return;
+            }
+            v = v.thunk_value(st);
+        }
+        let Some(l) = v.as_list() else {
+            return;
+        };
+        for (i, c) in l.cells().iter().enumerate() {
+            let w = c.get();
+            let t = if w.is_thunk() && w.thunk_state_cell().get().is_traced() {
+                w.thunk_state_cell().get().traced_id()
+            } else {
+                0
+            };
+            let obs = if t == 0 { Vec::new() } else { s.flatten(&[EDGE | t]) };
+            let p = std::path::Path::new(&dir).join(i.to_string());
+            if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+                errln!("fine trace: writing {}: {e}", p.display());
+            }
+        }
+    });
 }
 
 fn kind_name(k: Kind) -> &'static str {

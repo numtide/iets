@@ -34,7 +34,9 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
     let timings = a.timings;
     let evaluating = cli::evaluating(&a);
     let mut out: Vec<u8> = Vec::new();
+    let mut last = None;
     let r = cli::evaluate_each(ev, &a, |ev, v| {
+        last = Some(v);
         let start = out.len();
         if raw {
             // nix eval --raw: coerce without copying to the store, no newline
@@ -74,7 +76,7 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         ev.print_stats();
     }
     if crate::trace::fine::on() {
-        crate::trace::fine::dump(ev);
+        crate::trace::fine::dump(ev, last);
     }
     if let Err(e) = r {
         return report(ev, &e);

@@ -190,7 +190,7 @@ fn the_tracing_cache() {
         );
         // `stamp` is what `tree-meta-in-drv` reports under the iets names
         c.check(
-            &label("no lint under a classic name"),
+            &label("no lint in classic mode"),
             !(stderr(&cold) + &stderr(&hit)).contains("warning: ["),
             stderr(&cold),
         );

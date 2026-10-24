@@ -343,7 +343,7 @@ pub fn eval_flake_value(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
     let ov = ev.mk_attrs(&mut ov, pos)?;
     let mut overrides = vec![(ev.sym(lock.root.as_bytes()), pos, ov)];
     let overrides = ev.mk_attrs(&mut overrides, pos)?;
-    // its own primop, not the one in `builtins`: under a classic name that
+    // its own primop, not the one in `builtins`: in classic mode that
     // one is there only with `fetch-tree` or `flakes` (`builtins::exposed`),
     // and `call-flake.nix` needs it either way
     let fetch_sym = ev.sym(b"fetchTree");

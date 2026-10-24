@@ -65,7 +65,7 @@ pub fn eval_flag(
     match s {
         "-I" | "--include" => f.includes.push(parse_include(&next()?)),
         // `-IP=PATH` is iets's own spelling: Nix's short-flag clustering
-        // reads it as `-I -f -o -o …` and refuses it, so a classic name
+        // reads it as `-I -f -o -o …` and refuses it, so classic mode
         // must too (docs/reference/commands.md)
         _ if s.starts_with("-I") && s.len() > 2 && help::command().is_some() => {
             f.includes.push(parse_include(&s[2..]))
@@ -174,7 +174,7 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
                 f.overrides.push((s.trim_start_matches('-').to_string(), v));
             }
             // a synonym for the positional FILE, in the native namespace
-            // only: a classic name's argv stays Nix's
+            // only: classic mode's argv stays Nix's
             "-f" | "--file" if help::command().is_some() => {
                 let f = next();
                 set_positional(&mut a, &f)

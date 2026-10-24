@@ -301,7 +301,7 @@ fn jobs_root(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs) -> Result<Word, Box<
 }
 
 fn jobs_summary(j: &JobsArgs, stats: jobs::Stats, inst: Option<instantiate::Stats>, t0: Instant) {
-    // the real nix-eval-jobs says nothing, so the classic name says nothing
+    // the real nix-eval-jobs says nothing, so classic mode says nothing
     if j.quiet || help::command().is_none() {
         return;
     }

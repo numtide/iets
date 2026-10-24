@@ -31,7 +31,7 @@ Without the flag, the URL is the `builder` setting in your user
 
 Any other store URL is the usage error `unsupported builder 'URL':
 expected daemon, unix:///path, ssh-ng://[user@]host or grpc://host:port`.
-Under a classic name, iets falls back to the real nix.
+In classic mode, iets falls back to the real nix.
 
 ## What iets sends
 
@@ -82,7 +82,7 @@ the same way. `iets eval-jobs` uploads in batches while the walk runs.
 | output paths | `QueryDerivationOutputMap` | statically, from the derivations |
 | out-links | the local daemon, the closure copied back first | the local daemon substitutes from its caches; the rest by `FetchNars` |
 
-The stdout of the classic names is byte for byte the real nix's
+The stdout of classic mode is byte for byte the real nix's
 (`tests/classic_*.rs`).
 
 ## The worker protocol
@@ -112,7 +112,7 @@ Over `daemon` and `unix://`, iets sends the fields Nix's
 | keep-failed, try-fallback, max-silent-time, cores | 0 |
 | the override map | empty |
 
-Under a classic name, these come from nix.conf instead: `keep-failed`,
+In classic mode, these come from nix.conf instead: `keep-failed`,
 `keep-going`, `fallback`, `max-jobs`, `max-silent-time`, `cores` and
 `substitute`. The override map then holds every other store setting you
 set outside the system nix.conf (`docs/reference/settings.md`).
@@ -270,7 +270,7 @@ derivations.
 
 Outputs land in the farm's binary cache. `--fetch-to` restores them into a
 directory. Without an out-link (`iets build -o`, or `result` under the
-classic names), nothing comes back. An out-link first asks the local daemon to substitute the outputs
+classic mode), nothing comes back. An out-link first asks the local daemon to substitute the outputs
 (`QueryValidPaths` with `substitute`), which fetches them from the farm's
 cache when `nix.conf` lists it. A worker's own path infos carry only the
 worker's key, which isn't the cache key. What the local daemon cannot

@@ -17,7 +17,7 @@ Without the classic package, use subcommands: `iets nix-instantiate ...`,
 
 ## Where the builds go
 
-The classic names have no `--builder` flag. They build on the `builder`
+Classic mode has no `--builder` flag. They build on the `builder`
 setting in your user `iets.toml`, else on nix.conf's `store`. `--store URL`
 and `--option store URL` win over both. `--iets-option name value` sets any
 iets setting for one run, and iets removes it before a fallback runs the
@@ -40,7 +40,7 @@ Some things stay local whatever `builder` says:
 
 `nix/module.nix` installs `packages.default`. On a host with direnv, it also
 hooks iets into direnv ([Use iets with direnv](../how-to/use-with-direnv.md#nixos-module)).
-Set `iets.classic.enable` (default `false`) to also install the classic names:
+Set `iets.classic.enable` (default `false`) to also install the classic mode commands:
 
 ```nix
 {
@@ -50,7 +50,7 @@ Set `iets.classic.enable` (default `false`) to also install the classic names:
 ```
 
 This sets `nix.package` to the classic package, so `nixos-rebuild` uses the
-classic names too. Choose the Nix underneath with `iets.classic.nix` instead
+classic mode too. Choose the Nix underneath with `iets.classic.nix` instead
 of `nix.package`:
 
 ```nix
@@ -475,7 +475,7 @@ iets looks for the real binary in this order:
 
 1. `IETS_NIX_BIN_DIR/<name>`, when it exists;
 2. the first `<name>` on `PATH` that is not iets. When an entry is one of
-   iets's classic names, iets uses the Nix that the classic package was built
+   iets's classic mode commands, iets uses the Nix that the classic package was built
    for, which it names in `share/iets/real-nix-bin`;
 3. the `<name>` next to the first `nix-store` on `PATH`. The classic
    package has no `nix-store`, so this finds the Nix installation even
@@ -493,7 +493,7 @@ stop with `iets: recursive fetch ...`
 
 ## Config
 
-The classic names read nix.conf as Nix does. `docs/reference/settings.md`
+Classic mode reads nix.conf as Nix does. `docs/reference/settings.md`
 says what reaches the daemon, and which settings give a warning because they
 have no effect. On the command line, `--option name value` and the short
 forms (`--store`, `-j`/`--max-jobs`, `--cores`, `-k`, `-K`) apply in

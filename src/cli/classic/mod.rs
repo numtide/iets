@@ -164,7 +164,7 @@ fn settings_with(c: &Common, use_builder: bool) -> Result<(Config, Transport, Op
     cfg.announce();
     let url = if use_builder {
         let flag = store_given(c).then(|| cfg.store());
-        // A classic name addresses one store, as the tool it stands in for
+        // Classic mode addresses one store, as the tool it stands in for
         // does. Placing across several is `iets build`'s (docs/reference/classic.md).
         let specs = builders(flag.as_deref(), &cfg);
         if let [first, rest @ ..] = specs.as_slice()
@@ -172,7 +172,7 @@ fn settings_with(c: &Common, use_builder: bool) -> Result<(Config, Transport, Op
         {
             let names: Vec<&str> = rest.iter().map(|s| s.url.as_str()).collect();
             log::line(&format!(
-                "warning: a classic name builds on one place: using '{}', ignoring {}",
+                "warning: classic mode builds on one place: using '{}', ignoring {}",
                 first.url,
                 names.join(", ")
             ));

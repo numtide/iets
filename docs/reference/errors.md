@@ -86,7 +86,7 @@ You get a `hint` only when iets is sure of the fix:
   `iets build` that makes it.
 - `iets search` with no results says to use fewer or shorter regexes.
 - `fetchMercurial` names what works instead: a `fetchTree` with a
-  `narHash`, an hg flake input, or a classic name, which falls back to Nix.
+  `narHash`, an hg flake input, or classic mode, which falls back to Nix.
 
 The text on stderr shows the hint only for a usage error and an
 `unsupported` error. For every other error, the hint is only in the
@@ -98,7 +98,8 @@ record's `hint` field.
 | --- | --- |
 | 0 | Success. |
 | 1 | Any error. Also a build failure that has no code of its own. |
-| 2 | A usage error of a native command (`iets eval --bogus`). Under a classic name the code is 1, as in Nix. |
+| 2 | A usage error, such as `iets eval --bogus`. Classic mode uses 1, as Nix does. |
+| 3 | A feature iets lacks, such as import from derivation. Classic mode falls back to Nix instead. |
 | 1, 2 | `iets diff` alone follows `diff(1)`: 0 the two are equal, 1 they differ, 2 a usage error or any other failure (`docs/reference/commands.md`). |
 | 100 | A build failed (`PermanentFailure`, `InputRejected`, `DependencyFailed`). |
 | 101 | A build timed out. |
@@ -113,7 +114,7 @@ whole run, so a timeout and a failed build give 101.
 
 Nix itself exits 1 when it builds through a daemon, because the worker
 protocol doesn't carry the exit status. iets reads the status of each
-`BuildResult`, so it gives you the real code. The classic names
+`BuildResult`, so it gives you the real code. Classic mode
 (`nix-build`, `nix build`, `nix-shell`) exit 1, as Nix does.
 
 Some cases differ:
@@ -126,7 +127,7 @@ Some cases differ:
 ## `--log-format internal-json`
 
 The native commands (`eval`, `build`, `diff`, `eval-jobs`,
-`print-dev-env`) and the classic names take `--log-format FORMAT` and
+`print-dev-env`) and classic mode take `--log-format FORMAT` and
 `--show-trace`. `internal-json` gives you records. `raw`, `raw-with-logs`,
 `bar` and `bar-with-logs` give the plain text. Any other value is a usage
 error with Nix's message.
@@ -175,7 +176,7 @@ names the one thing that changed:
 
 The level is 3 because nothing went wrong: an edit invalidates the entry of
 every command that read the file. You see the record only when an entry
-existed and something had changed. Under a classic name it goes to
+existed and something had changed. In classic mode it goes to
 `json-log-path` only (`docs/reference/divergences.md`).
 
 `raw_msg` names one observation from the table in

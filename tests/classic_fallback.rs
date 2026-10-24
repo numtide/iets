@@ -1,4 +1,4 @@
-//! What iets leaves to the real Nix under the classic names, the fetchers,
+//! What iets leaves to the real Nix in classic mode, the fetchers,
 //! and the edges of a run: a full stdout and a bad iets.toml.
 #![cfg(unix)]
 
@@ -130,7 +130,7 @@ fn fallbacks() {
         .unwrap();
     c.check(
         "iets eval refuses import from derivation",
-        o.status.code() == Some(1)
+        o.status.code() == Some(3)
             && stderr(&o).contains("import from derivation is not supported"),
         stderr(&o),
     );

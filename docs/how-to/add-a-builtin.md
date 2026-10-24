@@ -83,7 +83,7 @@ For a new family file, declare it in `src/builtins/mod.rs` and call its
 
 Put a case in `tests/corpus/<name>.nix`. If it needs flags, put them in
 `<name>.flags`. Then record what Nix says. You need a real `nix-instantiate`
-on your `PATH` for this, since iets's classic name won't do:
+on your `PATH` for this, since iets in classic mode won't do:
 
 ```sh
 scripts/corpus.nu --update <name>

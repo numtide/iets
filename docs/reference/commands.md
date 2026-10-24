@@ -99,8 +99,8 @@ section lists.
 | `--experimental-features F`, `--extra-experimental-features F` | every feature is always on but `parse-toml-timestamps`, which this turns on |
 
 `-E` and a `FILE` together are the usage error
-`-E and FILE cannot be combined`. Otherwise the last input wins. Under a
-classic name the arguments stay Nix's, so `-f` is native only:
+`-E and FILE cannot be combined`. Otherwise the last input wins. In
+classic mode the arguments stay Nix's, so `-f` is native only:
 `nix-eval-jobs -f` is an unknown flag.
 
 `-A PATH` and a flake fragment call functions as they walk, the way Nix
@@ -119,7 +119,7 @@ $ iets eval --impure $nixpkgs -A hello.name
 - A function whose arguments end in `...` gets every `--arg`, named or not.
 
 Without an attribute path, the top level is called only when you give an
-`--arg`, as `nix eval -f FILE` does. The classic names, `search` and every
+`--arg`, as `nix eval -f FILE` does. Classic mode, `search` and every
 native command walk the same way.
 
 The lint flags are in `docs/reference/lints.md`. Pure evaluation is in
@@ -278,7 +278,7 @@ match all packages, use 'nix search <installable> ^'.`
 installable only when it names one: a flake reference, `<name>`, or a path
 that exists. Anything else is a regex. The default installable is
 `<nixpkgs>` from `-I` or `NIX_PATH`, evaluated impurely, as `--file` is.
-Under the classic name `nix search`, the first argument is always the
+In classic mode, the first argument of `nix search` is always the argument is always the
 installable, as in Nix.
 
 **What it searches.** iets walks the attributes in name order.
@@ -298,7 +298,7 @@ installable, as in Nix.
 - An evaluation error skips that attribute. `nix search` skips only under
   `legacyPackages` and stops everywhere else; `iets search` skips
   anywhere. A feature iets does not have is not an evaluation error: under
-  the classic name, it falls back to the real `nix`.
+  classic mode, it falls back to the real `nix`.
 - `iets search` calls the top level with your `--arg`s, so a package set
   that is a function, such as nixpkgs' own `default.nix`, works as it is.
   `nix search` does not do that.
@@ -577,7 +577,7 @@ element that is not an identifier (`names."7zip"`, where 2.35.2 writes
 
 | Flag | Status | Notes |
 |---|---|---|
-| `FILE`, `-E EXPR`, `--expr EXPR` | identical | The argument is a file unless you give `--flake`. The top level is called with the `--arg`s. A file evaluates purely here, where nix-eval-jobs follows nix.conf, because this is a native command (`docs/reference/settings.md`). Under the classic name `nix-eval-jobs`, nix-eval-jobs's default holds. |
+| `FILE`, `-E EXPR`, `--expr EXPR` | identical | The argument is a file unless you give `--flake`. The top level is called with the `--arg`s. A file evaluates purely here, where nix-eval-jobs follows nix.conf, because this is a native command (`docs/reference/settings.md`). As `nix-eval-jobs` in classic mode, nix-eval-jobs's default holds. |
 | `--arg N E`, `--argstr N S`, `--arg-from-file N F`, `--arg-from-stdin N` | identical | |
 | `-I`, `--include` | identical | |
 | `--flake REF[#attr]` | identical for locked local flakes | `REF` is a directory (`.`, `./x`, `path:/x`) or a local checkout pinned by rev (`git+file:///p?rev=SHA`). The fragment is looked up in `outputs` as it is. Without a fragment, the root is the whole flake (`_type`, `inputs`, `outputs`, `sourceInfo`), for `--select`. Registries and unlocked inputs are not supported. Evaluation is pure unless `--impure`. |

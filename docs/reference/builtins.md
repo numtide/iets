@@ -37,11 +37,11 @@ Every builtin that is not in this table works as it does in Nix.
 | `derivation` | works | See `derivationStrict`. |
 | `derivationStrict` | works | An `env` name, `builder` and `system` must be UTF-8. Nix accepts any bytes. |
 | `div` | works | A `let` binding of `__div` does not change `/`. In Nix it does. |
-| `fetchClosure` | fails | Under a classic name it needs the `fetch-closure` feature, as in Nix. |
+| `fetchClosure` | fails | In classic mode it needs the `fetch-closure` feature, as in Nix. |
 | `fetchGit` | works | iets copies a local working tree without a `ref` or a `rev` itself, like a flake's own tree. It also reads a commit of a local repository by `rev` or `ref` itself, without `submodules`. Every other fetch runs the real `nix`, which must be on `PATH`. In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev` fails. |
 | `fetchMercurial` | fails | |
 | `fetchTarball` | partial | Needs a `sha256`. |
-| `fetchTree` | partial | Type `path` works for an absolute path. Types `github`, `gitlab`, `sourcehut`, `git`, `tarball` and `hg` need a `narHash`. Other types fail. In pure evaluation, `path` also needs a `narHash`, and every type but `path` and `tarball` needs a `rev`. Under a classic name it needs the `fetch-tree` or `flakes` feature, as in Nix. |
+| `fetchTree` | partial | Type `path` works for an absolute path. Types `github`, `gitlab`, `sourcehut`, `git`, `tarball` and `hg` need a `narHash`. Other types fail. In pure evaluation, `path` also needs a `narHash`, and every type but `path` and `tarball` needs a `rev`. In classic mode it needs the `fetch-tree` or `flakes` feature, as in Nix. |
 | `fetchurl` | partial | Needs a `sha256` in every mode. Nix needs one only in pure evaluation. `iets prefetch URL` prints it. A hash mismatch exits with 1. Nix exits with 102. |
 | `flakeRefToString` | works | Accepts some references that Nix refuses. A `git` input that is not a URL fails. |
 | `fromJSON` | works | Error text differs. Refuses nesting deeper than 100,000 levels. |
@@ -54,7 +54,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `lessThan` | works | A `let` binding of `__lessThan` does not change `<`. In Nix it does. |
 | `mul` | works | A `let` binding of `__mul` does not change `*`. In Nix it does. |
 | `nixVersion` | works | `"2.34.8"`. |
-| `outputOf` | works | A producer that this run did not make must be in `/nix/store`. Under a classic name it needs the `dynamic-derivations` feature, as in Nix. |
+| `outputOf` | works | A producer that this run did not make must be in `/nix/store`. In classic mode it needs the `dynamic-derivations` feature, as in Nix. |
 | `parseFlakeRef` | works | Accepts some references that Nix refuses. `sourcehut:`, `hg+...` and other schemes fail. |
 | `sub` | works | A `let` binding of `__sub` does not change `-`. In Nix it does. |
 | `toJSON` | works | Writes a float with the fewest digits. Nix sometimes writes more. |

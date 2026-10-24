@@ -246,7 +246,7 @@ fn untracked(at: &SrcPath, pos: Pos) -> Option<Box<Error>> {
 }
 
 /// Copying a [`Src::Mem`] path again would need a source origin that
-/// uploads a NAR from memory. It is refused instead, so the classic names
+/// uploads a NAR from memory. It is refused instead, so classic mode
 /// fall back to nix.
 pub fn recopy_unsupported(path: &[u8], pos: Pos) -> Box<Error> {
     Error::boxed(

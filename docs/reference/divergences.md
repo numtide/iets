@@ -2,7 +2,7 @@
 
 iets aims to give you exactly what Nix 2.34.8 gives. This page lists every
 place where it knowingly doesn't. Each entry says what differs, why, and how
-you can see it for yourself. The classic names add more, listed in
+you can see it for yourself. Classic mode adds more, listed in
 `docs/reference/classic.md`.
 
 The reference is Nix 2.34.8, the `nixVersions.stable` of the nixpkgs in
@@ -381,15 +381,15 @@ building the producer, and evaluation does not build.
 this section. `builtins.fetchClosure` and `builtins.fetchMercurial` always
 fail in iets's own commands. They are still in `builtins`, so
 `builtins ? fetchMercurial` is true, and code that checks for one before it
-calls it gets the error. Under a classic name the call falls back to the real
+calls it gets the error. In classic mode the call falls back to the real
 nix. `fetchTarball` and `fetchTree` work for some inputs;
 `docs/reference/builtins.md` lists which.
 
 `builtins.fetchurl` differs from Nix in these ways:
 
 - It needs a `sha256` in every mode. Nix needs one only in pure
-  evaluation, and keeps a file without one for `tarball-ttl`. Under a
-  classic name, an impure call without a `sha256` falls back to the real
+  evaluation, and keeps a file without one for `tarball-ttl`. In
+  classic mode an impure call without a `sha256` falls back to the real
   nix. `iets prefetch URL` prints the hash.
 - A hash mismatch exits with 1. Nix exits with 102.
 - A download error has iets's own text, not curl's.
@@ -405,7 +405,7 @@ must be on `PATH`. It differs from Nix in these ways:
 - In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev`
   fails.
 
-`builtins.fetchClosure` is not supported. Under a classic name with the
+`builtins.fetchClosure` is not supported. In classic mode with the
 `fetch-closure` feature, the call falls back to the real nix.
 
 Observe it: `iets eval -E 'builtins.fetchMercurial ./.'` fails, and
@@ -418,7 +418,7 @@ iets never builds during evaluation. Reading a path whose string context
 names a derivation output (`import`, `readFile`, `pathExists` and the other
 builtins that read a file) fails when the output is not in the store. Nix
 builds the derivation first, unless `allow-import-from-derivation` is off.
-Under a classic name iets falls back to the real nix, which applies that
+In classic mode iets falls back to the real nix, which applies that
 setting (`docs/reference/settings.md`). An output that is already in the
 store is read, as Nix reads it, and the `ifd-local-output` lint warns:
 another machine can give another result. Only an output whose path is known
@@ -611,7 +611,7 @@ valid store path to Nix, with the name `n-`. iets refuses it with
 `missing dash`. The wire fuzz target lists the case as
 `store-path-without-a-dash`.
 
-## The tracing cache under the classic names
+## The tracing cache in classic mode
 
 `nix eval`, `nix build`, `nix derivation show`, `nix develop`,
 `nix print-dev-env`, `nix search`, `nix fmt` and `nix-build` answer from
@@ -627,7 +627,7 @@ On stderr:
 
 - **An invalidation is silent.** The native commands say
   `re-evaluating: PATH changed` when an entry is out of date. Nix says
-  nothing when its cache misses, and the classic names print what Nix prints,
+  nothing when its cache misses, and classic mode prints what Nix prints,
   so under them the line does not reach stderr, in text or under
   `--log-format internal-json`. The record (level 3, code
   `cache-invalidated`) still goes to the `json-log-path` file, which is where
@@ -653,7 +653,7 @@ that has no effect falls into one of these classes:
 1. **It holds by construction.** Nix's behavior is already what the flag
    asks for. No message.
 2. **iets implements it**, or sends it to the daemon as a Nix client does.
-3. **A classic name falls back** to the real nix
+3. **Classic mode falls back** to the real nix
    (`docs/reference/classic.md`).
 4. **One warning per key and process**, with the reason. Nix prints nothing
    here, so each warning is a divergence on stderr. stdout and the exit code
@@ -696,7 +696,7 @@ These flags are not ignored:
 ### Settings
 
 `docs/reference/settings.md` has the rules. A setting that acts in the Nix
-client and that iets has nothing for falls back under the classic names and
+client and that iets has nothing for falls back in classic mode and
 gives one `ignored-setting` warning in iets's own commands. A store setting
 given to `iets build`, `eval-jobs` or `print-dev-env` with `--option` gives
 one too, because those commands send a daemon no settings.
@@ -763,7 +763,7 @@ store, and `nix build` makes no link (`createOutLinksMaybe` in
 `iets build --builder URL` acts like `--store`: without `-o`, the outputs
 stay on the builder. This is deliberate. A CI run needs the verdict, not
 the bytes. With `-o PATH`, it acts like `--builders`: the closure comes
-back, and `PATH` links each output with Nix's names. The classic names
+back, and `PATH` links each output with Nix's names. Classic mode
 follow Nix: `nix build` and `nix-build` always bring the outputs back
 (`docs/reference/classic.md`).
 
@@ -797,9 +797,10 @@ things differ from Nix 2.34:
 - **Build exit codes.** `iets build` exits 100, 101, 102 or 104 on a
   failed build (`failingExitStatus`) through a daemon, where Nix exits 1.
   Nix computes these codes only when it builds in its own store. The
-  classic names exit 1, as Nix does as a daemon client.
-- **Usage errors of native commands** exit 2. Nix exits 1; under a
-  classic name iets does too.
+  classic mode exits 1, as Nix does as a daemon client.
+- **Usage errors** exit 2. Nix exits 1, and so does
+  classic mode.
+- **Unsupported features** exit 3. Classic mode falls back to Nix.
 - **`msg`** holds iets's plain text: no ANSI colors, no source
   excerpt. `raw_msg`, `line`, `column` and `file` are the fields to
   compare; they differ from Nix where the text differs. An error that
@@ -833,7 +834,7 @@ things differ from Nix 2.34:
   --dry-run --json` prints the installables' derived paths. The text on
   stderr is the same as Nix's.
 - **`json-log-path`** applies to every command. Nix applies it to the
-  `nix` command only: the classic names return before `applyJSONLogger`
+  `nix` command only: classic mode returns before `applyJSONLogger`
   (`src/nix/main.cc`).
 - **A failed write on stdout** gives `error: write of N bytes: REASON`
   and exit 1, as it does in Nix, but `N` is the bytes of the one write

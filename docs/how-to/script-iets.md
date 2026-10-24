@@ -76,7 +76,7 @@ that fails on a builder that reports only a generic failure (status 9) exits
 1.
 
 Three commands differ. `iets diff` follows `diff(1)`: 0 for equal, 1 for
-different, 2 for anything else. The classic names exit 1 on an error, as Nix
+different, 2 for anything else. Classic mode exits 1 on an error, as Nix
 does. `iets eval-jobs` exits 0 when only jobs fail, and their errors are in
 the job lines. [Errors, exit codes and log records](../reference/errors.md)
 has the full table.

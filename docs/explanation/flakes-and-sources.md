@@ -54,7 +54,7 @@ it, and `impure-path-in-drv` (outside a project) or `absolute-path-in-drv`
 
 A flake reference gets no project. Its root tree is already a virtual copy,
 filtered by the tracked file set, and a second root with no filter would let
-the evaluation read an untracked file by its absolute path. The classic names
+the evaluation read an untracked file by its absolute path. Classic mode
 get none either: each one answers like the real nix, `--pure-eval` included
 ([Classic mode](../reference/classic.md)).
 
@@ -67,7 +67,7 @@ follows Nix's `parseFlakeRefWithFragment`: a flake id first, then a URL,
 then a path.
 
 iets takes only a local path: `.`, `./x`, `/abs`, `~/x`, or a `path:` URL.
-Anything else is unsupported, and the classic names hand it to the real
+Anything else is unsupported, and classic mode hands it to the real
 `nix`:
 
 - a registry reference (`nixpkgs#hello`, and `x#y` even where `./x` exists,

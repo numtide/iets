@@ -51,6 +51,21 @@ fn help_and_version_go_to_stdout(bin: Iets) {
 }
 
 #[rstest]
+#[case::unsupported(
+    "import (derivation { name = \"d\"; system = \"x\"; builder = \"b\"; })",
+    3
+)]
+#[case::other("throw \"x\"", 1)]
+fn an_unsupported_construct_has_its_own_exit_code(
+    bin: Iets,
+    #[case] expr: &str,
+    #[case] code: i32,
+) {
+    let o = run(&bin, &["eval", "-E", expr]);
+    assert_eq!(o.status.code(), Some(code), "{}", stderr(&o));
+}
+
+#[rstest]
 #[case::unknown(&["bogus"], "error: unknown command 'bogus'\n")]
 #[case::typo(&["buidl"], "error: unknown command 'buidl'\ndid you mean 'build'?\n")]
 #[case::typo_with_args(&["serach", "^"], "did you mean 'search'?")]
@@ -388,7 +403,7 @@ fn a_bad_config_stops_only_what_reads_a_setting(bin: Iets) {
 #[rstest]
 fn eval_says_what_it_does_not_support(bin: Iets) {
     let o = run(&bin, &["eval", "--expr", "builtins.fetchMercurial ./."]);
-    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(o.status.code(), Some(3));
     assert!(
         stderr(&o).contains(r#"builtins.fetchTree { type = "hg";"#),
         "{}",
@@ -404,7 +419,7 @@ fn eval_says_what_it_does_not_support(bin: Iets) {
 #[case::github("github:NixOS/nixpkgs#lib.version", "only local paths are supported")]
 fn eval_says_which_flake_refs_it_does_not_support(bin: Iets, #[case] r: &str, #[case] want: &str) {
     let o = run(&bin, &["eval", r]);
-    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(o.status.code(), Some(3));
     assert!(stderr(&o).contains(want), "{}", stderr(&o));
 }
 

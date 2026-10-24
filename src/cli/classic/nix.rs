@@ -1,6 +1,6 @@
 //! `nix` (src/nix): the subcommands iets implements — `eval`, `build`,
 //! `derivation show`, `print-dev-env`, `develop`, `search`, `fmt` and `flake
-//! prefetch-inputs` — with the same exec fallback as the other classic names
+//! prefetch-inputs` — with the same exec fallback as the rest of classic mode
 //! for everything else.
 //! See `docs/reference/classic.md`.
 
@@ -132,7 +132,7 @@ pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
     match s {
         "--accept-flake-config" => ignored::flag(s, ignored::NO_NIX_CONFIG),
         // iets has every feature but this one, which changes what `fromTOML`
-        // returns (docs/reference/divergences.md). Under a classic name the
+        // returns (docs/reference/divergences.md). In classic mode the
         // value is still a setting, because the builtins Nix gates on a
         // feature are gated here too (`builtins::install`).
         "--experimental-features" | "--extra-experimental-features" => {

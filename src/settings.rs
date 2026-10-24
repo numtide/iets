@@ -110,7 +110,7 @@ pub struct Settings {
     pub ir_min: usize,
     /// `provenance`, `IETS_PROVENANCE`: `false` prints plain store paths.
     pub provenance: bool,
-    /// `pure`: `pure-eval` for the native commands, which a classic name does
+    /// `pure`: `pure-eval` for the native commands, which classic mode does
     /// not read (docs/reference/settings.md). A project file may not set it:
     /// an impure evaluation reads any path and fetches without a hash, so a
     /// clone could read a key and post it.
@@ -158,7 +158,7 @@ pub enum FixHashes {
     Never,
 }
 
-/// The flag every iets command and every classic name accepts. It is ours, so
+/// The flag every iets command accepts, in classic mode too. It is ours, so
 /// it never reaches the real nix: [`take_options`] removes it from the argv a
 /// fallback execs.
 pub const FLAG: &str = "--iets-option";

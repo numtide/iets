@@ -1420,7 +1420,7 @@ fn an_unfetchable_input() {
         .find(|r| r["level"] == 0)
         .unwrap_or_default();
     f.verdict(
-        u.status.code() == Some(1)
+        u.status.code() == Some(3)
             && rec["hint"]
                 .as_str()
                 .is_some_and(|h| h.contains("run 'nix flake update ghost'")),

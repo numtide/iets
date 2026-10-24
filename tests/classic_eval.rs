@@ -1,4 +1,4 @@
-//! Classic names that evaluate, against the real Nix: stdout bytes and exit
+//! Classic mode commands that evaluate, against the real Nix: stdout bytes and exit
 //! codes are Nix's.
 #![cfg(unix)]
 
@@ -162,7 +162,7 @@ fn the_builtins_names() {
     let s = store!();
     let f = Farm::new(&s);
     let mut c = Checks::default();
-    // the builtins Nix gates on a feature are gated under a classic name too
+    // the builtins Nix gates on a feature are gated in classic mode too
     for mode in ["--impure", "--pure-eval"] {
         for feats in [
             "",

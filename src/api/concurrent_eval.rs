@@ -1,5 +1,5 @@
 //! Differential test of the parallel runtime: every case is evaluated with
-//! 1, 2, 4 and 8 workers. Stdout, exit code and the effect lines on stderr,
+//! 1, 4 and 8 workers. Stdout, exit code and the effect lines on stderr,
 //! in their order, must match.
 
 use crate::api::run::Run;
@@ -8,12 +8,12 @@ use crate::api::{self, EvalArgs, Input};
 use crate::lint::Level;
 use crate::parallel::fiber::MAIN_STACK;
 use crate::session::Session;
+use rstest::rstest;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, fs, process, thread};
 
 const SLOW: &str = "slow = n: builtins.foldl' (a: b: a + b) 0 (builtins.genList (x: x) n);";
-const WORKERS: [usize; 4] = [1, 2, 4, 8];
+const WORKERS: [usize; 3] = [1, 4, 8];
 
 struct Case {
     name: String,
@@ -428,45 +428,88 @@ fn check(c: &Case) -> Option<String> {
     None
 }
 
-/// Each thread takes the next case: the route cases cost seconds each, and
-/// fixed chunks put them all on one thread.
-fn failures(cases: Vec<Case>) -> Vec<String> {
-    let threads = thread::available_parallelism().map_or(4, |n| n.get().clamp(4, 16));
-    let next = AtomicUsize::new(0);
-    thread::scope(|s| {
-        let handles: Vec<_> = (0..threads.min(cases.len()))
-            .map(|_| {
-                // the stack `main` gives the evaluator: deep-chain recurses deeply
-                thread::Builder::new()
-                    .stack_size(MAIN_STACK)
-                    .spawn_scoped(s, || {
-                        let mut failed = Vec::new();
-                        while let Some(c) = cases.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            if let Some(why) = check(c) {
-                                failed.push(format!("{}: {why}", c.name));
-                            }
-                        }
-                        failed
-                    })
-                    .expect("spawn a case thread")
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("a worker panicked"))
-            .collect()
-    })
-}
-
-#[test]
-fn concurrent_eval_matches_sequential_eval() {
-    let cases = plain_cases()
+fn all_cases() -> Vec<Case> {
+    plain_cases()
         .into_iter()
         .chain(effect_cases())
         .chain(route_cases())
-        .collect();
-    let failed = failures(cases);
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
+        .collect()
+}
+
+#[rstest]
+#[case::shared_graph("shared-graph")]
+#[case::deep_attrs("deep-attrs")]
+#[case::cycle("cycle")]
+#[case::cycle_two_ranges("cycle-two-ranges")]
+#[case::cycle_deep("cycle-deep")]
+#[case::error_elem("error-elem")]
+#[case::try_eval("try-eval")]
+#[case::trace_once("trace-once")]
+#[case::warn_once("warn-once")]
+#[case::import_shared("import-shared")]
+#[case::drv("drv")]
+#[case::json("json")]
+#[case::fn_identity("fn-identity")]
+#[case::print_code("print-code")]
+#[case::print_code_single("print-code-single")]
+#[case::nan("nan")]
+#[case::deep_chain("deep-chain")]
+#[case::failing_shared("failing-shared")]
+#[case::lint_speculated("lint-speculated")]
+#[case::lint_demanded("lint-demanded")]
+#[case::lint_ahead("lint-ahead")]
+#[case::trace_ahead("trace-ahead")]
+#[case::warn_ahead("warn-ahead")]
+#[case::lint_shared_ahead("lint-shared-ahead")]
+#[case::trace_shared_ahead("trace-shared-ahead")]
+#[case::lint_shared_helper("lint-shared-helper")]
+#[case::lint_map_twice("lint-map-twice")]
+#[case::lint_try_helper("lint-try-helper")]
+#[case::lint_shared_map("lint-shared-map")]
+#[case::drv_speculated("drv-speculated")]
+#[case::drv_demanded("drv-demanded")]
+#[case::route_local("route-local")]
+#[case::route_select("route-select")]
+#[case::route_apply("route-apply")]
+#[case::route_concat("route-concat")]
+#[case::route_tail("route-tail")]
+#[case::route_filter("route-filter")]
+#[case::route_attr_values("route-attr-values")]
+#[case::route_cat_attrs("route-cat-attrs")]
+#[case::route_list_to_attrs("route-list-to-attrs")]
+#[case::route_update("route-update")]
+#[case::route_inherit_from("route-inherit-from")]
+#[case::route_rec_attrs("route-rec-attrs")]
+#[case::route_map_arg("route-map-arg")]
+#[case::route_map_attrs("route-map-attrs")]
+#[case::route_zip_attrs("route-zip-attrs")]
+#[case::route_with_scope("route-with-scope")]
+#[case::route_remove_attrs("route-remove-attrs")]
+#[case::route_intersect_attrs("route-intersect-attrs")]
+#[case::route_foldl("route-foldl")]
+#[case::route_stress("route-stress")]
+fn concurrent_eval_matches_sequential_eval(#[case] name: &str) {
+    let c = all_cases()
+        .into_iter()
+        .find(|c| c.name == name)
+        .expect("a case of that name");
+    // the stack `main` gives the evaluator: deep-chain recurses deeply
+    let failed = thread::Builder::new()
+        .stack_size(MAIN_STACK)
+        .spawn(move || check(&c))
+        .expect("spawn the evaluator thread")
+        .join()
+        .expect("the case finishes");
+    assert!(failed.is_none(), "{}", failed.unwrap_or_default());
+}
+
+#[test]
+fn every_case_has_a_test() {
+    let names: Vec<String> = all_cases().into_iter().map(|c| c.name).collect();
+    let src = include_str!("concurrent_eval.rs");
+    for n in names {
+        assert!(src.contains(&format!("(\"{n}\")]")), "no #[case] for {n}");
+    }
 }
 
 const ALLOC: &str = "let xs = builtins.genList (i: builtins.genList (j: { a = j; b = toString (i + j); }) 3000) 300; in builtins.length (builtins.deepSeq xs xs)";

@@ -8,3 +8,8 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.default.overrides]]
 filter = "binary(nixpkgs_eval) | test(=nix_search_nixpkgs)"
 slow-timeout = { period = "60s", terminate-after = 8 }
+
+# each case runs up to 8 evaluator workers
+[[profile.default.overrides]]
+filter = "test(/concurrent_eval_matches_sequential_eval/)"
+threads-required = 4

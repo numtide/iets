@@ -158,6 +158,25 @@ On NixOS, import `nixosModules.default` and set `iets.classic.enable = true`.
 That puts the classic names (`nix-build`, `nix-shell`, ...) ahead of `nix` in
 your path. If direnv is enabled, `use flake` goes through iets too.
 
+### Binary cache
+
+The CI pushes the builds of iets to `cache.numtide.com`. Add this cache to get
+iets without a local build:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://cache.numtide.com" ];
+  extra-trusted-public-keys = [
+    "niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g="
+  ];
+};
+```
+
+The cache has the packages that the CI builds: `#static` on Linux and
+`#default` on macOS. On Linux, `#default` is not in the cache, thus `#default`
+and `nixosModules.default` build iets on your machine. To get iets from the
+cache on Linux, use `#static`.
+
 ## Documentation
 
 `./docs` is LLM-generated, but it should be useful as reference. Start with

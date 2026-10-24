@@ -1131,9 +1131,11 @@ type NameChange = (u8, Option<Arc<FxHashSet<String>>>);
 #[derive(Default)]
 struct Changes {
     steps: Vec<String>,
-    regions: FxHashMap<(String, String), u128>,
+    /// By "file\tregion".
+    regions: FxHashMap<String, u128>,
     files: FxHashMap<String, u128>,
-    lits: FxHashMap<(String, String, String), Vec<NameChange>>,
+    /// By "file\tregion\tordinal".
+    lits: FxHashMap<String, Vec<NameChange>>,
     dirs: FxHashMap<String, Vec<NameChange>>,
     modified: FxHashMap<String, u128>,
     trees: FxHashMap<String, u128>,
@@ -1170,9 +1172,9 @@ impl Changes {
             };
             let or = |m: &mut FxHashMap<String, u128>, k: &str| *m.entry(k.to_string()).or_insert(0) |= bit(s);
             match (f[1], f.len()) {
-                ("CR", 4..) => *c.regions.entry((f[2].into(), f[3].into())).or_insert(0) |= bit(s),
+                ("CR", 4..) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
                 ("CF", _) => or(&mut c.files, f[2]),
-                ("CL", 6..) => c.lits.entry((f[2].into(), f[3].into(), f[4].into())).or_default().push((s, names(f[5]))),
+                ("CL", 6..) => c.lits.entry(f[2..5].join("\t")).or_default().push((s, names(f[5]))),
                 ("CD", 4..) => c.dirs.entry(f[2].into()).or_default().push((s, names(f[3]))),
                 ("CM", _) => or(&mut c.modified, f[2]),
                 ("CT", _) => or(&mut c.trees, f[2]),
@@ -1193,7 +1195,7 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
     for line in std::fs::read_to_string(dir.join("provs"))?.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         let e = match f.get(2).copied() {
-            Some("lit") => c.lits.get(&(f[3].into(), f[4].into(), f[5].into())).cloned().unwrap_or_default(),
+            Some("lit") => c.lits.get(&f[3..6].join("\t")).cloned().unwrap_or_default(),
             Some("dir") => c.dirs.get(f[3]).cloned().unwrap_or_default(),
             Some("u") => {
                 let (a, b): (usize, usize) = (f[3].parse().unwrap(), f[4].parse().unwrap());
@@ -1205,39 +1207,42 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
         leaves.push(e);
     }
     let mut obs: Vec<u128> = Vec::new();
-    for line in std::fs::read_to_string(dir.join("obs"))?.lines() {
-        let f: Vec<&str> = line.split('\t').collect();
+    let text = std::fs::read_to_string(dir.join("obs"))?;
+    for line in text.lines() {
         let get = |m: &FxHashMap<String, u128>, k: &str| m.get(k).copied().unwrap_or(0);
-        let m = match f[0] {
-            "R" if f[1] == "?" => every,
-            "R" => c.regions.get(&(f[1].into(), f[2].into())).copied().unwrap_or(0) | get(&c.files, f[1]),
+        let mut f = line.splitn(4, '\t');
+        let (kind, a, b) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+        let m = match kind {
+            "R" if a == "?" => every,
+            // the file and the region path are next to each other in the line
+            "R" => get(&c.regions, &line[2..2 + a.len() + 1 + b.len()]) | get(&c.files, a),
             "K" => {
-                let name = f[2];
-                leaves[f[1].parse::<usize>().unwrap()]
-                    .iter()
-                    .filter(|(_, n)| n.as_ref().is_none_or(|n| n.contains(name)))
+                let l = &leaves[a.parse::<usize>().unwrap()];
+                l.iter()
+                    .filter(|(_, n)| n.as_ref().is_none_or(|n| n.contains(b)))
                     .fold(0, |m, (s, _)| m | bit(*s))
             }
-            "A" if skip.is_some_and(|re| f[2..].join(" ").contains(re)) => 0,
-            "A" => leaves[f[1].parse::<usize>().unwrap()].iter().fold(0, |m, (s, _)| m | bit(*s)),
+            "A" if skip.is_some_and(|re| line.contains(re)) => 0,
+            "A" => leaves[a.parse::<usize>().unwrap()].iter().fold(0, |m, (s, _)| m | bit(*s)),
             "X" => {
-                let off: u32 = f[2].parse().unwrap_or(0);
-                c.first.get(f[1]).map_or(0, |v| v.iter().filter(|(_, d)| *d <= off).fold(0, |m, (s, _)| m | bit(*s)))
+                let off: u32 = b.parse().unwrap_or(0);
+                c.first.get(a).map_or(0, |v| v.iter().filter(|(_, d)| *d <= off).fold(0, |m, (s, _)| m | bit(*s)))
             }
-            "F" | "C" => get(&c.modified, f[1]),
-            "T" => get(&c.trees, f[1]),
-            "S" => get(&c.stats, f[1]),
-            "D" => c.dirs.get(f[1]).map_or(0, |v| v.iter().fold(0, |m, (s, _)| m | bit(*s))),
+            "F" | "C" => get(&c.modified, a),
+            "T" => get(&c.trees, a),
+            "S" => get(&c.stats, a),
+            "D" => c.dirs.get(a).map_or(0, |v| v.iter().fold(0, |m, (s, _)| m | bit(*s))),
             _ => 0,
         };
         obs.push(m);
     }
-    let words: Vec<u32> = std::fs::read(dir.join("nodes"))?
+    let mut words: Vec<u32> = std::fs::read(dir.join("nodes"))?
         .chunks_exact(4)
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
         .collect();
-    // a trace comes after the traces it reads, so one pass in order does
-    let mut offsets: Vec<u32> = Vec::new();
+    // a trace comes after the traces it reads, so one pass in order does;
+    // the stamp word of each trace, of no use here, takes the index of its
+    // mask in `masks` plus one, or 0 for none
     let mut masks: Vec<u128> = Vec::new();
     let mut at = 2;
     while at < words.len() {
@@ -1247,17 +1252,31 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
             m |= if e & EDGE == 0 {
                 obs[*e as usize]
             } else {
-                masks[offsets.binary_search(&(e & !EDGE)).expect("a trace read before it was made")]
+                match words[(e & !EDGE) as usize] {
+                    0 => 0,
+                    k => masks[k as usize - 1],
+                }
             };
         }
-        offsets.push(at as u32);
-        masks.push(m);
+        words[at] = if m == 0 {
+            0
+        } else {
+            masks.push(m);
+            masks.len() as u32
+        };
         at += 2 + n;
     }
     let mut out = Vec::new();
     for (i, line) in std::fs::read_to_string(dir.join("roots"))?.lines().enumerate() {
-        let t: u32 = line.parse().unwrap_or(0);
-        let m = if t == 0 { 0 } else { offsets.binary_search(&t).map_or(every, |k| masks[k]) };
+        let t: usize = line.parse().unwrap_or(0);
+        let m = match t {
+            0 => 0,
+            t if t >= words.len() => every,
+            t => match words[t] {
+                0 => 0,
+                k => masks[k as usize - 1],
+            },
+        };
         if m != 0 {
             out.push((i, m));
         }
@@ -1298,8 +1317,15 @@ pub fn check_main(argv: &[String]) -> i32 {
         dags = &dags[2..];
     }
     let mut out = String::new();
-    for d in dags {
-        match check_dag(&c, std::path::Path::new(d), skip) {
+    let results: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = dags
+            .iter()
+            .map(|d| sc.spawn(|| check_dag(&c, std::path::Path::new(d), skip)))
+            .collect();
+        hs.into_iter().map(|h| h.join().expect("a checker thread")).collect()
+    });
+    for (d, r) in dags.iter().zip(results) {
+        match r {
             Ok(jobs) => {
                 for (i, m) in jobs {
                     for (s, name) in c.steps.iter().enumerate() {

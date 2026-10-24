@@ -131,7 +131,7 @@ drvPath, kept or new, with the full evaluation of that commit.
 | wrong drvPaths | 0 |
 | jobs evaluated again | 365,378, 4.5 % |
 | time for the 100 merges | 469.5 s, of which 187.8 s is the check |
-| a full evaluation of each merge, for comparison | 1,760 s |
+| a full evaluation of each merge, for comparison | 1,610 s (16.1 s each) |
 | time per merge, median | 2.48 s |
 | time per merge, 90th percentile | 13.2 s |
 

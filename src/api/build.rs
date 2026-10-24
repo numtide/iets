@@ -175,6 +175,18 @@ impl Dispatch {
         self.d.submit(&mut up, batch)
     }
 
+    /// [`Dispatch::submit`], with `on_outcome` called for each target as
+    /// soon as it is decided.
+    pub fn submit_each(
+        &mut self,
+        batch: Vec<Target>,
+        on_outcome: &mut dyn FnMut(&Outcome),
+    ) -> Result<Vec<Outcome>> {
+        let locate = |paths: &[StorePath]| locate_in_store(paths, &self.overrides);
+        let mut up = PlanUpload::new(&self.plan, &locate);
+        self.d.submit_each(&mut up, batch, on_outcome)
+    }
+
     /// `--no-build`: register the closure and stop.
     pub fn upload_only(&mut self, roots: &[StorePath]) -> Result<()> {
         let locate = |paths: &[StorePath]| locate_in_store(paths, &self.overrides);

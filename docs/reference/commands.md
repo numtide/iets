@@ -182,8 +182,9 @@ to evaluate stops the run before anything builds.
 
 It also takes the shared evaluation flags.
 
-- stdout: one output path per line, in root order. With `--json`, the
-  outcomes as one JSON object instead. With `--dry-run --json`, the plan.
+- stdout: one output path per line, printed as each root is built. With
+  `--json`, `-o` or `--fetch-to`, after the last one, in root order. With
+  `--json`, the outcomes as one JSON object instead. With `--dry-run --json`, the plan.
 - stderr: `building '<drv>'…` for each build, the daemon's log lines, the
   `--dry-run` plan text, and after several roots one last line,
   `N built, M failed: ATTR, …`. Nothing the daemon sends reaches stdout.

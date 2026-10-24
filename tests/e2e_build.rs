@@ -64,8 +64,11 @@ fn a_tree_builds_past_a_failure() {
         err.contains(&format!("3 built, 1 failed: checks.{sys}.bad")),
         "{err}"
     );
+    // in the order the roots were built
     let paths = stdout(&r1);
-    assert_eq!(names(&s, &paths), ["fb-chain", "fb-dep", "fb-ok"]);
+    let mut built = names(&s, &paths);
+    built.sort();
+    assert_eq!(built, ["fb-chain", "fb-dep", "fb-ok"]);
     assert!(paths.lines().all(|p| fs::exists(p).unwrap()));
     assert!(!err.contains(OTHER), "the other system is not built: {err}");
 
@@ -127,7 +130,12 @@ fn a_tree_builds_past_a_failure() {
     let r5 = build(&s, &[rel, "-A", "ci", "--argstr", "system", &sys, "-k"]);
     assert_eq!(r5.status.code(), Some(100));
     assert!(stderr(&r5).contains("ci.bad failed"), "{}", stderr(&r5));
-    assert_eq!(stdout(&r5), paths, "the same paths as the flake gave");
+    let out5 = stdout(&r5);
+    let mut again: Vec<&str> = out5.lines().collect();
+    let mut first: Vec<&str> = paths.lines().collect();
+    again.sort();
+    first.sort();
+    assert_eq!(again, first, "the same paths as the flake gave");
 }
 
 #[test]

@@ -327,6 +327,38 @@ impl Backend for Grpc {
         r
     }
 
+    /// The store builds a derivation per call, so a job is done the moment
+    /// its own build stops. A failure waits for the batch, which names the
+    /// leaf that broke.
+    fn submit_each(
+        &mut self,
+        batch: &Batch<'_>,
+        on_event: &mut dyn FnMut(Event),
+        on_done: &mut dyn FnMut(&str, &Status),
+    ) -> Result<HashMap<String, Status>> {
+        let roots: HashSet<String> = batch.jobs.iter().map(|j| j.drv.to_string()).collect();
+        let mut sent = HashSet::new();
+        let out = self.submit(batch, &mut |e: Event| {
+            let done = match &e {
+                Event::Stopped(s) if s.built && roots.contains(&s.drv_path) => {
+                    Some(s.drv_path.clone())
+                }
+                _ => None,
+            };
+            on_event(e);
+            if let Some(drv) = done {
+                on_done(&drv, &Status::ok());
+                sent.insert(drv);
+            }
+        })?;
+        for (drv, s) in &out {
+            if !sent.contains(drv) {
+                on_done(drv, s);
+            }
+        }
+        Ok(out)
+    }
+
     fn outputs(
         &mut self,
         drv: &str,

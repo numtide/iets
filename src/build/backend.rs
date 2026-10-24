@@ -24,7 +24,9 @@ use crate::remote::event::Event;
 use crate::remote::grpc::backend::Grpc;
 use crate::remote::plan::{self, Object, Plan};
 use crate::remote::worker::wire::{self, write_object};
-use crate::remote::worker::{Connection, Missing, Options, Stats, Transport, default_socket};
+use crate::remote::worker::{
+    BuildResult, Connection, Missing, Options, Stats, Transport, default_socket,
+};
 use crate::store::nar;
 use crate::store::path::StorePath;
 
@@ -129,6 +131,21 @@ pub trait Backend {
         batch: &Batch<'_>,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<HashMap<String, Status>>;
+
+    /// [`Backend::submit`], with `on_done` called for a job as soon as its
+    /// verdict is known.
+    fn submit_each(
+        &mut self,
+        batch: &Batch<'_>,
+        on_event: &mut dyn FnMut(Event),
+        on_done: &mut dyn FnMut(&str, &Status),
+    ) -> Result<HashMap<String, Status>> {
+        let out = self.submit(batch, on_event)?;
+        for (drv, s) in &out {
+            on_done(drv, s);
+        }
+        Ok(out)
+    }
 
     /// What building `jobs` would build and fetch.
     fn missing(&mut self, jobs: &[Job], on_event: &mut dyn FnMut(Event)) -> Result<Missing> {
@@ -310,6 +327,7 @@ impl Timings {
 pub struct Worker {
     pub conn: Connection,
     transport: Transport,
+    options: Options,
     t: Timings,
 }
 
@@ -327,8 +345,51 @@ impl Worker {
             },
             conn,
             transport: transport.clone(),
+            options: options.clone(),
         })
     }
+}
+
+fn targets(jobs: &[Job]) -> Vec<String> {
+    jobs.iter()
+        .map(|j| format!("{}!{}", j.drv, j.spec()))
+        .collect()
+}
+
+fn statuses(results: &[BuildResult]) -> HashMap<String, Status> {
+    let mut out: HashMap<String, Status> = HashMap::new();
+    for r in results {
+        let drv = r.path.split('!').next().unwrap_or(&r.path).to_string();
+        let e = out.entry(drv).or_insert_with(Status::ok);
+        if !r.success() {
+            let exit = log::build_exit(r.status, &r.msg);
+            *e = Status::failed(format!("status {}: {}", r.status, r.msg), exit);
+        }
+    }
+    out
+}
+
+/// Whether every wanted output of `job` is valid, asked on a connection of
+/// its own: the build's connection is busy until the whole op is over.
+fn outputs_valid(
+    side: &mut Option<Connection>,
+    transport: &Transport,
+    options: &Options,
+    job: &Job,
+) -> Result<bool> {
+    let c = match side {
+        Some(c) => c,
+        None => side.insert(Connection::open_with(transport, options, &mut |_| {})?),
+    };
+    let map = c.query_derivation_output_map(&job.drv.to_string(), &mut |_| {})?;
+    let wanted: Option<Vec<String>> = (map.into_iter())
+        .filter(|(n, _)| job.outputs.is_empty() || job.outputs.contains(n))
+        .map(|(_, p)| p)
+        .collect();
+    let Some(paths) = wanted else {
+        return Ok(false);
+    };
+    Ok(c.query_valid_paths(&paths, &mut |_| {})?.len() == paths.len())
 }
 
 impl Backend for Worker {
@@ -398,21 +459,48 @@ impl Backend for Worker {
         batch: &Batch<'_>,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<HashMap<String, Status>> {
-        let targets: Vec<String> = batch
-            .jobs
-            .iter()
-            .map(|j| format!("{}!{}", j.drv, j.spec()))
-            .collect();
         let t0 = Instant::now();
-        let results = self.conn.build_paths_with_results(&targets, on_event)?;
+        let results = (self.conn).build_paths_with_results(&targets(batch.jobs), on_event)?;
         self.t.build += t0.elapsed();
-        let mut out: HashMap<String, Status> = HashMap::new();
-        for r in &results {
-            let drv = r.path.split('!').next().unwrap_or(&r.path).to_string();
-            let e = out.entry(drv).or_insert_with(Status::ok);
-            if !r.success() {
-                let exit = log::build_exit(r.status, &r.msg);
-                *e = Status::failed(format!("status {}: {}", r.status, r.msg), exit);
+        Ok(statuses(&results))
+    }
+
+    /// One op, as `submit`. A job whose build stops with its outputs valid
+    /// is done then; a failure waits for the op's verdicts.
+    fn submit_each(
+        &mut self,
+        batch: &Batch<'_>,
+        on_event: &mut dyn FnMut(Event),
+        on_done: &mut dyn FnMut(&str, &Status),
+    ) -> Result<HashMap<String, Status>> {
+        let jobs: HashMap<String, &Job> = (batch.jobs.iter())
+            .map(|j| (j.drv.to_string(), j))
+            .collect();
+        let (transport, options) = (&self.transport, &self.options);
+        let mut side = None;
+        let mut sent = HashSet::new();
+        let t0 = Instant::now();
+        let results =
+            self.conn
+                .build_paths_with_results(&targets(batch.jobs), &mut |e: Event| {
+                    let job = match &e {
+                        Event::Stopped(s) if !sent.contains(&s.drv_path) => jobs.get(&s.drv_path),
+                        _ => None,
+                    };
+                    on_event(e);
+                    // a failed probe leaves the job to the op's verdict
+                    if let Some(j) = job
+                        && matches!(outputs_valid(&mut side, transport, options, j), Ok(true))
+                    {
+                        on_done(&j.drv.to_string(), &Status::ok());
+                        sent.insert(j.drv.to_string());
+                    }
+                })?;
+        self.t.build += t0.elapsed();
+        let out = statuses(&results);
+        for (drv, s) in &out {
+            if !sent.contains(drv) {
+                on_done(drv, s);
             }
         }
         Ok(out)

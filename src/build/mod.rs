@@ -23,7 +23,7 @@ pub mod fixhash;
 pub mod render;
 pub mod upload;
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -274,6 +274,26 @@ impl Dispatcher {
     /// Uploads what the batch needs and builds it in one op. Targets whose
     /// drv was already dispatched are dropped.
     pub fn submit(&mut self, up: &mut dyn Uploader, batch: Vec<Target>) -> Result<Vec<Outcome>> {
+        self.submit_with(up, batch, None)
+    }
+
+    /// [`Dispatcher::submit`], with each target on an op of its own and
+    /// `on_outcome` called as soon as it is decided.
+    pub fn submit_each(
+        &mut self,
+        up: &mut dyn Uploader,
+        batch: Vec<Target>,
+        on_outcome: &mut dyn FnMut(&Outcome),
+    ) -> Result<Vec<Outcome>> {
+        self.submit_with(up, batch, Some(on_outcome))
+    }
+
+    fn submit_with(
+        &mut self,
+        up: &mut dyn Uploader,
+        batch: Vec<Target>,
+        on_outcome: Option<&mut dyn FnMut(&Outcome)>,
+    ) -> Result<Vec<Outcome>> {
         let batch: Vec<Target> = batch
             .into_iter()
             .filter(|t| self.seen.insert(t.drv.clone()))
@@ -281,12 +301,17 @@ impl Dispatcher {
         if batch.is_empty() {
             return Ok(Vec::new());
         }
-        let out = self.submit_once(up, &batch)?;
+        let out = self.submit_once(up, &batch, on_outcome)?;
         self.exit = (out.iter()).fold(self.exit, |e, o| log::combine_exit(e, o.exit));
         Ok(out)
     }
 
-    fn submit_once(&mut self, up: &mut dyn Uploader, batch: &[Target]) -> Result<Vec<Outcome>> {
+    fn submit_once(
+        &mut self,
+        up: &mut dyn Uploader,
+        batch: &[Target],
+        mut on_outcome: Option<&mut dyn FnMut(&Outcome)>,
+    ) -> Result<Vec<Outcome>> {
         let by_drv: HashMap<String, String> = (batch.iter())
             .map(|t| (t.drv.to_string(), t.attr.clone()))
             .collect();
@@ -306,6 +331,11 @@ impl Dispatcher {
             }
             None => false,
         };
+        let names = Names {
+            prov: &self.prov,
+            by_drv: &by_drv,
+        };
+        let mut early: HashMap<String, Outcome> = HashMap::new();
         let status = match held {
             true => (by_drv.keys())
                 .map(|d| (d.clone(), backend::Status::ok()))
@@ -323,21 +353,42 @@ impl Dispatcher {
                     jobs: &jobs,
                     drvs: &drvs,
                 };
-                let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
-                self.backend.submit(&b, &mut on_event)?
+                let reporter = RefCell::new(&mut self.reporter);
+                let mut on_event =
+                    |e: Event| event_sink(&mut reporter.borrow_mut(), &self.prov, &by_drv)(e);
+                match on_outcome.as_deref_mut() {
+                    None => self.backend.submit(&b, &mut on_event)?,
+                    Some(f) => {
+                        let targets: HashMap<String, &Target> =
+                            batch.iter().map(|t| (t.drv.to_string(), t)).collect();
+                        // an output path that only the store knows is asked for
+                        // once the op is over
+                        let mut on_done = |drv: &str, s: &backend::Status| {
+                            let Some(t) = targets.get(drv) else { return };
+                            let r = &mut reporter.borrow_mut();
+                            let o = match built.as_ref().and_then(|b| b.get(drv)) {
+                                Some(m) if s.ok => built_outcome(r, &names, t, m.clone()),
+                                None if s.ok => return,
+                                _ => failed_outcome(r, &names, t, s),
+                            };
+                            f(&o);
+                            early.insert(drv.to_string(), o);
+                        };
+                        self.backend.submit_each(&b, &mut on_event, &mut on_done)?
+                    }
+                }
             }
         };
 
-        let names = Names {
-            prov: &self.prov,
-            by_drv: &by_drv,
-        };
         let earlier_failed = status.values().any(|s| !s.ok);
         let mut out = Vec::with_capacity(batch.len());
         for t in batch {
             let drv = t.drv.to_string();
-            let elapsed = self.reporter.duration(&drv);
-            match status.get(&drv) {
+            if let Some(o) = early.remove(&drv) {
+                out.push(o);
+                continue;
+            }
+            let o = match status.get(&drv) {
                 Some(s) if s.ok => {
                     let map = match built.as_ref().and_then(|b| b.get(&drv)) {
                         Some(m) => m.clone(),
@@ -346,56 +397,9 @@ impl Dispatcher {
                             self.backend.outputs(&drv, &mut on_event)?
                         }
                     };
-                    let outputs: BTreeMap<String, String> = map
-                        .into_iter()
-                        .filter_map(|(n, p)| p.map(|p| (n, p)))
-                        .filter(|(n, _)| t.outputs.is_empty() || t.outputs.contains(n))
-                        .collect();
-                    self.reporter.emit(&names.event(
-                        &drv,
-                        Kind::Built {
-                            outputs: outputs.clone(),
-                        },
-                        elapsed,
-                    ));
-                    out.push(Outcome {
-                        attr: t.attr.clone(),
-                        drv: t.drv.clone(),
-                        success: true,
-                        skipped: false,
-                        reason: None,
-                        log_tail: Vec::new(),
-                        outputs,
-                        exit: 0,
-                    });
+                    built_outcome(&mut self.reporter, &names, t, map)
                 }
-                Some(s) => {
-                    let tail = self.reporter.tail(&drv);
-                    // The daemon's message is several coloured lines; the
-                    // records want one plain one, the log tail has the rest.
-                    let reason = log::strip_ansi(&self.prov.rewrite_str(&s.reason));
-                    let reason = log::reason_line(&reason);
-                    self.reporter.emit(&names.event(
-                        &drv,
-                        Kind::Failed {
-                            reason: reason.clone(),
-                            log_tail: tail.clone(),
-                        },
-                        elapsed,
-                    ));
-                    let full = self.prov.rewrite_str(&s.reason);
-                    log::build_failed(names.pos(&drv), &full, s.exit, None);
-                    out.push(Outcome {
-                        attr: t.attr.clone(),
-                        drv: t.drv.clone(),
-                        success: false,
-                        skipped: false,
-                        reason: Some(reason),
-                        log_tail: tail,
-                        outputs: BTreeMap::new(),
-                        exit: s.exit,
-                    });
-                }
+                Some(s) => failed_outcome(&mut self.reporter, &names, t, s),
                 // No verdict for this target. Either the store stopped before
                 // it reached it (`keep-going` off, something earlier failed),
                 // or the op came back without it, which is a broken builder.
@@ -406,12 +410,13 @@ impl Dispatcher {
                     } else {
                         format!("the builder returned no build result for '{drv}'")
                     };
+                    let elapsed = self.reporter.duration(&drv);
                     self.reporter.emit(&names.event(
                         &drv,
                         Kind::Skipped { why: why.clone() },
                         elapsed,
                     ));
-                    out.push(Outcome {
+                    Outcome {
                         attr: t.attr.clone(),
                         drv: t.drv.clone(),
                         success: false,
@@ -420,9 +425,13 @@ impl Dispatcher {
                         log_tail: Vec::new(),
                         outputs: BTreeMap::new(),
                         exit: 1,
-                    });
+                    }
                 }
+            };
+            if let Some(f) = on_outcome.as_deref_mut() {
+                f(&o);
             }
+            out.push(o);
         }
         // A mismatch is a fact about a fixed-output derivation of this batch's
         // closure, from the daemon; anything else that prints the words is
@@ -597,6 +606,75 @@ fn unbuilt(b: &mut dyn Backend, drvs: &[String], on_event: &mut dyn FnMut(Event)
 /// What one derivation is called and where it was defined: the attribute the
 /// caller gave for it, else what provenance knows, else the derivation's own
 /// name. The position is added in one place, here.
+/// The outcome of a target that built, its event emitted.
+fn built_outcome(
+    reporter: &mut Reporter,
+    names: &Names,
+    t: &Target,
+    map: BTreeMap<String, Option<String>>,
+) -> Outcome {
+    let drv = t.drv.to_string();
+    let elapsed = reporter.duration(&drv);
+    let outputs: BTreeMap<String, String> = map
+        .into_iter()
+        .filter_map(|(n, p)| p.map(|p| (n, p)))
+        .filter(|(n, _)| t.outputs.is_empty() || t.outputs.contains(n))
+        .collect();
+    reporter.emit(&names.event(
+        &drv,
+        Kind::Built {
+            outputs: outputs.clone(),
+        },
+        elapsed,
+    ));
+    Outcome {
+        attr: t.attr.clone(),
+        drv: t.drv.clone(),
+        success: true,
+        skipped: false,
+        reason: None,
+        log_tail: Vec::new(),
+        outputs,
+        exit: 0,
+    }
+}
+
+/// The outcome of a target that failed, its event and record emitted.
+fn failed_outcome(
+    reporter: &mut Reporter,
+    names: &Names,
+    t: &Target,
+    s: &backend::Status,
+) -> Outcome {
+    let drv = t.drv.to_string();
+    let elapsed = reporter.duration(&drv);
+    let tail = reporter.tail(&drv);
+    // The daemon's message is several coloured lines; the records want one
+    // plain one, the log tail has the rest.
+    let reason = log::strip_ansi(&names.prov.rewrite_str(&s.reason));
+    let reason = log::reason_line(&reason);
+    reporter.emit(&names.event(
+        &drv,
+        Kind::Failed {
+            reason: reason.clone(),
+            log_tail: tail.clone(),
+        },
+        elapsed,
+    ));
+    let full = names.prov.rewrite_str(&s.reason);
+    log::build_failed(names.pos(&drv), &full, s.exit, None);
+    Outcome {
+        attr: t.attr.clone(),
+        drv: t.drv.clone(),
+        success: false,
+        skipped: false,
+        reason: Some(reason),
+        log_tail: tail,
+        outputs: BTreeMap::new(),
+        exit: s.exit,
+    }
+}
+
 struct Names<'a> {
     prov: &'a Provenance,
     by_drv: &'a HashMap<String, String>,

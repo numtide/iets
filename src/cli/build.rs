@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::slice;
 use std::time::{Duration, Instant};
 
 use crate::api;
@@ -430,7 +431,17 @@ fn build_roots(
             Err(e) => e.report(),
         };
     }
-    let outcomes = match d.submit(targets) {
+    // the paths go to stdout as each root is built, so a caller can start on
+    // the first while the rest still build
+    let stream = !b.json && b.fetch_to.is_none() && b.out_link.is_none();
+    let submitted = match stream {
+        true => d.submit_each(targets, &mut |o| {
+            devenv::keep_outputs(&transport, &b.root_key, &kept(slice::from_ref(o)));
+            render::emit(&Outcomes(slice::from_ref(o)), false);
+        }),
+        false => d.submit(targets),
+    };
+    let outcomes = match submitted {
         Ok(o) => o,
         Err(e) => return e.report(),
     };
@@ -446,30 +457,35 @@ fn build_roots(
         if let Err(e) = d.d.out_links(&out_links(prefix, &outcomes)) {
             return e.report();
         }
-    } else {
-        // the caller reads these paths off stdout and uses them afterwards, so a
-        // collection in between must not take them. `--fetch-to` already has
-        // the bytes outside the store and keeps no root here.
-        let outputs: Vec<(String, String)> = outcomes
-            .iter()
-            .flat_map(|o| {
-                o.outputs
-                    .iter()
-                    .map(|(name, path)| (format!("{}!{name}", o.attr), path.clone()))
-            })
-            .collect();
-        devenv::keep_outputs(&transport, &b.root_key, &outputs);
+    } else if !stream {
+        devenv::keep_outputs(&transport, &b.root_key, &kept(&outcomes));
     }
     timings(b, &d, plan_time);
     let report = Outcomes(&outcomes);
     if outcomes.len() > 1 {
         text::built(&report);
     }
-    render::emit(&report, b.json);
+    if !stream {
+        render::emit(&report, b.json);
+    }
     match silence(&outcomes, outputs) {
         Some(why) => log::combine_exit(d.d.exit, no_output(&why)),
         None => d.d.exit,
     }
+}
+
+/// The outputs a caller reads off stdout and uses afterwards, so a collection
+/// in between must not take them. `--fetch-to` already has the bytes outside
+/// the store and keeps no root here.
+fn kept(outcomes: &[Outcome]) -> Vec<(String, String)> {
+    outcomes
+        .iter()
+        .flat_map(|o| {
+            o.outputs
+                .iter()
+                .map(|(name, path)| (format!("{}!{name}", o.attr), path.clone()))
+        })
+        .collect()
 }
 
 /// `nix build`'s names (`createOutLinks`): `PREFIX`, `PREFIX-1`, ... per

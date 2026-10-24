@@ -878,6 +878,51 @@ impl State {
         v
     }
 
+    fn region_line(&self, id: u32) -> String {
+        match self.regions.get(&id) {
+            Some(r) => format!("R\t{}\t{}\t{}", lossy(&r.file), r.path, hex(&r.hash)),
+            None => format!("R\t?\t{id}\t"),
+        }
+    }
+
+    fn prov_line(&self, ev: &Evaluator, i: usize) -> String {
+        match &self.provs[i] {
+            Prov::Lit(l) => match self.lits.get(l) {
+                Some(l) => format!("P\t{i}\tlit\t{}\t{}\t{}", lossy(&l.file), l.region, l.ordinal),
+                None => format!("P\t{i}\tlit?\t{l}"),
+            },
+            Prov::Dir(d) => format!("P\t{i}\tdir\t{}", lossy(d)),
+            Prov::Union(a, b) => format!("P\t{i}\tu\t{a}\t{b}"),
+            Prov::Remove(a, names) => {
+                let names: Vec<_> = names.iter().map(|n| ev.interner.name_str(*n)).collect();
+                format!("P\t{i}\tx\t{a}\t{}", names.join(" "))
+            }
+        }
+    }
+
+    /// The whole read of `p`, with where it happened.
+    fn all_line(&self, ev: &Evaluator, p: u32) -> String {
+        let Some((at, nix, frames)) = self.sites.get(&p) else {
+            return format!("A\t{p}\t?\t?\t");
+        };
+        let nix = ev.describe_pos(crate::eval::Pos(*nix));
+        let mut st = String::new();
+        for f in frames.iter().rev().take(12) {
+            let _ = write!(st, " < {}", ev.describe_pos(crate::eval::Pos((f >> 32) as u32)));
+        }
+        format!("A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line())
+    }
+
+    fn obs_line(&self, ev: &Evaluator, id: u32) -> String {
+        match &self.obs[id as usize] {
+            O::Region(r) => self.region_line(*r),
+            O::Key(p, k) => format!("K\t{p}\t{}", ev.interner.name_str(*k)),
+            O::All(p) => self.all_line(ev, *p),
+            O::Pos(f, off) => format!("X\t{}\t{off}", lossy(f)),
+            O::Out(l) => l.clone(),
+        }
+    }
+
     /// `obs` as lines: `R` regions, `P` the provenances the `K` lookups and
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
@@ -902,10 +947,8 @@ impl State {
         }
         regions.sort_unstable();
         for id in regions {
-            let _ = match self.regions.get(&id) {
-                Some(r) => writeln!(out, "R\t{}\t{}\t{}", lossy(&r.file), r.path, hex(&r.hash)),
-                None => writeln!(out, "R\t?\t{id}\t"),
-            };
+            out.push_str(&self.region_line(id));
+            out.push('\n');
         }
         let mut used = vec![false; self.provs.len()];
         let mut stack: Vec<u32> = keys.iter().map(|k| k.0).chain(alls.iter().copied()).collect();
@@ -919,36 +962,18 @@ impl State {
                 Prov::Lit(_) | Prov::Dir(_) => {}
             }
         }
-        for (i, p) in self.provs.iter().enumerate() {
-            if !used[i] {
-                continue;
+        for (i, u) in used.iter().enumerate() {
+            if *u {
+                out.push_str(&self.prov_line(ev, i));
+                out.push('\n');
             }
-            let _ = match p {
-                Prov::Lit(l) => match self.lits.get(l) {
-                    Some(l) => writeln!(out, "P\t{i}\tlit\t{}\t{}\t{}", lossy(&l.file), l.region, l.ordinal),
-                    None => writeln!(out, "P\t{i}\tlit?\t{l}"),
-                },
-                Prov::Dir(d) => writeln!(out, "P\t{i}\tdir\t{}", lossy(d)),
-                Prov::Union(a, b) => writeln!(out, "P\t{i}\tu\t{a}\t{b}"),
-                Prov::Remove(a, names) => {
-                    let names: Vec<_> = names.iter().map(|n| ev.interner.name_str(*n)).collect();
-                    writeln!(out, "P\t{i}\tx\t{a}\t{}", names.join(" "))
-                }
-            };
         }
         for (p, k) in keys {
             let _ = writeln!(out, "K\t{p}\t{}", ev.interner.name_str(k));
         }
         for p in alls {
-            let Some((at, nix, frames)) = self.sites.get(&p) else {
-                continue;
-            };
-            let nix = ev.describe_pos(crate::eval::Pos(*nix));
-            let mut st = String::new();
-            for f in frames.iter().rev().take(12) {
-                let _ = write!(st, " < {}", ev.describe_pos(crate::eval::Pos((f >> 32) as u32)));
-            }
-            let _ = writeln!(out, "A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line());
+            out.push_str(&self.all_line(ev, p));
+            out.push('\n');
         }
         for (f, off) in pos {
             let _ = writeln!(out, "X\t{}\t{off}", lossy(f));
@@ -959,48 +984,87 @@ impl State {
         }
         out
     }
+
+    /// The trace graph of the run in `dir`: `obs` (a line per observation),
+    /// `provs`, `nodes` (the traces as little-endian `u32`, see `nodes`) and
+    /// `roots` (the trace of each job, a line each).
+    fn write_dag(&self, ev: &Evaluator, dir: &std::path::Path, roots: &[u32]) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let mut o = String::new();
+        for id in 0..self.obs.len() as u32 {
+            o.push_str(&self.obs_line(ev, id));
+            o.push('\n');
+        }
+        std::fs::write(dir.join("obs"), o)?;
+        let mut p = String::new();
+        for i in 0..self.provs.len() {
+            p.push_str(&self.prov_line(ev, i));
+            p.push('\n');
+        }
+        std::fs::write(dir.join("provs"), p)?;
+        let n: Vec<u8> = self.nodes.iter().flat_map(|w| w.to_le_bytes()).collect();
+        std::fs::write(dir.join("nodes"), n)?;
+        let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
+        std::fs::write(dir.join("roots"), r)
+    }
 }
 
-/// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named,
-/// and, when `IETS_FINE_JOBS` names a directory and `v` is a list, the
-/// trace of each element to `DIR/INDEX`.
+/// The trace of each element of `v` when it is a list, 0 for none.
+fn roots(v: Word) -> Vec<u32> {
+    let mut v = v;
+    if v.is_thunk() {
+        let st = v.thunk_state_cell().get();
+        if v.thunk_unforced(st) || st.is_blackhole() {
+            return Vec::new();
+        }
+        v = v.thunk_value(st);
+    }
+    let Some(l) = v.as_list() else {
+        return Vec::new();
+    };
+    l.cells()
+        .iter()
+        .map(|c| {
+            let w = c.get();
+            let st = if w.is_thunk() { w.thunk_state_cell().get() } else { Word::EMPTY };
+            if st.is_traced() { st.traced_id() } else { 0 }
+        })
+        .collect()
+}
+
+/// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named.
+/// When `v` is a list, writes the trace of each element to `DIR/INDEX` for
+/// `IETS_FINE_JOBS=DIR`, and the trace graph to `IETS_FINE_DAG=DIR`.
 pub fn dump(ev: &Evaluator, v: Option<Word>) {
     with(|s| {
-        let all = s.flatten(&s.log[s.frames[0].0..]);
-        if let Some(p) = &s.out
-            && let Err(e) = std::fs::write(p, s.text(ev, &all))
-        {
-            errln!("fine trace: writing {}: {e}", p.display());
-        }
-        let Some(dir) = std::env::var_os("IETS_FINE_JOBS") else {
-            return;
-        };
-        let Some(mut v) = v else {
-            return;
-        };
-        if v.is_thunk() {
-            let st = v.thunk_state_cell().get();
-            if v.thunk_unforced(st) || st.is_blackhole() {
-                return;
-            }
-            v = v.thunk_value(st);
-        }
-        let Some(l) = v.as_list() else {
-            return;
-        };
-        for (i, c) in l.cells().iter().enumerate() {
-            let w = c.get();
-            let t = if w.is_thunk() && w.thunk_state_cell().get().is_traced() {
-                w.thunk_state_cell().get().traced_id()
-            } else {
-                0
-            };
-            let obs = if t == 0 { Vec::new() } else { s.flatten(&[EDGE | t]) };
-            let p = std::path::Path::new(&dir).join(i.to_string());
-            if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+        if let Some(p) = &s.out {
+            let all = s.flatten(&s.log[s.frames[0].0..]);
+            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
+        let roots = v.map(roots).unwrap_or_default();
+        if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
+            for (i, t) in roots.iter().enumerate() {
+                let obs = if *t == 0 { Vec::new() } else { s.flatten(&[EDGE | t]) };
+                let p = std::path::Path::new(&dir).join(i.to_string());
+                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+                    errln!("fine trace: writing {}: {e}", p.display());
+                }
+            }
+        }
+        if let Some(dir) = std::env::var_os("IETS_FINE_DAG")
+            && let Err(e) = s.write_dag(ev, std::path::Path::new(&dir), &roots)
+        {
+            errln!("fine trace: writing {}: {e}", dir.display());
+        }
+        errln!(
+            "fine trace: {} frames, {} words of traces, {} observations, {} provenances",
+            s.serial,
+            s.nodes.len(),
+            s.obs.len(),
+            s.provs.len()
+        );
     });
 }
 
@@ -1052,5 +1116,189 @@ pub fn regions_main(argv: &[String]) -> i32 {
             s.lits.retain(|_, l| *l.file != *path);
         });
     }
+    0
+}
+
+/// One change of a step to a set's names: the names, or `None` for all.
+type NameChange = (u8, Option<Arc<FxHashSet<String>>>);
+
+/// What the steps of a change file changed, in the terms of the trace.
+#[derive(Default)]
+struct Changes {
+    steps: Vec<String>,
+    regions: FxHashMap<(String, String), u128>,
+    files: FxHashMap<String, u128>,
+    lits: FxHashMap<(String, String, String), Vec<NameChange>>,
+    dirs: FxHashMap<String, Vec<NameChange>>,
+    modified: FxHashMap<String, u128>,
+    trees: FxHashMap<String, u128>,
+    stats: FxHashMap<String, u128>,
+    /// The first changed byte of each file a step edited.
+    first: FxHashMap<String, Vec<(u8, u32)>>,
+}
+
+fn bit(s: u8) -> u128 {
+    1 << s
+}
+
+impl Changes {
+    /// `step\tCHANGE...` lines, as `fchg.sh` writes them.
+    fn read(text: &str) -> Changes {
+        let mut c = Changes::default();
+        let mut idx: FxHashMap<String, u8> = FxHashMap::default();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let s = *idx.entry(f[0].to_string()).or_insert_with(|| {
+                c.steps.push(f[0].to_string());
+                assert!(c.steps.len() <= 128, "fine-check: at most 128 steps");
+                (c.steps.len() - 1) as u8
+            });
+            let names = |n: &str| {
+                if n == "*" {
+                    None
+                } else {
+                    Some(Arc::new(n.split(' ').filter(|x| !x.is_empty()).map(String::from).collect()))
+                }
+            };
+            let or = |m: &mut FxHashMap<String, u128>, k: &str| *m.entry(k.to_string()).or_insert(0) |= bit(s);
+            match (f[1], f.len()) {
+                ("CR", 4..) => *c.regions.entry((f[2].into(), f[3].into())).or_insert(0) |= bit(s),
+                ("CF", _) => or(&mut c.files, f[2]),
+                ("CL", 6..) => c.lits.entry((f[2].into(), f[3].into(), f[4].into())).or_default().push((s, names(f[5]))),
+                ("CD", 4..) => c.dirs.entry(f[2].into()).or_default().push((s, names(f[3]))),
+                ("CM", _) => or(&mut c.modified, f[2]),
+                ("CT", _) => or(&mut c.trees, f[2]),
+                ("CS", _) => or(&mut c.stats, f[2]),
+                ("CX", 4..) => c.first.entry(f[2].into()).or_default().push((s, f[3].parse().unwrap_or(0))),
+                _ => {}
+            }
+        }
+        c
+    }
+}
+
+/// The steps each job of the trace graph in `dir` must be evaluated again
+/// for: `(job, mask)`.
+fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io::Result<Vec<(usize, u128)>> {
+    let every = if c.steps.is_empty() { 0 } else { u128::MAX >> (128 - c.steps.len()) };
+    let mut leaves: Vec<Vec<NameChange>> = Vec::new();
+    for line in std::fs::read_to_string(dir.join("provs"))?.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        let e = match f.get(2).copied() {
+            Some("lit") => c.lits.get(&(f[3].into(), f[4].into(), f[5].into())).cloned().unwrap_or_default(),
+            Some("dir") => c.dirs.get(f[3]).cloned().unwrap_or_default(),
+            Some("u") => {
+                let (a, b): (usize, usize) = (f[3].parse().unwrap(), f[4].parse().unwrap());
+                leaves[a].iter().chain(leaves[b].iter()).cloned().collect()
+            }
+            Some("x") => leaves[f[3].parse::<usize>().unwrap()].clone(),
+            _ => (0..c.steps.len() as u8).map(|s| (s, None)).collect(),
+        };
+        leaves.push(e);
+    }
+    let mut obs: Vec<u128> = Vec::new();
+    for line in std::fs::read_to_string(dir.join("obs"))?.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        let get = |m: &FxHashMap<String, u128>, k: &str| m.get(k).copied().unwrap_or(0);
+        let m = match f[0] {
+            "R" if f[1] == "?" => every,
+            "R" => c.regions.get(&(f[1].into(), f[2].into())).copied().unwrap_or(0) | get(&c.files, f[1]),
+            "K" => {
+                let name = f[2];
+                leaves[f[1].parse::<usize>().unwrap()]
+                    .iter()
+                    .filter(|(_, n)| n.as_ref().is_none_or(|n| n.contains(name)))
+                    .fold(0, |m, (s, _)| m | bit(*s))
+            }
+            "A" if skip.is_some_and(|re| f[2..].join(" ").contains(re)) => 0,
+            "A" => leaves[f[1].parse::<usize>().unwrap()].iter().fold(0, |m, (s, _)| m | bit(*s)),
+            "X" => {
+                let off: u32 = f[2].parse().unwrap_or(0);
+                c.first.get(f[1]).map_or(0, |v| v.iter().filter(|(_, d)| *d <= off).fold(0, |m, (s, _)| m | bit(*s)))
+            }
+            "F" | "C" => get(&c.modified, f[1]),
+            "T" => get(&c.trees, f[1]),
+            "S" => get(&c.stats, f[1]),
+            "D" => c.dirs.get(f[1]).map_or(0, |v| v.iter().fold(0, |m, (s, _)| m | bit(*s))),
+            _ => 0,
+        };
+        obs.push(m);
+    }
+    let words: Vec<u32> = std::fs::read(dir.join("nodes"))?
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    // a trace comes after the traces it reads, so one pass in order does
+    let mut offsets: Vec<u32> = Vec::new();
+    let mut masks: Vec<u128> = Vec::new();
+    let mut at = 2;
+    while at < words.len() {
+        let n = words[at + 1] as usize;
+        let mut m = 0;
+        for e in &words[at + 2..at + 2 + n] {
+            m |= if e & EDGE == 0 {
+                obs[*e as usize]
+            } else {
+                masks[offsets.binary_search(&(e & !EDGE)).expect("a trace read before it was made")]
+            };
+        }
+        offsets.push(at as u32);
+        masks.push(m);
+        at += 2 + n;
+    }
+    let mut out = Vec::new();
+    for (i, line) in std::fs::read_to_string(dir.join("roots"))?.lines().enumerate() {
+        let t: u32 = line.parse().unwrap_or(0);
+        let m = if t == 0 { 0 } else { offsets.binary_search(&t).map_or(every, |k| masks[k]) };
+        if m != 0 {
+            out.push((i, m));
+        }
+    }
+    Ok(out)
+}
+
+/// `iets fine-check CHANGES [--skip TEXT] DAG...`: for each job of each
+/// trace graph that a step of CHANGES invalidates, `DAG\tJOB\tSTEP`. A
+/// whole read whose place holds TEXT is left out, to price a fix there.
+pub fn check_main(argv: &[String]) -> i32 {
+    let Some(changes) = argv.first() else {
+        errln!("usage: iets fine-check CHANGES [--skip TEXT] DAG...");
+        return 2;
+    };
+    let c = match std::fs::read_to_string(changes) {
+        Ok(t) => Changes::read(&t),
+        Err(e) => {
+            errln!("{changes}: {e}");
+            return 1;
+        }
+    };
+    let mut skip = None;
+    let mut dags = &argv[1..];
+    if dags.first().map(String::as_str) == Some("--skip") && dags.len() > 1 {
+        skip = Some(dags[1].as_str());
+        dags = &dags[2..];
+    }
+    let mut out = String::new();
+    for d in dags {
+        match check_dag(&c, std::path::Path::new(d), skip) {
+            Ok(jobs) => {
+                for (i, m) in jobs {
+                    for (s, name) in c.steps.iter().enumerate() {
+                        if m & bit(s as u8) != 0 {
+                            let _ = writeln!(out, "{d}\t{i}\t{name}");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                errln!("{d}: {e}");
+                return 1;
+            }
+        }
+    }
+    print!("{out}");
     0
 }

@@ -119,10 +119,11 @@ enum Prov {
     Remove(u32, Vec<Sym>),
 }
 
-/// Turns the trace on when `IETS_FINE_TRACE` is set.
+/// Turns the trace on when `IETS_FINE_TRACE` is set; empty, the run writes no
+/// whole trace of its own.
 pub fn init() {
     if let Some(p) = std::env::var_os("IETS_FINE_TRACE") {
-        start(Some(PathBuf::from(p)));
+        start((!p.is_empty()).then(|| PathBuf::from(p)));
     }
 }
 
@@ -992,18 +993,22 @@ impl State {
         std::fs::create_dir_all(dir)?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
-            o.push_str(&self.obs_line(ev, id));
+            // a name may hold a newline, and a line is an id
+            o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
-            p.push_str(&self.prov_line(ev, i));
+            p.push_str(&self.prov_line(ev, i).replace('\n', "\\n"));
             p.push('\n');
         }
         std::fs::write(dir.join("provs"), p)?;
-        let n: Vec<u8> = self.nodes.iter().flat_map(|w| w.to_le_bytes()).collect();
-        std::fs::write(dir.join("nodes"), n)?;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("nodes"))?);
+        for x in &self.nodes {
+            std::io::Write::write_all(&mut w, &x.to_le_bytes())?;
+        }
+        std::io::Write::flush(&mut w)?;
         let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
         std::fs::write(dir.join("roots"), r)
     }
@@ -1264,6 +1269,17 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
 /// trace graph that a step of CHANGES invalidates, `DAG\tJOB\tSTEP`. A
 /// whole read whose place holds TEXT is left out, to price a fix there.
 pub fn check_main(argv: &[String]) -> i32 {
+    if let [flag, job, dir] = argv
+        && flag == "--job"
+    {
+        return match show_job(std::path::Path::new(dir), job.parse().unwrap_or(0)) {
+            Ok(()) => 0,
+            Err(e) => {
+                errln!("{dir}: {e}");
+                1
+            }
+        };
+    }
     let Some(changes) = argv.first() else {
         errln!("usage: iets fine-check CHANGES [--skip TEXT] DAG...");
         return 2;
@@ -1301,4 +1317,36 @@ pub fn check_main(argv: &[String]) -> i32 {
     }
     print!("{out}");
     0
+}
+
+/// `iets fine-check --job N DAG`: the observations of job N of a graph.
+fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
+    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?.lines().map(String::from).collect();
+    let words: Vec<u32> = std::fs::read(dir.join("nodes"))?
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    let roots = std::fs::read_to_string(dir.join("roots"))?;
+    let t: u32 = roots.lines().nth(job).and_then(|l| l.parse().ok()).unwrap_or(0);
+    let mut seen = FxHashSet::default();
+    let mut ids = FxHashSet::default();
+    let mut stack = vec![EDGE | t];
+    while let Some(e) = stack.pop() {
+        if e & EDGE == 0 {
+            ids.insert(e);
+            continue;
+        }
+        let t = (e & !EDGE) as usize;
+        if t == 0 || !seen.insert(t) {
+            continue;
+        }
+        let n = words[t + 1] as usize;
+        stack.extend_from_slice(&words[t + 2..t + 2 + n]);
+    }
+    let mut ids: Vec<u32> = ids.into_iter().collect();
+    ids.sort_unstable();
+    for i in ids {
+        println!("{}", obs[i as usize]);
+    }
+    Ok(())
 }

@@ -13,9 +13,10 @@ use crate::syntax::ast::{
 };
 use crate::syntax::symbol::{FxHashMap, Interner, Sym};
 use crate::sys;
+use crate::trace::fine;
 use ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, DynBindIr, FormalIr, Ir, IrRef, LambdaIr, LetIr,
-    ParamIr, SelectIr,
+    NO_LIT, ParamIr, SelectIr,
 };
 
 use std::cell::Cell;
@@ -59,6 +60,8 @@ pub struct Compiler<'a> {
     sym_cur_pos: Sym,
     sym_overrides: Sym,
     sym_body: Sym,
+    /// Split large sets and `let`s into regions for the fine trace.
+    pub fine: bool,
 }
 
 type CResult<T> = Result<T, Box<Error>>;
@@ -147,6 +150,7 @@ impl<'a> Compiler<'a> {
             sym_cur_pos,
             sym_overrides,
             sym_body,
+            fine: false,
         }
     }
 
@@ -163,8 +167,23 @@ impl<'a> Compiler<'a> {
         self.parser_notes()?;
         let root = self.ast.root;
         let ir = self.expr(root)?;
+        let ir = if self.fine { self.region(ir) } else { ir };
         self.scopes.clear();
         Ok(ir)
+    }
+
+    fn region(&mut self, body: IrRef) -> IrRef {
+        self.alloc(Ir::Region {
+            id: fine::new_region(),
+            body,
+        })
+    }
+
+    /// Whether the binds of a set or `let` become regions of their own.
+    fn split(&self, binds: &[BindIr]) -> bool {
+        self.fine
+            && binds.len() >= fine::FINE_MIN
+            && binds.iter().all(|b| b.sym != self.sym_overrides)
     }
 
     #[inline]
@@ -405,7 +424,7 @@ impl<'a> Compiler<'a> {
                         pos,
                     );
                 }
-                let (binds, from) = self.lower_rec_binds(merged)?;
+                let (binds, from, _) = self.lower_rec_binds(merged, true)?;
                 let body = self.expr(*body)?;
                 self.scopes.pop();
                 Ir::Let(self.alloc(LetIr { binds, from, body }))
@@ -910,7 +929,7 @@ impl<'a> Compiler<'a> {
             let pos = m.pos;
             let mut m = m;
             let dynamics = mem::take(&mut m.dynamics);
-            let (binds, from) = self.lower_rec_binds(m)?;
+            let (binds, from, split) = self.lower_rec_binds(m, dynamics.is_empty())?;
             // dynamics of rec sets are evaluated in the rec env: compile them
             // while its scope is still pushed
             let dynamic = self.lower_dynamics(dynamics)?;
@@ -926,6 +945,7 @@ impl<'a> Compiler<'a> {
                 dynamic,
                 pos,
                 overrides,
+                lit: if split { fine::new_lit() } else { NO_LIT },
             }));
         }
         let Merged {
@@ -995,6 +1015,12 @@ impl<'a> Compiler<'a> {
             }
             self.scopes.pop();
         }
+        let split = dynamics.is_empty() && self.split(&binds);
+        if split {
+            for b in binds.iter_mut() {
+                b.value = self.region(b.value);
+            }
+        }
         let dynamic = self.lower_dynamics(dynamics)?;
         binds.sort_by_key(|b| b.sym);
         let binds = self.alloc_binds(binds);
@@ -1006,6 +1032,7 @@ impl<'a> Compiler<'a> {
             dynamic,
             pos,
             overrides: None,
+            lit: if split { fine::new_lit() } else { NO_LIT },
         }))
     }
 
@@ -1036,7 +1063,11 @@ impl<'a> Compiler<'a> {
     /// Recursive bindings (`rec { }` and `let`). Pushes the new scope and
     /// leaves it on the stack so the caller can compile the body; the caller
     /// pops it.
-    fn lower_rec_binds(&mut self, m: Merged) -> CResult<(&'static [BindIr], &'static [IrRef])> {
+    fn lower_rec_binds(
+        &mut self,
+        m: Merged,
+        may_split: bool,
+    ) -> CResult<(&'static [BindIr], &'static [IrRef], bool)> {
         let Merged {
             mut statics,
             from_exprs,
@@ -1086,7 +1117,13 @@ impl<'a> Compiler<'a> {
         for e in from_exprs {
             from.push(self.expr(e)?);
         }
-        Ok((self.alloc_binds(binds), self.alloc_refs(from)))
+        let split = may_split && self.split(&binds);
+        if split {
+            for b in binds.iter_mut() {
+                b.value = self.region(b.value);
+            }
+        }
+        Ok((self.alloc_binds(binds), self.alloc_refs(from), split))
     }
 
     fn var_ir(&mut self, var: Sym, pos: Pos) -> CResult<IrRef> {

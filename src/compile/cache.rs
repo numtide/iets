@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use super::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, DynBindIr, FormalIr, Ir, IrRef, LambdaIr, LetIr,
-    ParamIr, SelectIr,
+    NO_LIT, ParamIr, SelectIr,
 };
 use crate::cachefs::{self, Shape};
 use crate::eval::{Evaluator, Pos};
@@ -551,6 +551,8 @@ impl Ser {
             Ir::Sub(l, r, pos) => self.binary(30, l, r, *pos),
             Ir::Mul(l, r, pos) => self.binary(31, l, r, *pos),
             Ir::Div(l, r, pos) => self.binary(32, l, r, *pos),
+            // the fine trace compiles without the cache
+            Ir::Region { .. } => self.ok = false,
         }
     }
 
@@ -1129,6 +1131,7 @@ impl<'a> De<'a, '_> {
                     dynamic,
                     pos,
                     overrides,
+                    lit: NO_LIT,
                 }))
             }
             10 => Ir::List(self.nodes()),

@@ -2,6 +2,7 @@
 //! validation against the file system, and the on-disk entry. Design:
 //! docs/explanation/caching.md.
 
+pub mod fine;
 pub mod key;
 pub mod run;
 pub mod store;
@@ -402,7 +403,7 @@ impl Trace {
 
     /// A regular file whose bytes are in memory.
     pub fn file(&self, path: &[u8], meta: &fs::Metadata, bytes: &[u8]) {
-        if self.is_on() {
+        if self.is_on() && !fine::importing() {
             self.record(file_obs(&sys::from_native(path), meta, sha256(bytes)));
         }
     }

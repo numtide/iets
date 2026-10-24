@@ -100,6 +100,12 @@ pub enum Ir {
     Sub(IrRef, IrRef, Pos),
     Mul(IrRef, IrRef, Pos),
     Div(IrRef, IrRef, Pos),
+    /// A binding of a large set or `let`, or a file's root, compiled for the
+    /// fine trace only (`trace::fine`): evaluating it records region `id`.
+    Region {
+        id: u32,
+        body: IrRef,
+    },
 }
 
 pub enum AttrElemIr {
@@ -136,7 +142,11 @@ pub struct AttrsIr {
     pub pos: Pos,
     /// Index of `__overrides` in `binds`, rec sets only.
     pub overrides: Option<u32>,
+    /// The fine trace's literal when every bind is a region, else `NO_LIT`.
+    pub lit: u32,
 }
+
+pub const NO_LIT: u32 = u32::MAX;
 
 pub struct DynBindIr {
     pub name: IrRef,

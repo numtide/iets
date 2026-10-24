@@ -6,6 +6,7 @@ use crate::lint::purity;
 use crate::runtime::Word;
 use crate::runtime::arena::Stat;
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Sym};
+use crate::trace::fine;
 use crate::{parallel, print};
 
 pub fn register(r: &mut Registry) {
@@ -110,11 +111,15 @@ fn remove_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
     names.sort();
     names.dedup();
     let out: Vec<(Sym, Pos, Word)> = a
-        .iter()
+        .iter_quiet()
         .filter(|at| names.binary_search(&at.sym).is_err())
         .map(|at| (at.sym, at.pos, at.cell.get()))
         .collect();
-    Ok(ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsRemove))
+    let r = ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsRemove);
+    if let Some(o) = r.as_attrs() {
+        fine::removed(o, a, &names);
+    }
+    Ok(r)
 }
 
 fn intersect_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -128,8 +133,9 @@ fn intersect_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
         pos,
         "while evaluating the second argument passed to builtins.intersectAttrs",
     )?;
-    let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(left.len().min(right.len()));
-    if left.len() < right.len() {
+    let mut out: Vec<(Sym, Pos, Word)> =
+        Vec::with_capacity(left.len_quiet().min(right.len_quiet()));
+    if left.len_quiet() < right.len_quiet() {
         for l in left.iter() {
             if let Some(r) = right.get(l.sym) {
                 out.push((r.sym, r.pos, r.cell.get()));
@@ -153,17 +159,21 @@ fn map_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     )?;
     let f = args[0];
     let a = ev.arena.flat(a);
-    if a.len() <= Word::MAP_MAX_IDX + 1 {
+    if a.len_quiet() <= Word::MAP_MAX_IDX + 1 {
         // one map word per entry, no thunk object (docs/explanation/evaluation.md)
         return Ok(ev.arena.mk_map_attrs(f, a));
     }
-    let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(a.len());
-    for attr in a.iter() {
+    let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(a.len_quiet());
+    for attr in a.iter_quiet() {
         let name = ev.sym_string(attr.sym);
         let v = ev.arena.mk_thunk_app2(f, name, attr.cell.get());
         out.push((attr.sym, attr.pos, v));
     }
-    Ok(ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsMap))
+    let r = ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsMap);
+    if let Some(o) = r.as_attrs() {
+        fine::same(o, a);
+    }
+    Ok(r)
 }
 
 fn list_to_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

@@ -94,6 +94,9 @@ fn command(argv: Vec<String>, classic: Option<String>) -> i32 {
         return on_big_stack(move || cli::classic::dispatch(&name, &rest));
     }
     let mut rest: Vec<String> = argv[1..].to_vec();
+    if cmd == "fine-regions" {
+        return crate::trace::fine::regions_main(&rest);
+    }
     help::set_command("iets");
     let cmd = match cmd.as_str() {
         "cache-dump" => {

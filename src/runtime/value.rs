@@ -10,11 +10,13 @@ use super::word::{
     TAG_THUNK_MAP, Word,
 };
 use crate::compile::ir::{Ir, LambdaIr};
+use crate::trace::fine;
 use crate::eval::{self, Evaluator, Pos};
 use crate::syntax::symbol::{self, Sym};
 #[cfg(feature = "stats2")]
 use std::sync::atomic::{AtomicU8, AtomicUsize};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::panic::Location;
 use std::{ptr, slice};
 
 /// Most contents the `strings` table records: the capacity of 2^20 buckets,
@@ -414,9 +416,13 @@ impl AttrsObj {
     /// The entries as one sorted slice. A union must have been flattened
     /// (`Arena::flat`) by the caller; iteration without a copy is `iter()`.
     #[inline]
+    #[track_caller]
     pub(crate) fn attrs(&self) -> &'static [Attr] {
         #[cfg(feature = "stats2")]
         mark_byte(&self.flags, |f| f | 0x80);
+        if self.flags & fine::FLAG != 0 {
+            fine::all(self, Location::caller());
+        }
         self.attrs_raw()
     }
 
@@ -476,12 +482,23 @@ impl AttrsObj {
     }
 
     #[inline]
+    #[track_caller]
     pub(crate) fn len(&self) -> usize {
+        if self.flags & fine::FLAG != 0 {
+            fine::all(self, Location::caller());
+        }
+        self.len_quiet()
+    }
+
+    /// `len` for a caller whose answer does not depend on it, such as a
+    /// capacity: the fine trace records no read of the whole set.
+    #[inline]
+    pub(crate) fn len_quiet(&self) -> usize {
         let n = self.len_raw();
         if n != u32::MAX {
             return n as usize;
         }
-        let n = self.iter().count();
+        let n = self.iter_quiet().count();
         self.len.store(n as u32, Ordering::Relaxed);
         n
     }
@@ -513,6 +530,9 @@ impl AttrsObj {
     pub(crate) fn get(&self, sym: Sym) -> Option<&'static Attr> {
         #[cfg(feature = "stats2")]
         mark_byte(&self.flags, |f| if f & 0x7f < 0x7f { f + 1 } else { f });
+        if self.flags & fine::FLAG != 0 {
+            fine::get(self, sym);
+        }
         if self.kind == Kind::Attrs {
             #[cfg(feature = "stats2")]
             census::note_get(0, 0);
@@ -561,9 +581,20 @@ impl AttrsObj {
 
     /// The entries in sym order, merging a union's leaves on the fly.
     #[inline]
+    #[track_caller]
     pub(crate) fn iter(&self) -> AttrIter {
         #[cfg(feature = "stats2")]
         mark_byte(&self.flags, |f| f | 0x80);
+        if self.flags & fine::FLAG != 0 {
+            fine::all(self, Location::caller());
+        }
+        self.iter_quiet()
+    }
+
+    /// `iter` for a set built from this one that keeps its provenance:
+    /// the fine trace records no read of the whole set.
+    #[inline]
+    pub(crate) fn iter_quiet(&self) -> AttrIter {
         let mut it = AttrIter {
             leaves: [&[]; SENTINEL + 1],
             keys: [u64::MAX; SENTINEL + 1],
@@ -1271,7 +1302,7 @@ impl Arena {
         let cap = a.leaf_sets().iter().map(|l| l.len_raw() as usize).sum();
         let out = self.alloc_attrs_as(cap, Stat::AttrsUpd);
         let mut n = 0;
-        for e in a.iter() {
+        for e in a.iter_quiet() {
             out.init_from(n, e);
             n += 1;
         }
@@ -1282,6 +1313,7 @@ impl Arena {
         let out: &'static AttrsObj = out;
         a.len.store(n as u32, Ordering::Relaxed);
         u.flat.set(Word::from_ref(out));
+        fine::same(out, a);
         out
     }
 
@@ -1392,8 +1424,8 @@ impl Arena {
     /// `mapAttrs f src` for a flat `src` of at most `MAP_MAX_IDX + 1`
     /// entries: the result's cells are the thunks, no object per entry.
     pub(crate) fn mk_map_attrs(&mut self, f: Word, src: &'static AttrsObj) -> Word {
-        debug_assert!(!src.is_union() && src.len() <= Word::MAP_MAX_IDX + 1);
-        let n = src.len();
+        debug_assert!(!src.is_union() && src.len_quiet() <= Word::MAP_MAX_IDX + 1);
+        let n = src.len_quiet();
         let out: *mut AttrsObj = self.alloc_attrs_as(n, Stat::AttrsMap);
         let size = size_of::<MapDesc>() + n * size_of::<Cell>();
         self.stats.note(Stat::ThunkMap, size);
@@ -1417,6 +1449,7 @@ impl Arena {
             // SAFETY: exclusive access to the fresh set during the fill.
             unsafe { (*out).init(i, a.sym, a.pos, Word::thunk_map_from_ref(&*desc, i)) };
         }
+        fine::same(out_ref, src);
         Word::from_ref(out_ref)
     }
 

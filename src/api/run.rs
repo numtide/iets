@@ -126,7 +126,12 @@ impl Run {
         f: impl FnOnce(&mut Evaluator, Option<Cache>) -> R + Send + 'static,
     ) -> Result<R, StackError> {
         let store = self.cache.as_ref().map(|c| &c.store);
-        let ev = self.cfg.trace_in(store).build();
+        let mut cfg = self.cfg.trace_in(store);
+        crate::trace::fine::init();
+        if crate::trace::fine::on() {
+            cfg = cfg.trace(true).ir_cache(None);
+        }
+        let ev = cfg.build();
         let cache = self.cache;
         parallel::try_run(self.workers, ev, move |ev| f(ev, cache))
     }

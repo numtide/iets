@@ -473,7 +473,7 @@ impl SrcPath {
                         out.push((name, t));
                     }
                 }
-                if ev.trace().is_on() {
+                if ev.trace().is_on() && !trace::fine::on() {
                     ev.trace().record(Obs::Dir {
                         path: p,
                         hash: trace::dir_listing_hash(&mut listing),

@@ -73,6 +73,9 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
     if ev.session().settings().stats >= 1 {
         ev.print_stats();
     }
+    if crate::trace::fine::on() {
+        crate::trace::fine::dump(ev);
+    }
     if let Err(e) = r {
         return report(ev, &e);
     }

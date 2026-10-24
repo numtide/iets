@@ -409,7 +409,13 @@ fn read_dir(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     for (name, t) in listing {
         entries.push((ev.sym(&name), Pos::NONE, names[t as usize]));
     }
-    ev.mk_attrs(&mut entries, pos)
+    let r = ev.mk_attrs(&mut entries, pos)?;
+    if trace::fine::on()
+        && let Some(o) = r.as_attrs()
+    {
+        trace::fine::dir(o, &p);
+    }
+    Ok(r)
 }
 
 fn read_file_type(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

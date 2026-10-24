@@ -21,7 +21,7 @@ use crate::builtins::derivation::DrvState;
 use crate::builtins::{self, store_hooks};
 use crate::compile::cache::{self, IrCache};
 use crate::compile::ir::{
-    AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, ParamIr, SelectIr,
+    AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, NO_LIT, ParamIr, SelectIr,
 };
 use crate::compile::{self, Compiler, Globals};
 use crate::events::{self, Field, Group};
@@ -43,7 +43,7 @@ use crate::store::path::{StorePath, store_dir, strip_store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
-use crate::trace::{self, Trace, store};
+use crate::trace::{self, Trace, fine, store};
 use crate::{argv, config, parallel, syntax};
 
 pub const MAX_CALL_DEPTH: u32 = 10000;
@@ -762,6 +762,7 @@ impl Evaluator {
             base_dir,
             lints.as_ref(),
         );
+        c.fine = origin == Origin::File && fine::on();
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
         let diags = mem::take(&mut c.diags);
@@ -779,6 +780,9 @@ impl Evaluator {
             self.trace.env(b"HOME");
         }
         let ir = r?;
+        if origin == Origin::File && fine::on() {
+            fine::compiled(self, path, ir, base);
+        }
         self.report_diags(&diags);
         Ok((ir, used_home, diags))
     }
@@ -1006,7 +1010,15 @@ impl Evaluator {
         {
             return Ok(src.to_vec());
         }
-        match store_hooks::resolve(self, resolved).read(self, false) {
+        let fine = fine::on();
+        if fine {
+            fine::set_importing(true);
+        }
+        let r = store_hooks::resolve(self, resolved).read(self, false);
+        if fine {
+            fine::set_importing(false);
+        }
+        match r {
             Ok(s) => Ok(s),
             Err((_, e)) => bail!(
                 ErrorKind::Io,
@@ -1477,6 +1489,9 @@ impl Evaluator {
         }
         let (line, col) = f.line_col(off);
         let path = f.path.clone();
+        if fine::on() {
+            fine::position(&path, off);
+        }
         let file = self.mk_string(&path);
         let line = self.mk_int(line as i64);
         let col = self.mk_int(col as i64);
@@ -1576,6 +1591,7 @@ impl Evaluator {
                         return Ok(self.arena.mk_primop_app(op, args));
                     }
                     let d = self.prof_enter_op(pos, op.sym);
+                    fine::at(pos.0, &self.prof);
                     cur = (op.f)(self, &args[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
@@ -1596,6 +1612,7 @@ impl Evaluator {
                     all[..app.args.len()].copy_from_slice(app.args);
                     all[app.args.len()..arity].copy_from_slice(&args[..need]);
                     let d = self.prof_enter_op(pos, op.sym);
+                    fine::at(pos.0, &self.prof);
                     cur = (op.f)(self, &all[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
@@ -1966,6 +1983,10 @@ impl Evaluator {
                 let b = self.eval(env, r)?;
                 self.arith(a, b, ArithOp::Div, *pos)
             }
+            Ir::Region { id, body } => {
+                fine::enter(*id);
+                self.eval(env, body)
+            }
         }
     }
 
@@ -2306,6 +2327,9 @@ impl Evaluator {
                 out.init(i, b.sym, b.pos, w);
             }
         }
+        if a.lit != NO_LIT {
+            fine::lit(out, a.lit);
+        }
         Word::from_ref(out)
     }
 
@@ -2452,7 +2476,7 @@ impl Evaluator {
         if b.is_empty() {
             return Word::from_ref(a);
         }
-        let a_small = a.kind == Kind::Attrs && a.len() < UNION_MIN;
+        let a_small = a.kind == Kind::Attrs && a.len_quiet() < UNION_MIN;
         if !a_small {
             let a = if leaf_count(a) + leaf_count(b) > MAX_LEAVES as usize {
                 self.arena.flat(a)
@@ -2460,7 +2484,11 @@ impl Evaluator {
                 a
             };
             if leaf_count(a) + leaf_count(b) <= MAX_LEAVES as usize {
-                return self.arena.alloc_union(a, b);
+                let u = self.arena.alloc_union(a, b);
+                if let Some(o) = u.as_attrs() {
+                    fine::union(o, a, b);
+                }
+                return u;
             }
         }
         let (aa, bb) = (
@@ -2509,6 +2537,7 @@ impl Evaluator {
             out.init_from(k, x);
             k += 1;
         }
+        fine::union(out, a, b);
         Word::from_ref(out)
     }
 
@@ -2674,6 +2703,7 @@ pub fn ir_pos(ir: &Ir) -> Pos {
         Ir::Lambda(l) => l.pos,
         Ir::Select(s) | Ir::SelectCount(s) => s.pos,
         Ir::Let(l) => ir_pos(l.body),
+        Ir::Region { body, .. } => ir_pos(body),
         Ir::Const(_) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => Pos::NONE,
     }
 }

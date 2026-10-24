@@ -1,4 +1,4 @@
-//! nix-shell, nix develop and nix fmt under the classic names, against the
+//! nix-shell, nix develop and nix fmt in classic mode, against the
 //! real Nix, on the fake stdenv of `tests/e2e/pkgs/shell.nix`.
 #![cfg(unix)]
 

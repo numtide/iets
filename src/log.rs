@@ -897,7 +897,7 @@ pub fn warning(code: &'static str, raw: String) {
 
 /// What made a tracing-cache entry stale, as `re-evaluating: RAW`. Level 3:
 /// nothing is wrong, and an edit invalidates an entry on every normal run
-/// (docs/reference/errors.md). Under a classic name only `json-log-path`
+/// (docs/reference/errors.md). In classic mode only `json-log-path`
 /// gets it: Nix invalidates its own evaluation cache without a word
 /// (docs/reference/divergences.md).
 pub fn invalidated(raw: String) {

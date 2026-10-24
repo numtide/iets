@@ -93,7 +93,7 @@ not try to bundle every tool.
 
 ## Not supported (yet)
 
-Some things iets doesn't do. Under the classic names, most of these fall
+Some things iets doesn't do. In classic mode, most of these fall
 back to the real `nix`, so you mostly won't notice.
 
 * No nix-daemon, and no store of its own. Builds go to a daemon or a remote
@@ -155,7 +155,7 @@ nix develop -c cargo build --release
 ```
 
 On NixOS, import `nixosModules.default` and set `iets.classic.enable = true`.
-That puts the classic names (`nix-build`, `nix-shell`, ...) ahead of `nix` in
+That puts the classic mode commands (`nix-build`, `nix-shell`, ...) ahead of `nix` in
 your path. If direnv is enabled, `use flake` goes through iets too.
 
 ## Documentation

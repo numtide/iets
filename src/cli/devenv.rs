@@ -147,7 +147,7 @@ pub(crate) fn keep_outputs(transport: &Transport, key: &[Vec<u8>], outputs: &[(S
 
 /// Links `out_path` at `link` in the roots store, registers the link with the
 /// daemon and marks it used, so the TTL sweep keeps the roots of the shells
-/// somebody still enters. Best effort and silent: the classic names print
+/// somebody still enters. Best effort and silent: classic mode prints
 /// what nix prints, byte for byte, so a root a daemon will not take costs the
 /// root and nothing else.
 pub(crate) fn keep_root(

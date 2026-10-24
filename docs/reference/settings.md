@@ -49,7 +49,7 @@ prints cover every worker.
 | `IETS_IR_STATS` | | set = on | off | One line per compiled file on stderr. |
 | `IETS_IR_MIN` | | usize (bytes) | 1024 | Sources smaller than this compile faster than their cache entry loads, so they are not cached. |
 | `IETS_PROVENANCE` | `provenance` | Boolean | on | Rewrites store paths and positions back to local trees (`docs/explanation/provenance.md`). |
-| `IETS_NIX_BIN_DIR` | `nix-bin-dir` | path | unset | Where the real Nix binaries live. Unset: the first one on `PATH` that is not iets, where a classic name stands for the Nix it was built with (`docs/reference/classic.md`, **Fallback rules**). |
+| `IETS_NIX_BIN_DIR` | `nix-bin-dir` | path | unset | Where the real Nix binaries live. Unset: the first one on `PATH` that is not iets, where an iets classic mode command stands for the Nix it was built with (`docs/reference/classic.md`, **Fallback rules**). |
 | `IETS_NO_FALLBACK` | `no-fallback` | Boolean | off | A classic command fails instead of running the real Nix (`docs/reference/classic.md`). |
 | `IETS_FETCHING` | | set = on | off | Set on the Nix subprocess that fetches a flake input, so a recursive fetch is an error. |
 | `IETS_OFFLINE` | | set = on | off | Any download is an error. A flake whose inputs the input store already holds still evaluates. |
@@ -86,7 +86,7 @@ derivation can't make iets rewrite a hash in your files. Each fix is a
 ## `--iets-option`
 
 `--iets-option NAME VALUE` sets any `iets.toml` setting for one run. Every
-iets command and every classic name takes it, and it never reaches the
+iets command takes it, in classic mode too, and it never reaches the
 real nix: iets removes it from the argv before a classic fallback runs.
 
 VALUE is a TOML value when it reads as a boolean, an integer, a quoted
@@ -203,7 +203,7 @@ given there, and these, which have no environment variable:
 | `pure` | bool | `true` |
 
 **`pure`** is `pure-eval` for the native commands. Set it to `false` to
-make every run impure. The classic names don't read it: each keeps Nix's own
+make every run impure. Classic mode doesn't read it: each command keeps Nix's own
 rule, so a command line gives the same answer whichever binary `PATH` found.
 `--impure` is the per-run form. `pure` is a user setting only (see the
 project file).
@@ -254,7 +254,7 @@ it accepts, before anything is uploaded.
 `--builder` takes one string, so it separates places with `;`
 (`--builder 'daemon; ssh-ng://buildhost'`), as nix.conf's `builders`
 separates machines. A URL's own query string uses `&`, never `;`. A
-classic name talks to one store, like the tool it stands in for, so it
+classic mode command talks to one store, like the tool it stands in for, so it
 takes the first place and warns about the rest.
 
 ## `nix.conf`
@@ -322,14 +322,14 @@ Each Nix setting falls in a class for iets. Other pages refer to the numbers.
 | Setting | Effect |
 |:---|:---|
 | `store` | the last fallback for `builder` |
-| `system` | `builtins.currentSystem` under the classic names; the `system=` default of a `grpc://` URL. iets's own commands use the system iets was built for |
+| `system` | `builtins.currentSystem` in classic mode; the `system=` default of a `grpc://` URL. iets's own commands use the system iets was built for |
 | `pure-eval` | see **`pure-eval`** |
 | `nix-path` | the search path after `-I`, when `NIX_PATH` is not in the environment. `--option nix-path` replaces `NIX_PATH`, and `--option extra-nix-path` adds to it, as in Nix (`configuration.cc:192`). Nix's channel defaults are not applied |
 | `show-trace` | the same as `--show-trace` |
 | `json-log-path` | `docs/reference/errors.md` |
 | `access-tokens`, `connect-timeout`, `stalled-download-timeout` | the flake input fetcher. The timeouts default to 15 s and 300 s; 0 is no limit, as in `filetransfer.hh`. `--option` reaches the fetcher too: the session keeps the settings of the first load |
 | `bash-prompt`, `bash-prompt-prefix`, `bash-prompt-suffix` | `nix develop` |
-| `experimental-features` | under a classic name, whether `builtins` has `fetchTree`, `fetchClosure` and `outputOf`, as in Nix; iets's own commands have every feature (`docs/reference/divergences.md`). `parse-toml-timestamps` needs the flag everywhere |
+| `experimental-features` | in classic mode, whether `builtins` has `fetchTree`, `fetchClosure` and `outputOf`, as in Nix; iets's own commands have every feature (`docs/reference/divergences.md`). `parse-toml-timestamps` needs the flag everywhere |
 
 An old name is its setting: `build-cores` is `cores`, `binary-caches` is
 `substituters`, and so on for every alias in Nix 2.34.8.
@@ -352,15 +352,15 @@ as it does for a Nix client. `store` is not sent: it names the daemon. A
 list setting that only got `extra-` values goes as `extra-NAME`, which the
 daemon appends to its own value.
 
-The classic names do this. iets's own commands (`iets eval`, `build`,
+Classic mode does this. iets's own commands (`iets eval`, `build`,
 `eval-jobs`, `print-dev-env`, `diff`) send Nix's defaults and no
 overrides. There, a store setting given with `--option` gives one warning:
 
 ```
-warning: setting 'sandbox' is ignored: iets's own commands send a daemon no settings; the classic names do
+warning: setting 'sandbox' is ignored: iets's own commands send a daemon no settings; classic mode does
 ```
 
-A `grpc://` builder has no `SetOptions`. For it, the classic names give
+A `grpc://` builder has no `SetOptions`. For it, classic mode gives
 the same warning, with the reason `a grpc:// builder takes no settings;
 its URL has 'max-builds'`. `store` and `system` still apply.
 
@@ -368,7 +368,7 @@ its URL has 'max-builds'`. `store` and `system` still apply.
 
 | Setting | Why it holds |
 |:---|:---|
-| `allow-import-from-derivation`, `trace-import-from-derivation` | iets never builds during evaluation. It reads a derivation output that is already in the store only when `allow-import-from-derivation` is on and `trace-import-from-derivation` is off. In other cases an import from derivation is an error in iets's own commands, and a fallback under a classic name, where the real nix applies the setting. |
+| `allow-import-from-derivation`, `trace-import-from-derivation` | iets never builds during evaluation. It reads a derivation output that is already in the store only when `allow-import-from-derivation` is on and `trace-import-from-derivation` is off. In other cases an import from derivation is an error in iets's own commands, and a fallback in classic mode, where the real nix applies the setting. |
 | `eval-cache` | iets has no Nix evaluation cache. Its own caches check every input they read, and `--no-cache` turns them off. |
 | `warn-dirty`, `allow-dirty-locks`, `commit-lock-file-summary` | iets prints no dirty-tree warning and writes no lock file. |
 | `flake-registry`, `use-registries` | iets has no registry. A reference that needs one falls back, or is an error in iets's own commands. |

@@ -1,4 +1,4 @@
-//! What iets leaves to the real Nix under the classic names, the fetchers,
+//! What iets leaves to the real Nix in classic mode, the fetchers,
 //! and the edges of a run: a full stdout and a bad iets.toml.
 #![cfg(unix)]
 

@@ -131,7 +131,7 @@ pub const PAGES: &[Page] = &[
     in_repo(
         "how-to",
         "replace-nix-tools",
-        "put the classic names on PATH",
+        "put the classic mode commands on PATH",
     ),
     in_repo("how-to", "fix-hashes", "let a build write the hash it got"),
     in_repo("how-to", "script-iets", "drive it from a program"),

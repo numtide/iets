@@ -73,7 +73,7 @@ setting fields are private, so a late write does not compile. See
 
 *2026-09-26*
 
-`iets fast-build` and the classic name `nix-fast-build` are gone. They
+`iets fast-build` and its classic mode command `nix-fast-build` are gone. They
 were 920 lines of another tool's command line: twelve flags it existed to
 refuse, its own meaning for `-f`, its own `--option` handling and its own
 reject type, beside 510 lines of `iets build`. With them went the result

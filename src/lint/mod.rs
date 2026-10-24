@@ -397,7 +397,7 @@ impl Config {
         Ok(())
     }
 
-    /// Every lint off: a classic name prints what Nix prints.
+    /// Every lint off: classic mode prints what Nix prints.
     pub fn off() -> Config {
         Config {
             levels: [Level::Off; N],

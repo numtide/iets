@@ -1,4 +1,4 @@
-//! Classic names that build, against the real Nix: out-links, roots, the
+//! Classic mode commands that build, against the real Nix: out-links, roots, the
 //! log records of a build and its failures.
 #![cfg(unix)]
 
@@ -263,7 +263,7 @@ fn failures() {
     let mut c = Checks::default();
     let j = ["--log-format", "internal-json"];
     // a daemon client nix exits 1 on any failed build, and so do the
-    // classic names. `iets build` exits with the build status.
+    // classic mode. `iets build` exits with the build status.
     let fail = expr(
         &s,
         "fail.nix",

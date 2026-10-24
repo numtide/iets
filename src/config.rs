@@ -152,7 +152,7 @@ const NO_LINT_SETTINGS: &str = "iets does not read it; 'iets eval' has the '--li
 
 /// The settings that act in the Nix client and that iets has nothing for:
 /// the name, Nix's default, and why. With any other value, whatever set it,
-/// a classic name falls back to the real nix (`Config::left_to_nix`), and the
+/// classic mode falls back to the real nix (`Config::left_to_nix`), and the
 /// commands that cannot give one `ignored-setting` warning. The other client
 /// settings are applied or hold by construction (`CLIENT`).
 const UNIMPLEMENTED: &[(&str, &str, &str)] = &[
@@ -312,7 +312,7 @@ pub fn user_conf_files() -> Vec<PathBuf> {
 }
 
 /// Whether an experimental feature is on for this run: `experimental-features`
-/// of nix.conf, plus what the command line added. Only the classic names ask,
+/// of nix.conf, plus what the command line added. Only classic mode asks,
 /// for the builtins Nix gates on one; iets's own commands have every feature
 /// (docs/reference/divergences.md). Before the settings are read nothing is on,
 /// which is Nix's own default.
@@ -474,7 +474,7 @@ impl Config {
     }
 
     /// The first `UNIMPLEMENTED` setting with a value of its own that is a
-    /// reason for a classic name to fall back: the real nix applies it.
+    /// reason for classic mode to fall back: the real nix applies it.
     pub fn left_to_nix(&self) -> Option<&'static str> {
         let set = |(name, default, _): &&(&'static str, &str, &str)| {
             let differs = |v: &str| !same_value(v, default);
@@ -501,7 +501,7 @@ impl Config {
 
     /// `load` for iets's own commands, which send a daemon no settings.
     pub fn load_native(overrides: &[(String, String)]) -> Result<Config> {
-        let why = "iets's own commands send a daemon no settings; the classic names do";
+        let why = "iets's own commands send a daemon no settings; classic mode does";
         note_unsent(overrides, &[], why);
         Config::load(overrides)
     }

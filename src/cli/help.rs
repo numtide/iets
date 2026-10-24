@@ -247,7 +247,7 @@ pub const COMMANDS: &str = "eval build search diff eval-jobs print-dev-env prefe
      cache completion";
 
 /// The native command being parsed, "iets" before the command word; unset
-/// under a classic name.
+/// in classic mode.
 pub fn set_command(cmd: &'static str) {
     *Session::current().command.lock().unwrap() = Some(cmd);
 }
@@ -407,7 +407,7 @@ pub fn suggest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) ->
         .map(|(_, c)| c)
 }
 
-/// Every word `iets WORD` takes: the native commands, the classic names it
+/// Every word `iets WORD` takes: the native commands, the classic mode commands it
 /// answers to, and the two that are not commands.
 pub fn command_words() -> Vec<&'static str> {
     (COMMANDS.split(' '))
@@ -417,7 +417,7 @@ pub fn command_words() -> Vec<&'static str> {
 }
 
 /// The report of a bad command line under `cmd` ("iets" before the command
-/// word, `None` under a classic name).
+/// word, `None` in classic mode).
 pub fn usage(cmd: Option<&str>, msg: &str, maybe: Option<&str>) -> log::Report {
     let maybe = maybe.map(|m| format!("did you mean '{m}'?"));
     let help = match cmd {

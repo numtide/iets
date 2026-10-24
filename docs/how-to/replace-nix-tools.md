@@ -66,7 +66,7 @@ iets search --impure --expr 'import <nixpkgs> {}' git gui
 ```
 
 `iets search` has no flake registry, so `nix search nixpkgs ^` under the
-classic name goes to the real `nix`.
+classic mode command goes to the real `nix`.
 
 ## Replace `nix-diff`
 

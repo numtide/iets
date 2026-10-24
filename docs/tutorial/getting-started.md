@@ -241,7 +241,7 @@ cache: hit, 1218 entries validated, 1 rehashed, load 0.002s, validate 0.012s
 `hello.nix` again. The contents were the same, so it was still a hit. Change
 the contents and the next run misses.
 
-## Classic names
+## Classic mode
 
 The same binary answers to Nix's own command names, so your scripts don't
 have to change. Instantiate your derivation with one:

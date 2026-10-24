@@ -90,7 +90,7 @@ let config = iets::eval::EvalConfig::new().system("aarch64-linux").pure(true);
 let run = api::run::Run::over(config, &a)?;
 ```
 
-The native commands that evaluate go through `Run`, and the classic names
+The native commands that evaluate go through `Run`, and classic mode
 use `Run::on`. `parallel::try_run(workers, config.build(), f)` does the same
 without the tracing cache.
 

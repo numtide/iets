@@ -50,7 +50,7 @@ fn is_iets(canonical: &Path, me: Option<&Path>) -> bool {
 /// bin directory the farm entry for that iets records. `None` means the
 /// directory offers no real nix, so the caller must look further. Without
 /// this every candidate would be a candidate to exec, and a directory that
-/// holds iets's own classic names makes the fallback exec iets again.
+/// holds iets's own classic mode commands makes the fallback exec iets again.
 fn candidate(dir: &Path, name: &str, me: Option<&Path>) -> Option<PathBuf> {
     let p = dir.join(name);
     if !executable(&p) {
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(on_path("nix", dirs.iter().cloned(), Some(&resolved)), None);
 
         // what `nix-bin-dir` points at goes through the same test, so a
-        // directory of iets's own classic names cannot exec iets again
+        // directory of iets's own classic mode commands cannot exec iets again
         assert_eq!(candidate(&x, "nix", None), None);
         assert_eq!(candidate(&real, "nix", None), Some(nix));
         assert_eq!(candidate(&real, "nix-build", None), None);

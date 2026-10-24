@@ -142,7 +142,7 @@ tracing entry (0.9 MiB) and 56 IR entries (0.5 MiB).
 every observation of the outside world the run made. A later run with the
 same command validates those observations. If nothing changed, it replays
 the result and skips evaluation entirely. `print-dev-env`, `search` and the
-`nix` subcommands and `nix-build` iets serves under the classic names do the
+`nix` subcommands and `nix-build` iets serves in classic mode do the
 same, each with a key of its own ([Classic mode](../reference/classic.md)
 says what each entry holds).
 
@@ -217,8 +217,8 @@ imports. Under `--log-format internal-json` it is a level-3 record with code
 `cache-invalidated`
 ([Errors, exit codes and log records](../reference/errors.md)). Validation
 runs on four threads, and the lowest-indexed failure wins, so one change
-always names the same thing. A run with no entry prints nothing. Under a
-classic name the line stays off stderr and the record goes to
+always names the same thing. A run with no entry prints nothing. In
+classic mode the line stays off stderr and the record goes to
 `json-log-path` alone
 ([Known divergences from Nix 2.34](../reference/divergences.md)).
 
@@ -411,7 +411,7 @@ behind, and the TTL takes them.
 both default on and are separate switches, because the lifetimes differ. A
 shell root pins a large closure for as long as somebody keeps entering that
 project. A build root pins an output the caller is about to use. On the
-classic names it diverges from Nix on purpose
+classic mode it diverges from Nix on purpose
 ([Known divergences from Nix 2.34](../reference/divergences.md)), which is
 reason enough to turn it off there.
 

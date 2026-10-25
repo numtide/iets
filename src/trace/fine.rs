@@ -49,6 +49,7 @@ const EDGE: u32 = 1 << 31;
 const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
+const STALE: u32 = u32::MAX;
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -102,6 +103,14 @@ struct State {
     qtrace: Vec<u32>,
     path_stamp: Vec<u32>,
     whole_stamp: Vec<u32>,
+    /// By ring head: how many paths joined it. By path: that count plus one
+    /// when `select` last took the path to each path of its parent's ring.
+    grown: Vec<u32>,
+    fanned: Vec<u32>,
+    /// By ring head: the trace `above` made, which holds the edges, or
+    /// `STALE`. By path: whether it has a path below it.
+    above_node: Vec<u32>,
+    parent: Vec<bool>,
     /// The paths that reach one object, a ring by path, and the first of
     /// them, which reads record and which holds the kind, fingerprint and
     /// trace.
@@ -303,6 +312,13 @@ impl State {
         self.qtrace.push(0);
         self.path_stamp.push(0);
         self.whole_stamp.push(0);
+        self.grown.push(0);
+        self.fanned.push(0);
+        self.above_node.push(STALE);
+        self.parent.push(false);
+        if parent != NO_PATH {
+            self.parent[parent as usize] = true;
+        }
         self.ring.push(p);
         self.head.push(p);
         self.fring.push(p);
@@ -317,6 +333,8 @@ impl State {
             return;
         }
         self.head[c] = h;
+        self.grown[h as usize] += 1;
+        self.above_node[h as usize] = STALE;
         self.ring[c] = self.ring[h as usize];
         self.ring[h as usize] = c as u32;
     }
@@ -332,22 +350,44 @@ impl State {
     }
 
     /// Edges to the traces of the queries above each path of the ring of
-    /// `p`: what made the sets that hold the object, and so its code.
+    /// `p`: what made the sets that hold the object, and so its code. The
+    /// readers of one ring share them as one trace.
     fn above(&mut self, p: u32) {
-        let mut m = p;
-        loop {
-            let mut q = self.paths[m as usize].0;
-            while q != NO_PATH {
-                let t = self.qtrace[q as usize];
-                if t != 0 {
-                    self.edge(t);
+        let h = self.head[p as usize] as usize;
+        if self.above_node[h] == STALE {
+            let mut ts = Vec::new();
+            let mut m = p;
+            loop {
+                let mut q = self.paths[m as usize].0;
+                while q != NO_PATH {
+                    let t = self.qtrace[q as usize];
+                    if t != 0 {
+                        ts.push(EDGE | t);
+                    }
+                    q = self.paths[q as usize].0;
                 }
-                q = self.paths[q as usize].0;
+                m = self.ring[m as usize];
+                if m == p {
+                    break;
+                }
             }
-            m = self.ring[m as usize];
-            if m == p {
-                break;
-            }
+            ts.sort_unstable();
+            ts.dedup();
+            self.above_node[h] = match ts[..] {
+                [] => 0,
+                [t] => t & !EDGE,
+                _ => {
+                    let t = self.nodes.len() as u32;
+                    self.nodes.push(0);
+                    self.nodes.push(ts.len() as u32);
+                    self.nodes.extend_from_slice(&ts);
+                    t
+                }
+            };
+        }
+        let t = self.above_node[h];
+        if t != 0 {
+            self.edge(t);
         }
     }
 
@@ -443,6 +483,11 @@ impl State {
         let Some(&(p, depth)) = self.tags.get(&addr(a)) else {
             return;
         };
+        let c = self.path(p, at.sym);
+        let n = self.grown[self.head[p as usize] as usize] + 1;
+        if std::mem::replace(&mut self.fanned[c as usize], n) == n {
+            return;
+        }
         let mut r = p;
         loop {
             let c = self.path(r, at.sym);
@@ -481,6 +526,10 @@ impl State {
         let i = p as usize;
         if self.kind[i] == kind::UNREAD {
             self.qtrace[i] = t;
+            // the traces `above` made for the paths below lack this one
+            if t != 0 && self.parent[i] {
+                self.above_node.fill(STALE);
+            }
             self.kind[i] = match v.view() {
                 Value::Attrs(a) if !self.tag(a, p, 0) => kind::PLAIN,
                 Value::Lambda(_) | Value::PrimOpApp(_) => {

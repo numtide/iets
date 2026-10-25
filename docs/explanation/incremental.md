@@ -239,20 +239,27 @@ at once; the mean of three rounds (`overhead2.sh`):
 
 | run | wall | sum of the processes | largest process |
 |---|---|---|---|
-| the branch's base commit | 14.91 s | 104.3 s | 5.3 GB |
-| this branch, trace off | 15.63 s (+5 %) | 109.3 s (+5 %) | 5.3 GB |
-| trace on | 21.04 s (+41 %) | 151.9 s (+46 %) | 6.6 GB |
-| trace on, queries | 26.63 s (+79 %) | 190.1 s (+82 %) | 7.9 GB |
-| trace on, queries, graph written | 27.75 s (+86 %) | 198.8 s (+91 %) | 7.9 GB |
+| the branch's base commit | 14.62 s | 103.6 s | 5.3 GB |
+| this branch, trace off | 15.52 s (+6 %) | 108.2 s (+4 %) | 5.3 GB |
+| trace on | 21.47 s (+47 %) | 150.7 s (+45 %) | 6.6 GB |
+| trace on, queries | 24.18 s (+65 %) | 172.0 s (+66 %) | 6.7 GB |
+| trace on, queries, graph written | 25.13 s (+72 %) | 179.0 s (+73 %) | 7.0 GB |
 
 The base commit varies by 3 % between runs (15.38 s in `compare.sh`), so
-the cost of the trace when it is off is between 1 and 5 %.
+the cost of the trace when it is off is between 1 and 6 %.
 
 A process has 470,000 to 530,000 paths. About 104,000 of them were read as
 queries with a fingerprint, and 84,000 to 113,000 joined the ring of another
 path. Paths are
 made lazily: a first version that gave a path to every cell of every tagged
 set made 16.9 million paths per process and took 118 s.
+
+A read of a path that is no query depends on the sets above every path of
+its ring. A ring has 31 paths on average, so the readers of one ring share
+these edges as one trace. Without it, the edges were 25 % of the graph, and
+the run with queries took 26.63 s and 7.9 GB. The check gives the same
+result for the 111 change sets, and the replay below takes 394.0 s in place
+of 399.2 s, with the same jobs.
 
 ### What it gives
 
@@ -306,7 +313,7 @@ cache keeps the files that did not change, and its tracing cache misses.
 | stock iets, no cache | 15.38 s | 108.2 s | 5.3 GB |
 | stock iets, IR cache warm | 14.70 s | 105.0 s | 5.3 GB |
 | stock iets, tracing cache hit (the same commit) | 0.04 s | 0.2 s | |
-| this branch, the full traced run of a first commit | 27.75 s | 198.8 s | 7.9 GB |
+| this branch, the full traced run of a first commit | 25.13 s | 179.0 s | 7.0 GB |
 | this branch, a merge (`replay2.sh`, the check included) | 2.22 s median, 5.73 s at the 90th percentile, 38.2 s at most | | |
 
 CppNix has no evaluation cache for this kind of expression: a second run

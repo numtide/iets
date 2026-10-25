@@ -1933,6 +1933,51 @@ struct GPath {
     born: u32,
 }
 
+/// The traces of a graph are in blocks of this many words (a power of
+/// two), by where they start: a check reads only the blocks that what
+/// changed can reach.
+const BLOCK: u32 = 12;
+/// A block marks its readers by parts of this many words that have a trace
+/// that is not clean: a smaller part wakes fewer blocks for nothing.
+const PART: u32 = 8;
+
+/// By key, a list: its values, in the order they came.
+#[derive(Default)]
+struct Lists {
+    at: Vec<u32>,
+    to: Vec<u32>,
+}
+
+impl Lists {
+    /// From `(key, value)` pairs of keys below `n`.
+    fn new(n: usize, pairs: &[(u32, u32)]) -> Lists {
+        let mut at = vec![0u32; n + 1];
+        for (k, _) in pairs {
+            at[*k as usize + 1] += 1;
+        }
+        for i in 0..n {
+            at[i + 1] += at[i];
+        }
+        let mut fill = at.clone();
+        let mut to = vec![0u32; pairs.len()];
+        for (k, b) in pairs {
+            to[fill[*k as usize] as usize] = *b;
+            fill[*k as usize] += 1;
+        }
+        Lists { at, to }
+    }
+
+    fn get(&self, k: u32) -> &[u32] {
+        &self.to[self.at[k as usize] as usize..self.at[k as usize + 1] as usize]
+    }
+}
+
+fn mark(visit: &mut [u64], blocks: &[u32]) {
+    for b in blocks {
+        visit[*b as usize >> 6] |= 1 << (b & 63);
+    }
+}
+
 /// A trace graph a server keeps for many checks.
 struct Graph {
     dir: String,
@@ -1944,18 +1989,33 @@ struct Graph {
     words: Vec<u32>,
     roots: Vec<u32>,
     paths: Vec<GPath>,
-    by_key: FxHashMap<u32, u32>,
+    /// By key, its path, or `NO_PATH`.
+    by_key: Vec<u32>,
     /// The other paths of each ring of more than one, by its first.
-    rings: FxHashMap<u32, Vec<u32>>,
+    rings: Lists,
     /// The paths below each path, from `below[i]` to `below[i + 1]`.
     below: Vec<u32>,
     children: Vec<u32>,
-    /// The first paths whose force left each trace.
-    forced: FxHashMap<u32, Vec<u32>>,
+    /// The paths a query read whose force left a trace, as `(trace, path)`
+    /// in order.
+    forced: Vec<(u32, u32)>,
+    /// By path, after a refresh: `LOCAL` when the newest step that read its
+    /// key is this one, `OWNER` when a check takes the trace of the key here.
+    mine: Vec<u8>,
+    /// By block, its first trace, or `NO_PATH`.
+    starts: Vec<u32>,
+    /// The blocks that hold each observation, the later blocks that read a
+    /// trace of each part, and the blocks with a read that the status of
+    /// each first path decides.
+    by_obs: Lists,
+    readers: Lists,
+    by_head: Lists,
     /// After a check: by trace, 0 for clean, else the index of its status
-    /// in `stat` plus one; the suspects of a status are in `sets`.
+    /// in `stat` plus one; the suspects of a status are in `sets`. `dirty`
+    /// has the traces that are not clean.
     stat: Vec<(bool, u32)>,
     sets: Sets,
+    dirty: Vec<u32>,
 }
 
 /// The observations of a graph, by what can change them.
@@ -2024,22 +2084,30 @@ impl ObsIndex {
 
     /// The steps of `c` that changed each observation.
     fn changed(&self, c: &Changes, leaves: &[Vec<NameChange>]) -> Vec<u128> {
-        fn or(d: &mut [u128], ids: Option<&Vec<u32>>, m: u128) {
+        let mut d = vec![0u128; self.n];
+        self.each_changed(c, leaves, &mut |i, m| d[i as usize] |= m);
+        d
+    }
+
+    /// Gives `put` the observations that steps of `c` changed, with the
+    /// steps; one observation can come many times.
+    fn each_changed(
+        &self,
+        c: &Changes,
+        leaves: &[Vec<NameChange>],
+        put: &mut dyn FnMut(u32, u128),
+    ) {
+        fn or(put: &mut dyn FnMut(u32, u128), ids: Option<&Vec<u32>>, m: u128) {
             for i in ids.into_iter().flatten() {
-                d[*i as usize] |= m;
+                put(*i, m);
             }
         }
         let steps = |v: &[NameChange]| v.iter().fold(0, |m, (s, _)| m | bit(*s));
-        let mut d = vec![0u128; self.n];
         if !c.steps.is_empty() {
-            or(
-                &mut d,
-                Some(&self.every),
-                u128::MAX >> (128 - c.steps.len()),
-            );
+            or(put, Some(&self.every), u128::MAX >> (128 - c.steps.len()));
         }
         for (k, m) in &c.regions {
-            or(&mut d, self.regions.get(k), *m);
+            or(put, self.regions.get(k), *m);
         }
         for (maps, idx) in [
             (&c.files, &self.region_files),
@@ -2048,27 +2116,28 @@ impl ObsIndex {
             (&c.stats, &self.stats),
         ] {
             for (k, m) in maps {
-                or(&mut d, idx.get(k), *m);
+                or(put, idx.get(k), *m);
             }
         }
         for (k, v) in &c.dirs {
-            or(&mut d, self.dirs.get(k), steps(v));
+            or(put, self.dirs.get(k), steps(v));
         }
         for (f, v) in &c.first {
             for (i, off) in self.positions.get(f).into_iter().flatten() {
-                d[*i as usize] |= v
+                let m = v
                     .iter()
                     .filter(|(_, o)| o <= off)
                     .fold(0, |m, (s, _)| m | bit(*s));
+                put(*i, m);
             }
         }
         let mut names: FxHashSet<&str> = FxHashSet::default();
         for (p, l) in leaves.iter().enumerate() {
             let p = p as u32;
-            or(&mut d, self.wholes.get(&p), steps(l));
+            or(put, self.wholes.get(&p), steps(l));
             for (s, n) in l {
                 match n {
-                    None => or(&mut d, self.keys_of.get(&p), bit(*s)),
+                    None => or(put, self.keys_of.get(&p), bit(*s)),
                     Some(n) => names.extend(n.iter().map(String::as_str)),
                 }
             }
@@ -2076,13 +2145,13 @@ impl ObsIndex {
         for n in names {
             for (i, p) in self.names.get(n).into_iter().flatten() {
                 let l = &leaves[*p as usize];
-                d[*i as usize] |= l
+                let m = l
                     .iter()
                     .filter(|(_, s)| s.as_ref().is_some_and(|s| s.contains(n)))
                     .fold(0, |m, (s, _)| m | bit(*s));
+                put(*i, m);
             }
         }
-        d
     }
 }
 
@@ -2116,7 +2185,8 @@ impl Keys {
 }
 
 impl Graph {
-    fn load(dir: &str, step: u32, keys: &mut Keys) -> std::io::Result<Graph> {
+    /// The paths of the graph in `dir`.
+    fn paths(dir: &str, keys: &mut Keys) -> Vec<GPath> {
         let d = std::path::Path::new(dir);
         let mut paths: Vec<GPath> = Vec::new();
         if let Ok(t) = std::fs::read_to_string(d.join("queries")) {
@@ -2148,14 +2218,20 @@ impl Graph {
                 });
             }
         }
-        let mut rings: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-        let mut forced: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        paths
+    }
+
+    fn load(dir: String, step: u32, paths: Vec<GPath>) -> std::io::Result<Graph> {
+        let d = std::path::Path::new(&dir);
+        let mut rings: Vec<(u32, u32)> = Vec::new();
+        let mut forced: Vec<(u32, u32)> = Vec::new();
         let mut below = vec![0u32; paths.len() + 1];
         for (i, p) in paths.iter().enumerate() {
             if p.head != i as u32 {
-                rings.entry(p.head).or_default().push(i as u32);
-            } else if p.trace != 0 && p.kind != kind::EAGER {
-                forced.entry(p.trace).or_default().push(i as u32);
+                rings.push((p.head, i as u32));
+            }
+            if p.trace != 0 && p.kind != kind::UNREAD {
+                forced.push((p.trace, i as u32));
             }
             if p.parent != NO_PATH {
                 below[p.parent as usize + 1] += 1;
@@ -2173,29 +2249,116 @@ impl Graph {
             }
         }
         children.truncate(*below.last().unwrap_or(&0) as usize);
-        Ok(Graph {
-            dir: dir.to_string(),
-            step,
-            provs: std::fs::read_to_string(d.join("provs"))?,
-            index: ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
-            words: read_words(&d.join("nodes"))?,
-            roots: std::fs::read_to_string(d.join("roots"))?
+        forced.sort_unstable();
+        let rings = Lists::new(paths.len(), &rings);
+        let mut by_key = vec![NO_PATH; paths.iter().map(|p| p.key as usize + 1).max().unwrap_or(0)];
+        for (i, p) in paths.iter().enumerate() {
+            by_key[p.key as usize] = i as u32;
+        }
+        let (provs, index, words, roots) = (
+            std::fs::read_to_string(d.join("provs"))?,
+            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            read_words(&d.join("nodes"))?,
+            std::fs::read_to_string(d.join("roots"))?
                 .lines()
                 .map(|l| l.parse().unwrap_or(0))
                 .collect(),
-            by_key: paths
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.key, i as u32))
-                .collect(),
+        );
+        let mut g = Graph {
+            dir,
+            step,
+            provs,
+            index,
+            words,
+            roots,
+            by_key,
             paths,
             rings,
             below,
             children,
             forced,
+            mine: Vec::new(),
+            starts: Vec::new(),
+            by_obs: Lists::default(),
+            readers: Lists::default(),
+            by_head: Lists::default(),
             stat: Vec::new(),
             sets: Sets::default(),
-        })
+            dirty: Vec::new(),
+        };
+        g.reach();
+        Ok(g)
+    }
+
+    /// Makes the blocks and what reaches them, and every trace clean.
+    fn reach(&mut self) {
+        /// `(key, block)` pairs, each once: `last` has the last block of a key, plus one.
+        struct Pairs(Vec<u32>, Vec<(u32, u32)>);
+        impl Pairs {
+            fn add(&mut self, k: u32, b: u32) -> bool {
+                let new = std::mem::replace(&mut self.0[k as usize], b + 1) != b + 1;
+                if new {
+                    self.1.push((k, b));
+                }
+                new
+            }
+        }
+        let mut words = std::mem::take(&mut self.words);
+        let nb = (words.len() >> BLOCK) + 1;
+        self.starts = vec![NO_PATH; nb];
+        let mut obs = Pairs(vec![0; self.index.n], Vec::new());
+        let parts = (words.len() >> PART) + 1;
+        let mut edges = Pairs(vec![0; parts], Vec::new());
+        let mut read = Pairs(vec![0; self.paths.len()], Vec::new());
+        let mut heads = Pairs(vec![0; self.paths.len()], Vec::new());
+        let mut at = 2;
+        while at < words.len() {
+            let b = (at >> BLOCK) as u32;
+            if self.starts[b as usize] == NO_PATH {
+                self.starts[b as usize] = at as u32;
+            }
+            words[at] = 0;
+            let n = words[at + 1] as usize;
+            let mut k = at + 2;
+            while k < at + 2 + n {
+                let w = words[k];
+                k += 1;
+                if w & EDGE == 0 {
+                    obs.add(w, b);
+                    continue;
+                }
+                if w & QUERY != 0 {
+                    let h = self.paths[words[k] as usize].head;
+                    k += 1;
+                    if read.add(h, b) {
+                        heads.add(h, b);
+                        for m in self.ring(h) {
+                            let p = self.paths[m as usize].parent;
+                            if p != NO_PATH {
+                                heads.add(self.paths[p as usize].head, b);
+                            }
+                        }
+                    }
+                }
+                let t = w & !(EDGE | QUERY);
+                if t != 0 && t >> BLOCK != b {
+                    edges.add(t >> PART, b);
+                }
+            }
+            at += 2 + n;
+        }
+        read.1.clear();
+        self.by_obs = Lists::new(self.index.n, &obs.1);
+        self.readers = Lists::new(parts, &edges.1);
+        self.by_head = Lists::new(self.paths.len(), &heads.1);
+        self.words = words;
+    }
+
+    fn path_of(&self, key: u32) -> Option<u32> {
+        self.by_key
+            .get(key as usize)
+            .copied()
+            .filter(|p| *p != NO_PATH)
     }
 
     fn status(&self, t: u32) -> Option<(bool, u32)> {
@@ -2206,7 +2369,7 @@ impl Graph {
     }
 
     fn ring(&self, h: u32) -> impl Iterator<Item = u32> + '_ {
-        std::iter::once(h).chain(self.rings.get(&h).into_iter().flatten().copied())
+        std::iter::once(h).chain(self.rings.get(h).iter().copied())
     }
 
     fn read(&self, i: u32) -> bool {
@@ -2282,18 +2445,15 @@ const MAX_SUSPECTS: usize = 256;
 struct Server {
     graphs: Vec<Graph>,
     keys: Keys,
-    /// By key, made again after a load or a drop: the newest step that read
-    /// it, and where (`Store`).
-    newest: FxHashMap<u32, u32>,
-    store: Store,
-    /// By key, how many graphs read it.
-    readers: FxHashMap<u32, u32>,
+    /// The graphs that `load` started to read.
+    loading: Vec<std::thread::JoinHandle<std::io::Result<Graph>>>,
+    /// By key, made again after a load or a drop: the graph of the newest
+    /// step that read it, plus one, where a check takes its trace; and how
+    /// many graphs read it.
+    owner: Vec<u32>,
+    readers: Vec<u32>,
     fresh: bool,
 }
-
-/// Where a check finds the trace of a query: the graph of the newest step
-/// that read it, and the trace there.
-type Store = FxHashMap<u32, (usize, u32)>;
 
 /// What the objects of a graph that a route from the root set reaches
 /// require by now: those whose force or whose holder, by any path made by
@@ -2302,6 +2462,8 @@ struct Moved {
     on: Vec<St>,
     /// The paths made by now are those before it.
     now: u32,
+    /// The first paths whose status `set` changed.
+    touched: Vec<u32>,
 }
 
 impl Moved {
@@ -2314,6 +2476,7 @@ impl Moved {
                 continue;
             }
             self.on[h as usize] = new;
+            self.touched.push(h);
             for r in g.ring(h).filter(|r| *r < self.now) {
                 let (a, b) = (g.below[r as usize], g.below[r as usize + 1]);
                 for c in &g.children[a as usize..b as usize] {
@@ -2354,31 +2517,52 @@ impl Moved {
 }
 
 impl Server {
-    /// Checks every graph against one step of changes. A query read is a
-    /// cutoff when only the force of its object changed: the reader is then
-    /// a suspect, clean when the query keeps its fingerprint. When a route
-    /// to the object may have moved, the reader changed. Returns, by graph,
-    /// the status of each job: `None` clean, `Some((hard, suspects))`.
     fn refresh(&mut self) {
         if self.fresh {
             return;
         }
-        self.newest.clear();
-        self.store.clear();
+        let n = self.keys.rows.len();
+        self.owner.clear();
+        self.owner.resize(n, 0);
         self.readers.clear();
+        self.readers.resize(n, 0);
         let mut order: Vec<usize> = (0..self.graphs.len()).collect();
         order.sort_by_key(|i| std::cmp::Reverse(self.graphs[*i].step));
         for i in order {
             let g = &self.graphs[i];
             for (j, p) in g.paths.iter().enumerate() {
                 if g.read(j as u32) {
-                    self.newest.entry(p.key).or_insert(g.step);
-                    self.store.entry(p.key).or_insert((i, p.trace));
-                    *self.readers.entry(p.key).or_insert(0) += 1;
+                    let k = p.key as usize;
+                    if self.owner[k] == 0 {
+                        self.owner[k] = i as u32 + 1;
+                    }
+                    self.readers[k] += 1;
                 }
             }
         }
+        for i in 0..self.graphs.len() {
+            let g = &self.graphs[i];
+            let mine = (0..g.paths.len() as u32)
+                .map(|j| match g.read(j) {
+                    true => {
+                        let o = self.owner[g.paths[j as usize].key as usize] as usize - 1;
+                        ((self.graphs[o].step == g.step) as u8 * LOCAL) | ((o == i) as u8 * OWNER)
+                    }
+                    false => 0,
+                })
+                .collect();
+            self.graphs[i].mine = mine;
+        }
         self.fresh = true;
+    }
+
+    /// Takes the graphs that `load` started.
+    fn settle(&mut self) -> std::io::Result<()> {
+        for h in std::mem::take(&mut self.loading) {
+            self.graphs.push(h.join().expect("a loader thread")?);
+            self.fresh = false;
+        }
+        Ok(())
     }
 
     /// Drops those of `dirs`, graphs that own no job, whose traces no other
@@ -2387,16 +2571,15 @@ impl Server {
         let mut out = Vec::new();
         loop {
             self.refresh();
-            let needed = |i: usize, g: &Graph| {
-                g.paths.iter().enumerate().any(|(j, p)| {
-                    g.read(j as u32)
-                        && self.store.get(&p.key).is_some_and(|s| s.0 == i)
-                        && self.readers[&p.key] > 1
-                })
+            let needed = |g: &Graph| {
+                g.paths
+                    .iter()
+                    .enumerate()
+                    .any(|(j, p)| g.mine[j] & OWNER != 0 && self.readers[p.key as usize] > 1)
             };
             let Some(i) = (0..self.graphs.len()).find(|i| {
                 let g = &self.graphs[*i];
-                dirs.contains(g.dir.as_str()) && !needed(*i, g)
+                dirs.contains(g.dir.as_str()) && !needed(g)
             }) else {
                 return out;
             };
@@ -2405,11 +2588,18 @@ impl Server {
         }
     }
 
+    /// Checks every graph against one step of changes. A query read is a
+    /// cutoff when only the force of its object changed: the reader is then
+    /// a suspect, clean when the query keeps its fingerprint. When a route
+    /// to the object may have moved, the reader changed. Returns, by graph,
+    /// the status of each job: `None` clean, `Some((hard, suspects))`.
     fn check(&mut self, c: &Changes) -> Vec<Vec<Option<(bool, u32)>>> {
         self.refresh();
         let mut steps: Vec<u32> = self.graphs.iter().map(|g| g.step).collect();
         steps.sort_unstable();
         steps.dedup();
+        // by key: the graph whose trace of it, the newest, is not clean
+        let mut stale: Stale = FxHashMap::default();
         // a step's graphs read only the statuses of newer steps: in parallel
         for step in steps.into_iter().rev() {
             let idx: Vec<usize> = (0..self.graphs.len())
@@ -2419,24 +2609,26 @@ impl Server {
                 .into_iter()
                 .map(|i| (i, std::mem::take(&mut self.graphs[i].words)))
                 .collect();
-            let out: Vec<(Vec<(bool, u32)>, Sets)> = std::thread::scope(|sc| {
-                let (graphs, store, newest) = (&self.graphs, &self.store, &self.newest);
+            let out: Vec<Pass> = std::thread::scope(|sc| {
+                let (graphs, stale) = (&self.graphs, &stale);
                 let hs: Vec<_> = taken
                     .iter_mut()
                     .map(|(i, w)| {
                         let i = *i;
-                        sc.spawn(move || pass(graphs, i, w, c, store, newest))
+                        sc.spawn(move || pass(graphs, i, w, c, stale))
                     })
                     .collect();
                 hs.into_iter()
                     .map(|h| h.join().expect("a checker thread"))
                     .collect()
             });
-            for ((i, w), (stat, sets)) in taken.into_iter().zip(out) {
+            for ((i, w), p) in taken.into_iter().zip(out) {
                 let g = &mut self.graphs[i];
                 g.words = w;
-                g.stat = stat;
-                g.sets = sets;
+                g.stat = p.stat;
+                g.sets = p.sets;
+                g.dirty = p.dirty;
+                stale.extend(p.keys.into_iter().map(|(k, st)| (k, (i, st))));
             }
         }
         self.graphs
@@ -2451,118 +2643,178 @@ impl Server {
     }
 }
 
+const LOCAL: u8 = 1;
+const OWNER: u8 = 2;
+type Stale = FxHashMap<u32, (usize, St)>;
+
+/// What a pass leaves: the statuses, the traces that have one, and the keys
+/// whose newest trace, which is of this graph, is not clean.
+struct Pass {
+    stat: Vec<St>,
+    sets: Sets,
+    dirty: Vec<u32>,
+    keys: Vec<(u32, St)>,
+}
+
 /// The forward pass over graph `i`, whose trace words are `words`; graphs of
-/// newer steps are done. A hard status keeps no suspects.
-fn pass(
-    graphs: &[Graph],
-    i: usize,
-    words: &mut [u32],
-    c: &Changes,
-    store: &Store,
-    newest: &FxHashMap<u32, u32>,
-) -> (Vec<(bool, u32)>, Sets) {
+/// newer steps are done. A hard status keeps no suspects. It reads a block
+/// when a trace of it can be other than clean: the block has an observation
+/// that changed, reads a block or a path that is not clean, makes a path
+/// below one.
+fn pass(graphs: &[Graph], i: usize, words: &mut [u32], c: &Changes, stale_keys: &Stale) -> Pass {
     let g = &graphs[i];
     let leaves = leaves(c, &g.provs);
-    let obs = g.index.changed(c, &leaves);
-    let local = |k: u32| newest.get(&k) == Some(&g.step);
+    let mut visit = vec![0u64; (g.starts.len() >> 6) + 1];
+    for at in &g.dirty {
+        words[*at as usize] = 0;
+    }
+    let mut obs = vec![false; g.index.n];
+    g.index.each_changed(c, &leaves, &mut |o, m| {
+        if m != 0 && !std::mem::replace(&mut obs[o as usize], true) {
+            mark(&mut visit, g.by_obs.get(o));
+        }
+    });
+    let local = |h: u32| g.mine[h as usize] & LOCAL != 0;
     let mut sets = Sets::default();
     // the forces a newer step read again: what their newest trace requires
     let mut moved = Moved {
         on: vec![CLEAN; g.paths.len()],
         now: 0,
+        touched: Vec::new(),
     };
     let mut stale = vec![CLEAN; g.paths.len()];
-    for (h, p) in g.paths.iter().enumerate() {
-        if p.head == h as u32 && g.read(h as u32) && p.kind != kind::EAGER && !local(p.key) {
-            let st = match store.get(&p.key) {
-                Some(&(_, 0)) => CLEAN,
-                Some(&(j, t)) => match graphs[j].status(t) {
-                    None => CLEAN,
-                    Some((true, _)) => HARD,
-                    Some((false, x)) => sets.status(graphs[j].sets.get(x).to_vec()),
-                },
-                None => HARD,
-            };
-            stale[h] = st;
-            moved.on[h] = st;
-        }
-    }
-    let mut stat: Vec<St> = Vec::new();
-    let mut sus: Vec<u32> = Vec::new();
-    let mut at = 2;
-    while at < words.len() {
-        moved.advance(g, &mut sets, at as u32);
-        let n = words[at + 1] as usize;
-        let mut hard = false;
-        sus.clear();
-        let mut k = at + 2;
-        while k < at + 2 + n && !hard {
-            let e = words[k];
-            k += 1;
-            if e & EDGE == 0 {
-                hard = obs[e as usize] != 0;
-            } else if e & QUERY != 0 {
-                let (t, p) = (e & !(EDGE | QUERY), words[k]);
-                k += 1;
-                let h = g.paths[p as usize].head;
-                let key = g.paths[h as usize].key;
-                let up = moved.above(g, &mut sets, h);
-                let own = if !local(key) {
-                    stale[h as usize]
-                } else if t == 0 || words[t as usize] == 0 {
-                    CLEAN
-                } else {
-                    stat[words[t as usize] as usize - 1]
-                };
-                // a force that changed is verified by its path; one whose
-                // queries may have, by those
-                hard = up.0;
-                sus.extend_from_slice(sets.get(up.1));
-                match own {
-                    (true, _) => sus.push(key),
-                    (false, x) => sus.extend_from_slice(sets.get(x)),
-                }
-            } else {
-                let t = (e & !EDGE) as usize;
-                if t != 0
-                    && let x @ 1.. = words[t]
-                {
-                    let (h, s) = stat[x as usize - 1];
-                    hard = h;
-                    sus.extend_from_slice(sets.get(s));
-                }
-            }
-        }
-        let st = if hard {
-            HARD
-        } else {
-            sus.sort_unstable();
-            sus.dedup();
-            sets.status(sus.clone())
-        };
-        words[at] = if st == CLEAN {
-            0
-        } else {
-            stat.push(st);
-            stat.len() as u32
-        };
-        if st != CLEAN
-            && let Some(hs) = g.forced.get(&(at as u32))
+    for (key, (j, st)) in stale_keys {
+        if let Some(h) = g.path_of(*key)
+            && g.paths[h as usize].head == h
+            && g.read(h)
+            && g.paths[h as usize].kind != kind::EAGER
+            && !local(h)
         {
-            for h in hs {
-                if local(g.paths[*h as usize].key) {
-                    moved.set(g, &mut sets, *h, st);
-                }
+            let st = match *st {
+                (true, _) => HARD,
+                (false, x) => sets.status(graphs[*j].sets.get(x).to_vec()),
+            };
+            stale[h as usize] = st;
+            moved.on[h as usize] = st;
+            mark(&mut visit, g.by_head.get(h));
+        }
+    }
+    let mut out = Pass {
+        stat: Vec::new(),
+        sets: Sets::default(),
+        dirty: Vec::new(),
+        keys: Vec::new(),
+    };
+    let stat = &mut out.stat;
+    let mut sus: Vec<u32> = Vec::new();
+    let mut next = 0;
+    for b in 0..g.starts.len() {
+        if visit[b >> 6] & (1 << (b & 63)) == 0 {
+            // a path made below one that is not clean changes what reads see
+            let mut n = moved.now as usize;
+            let mut wake = false;
+            while !wake && n < g.paths.len() && g.paths[n].born as usize >> BLOCK <= b {
+                let p = g.paths[n].parent;
+                wake = p != NO_PATH && moved.on[g.paths[p as usize].head as usize] != CLEAN;
+                n += 1;
+            }
+            if !wake {
+                moved.now = n as u32;
+                continue;
             }
         }
-        at += 2 + n;
+        let mut at = g.starts[b] as usize;
+        let mut part = usize::MAX;
+        while at < words.len() && at >> BLOCK == b {
+            moved.advance(g, &mut sets, at as u32);
+            let n = words[at + 1] as usize;
+            let mut hard = false;
+            sus.clear();
+            let mut k = at + 2;
+            while k < at + 2 + n && !hard {
+                let e = words[k];
+                k += 1;
+                if e & EDGE == 0 {
+                    hard = obs[e as usize];
+                } else if e & QUERY != 0 {
+                    let (t, p) = (e & !(EDGE | QUERY), words[k]);
+                    k += 1;
+                    let h = g.paths[p as usize].head;
+                    let key = g.paths[h as usize].key;
+                    let up = moved.above(g, &mut sets, h);
+                    let own = if !local(h) {
+                        stale[h as usize]
+                    } else if t == 0 || words[t as usize] == 0 {
+                        CLEAN
+                    } else {
+                        stat[words[t as usize] as usize - 1]
+                    };
+                    // a force that changed is verified by its path; one whose
+                    // queries may have, by those
+                    hard = up.0;
+                    sus.extend_from_slice(sets.get(up.1));
+                    match own {
+                        (true, _) => sus.push(key),
+                        (false, x) => sus.extend_from_slice(sets.get(x)),
+                    }
+                } else {
+                    let t = (e & !EDGE) as usize;
+                    if t != 0
+                        && let x @ 1.. = words[t]
+                    {
+                        let (h, s) = stat[x as usize - 1];
+                        hard = h;
+                        sus.extend_from_slice(sets.get(s));
+                    }
+                }
+            }
+            let st = if hard {
+                HARD
+            } else {
+                sus.sort_unstable();
+                sus.dedup();
+                sets.status(sus.clone())
+            };
+            words[at] = if st == CLEAN {
+                0
+            } else {
+                stat.push(st);
+                stat.len() as u32
+            };
+            if st != CLEAN {
+                if std::mem::replace(&mut part, at >> PART) != at >> PART {
+                    mark(&mut visit, g.readers.get(part as u32));
+                }
+                out.dirty.push(at as u32);
+                while next < g.forced.len() && g.forced[next].0 < at as u32 {
+                    next += 1;
+                }
+                let own = g.forced[next..].iter().take_while(|f| f.0 == at as u32);
+                for (_, h) in own {
+                    let p = &g.paths[*h as usize];
+                    if g.mine[*h as usize] & OWNER != 0 {
+                        out.keys.push((p.key, st));
+                    }
+                    if p.head == *h && p.kind != kind::EAGER && local(*h) {
+                        moved.set(g, &mut sets, *h, st);
+                    }
+                }
+            }
+            at += 2 + n;
+        }
+        for h in moved.touched.drain(..) {
+            mark(&mut visit, g.by_head.get(h));
+        }
     }
-    (stat, sets)
+    out.sets = sets;
+    out
 }
 
 /// `iets fine-check --serve`: reads commands, one a line, and answers each:
 ///
-/// - `load DIR STEP`: keeps the graph in DIR, written at STEP; `ok`.
+/// - `load DIR STEP`: starts to read the graph in DIR, written at STEP, and
+///   keeps it; `ok`. When it cannot be read, the next command that is no
+///   `load` fails.
 /// - `drop DIR`: forgets it; `ok`.
 /// - `gc FILE OUT`: of the graphs in FILE, a line each, which own no job,
 ///   forgets those whose traces no other graph needs, and writes them to
@@ -2581,15 +2833,23 @@ fn serve() -> i32 {
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let f: Vec<&str> = line.split(' ').collect();
+        // a graph that did not load fails the next command that needs the graphs
+        let failed = match f[0] {
+            "load" => None,
+            _ => s.settle().err(),
+        };
         let reply = match f.as_slice() {
-            ["load", dir, step] => match Graph::load(dir, step.parse().unwrap_or(0), &mut s.keys) {
-                Ok(g) => {
-                    s.graphs.push(g);
-                    s.fresh = false;
-                    "ok\n".to_string()
-                }
-                Err(e) => format!("error {dir}: {e}\n"),
-            },
+            _ if failed.is_some() => format!("error {}\n", failed.unwrap()),
+            ["load", dir, step] => {
+                let (dir, step) = (dir.to_string(), step.parse().unwrap_or(0));
+                let paths = Graph::paths(&dir, &mut s.keys);
+                let d = dir.clone();
+                s.loading.push(std::thread::spawn(move || {
+                    Graph::load(dir, step, paths)
+                        .map_err(|e| std::io::Error::other(format!("{d}: {e}")))
+                }));
+                "ok\n".to_string()
+            }
             ["drop", dir] => {
                 s.graphs.retain(|g| g.dir != *dir);
                 s.fresh = false;
@@ -2632,12 +2892,15 @@ fn serve() -> i32 {
                     let mut ks: Vec<u32> = suspects.into_iter().collect();
                     ks.sort_unstable();
                     for k in ks {
-                        let fp = s.store.get(&k).map_or("-", |&(j, _)| {
-                            let g = &s.graphs[j];
-                            g.by_key
-                                .get(&k)
-                                .map_or("-", |p| g.paths[*p as usize].fp.as_str())
-                        });
+                        let fp = s
+                            .owner
+                            .get(k as usize)
+                            .filter(|j| **j != 0)
+                            .map_or("-", |j| {
+                                let g = &s.graphs[*j as usize - 1];
+                                g.path_of(k)
+                                    .map_or("-", |p| g.paths[p as usize].fp.as_str())
+                            });
                         let names = s.keys.names(k).join("\t");
                         let _ = writeln!(o, "Q\t{k}\t{fp}\t{names}");
                     }

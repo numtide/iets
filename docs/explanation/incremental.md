@@ -232,6 +232,13 @@ trace of each path, so it never checks a stale trace again. A graph that
 owns no job stays loaded while it holds the newest trace of a query that
 another graph read.
 
+A check does not read a whole graph. The traces are in blocks of 4,096
+words. At load, the checker records which blocks hold each observation,
+which blocks read each part of 256 words, and which blocks read each path.
+A check then reads a block only when one of these can give it a trace that
+is not clean. The traces are in the order they closed, so one pass in
+order is enough. The index adds about 15 % to the memory of the checker.
+
 ### What queries cost
 
 The 80,618 jobs as `pkgs.<path>.drvPath`, in 8 processes of one worker each,
@@ -293,9 +300,25 @@ keep a third to a half of the jobs, but they verify nearly one query per kept
 job, so they cost as much as evaluating everything. Step 6 changes the
 construction of the root set, which every job reads.
 
-The check costs more with the cutoff, 0.6 to 3.3 s per merge: a kept job
-stays in its old graph, so more graphs stay loaded. A checker that merged
-graphs would not pay that.
+A kept job stays in its old graph, so more graphs stay loaded: 72 graphs
+of 6.2 billion words after the 100 merges. A checker that reads every
+word takes 0.6 to 3.3 s per merge for them. The same replay, with the same
+jobs and 0 wrong drvPaths, when the checker reads only the blocks that a
+change reaches and loads the graphs of a merge in parallel:
+
+| | every word | only the blocks reached |
+|---|---|---|
+| check, the 100 merges | 155.9 s | 18.3 s |
+| check per merge, median | 1.31 s | 0.07 s |
+| check per merge, 90th percentile | 3.10 s | 0.49 s |
+| evaluation, with the loads | 238.1 s | 228.2 s |
+| time for the 100 merges | 394.0 s | 246.6 s |
+| time per merge, median | 2.25 s | 0.71 s |
+| time per merge, 90th percentile | 5.84 s | 4.25 s |
+| checker memory, the 72 graphs | 30.4 GB | 34.9 GB |
+
+The last merge dirties 28 traces in 3 blocks of 1.5 million. A merge that
+changes most jobs still reads most blocks: 2.6 s for step 88.
 
 The batch shape alone changes little. Without the cutoff, the batches of
 `pkgs` evaluate 365,705 jobs, and those of `outpaths.nix` 365,378.
@@ -314,11 +337,11 @@ cache keeps the files that did not change, and its tracing cache misses.
 | stock iets, IR cache warm | 14.70 s | 105.0 s | 5.3 GB |
 | stock iets, tracing cache hit (the same commit) | 0.04 s | 0.2 s | |
 | this branch, the full traced run of a first commit | 25.13 s | 179.0 s | 7.0 GB |
-| this branch, a merge (`replay2.sh`, the check included) | 2.22 s median, 5.73 s at the 90th percentile, 38.2 s at most | | |
+| this branch, a merge (`replay2.sh`, the check included) | 0.71 s median, 4.25 s at the 90th percentile, 35.2 s at most | | |
 
 CppNix has no evaluation cache for this kind of expression: a second run
 takes as long as the first. The resident checker holds every live graph in
-memory, which the table leaves out: 9.9 GB for the 8 graphs of the first
+memory, which the table leaves out: 10.4 GB for the 8 graphs of the first
 commit, and more while kept jobs hold older graphs.
 
 ## Limits

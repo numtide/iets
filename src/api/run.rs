@@ -154,6 +154,17 @@ impl Run {
     }
 }
 
+/// `iets fine-check` and `iets fine-regions`, the commands of the incremental
+/// prototype (docs/explanation/incremental.md): their exit code, or `None`
+/// for another command.
+pub fn fine_command(cmd: &str, argv: &[String]) -> Option<i32> {
+    match cmd {
+        "fine-check" => Some(crate::trace::fine::check_main(argv)),
+        "fine-regions" => Some(crate::trace::fine::regions_main(argv)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

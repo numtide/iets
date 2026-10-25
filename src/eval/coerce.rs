@@ -269,6 +269,8 @@ impl Evaluator {
                 Ok(true)
             }
             (Value::Attrs(x), Value::Attrs(y)) => {
+                fine::compared(x);
+                fine::compared(y);
                 if self.is_derivation(a)? && self.is_derivation(b)? {
                     let i = x.get(self.s.out_path);
                     let j = y.get(self.s.out_path);

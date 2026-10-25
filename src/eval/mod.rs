@@ -1072,7 +1072,7 @@ impl Evaluator {
         }
         if !w.thunk_unforced(st) {
             if st.is_traced() {
-                fine::edge(st.traced_id());
+                fine::read(&self.interner, w, st, w.thunk_value(st));
             }
             return Ok(w.thunk_value(st));
         }
@@ -1094,10 +1094,7 @@ impl Evaluator {
                 debug_assert!(!v.is_thunk());
                 let mut done = w.thunk_finish(v, true);
                 if traced {
-                    let id = fine::pop();
-                    if id != 0 {
-                        done = Word::traced(id);
-                    }
+                    done = fine::finish(&self.interner, w, v, done);
                 }
                 state.set(done);
                 Ok(v)
@@ -1571,6 +1568,7 @@ impl Evaluator {
         let mut args = args;
         let mut functors = 0u32;
         while !args.is_empty() {
+            fine::apply(cur);
             match cur.view() {
                 Value::Lambda(l) => {
                     // `a: b: e` applied to two arguments binds `b` in the env
@@ -2507,10 +2505,10 @@ impl Evaluator {
                 return u;
             }
         }
-        let (aa, bb) = (
-            self.arena.flat(a).attrs_raw(),
-            self.arena.flat(b).attrs_raw(),
-        );
+        let (fa, fb) = (self.arena.flat(a), self.arena.flat(b));
+        fine::spread(fa);
+        fine::spread(fb);
+        let (aa, bb) = (fa.attrs_raw(), fb.attrs_raw());
         let (mut i, mut j, mut common) = (0, 0, 0);
         while i < aa.len() && j < bb.len() {
             match aa[i].sym.cmp(&bb[j].sym) {

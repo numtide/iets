@@ -31,7 +31,7 @@ use crate::compile::ir::{
 };
 use crate::eval::Evaluator;
 use crate::runtime::Word;
-use crate::runtime::value::{AttrsObj, Value};
+use crate::runtime::value::{Attr, AttrsObj, Value};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
 use crate::trace::{Kind, Obs};
@@ -39,8 +39,16 @@ use crate::trace::{Kind, Obs};
 pub const FINE_MIN: usize = 8;
 /// `AttrsObj::flags` bit: the set has a provenance here.
 pub(crate) const FLAG: u8 = 0x40;
+/// `AttrsObj::flags` bit: the set is the value at a query path (`State::tag`).
+pub(crate) const TAGGED: u8 = 0x20;
+/// With `TAGGED`: every cell of the set has its path.
+const FILLED: u8 = 0x10;
 /// An entry of a frame that is an edge to a trace, not an observation.
 const EDGE: u32 = 1 << 31;
+/// With `EDGE`: the read of a query, whose path follows in the next word.
+const QUERY: u32 = 1 << 30;
+/// The parent of a path of the root set.
+const NO_PATH: u32 = u32::MAX;
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -83,6 +91,47 @@ struct State {
     /// The trace of each path copied to the store, for the cache hits.
     copies: FxHashMap<Vec<u8>, u32>,
     serial: u32,
+    /// Query paths: the parent path (`NO_PATH` under the root set) and the
+    /// name.
+    paths: Vec<(u32, Sym)>,
+    path_ids: FxHashMap<(u32, Sym), u32>,
+    /// By path: how its reads are recorded (`Kind`), the fingerprint of
+    /// its value, the trace of its force, and the frame that last read it.
+    kind: Vec<u8>,
+    fps: Vec<Option<[u8; 16]>>,
+    qtrace: Vec<u32>,
+    path_stamp: Vec<u32>,
+    whole_stamp: Vec<u32>,
+    /// The paths that reach one object, a ring by path, and the first of
+    /// them, which reads record and which holds the kind, fingerprint and
+    /// trace.
+    ring: Vec<u32>,
+    head: Vec<u32>,
+    /// The length of `nodes` when each path was made.
+    born: Vec<u32>,
+    /// The thunks of the cells of the root set and of every set a query
+    /// read, by bits: their first path.
+    cells: FxHashMap<u64, u32>,
+    /// Those sets, by address: their first path.
+    tags: FxHashMap<usize, (u32, u8)>,
+    /// Functions such a set holds or such a thunk forced to, by bits: their
+    /// first path, and a ring of their paths by path.
+    funcs: FxHashMap<u64, u32>,
+    fring: Vec<u32>,
+}
+
+/// How the reads of a path are recorded.
+mod kind {
+    pub const UNREAD: u8 = 0;
+    /// A query, by fingerprint.
+    pub const QUERY: u8 = 1;
+    /// A function: an edge, and the paths above it when it is called.
+    pub const FUNC: u8 = 2;
+    /// An edge and the paths above it: no fingerprint, or a set another
+    /// path reached first.
+    pub const PLAIN: u8 = 3;
+    /// A set its parent holds as a value: no force of its own.
+    pub const EAGER: u8 = 4;
 }
 
 /// One observation.
@@ -222,24 +271,464 @@ pub fn push() -> bool {
     true
 }
 
-/// Closes the frame of a force that returned: its trace, which the parent
-/// frame now reads, or 0 for none.
-pub fn pop() -> u32 {
-    with(|s| {
-        let (start, _) = s.frames.pop().expect("an open frame");
-        let n = s.log.len() - start;
+impl State {
+    /// Closes the innermost frame: its trace, or 0 for none.
+    fn close(&mut self) -> u32 {
+        let (start, _) = self.frames.pop().expect("an open frame");
+        let n = self.log.len() - start;
         let t = match n {
             0 => 0,
-            1 if s.log[start] & EDGE != 0 => s.log[start] & !EDGE,
+            1 if self.log[start] & (EDGE | QUERY) == EDGE => self.log[start] & !EDGE,
             _ => {
-                let t = s.nodes.len() as u32;
-                s.nodes.push(0);
-                s.nodes.push(n as u32);
-                s.nodes.extend_from_slice(&s.log[start..]);
+                let t = self.nodes.len() as u32;
+                self.nodes.push(0);
+                self.nodes.push(n as u32);
+                self.nodes.extend_from_slice(&self.log[start..]);
                 t
             }
         };
-        s.log.truncate(start);
+        self.log.truncate(start);
+        t
+    }
+
+    fn path(&mut self, parent: u32, sym: Sym) -> u32 {
+        if let Some(p) = self.path_ids.get(&(parent, sym)) {
+            return *p;
+        }
+        let p = self.paths.len() as u32;
+        self.paths.push((parent, sym));
+        self.path_ids.insert((parent, sym), p);
+        self.kind.push(kind::UNREAD);
+        self.fps.push(None);
+        self.qtrace.push(0);
+        self.path_stamp.push(0);
+        self.whole_stamp.push(0);
+        self.ring.push(p);
+        self.head.push(p);
+        self.fring.push(p);
+        self.born.push(self.nodes.len() as u32);
+        p
+    }
+
+    /// Adds the new path `c` to the ring of `h`: they reach one object.
+    fn link(&mut self, h: u32, c: u32) {
+        let (h, c) = (self.head[h as usize], c as usize);
+        if h as usize == c || self.ring[c] != c as u32 {
+            return;
+        }
+        self.head[c] = h;
+        self.ring[c] = self.ring[h as usize];
+        self.ring[h as usize] = c as u32;
+    }
+
+    /// A read of query `p`, whose force left trace `t`.
+    fn query(&mut self, p: u32, t: u32) {
+        let st = self.stamp();
+        if self.path_stamp[p as usize] != st {
+            self.path_stamp[p as usize] = st;
+            self.log.push(EDGE | QUERY | t);
+            self.log.push(p);
+        }
+    }
+
+    /// Edges to the traces of the queries above each path of the ring of
+    /// `p`: what made the sets that hold the object, and so its code.
+    fn above(&mut self, p: u32) {
+        let mut m = p;
+        loop {
+            let mut q = self.paths[m as usize].0;
+            while q != NO_PATH {
+                let t = self.qtrace[q as usize];
+                if t != 0 {
+                    self.edge(t);
+                }
+                q = self.paths[q as usize].0;
+            }
+            m = self.ring[m as usize];
+            if m == p {
+                break;
+            }
+        }
+    }
+
+    fn cell(&mut self, w: Word, c: u32) {
+        match self.cells.get(&w.bits()) {
+            Some(&h) => self.link(h, c),
+            None => {
+                self.cells.insert(w.bits(), c);
+                let st = w.thunk_state_cell();
+                let sw = st.get();
+                if sw.is_traced() {
+                    st.set(Word::traced_cell(sw.traced_id()));
+                } else if !w.thunk_unforced(sw) && !sw.is_blackhole() {
+                    st.set(Word::traced_cell(0));
+                }
+            }
+        }
+    }
+
+    /// Marks function `w` as the value at path `c`: a cell that holds it,
+    /// or a thunk that forced to it.
+    fn func(&mut self, w: Word, c: u32) {
+        match self.funcs.get(&w.bits()) {
+            Some(&h) if h != c && self.fring[c as usize] == c => {
+                self.fring[c as usize] = self.fring[h as usize];
+                self.fring[h as usize] = c;
+            }
+            Some(_) => {}
+            None => {
+                self.funcs.insert(w.bits(), c);
+            }
+        }
+    }
+
+    /// Records set `a` as the value at path `p`, `depth` sets below the
+    /// value of a force: a cell of it becomes a query when a lookup or an
+    /// iteration reaches it. False when a force reached `a` and another path
+    /// reached it first, which keeps it: a read through `p` is then no query,
+    /// and its reader depends on all that made `p` lead to `a`, such as
+    /// `foo = foo_2`.
+    fn tag(&mut self, a: &'static AttrsObj, p: u32, depth: u32) -> bool {
+        match self.tags.get(&addr(a)).copied() {
+            Some((q, _)) if q != NO_PATH && self.head[q as usize] == self.head[p as usize] => {
+                return true;
+            }
+            Some((q, _)) if depth == 0 || q == NO_PATH => return false,
+            Some((q, d)) => {
+                self.kind[p as usize] = kind::EAGER;
+                self.link(q, p);
+                if a.flags & FILLED != 0 {
+                    for at in a.iter_raw() {
+                        let c = self.path(p, at.sym);
+                        self.mark(at, c, d);
+                    }
+                }
+                return true;
+            }
+            None => {}
+        }
+        if depth > 0 {
+            self.kind[p as usize] = kind::EAGER;
+        }
+        self.tags.insert(addr(a), (p, depth as u8));
+        a.mark(TAGGED);
+        if a.is_union()
+            && let Some(f) = a.flattened()
+        {
+            self.tags.insert(addr(f), (p, depth as u8));
+            f.mark(TAGGED);
+        }
+        true
+    }
+
+    /// Marks the object in cell `at` as the value at path `c`.
+    fn mark(&mut self, at: &Attr, c: u32, depth: u8) {
+        let w = at.cell.get();
+        if w.is_thunk() {
+            self.cell(w, c);
+            return;
+        }
+        match w.view() {
+            Value::Lambda(_) | Value::PrimOpApp(_) => self.func(w, c),
+            Value::Attrs(b) if depth < 4 => {
+                self.tag(b, c, depth as u32 + 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// A lookup in the tagged set `a` reached cell `at`: it is the value at
+    /// that name below each path of `a`.
+    fn select(&mut self, a: &AttrsObj, at: &Attr) {
+        let Some(&(p, depth)) = self.tags.get(&addr(a)) else {
+            return;
+        };
+        let mut r = p;
+        loop {
+            let c = self.path(r, at.sym);
+            self.mark(at, c, depth);
+            r = self.ring[r as usize];
+            if r == p {
+                break;
+            }
+        }
+    }
+
+    /// An iteration or a copy reached every cell of the tagged set `a`.
+    fn fill(&mut self, a: &AttrsObj) {
+        if a.flags & FILLED != 0 {
+            return;
+        }
+        a.mark(FILLED);
+        for at in a.iter_raw() {
+            self.select(a, at);
+        }
+    }
+
+    /// A read of the forced thunk `w` in state `st`, with value `v`.
+    fn read(&mut self, names: &Interner, w: Word, st: Word, v: Word) {
+        let t = st.traced_id();
+        let p = match st.is_query_cell() {
+            true => self.cells.get(&w.bits()).copied().unwrap_or(NO_PATH),
+            false => NO_PATH,
+        };
+        if p == NO_PATH {
+            if t != 0 {
+                self.edge(t);
+            }
+            return;
+        }
+        let i = p as usize;
+        if self.kind[i] == kind::UNREAD {
+            self.qtrace[i] = t;
+            self.kind[i] = match v.view() {
+                Value::Attrs(a) if !self.tag(a, p, 0) => kind::PLAIN,
+                Value::Lambda(_) | Value::PrimOpApp(_) => {
+                    self.func(v, p);
+                    kind::FUNC
+                }
+                _ => match fingerprint(names, v) {
+                    Some(h) => {
+                        self.fps[i] = Some(h);
+                        kind::QUERY
+                    }
+                    None => kind::PLAIN,
+                },
+            };
+        }
+        match self.kind[i] {
+            kind::QUERY => self.query(p, t),
+            k => {
+                if t != 0 {
+                    self.edge(t);
+                }
+                if k == kind::PLAIN {
+                    self.above(p);
+                }
+            }
+        }
+    }
+}
+
+/// The fingerprint of a forced value a query read: scalars and lists of them
+/// by value, a set by its names and the values its cells hold that are no
+/// thunk. `None` for what has none: a function, a list of anything else, a
+/// set that holds such a list.
+fn fingerprint(names: &Interner, v: Word) -> Option<[u8; 16]> {
+    let mut h = Hasher::new();
+    put(names, &mut h, v, 0)?;
+    Some(h.finalize().as_bytes()[..16].try_into().unwrap())
+}
+
+fn put(names: &Interner, h: &mut Hasher, v: Word, depth: u32) -> Option<()> {
+    if depth > 4 {
+        return None;
+    }
+    match v.view() {
+        Value::Int(i) => {
+            tag(h, 1);
+            h.update(&i.to_le_bytes());
+        }
+        Value::Float(f) => {
+            tag(h, 2);
+            h.update(&f.to_bits().to_le_bytes());
+        }
+        Value::Bool(b) => tag(h, 3 + u8::from(b)),
+        Value::Null => tag(h, 5),
+        Value::String(s) => {
+            tag(h, 6);
+            bytes(h, s.bytes);
+            bytes(h, format!("{:?}", s.ctx).as_bytes());
+        }
+        Value::Path(p) => {
+            tag(h, 7);
+            bytes(h, p.path);
+        }
+        Value::List(l) => {
+            tag(h, 8);
+            num(h, l.len as usize);
+            for c in l.cells() {
+                put(names, h, forced(c.get())?, depth + 1)?;
+            }
+        }
+        Value::Attrs(a) => {
+            tag(h, 9);
+            let mut v: Vec<_> = a.iter_raw().collect();
+            v.sort_by(|x, y| names.name(x.sym).cmp(names.name(y.sym)));
+            num(h, v.len());
+            for at in v {
+                bytes(h, names.name(at.sym));
+                let w = at.cell.get();
+                if w.is_thunk() {
+                    tag(h, 10);
+                } else if matches!(
+                    w.view(),
+                    Value::Lambda(_) | Value::PrimOp(_) | Value::PrimOpApp(_)
+                ) {
+                    tag(h, 11);
+                } else {
+                    put(names, h, w, depth + 1)?;
+                }
+            }
+        }
+        Value::Lambda(_) | Value::PrimOp(_) | Value::PrimOpApp(_) => return None,
+    }
+    Some(())
+}
+
+/// The value of `w` when it holds one now, without forcing anything.
+fn forced(w: Word) -> Option<Word> {
+    if !w.is_thunk() {
+        return Some(w);
+    }
+    let st = w.thunk_state_cell().get();
+    (!w.thunk_unforced(st) && !st.is_blackhole()).then(|| w.thunk_value(st))
+}
+
+/// Closes the frame of a force that returned, and has the parent read it.
+/// `done` is the state the thunk gets without the trace; the result is the
+/// state to publish.
+pub fn finish(names: &Interner, w: Word, v: Word, done: Word) -> Word {
+    with(|s| {
+        let t = s.close();
+        let st = if s.cells.contains_key(&w.bits()) {
+            Word::traced_cell(t)
+        } else if t != 0 {
+            Word::traced(t)
+        } else {
+            return done;
+        };
+        s.read(names, w, st, v);
+        st
+    })
+}
+
+/// A read of the forced thunk `w`, whose state `st` holds a trace.
+#[inline]
+pub fn read(names: &Interner, w: Word, st: Word, v: Word) {
+    if !st.is_query_cell() {
+        edge(st.traced_id());
+        return;
+    }
+    with(|s| s.read(names, w, st, v));
+}
+
+/// A call of `f`: when a set a query read holds it, its code is the
+/// computation of that set, which the caller now depends on in full.
+#[inline]
+pub fn apply(f: Word) {
+    if on() {
+        with(|s| {
+            if let Some(&h) = s.funcs.get(&f.bits()) {
+                let mut p = h;
+                loop {
+                    s.whole(p);
+                    p = s.fring[p as usize];
+                    if p == h {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// `==` on a set a query read: pointer equality inside it depends on how it
+/// was built, so the caller depends on that in full.
+pub fn compared(a: &AttrsObj) {
+    if on() {
+        with(|s| {
+            if let Some(&(p, _)) = s.tags.get(&addr(a))
+                && p != NO_PATH
+            {
+                s.whole(p);
+            }
+        });
+    }
+}
+
+impl State {
+    fn whole(&mut self, p: u32) {
+        let st = self.stamp();
+        if std::mem::replace(&mut self.whole_stamp[p as usize], st) == st {
+            return;
+        }
+        let t = self.qtrace[self.head[p as usize] as usize];
+        if t != 0 {
+            self.edge(t);
+        }
+        self.above(p);
+    }
+}
+
+/// `builtins.fineRoot set`: the cells of `set` are queries, named by their
+/// attribute path.
+pub fn root(a: &'static AttrsObj) {
+    if on() {
+        with(|s| {
+            // the root set reached again is no query: its reader depends on the root in full
+            s.tags.insert(addr(a), (NO_PATH, 0));
+            for at in a.iter_raw() {
+                let c = s.path(NO_PATH, at.sym);
+                s.mark(at, c, 0);
+            }
+        });
+    }
+}
+
+pub fn select(a: &AttrsObj, at: &Attr) {
+    if on() {
+        with(|s| s.select(a, at));
+    }
+}
+
+/// An iteration or a copy of `a` reaches all its cells: those of the
+/// tagged sets among `a` and the sides of a union it holds become queries.
+#[inline]
+pub fn spread(a: &AttrsObj) {
+    if !on() {
+        return;
+    }
+    let leaves = a.is_union() && a.flattened().is_none();
+    if a.flags & TAGGED == 0 && !(leaves && a.leaf_sets().iter().any(|l| l.flags & TAGGED != 0)) {
+        return;
+    }
+    with(|s| {
+        if a.flags & TAGGED != 0 {
+            s.fill(a);
+        }
+        if leaves {
+            for l in a.leaf_sets() {
+                if l.flags & TAGGED != 0 {
+                    s.fill(l);
+                }
+            }
+        }
+    });
+}
+
+/// `out` is the flat copy of the union `a`: the same set at the same paths.
+pub fn flattened(out: &AttrsObj, a: &AttrsObj) {
+    if a.flags & TAGGED != 0 {
+        with(|s| {
+            if let Some(&t) = s.tags.get(&addr(a)) {
+                s.tags.insert(addr(out), t);
+                out.mark(TAGGED | (a.flags & FILLED));
+            }
+        });
+    }
+}
+
+/// The fingerprint of `v` as a query records it, in hex; `-` for none.
+pub fn fingerprint_hex(names: &Interner, v: Word) -> String {
+    fingerprint(names, v).map_or("-".into(), |h| hex(&h))
+}
+
+/// Closes the frame of a force outside the thunk protocol (a copy to the
+/// store), which the parent then reads; its trace, or 0 for none.
+pub fn pop() -> u32 {
+    with(|s| {
+        let t = s.close();
         if t != 0 {
             s.edge(t);
         }
@@ -416,7 +905,7 @@ pub fn compiled(ev: &Evaluator, path: &[u8], root: IrRef, base: u32) {
     let rev = with(|s| s.rev.take()).unwrap_or_else(|| {
         let mut rev = FxHashMap::default();
         if let Some(b) = ev.globals.builtins {
-            for a in b.iter_quiet() {
+            for a in b.iter_raw() {
                 rev.insert(a.cell.get().bits(), a.sym);
             }
         }
@@ -897,18 +1386,23 @@ impl State {
     fn flatten(&self, entries: &[u32]) -> Vec<u32> {
         let mut nodes = FxHashSet::default();
         let mut obs = FxHashSet::default();
-        let mut stack = entries.to_vec();
-        while let Some(e) = stack.pop() {
-            if e & EDGE == 0 {
-                obs.insert(e);
-                continue;
-            }
-            let t = (e & !EDGE) as usize;
-            if !nodes.insert(t) {
+        let mut stack = vec![];
+        let mut visit = |es: &[u32], stack: &mut Vec<u32>| {
+            scan(es, |e| match e {
+                Entry::Obs(o) => {
+                    obs.insert(o);
+                }
+                Entry::Edge(t) => stack.push(t),
+            })
+        };
+        visit(entries, &mut stack);
+        while let Some(t) = stack.pop() {
+            let t = t as usize;
+            if t == 0 || !nodes.insert(t) {
                 continue;
             }
             let n = self.nodes[t + 1] as usize;
-            stack.extend_from_slice(&self.nodes[t + 2..t + 2 + n]);
+            visit(&self.nodes[t + 2..t + 2 + n], &mut stack);
         }
         let mut v: Vec<u32> = obs.into_iter().collect();
         v.sort_unstable();
@@ -1063,6 +1557,23 @@ impl State {
             std::io::Write::write_all(&mut w, &x.to_le_bytes())?;
         }
         std::io::Write::flush(&mut w)?;
+        let mut q = String::new();
+        for (i, (parent, sym)) in self.paths.iter().enumerate() {
+            let parent = if *parent == NO_PATH {
+                "-".to_string()
+            } else {
+                parent.to_string()
+            };
+            let fp = self.fps[i].map_or("-".to_string(), |h| hex(&h));
+            let name = ev.interner.name_str(*sym).replace(['\t', '\n'], " ");
+            let (h, k, b) = (self.head[i], self.kind[i], self.born[i]);
+            let _ = writeln!(
+                q,
+                "{i}\t{parent}\t{name}\t{fp}\t{}\t{h}\t{k}\t{b}",
+                self.qtrace[i]
+            );
+        }
+        std::fs::write(dir.join("queries"), q)?;
         let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
         std::fs::write(dir.join("roots"), r)
     }
@@ -1268,20 +1779,11 @@ impl Changes {
     }
 }
 
-/// The steps each job of the trace graph in `dir` must be evaluated again
-/// for: `(job, mask)`.
-fn check_dag(
-    c: &Changes,
-    dir: &std::path::Path,
-    skip: Option<&str>,
-) -> std::io::Result<Vec<(usize, u128)>> {
-    let every = if c.steps.is_empty() {
-        0
-    } else {
-        u128::MAX >> (128 - c.steps.len())
-    };
+/// The changes each provenance's sets and listings went through, from the
+/// `provs` of a graph.
+fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     let mut leaves: Vec<Vec<NameChange>> = Vec::new();
-    for line in std::fs::read_to_string(dir.join("provs"))?.lines() {
+    for line in provs.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         let e = match f.get(2).copied() {
             Some("lit") => c.lits.get(&f[3..6].join("\t")).cloned().unwrap_or_default(),
@@ -1295,53 +1797,33 @@ fn check_dag(
         };
         leaves.push(e);
     }
-    let mut obs: Vec<u128> = Vec::new();
-    let text = std::fs::read_to_string(dir.join("obs"))?;
-    for line in text.lines() {
-        let get = |m: &FxHashMap<String, u128>, k: &str| m.get(k).copied().unwrap_or(0);
-        let mut f = line.splitn(4, '\t');
-        let (kind, a, b) = (
-            f.next().unwrap_or(""),
-            f.next().unwrap_or(""),
-            f.next().unwrap_or(""),
-        );
-        let m = match kind {
-            "R" if a == "?" => every,
-            // the file and the region path are next to each other in the line
-            "R" => get(&c.regions, &line[2..2 + a.len() + 1 + b.len()]) | get(&c.files, a),
-            "K" => {
-                let l = &leaves[a.parse::<usize>().unwrap()];
-                l.iter()
-                    .filter(|(_, n)| n.as_ref().is_none_or(|n| n.contains(b)))
-                    .fold(0, |m, (s, _)| m | bit(*s))
-            }
-            "A" if skip.is_some_and(|re| line.contains(re)) => 0,
-            "A" => leaves[a.parse::<usize>().unwrap()]
-                .iter()
-                .fold(0, |m, (s, _)| m | bit(*s)),
-            "X" => {
-                let off: u32 = b.parse().unwrap_or(0);
-                c.first.get(a).map_or(0, |v| {
-                    v.iter()
-                        .filter(|(_, d)| *d <= off)
-                        .fold(0, |m, (s, _)| m | bit(*s))
-                })
-            }
-            "F" | "C" => get(&c.modified, a),
-            "T" => get(&c.trees, a),
-            "S" => get(&c.stats, a),
-            "D" => c
-                .dirs
-                .get(a)
-                .map_or(0, |v| v.iter().fold(0, |m, (s, _)| m | bit(*s))),
-            _ => 0,
-        };
-        obs.push(m);
-    }
-    let mut words: Vec<u32> = std::fs::read(dir.join("nodes"))?
-        .chunks_exact(4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-        .collect();
+    leaves
+}
+
+fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
+    Ok(std::fs::read(path)?
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect())
+}
+
+/// The steps each job of the trace graph in `dir` must be evaluated again
+/// for, with every query read as the trace of its force: `(job, mask)`.
+fn check_dag(
+    c: &Changes,
+    dir: &std::path::Path,
+    skip: Option<&str>,
+) -> std::io::Result<Vec<(usize, u128)>> {
+    let every = if c.steps.is_empty() {
+        0
+    } else {
+        u128::MAX >> (128 - c.steps.len())
+    };
+    let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
+    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
     // mask in `masks` plus one, or 0 for none
@@ -1350,16 +1832,15 @@ fn check_dag(
     while at < words.len() {
         let n = words[at + 1] as usize;
         let mut m = 0;
-        for e in &words[at + 2..at + 2 + n] {
-            m |= if e & EDGE == 0 {
-                obs[*e as usize]
-            } else {
-                match words[(e & !EDGE) as usize] {
+        scan(&words[at + 2..at + 2 + n], |e| {
+            m |= match e {
+                Entry::Obs(o) => obs[o as usize],
+                Entry::Edge(t) => match words[t as usize] {
                     0 => 0,
                     k => masks[k as usize - 1],
-                }
-            };
-        }
+                },
+            }
+        });
         words[at] = if m == 0 {
             0
         } else {
@@ -1389,10 +1870,757 @@ fn check_dag(
     Ok(out)
 }
 
+/// A path of a trace graph, with what the first path of its ring holds.
+struct GPath {
+    key: u32,
+    /// The index of the parent, or `NO_PATH`.
+    parent: u32,
+    head: u32,
+    fp: String,
+    trace: u32,
+    kind: u8,
+    /// Where the traces stood when the path was made: a trace that closed
+    /// before knew no route through it.
+    born: u32,
+}
+
+/// A trace graph a server keeps for many checks.
+struct Graph {
+    dir: String,
+    /// The step that wrote it: a query the graphs of the newest step read
+    /// is checked against their traces.
+    step: u32,
+    provs: String,
+    index: ObsIndex,
+    words: Vec<u32>,
+    roots: Vec<u32>,
+    paths: Vec<GPath>,
+    by_key: FxHashMap<u32, u32>,
+    /// The other paths of each ring of more than one, by its first.
+    rings: FxHashMap<u32, Vec<u32>>,
+    /// The paths below each path, from `below[i]` to `below[i + 1]`.
+    below: Vec<u32>,
+    children: Vec<u32>,
+    /// The first paths whose force left each trace.
+    forced: FxHashMap<u32, Vec<u32>>,
+    /// After a check: by trace, 0 for clean, else the index of its status
+    /// in `stat` plus one; the suspects of a status are in `sets`.
+    stat: Vec<(bool, u32)>,
+    sets: Sets,
+}
+
+/// The observations of a graph, by what can change them.
+#[derive(Default)]
+struct ObsIndex {
+    n: usize,
+    every: Vec<u32>,
+    regions: FxHashMap<String, Vec<u32>>,
+    region_files: FxHashMap<String, Vec<u32>>,
+    /// Name lookups by name, with their provenance, and by provenance.
+    names: FxHashMap<String, Vec<(u32, u32)>>,
+    keys_of: FxHashMap<u32, Vec<u32>>,
+    wholes: FxHashMap<u32, Vec<u32>>,
+    positions: FxHashMap<String, Vec<(u32, u32)>>,
+    files: FxHashMap<String, Vec<u32>>,
+    trees: FxHashMap<String, Vec<u32>>,
+    stats: FxHashMap<String, Vec<u32>>,
+    dirs: FxHashMap<String, Vec<u32>>,
+}
+
+impl ObsIndex {
+    /// The index of the observations in `text`, without the whole reads
+    /// whose place holds `skip`.
+    fn new(text: &str, skip: Option<&str>) -> ObsIndex {
+        let mut x = ObsIndex::default();
+        let push = |m: &mut FxHashMap<String, Vec<u32>>, k: &str, i: u32| {
+            m.entry(k.to_string()).or_default().push(i)
+        };
+        for (i, line) in text.lines().enumerate() {
+            let i = i as u32;
+            x.n += 1;
+            let mut f = line.splitn(4, '\t');
+            let (kind, a, b) = (
+                f.next().unwrap_or(""),
+                f.next().unwrap_or(""),
+                f.next().unwrap_or(""),
+            );
+            match kind {
+                "R" if a == "?" => x.every.push(i),
+                "R" => {
+                    // the file and the region path are next to each other in the line
+                    push(&mut x.regions, &line[2..2 + a.len() + 1 + b.len()], i);
+                    push(&mut x.region_files, a, i);
+                }
+                "K" => {
+                    let p = a.parse().unwrap_or(0);
+                    x.names.entry(b.to_string()).or_default().push((i, p));
+                    x.keys_of.entry(p).or_default().push(i);
+                }
+                "A" if skip.is_some_and(|t| line.contains(t)) => {}
+                "A" => x.wholes.entry(a.parse().unwrap_or(0)).or_default().push(i),
+                "X" => x
+                    .positions
+                    .entry(a.to_string())
+                    .or_default()
+                    .push((i, b.parse().unwrap_or(0))),
+                "F" | "C" => push(&mut x.files, a, i),
+                "T" => push(&mut x.trees, a, i),
+                "S" => push(&mut x.stats, a, i),
+                "D" => push(&mut x.dirs, a, i),
+                _ => {}
+            }
+        }
+        x
+    }
+
+    /// The steps of `c` that changed each observation.
+    fn changed(&self, c: &Changes, leaves: &[Vec<NameChange>]) -> Vec<u128> {
+        fn or(d: &mut [u128], ids: Option<&Vec<u32>>, m: u128) {
+            for i in ids.into_iter().flatten() {
+                d[*i as usize] |= m;
+            }
+        }
+        let steps = |v: &[NameChange]| v.iter().fold(0, |m, (s, _)| m | bit(*s));
+        let mut d = vec![0u128; self.n];
+        if !c.steps.is_empty() {
+            or(
+                &mut d,
+                Some(&self.every),
+                u128::MAX >> (128 - c.steps.len()),
+            );
+        }
+        for (k, m) in &c.regions {
+            or(&mut d, self.regions.get(k), *m);
+        }
+        for (maps, idx) in [
+            (&c.files, &self.region_files),
+            (&c.modified, &self.files),
+            (&c.trees, &self.trees),
+            (&c.stats, &self.stats),
+        ] {
+            for (k, m) in maps {
+                or(&mut d, idx.get(k), *m);
+            }
+        }
+        for (k, v) in &c.dirs {
+            or(&mut d, self.dirs.get(k), steps(v));
+        }
+        for (f, v) in &c.first {
+            for (i, off) in self.positions.get(f).into_iter().flatten() {
+                d[*i as usize] |= v
+                    .iter()
+                    .filter(|(_, o)| o <= off)
+                    .fold(0, |m, (s, _)| m | bit(*s));
+            }
+        }
+        let mut names: FxHashSet<&str> = FxHashSet::default();
+        for (p, l) in leaves.iter().enumerate() {
+            let p = p as u32;
+            or(&mut d, self.wholes.get(&p), steps(l));
+            for (s, n) in l {
+                match n {
+                    None => or(&mut d, self.keys_of.get(&p), bit(*s)),
+                    Some(n) => names.extend(n.iter().map(String::as_str)),
+                }
+            }
+        }
+        for n in names {
+            for (i, p) in self.names.get(n).into_iter().flatten() {
+                let l = &leaves[*p as usize];
+                d[*i as usize] |= l
+                    .iter()
+                    .filter(|(_, s)| s.as_ref().is_some_and(|s| s.contains(n)))
+                    .fold(0, |m, (s, _)| m | bit(*s));
+            }
+        }
+        d
+    }
+}
+
+/// The keys of the queries every graph names: a path in the root set.
+#[derive(Default)]
+struct Keys {
+    ids: FxHashMap<(u32, String), u32>,
+    rows: Vec<(u32, String)>,
+}
+
+impl Keys {
+    fn id(&mut self, parent: u32, name: &str) -> u32 {
+        if let Some(k) = self.ids.get(&(parent, name.to_string())) {
+            return *k;
+        }
+        let k = self.rows.len() as u32;
+        self.rows.push((parent, name.to_string()));
+        self.ids.insert((parent, name.to_string()), k);
+        k
+    }
+
+    fn names(&self, mut k: u32) -> Vec<&str> {
+        let mut v = Vec::new();
+        while k != NO_PATH {
+            v.push(self.rows[k as usize].1.as_str());
+            k = self.rows[k as usize].0;
+        }
+        v.reverse();
+        v
+    }
+}
+
+impl Graph {
+    fn load(dir: &str, step: u32, keys: &mut Keys) -> std::io::Result<Graph> {
+        let d = std::path::Path::new(dir);
+        let mut paths: Vec<GPath> = Vec::new();
+        if let Ok(t) = std::fs::read_to_string(d.join("queries")) {
+            for line in t.lines() {
+                let f: Vec<&str> = line.split('\t').collect();
+                let num = |s: &str| s.parse::<u32>().unwrap_or(0);
+                let parent = if f[1] == "-" { NO_PATH } else { num(f[1]) };
+                let pk = if parent == NO_PATH {
+                    NO_PATH
+                } else {
+                    paths[parent as usize].key
+                };
+                let head = num(f[5]);
+                let i = paths.len() as u32;
+                let (fp, trace, kind) = if head == i {
+                    (f[3].to_string(), num(f[4]), num(f[6]) as u8)
+                } else {
+                    let h = &paths[head as usize];
+                    (h.fp.clone(), h.trace, h.kind)
+                };
+                paths.push(GPath {
+                    key: keys.id(pk, f[2]),
+                    parent,
+                    head,
+                    fp,
+                    trace,
+                    kind,
+                    born: num(f[7]),
+                });
+            }
+        }
+        let mut rings: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        let mut forced: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        let mut below = vec![0u32; paths.len() + 1];
+        for (i, p) in paths.iter().enumerate() {
+            if p.head != i as u32 {
+                rings.entry(p.head).or_default().push(i as u32);
+            } else if p.trace != 0 && p.kind != kind::EAGER {
+                forced.entry(p.trace).or_default().push(i as u32);
+            }
+            if p.parent != NO_PATH {
+                below[p.parent as usize + 1] += 1;
+            }
+        }
+        for i in 0..paths.len() {
+            below[i + 1] += below[i];
+        }
+        let mut fill = below.clone();
+        let mut children = vec![0u32; paths.len()];
+        for (i, p) in paths.iter().enumerate() {
+            if p.parent != NO_PATH {
+                children[fill[p.parent as usize] as usize] = i as u32;
+                fill[p.parent as usize] += 1;
+            }
+        }
+        children.truncate(*below.last().unwrap_or(&0) as usize);
+        Ok(Graph {
+            dir: dir.to_string(),
+            step,
+            provs: std::fs::read_to_string(d.join("provs"))?,
+            index: ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            words: read_words(&d.join("nodes"))?,
+            roots: std::fs::read_to_string(d.join("roots"))?
+                .lines()
+                .map(|l| l.parse().unwrap_or(0))
+                .collect(),
+            by_key: paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.key, i as u32))
+                .collect(),
+            paths,
+            rings,
+            below,
+            children,
+            forced,
+            stat: Vec::new(),
+            sets: Sets::default(),
+        })
+    }
+
+    fn status(&self, t: u32) -> Option<(bool, u32)> {
+        match self.words[t as usize] {
+            0 => None,
+            k => Some(self.stat[k as usize - 1]),
+        }
+    }
+
+    fn ring(&self, h: u32) -> impl Iterator<Item = u32> + '_ {
+        std::iter::once(h).chain(self.rings.get(&h).into_iter().flatten().copied())
+    }
+
+    fn read(&self, i: u32) -> bool {
+        self.paths[i as usize].kind != kind::UNREAD
+    }
+}
+
+/// Sets of keys, each kept once.
+#[derive(Default)]
+struct Sets {
+    sets: Vec<Vec<u32>>,
+    ids: FxHashMap<Vec<u32>, u32>,
+}
+
+impl Sets {
+    fn id(&mut self, v: Vec<u32>) -> u32 {
+        if v.is_empty() {
+            return 0;
+        }
+        if let Some(i) = self.ids.get(&v) {
+            return *i;
+        }
+        let i = self.sets.len() as u32 + 1;
+        self.sets.push(v.clone());
+        self.ids.insert(v, i);
+        i
+    }
+
+    fn get(&self, i: u32) -> &[u32] {
+        if i == 0 {
+            &[]
+        } else {
+            &self.sets[i as usize - 1]
+        }
+    }
+
+    /// What `a` and `b` together require.
+    fn join(&mut self, a: St, b: St) -> St {
+        if a.0 || b.0 {
+            return HARD;
+        }
+        if b.1 == 0 || a.1 == b.1 {
+            return a;
+        }
+        if a.1 == 0 {
+            return b;
+        }
+        let mut v: Vec<u32> = self.get(a.1).iter().chain(self.get(b.1)).copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        self.status(v)
+    }
+
+    fn status(&mut self, v: Vec<u32>) -> St {
+        match v.len() {
+            0 => CLEAN,
+            n if n > MAX_SUSPECTS => HARD,
+            _ => (false, self.id(v)),
+        }
+    }
+}
+
+/// A status: changed, or the suspects (an id of `Sets`) whose fingerprints
+/// must hold.
+type St = (bool, u32);
+const CLEAN: St = (false, 0);
+const HARD: St = (true, 0);
+/// Past this many suspects a status is hard: it bounds the work of a check.
+const MAX_SUSPECTS: usize = 256;
+
+/// The resident checker: graphs, newest step last.
+#[derive(Default)]
+struct Server {
+    graphs: Vec<Graph>,
+    keys: Keys,
+    /// By key, made again after a load or a drop: the newest step that read
+    /// it, and where (`Store`).
+    newest: FxHashMap<u32, u32>,
+    store: Store,
+    /// By key, how many graphs read it.
+    readers: FxHashMap<u32, u32>,
+    fresh: bool,
+}
+
+/// Where a check finds the trace of a query: the graph of the newest step
+/// that read it, and the trace there.
+type Store = FxHashMap<u32, (usize, u32)>;
+
+/// What the objects of a graph that a route from the root set reaches
+/// require by now: those whose force or whose holder, by any path made by
+/// now, changed or is a suspect.
+struct Moved {
+    on: Vec<St>,
+    /// The paths made by now are those before it.
+    now: u32,
+}
+
+impl Moved {
+    fn set(&mut self, g: &Graph, sets: &mut Sets, h: u32, st: St) {
+        let mut stack = vec![(h, st)];
+        while let Some((h, st)) = stack.pop() {
+            let old = self.on[h as usize];
+            let new = sets.join(old, st);
+            if new == old {
+                continue;
+            }
+            self.on[h as usize] = new;
+            for r in g.ring(h).filter(|r| *r < self.now) {
+                let (a, b) = (g.below[r as usize], g.below[r as usize + 1]);
+                for c in &g.children[a as usize..b as usize] {
+                    if *c < self.now {
+                        stack.push((g.paths[*c as usize].head, new));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Makes the paths made before trace offset `at`.
+    fn advance(&mut self, g: &Graph, sets: &mut Sets, at: u32) {
+        while (self.now as usize) < g.paths.len() && g.paths[self.now as usize].born <= at {
+            let c = self.now;
+            self.now += 1;
+            let p = g.paths[c as usize].parent;
+            if p != NO_PATH {
+                let st = self.on[g.paths[p as usize].head as usize];
+                if st != CLEAN {
+                    self.set(g, sets, g.paths[c as usize].head, st);
+                }
+            }
+        }
+    }
+
+    /// What the holders of the paths of the ring of `h` made by now require.
+    fn above(&self, g: &Graph, sets: &mut Sets, h: u32) -> St {
+        let mut st = CLEAN;
+        for m in g.ring(h).filter(|m| *m < self.now) {
+            let p = g.paths[m as usize].parent;
+            if p != NO_PATH {
+                st = sets.join(st, self.on[g.paths[p as usize].head as usize]);
+            }
+        }
+        st
+    }
+}
+
+impl Server {
+    /// Checks every graph against one step of changes. A query read is a
+    /// cutoff when only the force of its object changed: the reader is then
+    /// a suspect, clean when the query keeps its fingerprint. When a route
+    /// to the object may have moved, the reader changed. Returns, by graph,
+    /// the status of each job: `None` clean, `Some((hard, suspects))`.
+    fn refresh(&mut self) {
+        if self.fresh {
+            return;
+        }
+        self.newest.clear();
+        self.store.clear();
+        self.readers.clear();
+        let mut order: Vec<usize> = (0..self.graphs.len()).collect();
+        order.sort_by_key(|i| std::cmp::Reverse(self.graphs[*i].step));
+        for i in order {
+            let g = &self.graphs[i];
+            for (j, p) in g.paths.iter().enumerate() {
+                if g.read(j as u32) {
+                    self.newest.entry(p.key).or_insert(g.step);
+                    self.store.entry(p.key).or_insert((i, p.trace));
+                    *self.readers.entry(p.key).or_insert(0) += 1;
+                }
+            }
+        }
+        self.fresh = true;
+    }
+
+    /// Drops those of `dirs`, graphs that own no job, whose traces no other
+    /// graph needs: none is the newest trace of a query another graph read.
+    fn gc(&mut self, dirs: &FxHashSet<&str>) -> Vec<String> {
+        let mut out = Vec::new();
+        loop {
+            self.refresh();
+            let needed = |i: usize, g: &Graph| {
+                g.paths.iter().enumerate().any(|(j, p)| {
+                    g.read(j as u32)
+                        && self.store.get(&p.key).is_some_and(|s| s.0 == i)
+                        && self.readers[&p.key] > 1
+                })
+            };
+            let Some(i) = (0..self.graphs.len()).find(|i| {
+                let g = &self.graphs[*i];
+                dirs.contains(g.dir.as_str()) && !needed(*i, g)
+            }) else {
+                return out;
+            };
+            out.push(self.graphs.remove(i).dir);
+            self.fresh = false;
+        }
+    }
+
+    fn check(&mut self, c: &Changes) -> Vec<Vec<Option<(bool, u32)>>> {
+        self.refresh();
+        let mut steps: Vec<u32> = self.graphs.iter().map(|g| g.step).collect();
+        steps.sort_unstable();
+        steps.dedup();
+        // a step's graphs read only the statuses of newer steps: in parallel
+        for step in steps.into_iter().rev() {
+            let idx: Vec<usize> = (0..self.graphs.len())
+                .filter(|i| self.graphs[*i].step == step)
+                .collect();
+            let mut taken: Vec<(usize, Vec<u32>)> = idx
+                .into_iter()
+                .map(|i| (i, std::mem::take(&mut self.graphs[i].words)))
+                .collect();
+            let out: Vec<(Vec<(bool, u32)>, Sets)> = std::thread::scope(|sc| {
+                let (graphs, store, newest) = (&self.graphs, &self.store, &self.newest);
+                let hs: Vec<_> = taken
+                    .iter_mut()
+                    .map(|(i, w)| {
+                        let i = *i;
+                        sc.spawn(move || pass(graphs, i, w, c, store, newest))
+                    })
+                    .collect();
+                hs.into_iter()
+                    .map(|h| h.join().expect("a checker thread"))
+                    .collect()
+            });
+            for ((i, w), (stat, sets)) in taken.into_iter().zip(out) {
+                let g = &mut self.graphs[i];
+                g.words = w;
+                g.stat = stat;
+                g.sets = sets;
+            }
+        }
+        self.graphs
+            .iter()
+            .map(|g| {
+                g.roots
+                    .iter()
+                    .map(|t| if *t == 0 { None } else { g.status(*t) })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+/// The forward pass over graph `i`, whose trace words are `words`; graphs of
+/// newer steps are done. A hard status keeps no suspects.
+fn pass(
+    graphs: &[Graph],
+    i: usize,
+    words: &mut [u32],
+    c: &Changes,
+    store: &Store,
+    newest: &FxHashMap<u32, u32>,
+) -> (Vec<(bool, u32)>, Sets) {
+    let g = &graphs[i];
+    let leaves = leaves(c, &g.provs);
+    let obs = g.index.changed(c, &leaves);
+    let local = |k: u32| newest.get(&k) == Some(&g.step);
+    let mut sets = Sets::default();
+    // the forces a newer step read again: what their newest trace requires
+    let mut moved = Moved {
+        on: vec![CLEAN; g.paths.len()],
+        now: 0,
+    };
+    let mut stale = vec![CLEAN; g.paths.len()];
+    for (h, p) in g.paths.iter().enumerate() {
+        if p.head == h as u32 && g.read(h as u32) && p.kind != kind::EAGER && !local(p.key) {
+            let st = match store.get(&p.key) {
+                Some(&(_, 0)) => CLEAN,
+                Some(&(j, t)) => match graphs[j].status(t) {
+                    None => CLEAN,
+                    Some((true, _)) => HARD,
+                    Some((false, x)) => sets.status(graphs[j].sets.get(x).to_vec()),
+                },
+                None => HARD,
+            };
+            stale[h] = st;
+            moved.on[h] = st;
+        }
+    }
+    let mut stat: Vec<St> = Vec::new();
+    let mut sus: Vec<u32> = Vec::new();
+    let mut at = 2;
+    while at < words.len() {
+        moved.advance(g, &mut sets, at as u32);
+        let n = words[at + 1] as usize;
+        let mut hard = false;
+        sus.clear();
+        let mut k = at + 2;
+        while k < at + 2 + n && !hard {
+            let e = words[k];
+            k += 1;
+            if e & EDGE == 0 {
+                hard = obs[e as usize] != 0;
+            } else if e & QUERY != 0 {
+                let (t, p) = (e & !(EDGE | QUERY), words[k]);
+                k += 1;
+                let h = g.paths[p as usize].head;
+                let key = g.paths[h as usize].key;
+                let up = moved.above(g, &mut sets, h);
+                let own = if !local(key) {
+                    stale[h as usize]
+                } else if t == 0 || words[t as usize] == 0 {
+                    CLEAN
+                } else {
+                    stat[words[t as usize] as usize - 1]
+                };
+                // a force that changed is verified by its path; one whose
+                // queries may have, by those
+                hard = up.0;
+                sus.extend_from_slice(sets.get(up.1));
+                match own {
+                    (true, _) => sus.push(key),
+                    (false, x) => sus.extend_from_slice(sets.get(x)),
+                }
+            } else {
+                let t = (e & !EDGE) as usize;
+                if t != 0
+                    && let x @ 1.. = words[t]
+                {
+                    let (h, s) = stat[x as usize - 1];
+                    hard = h;
+                    sus.extend_from_slice(sets.get(s));
+                }
+            }
+        }
+        let st = if hard {
+            HARD
+        } else {
+            sus.sort_unstable();
+            sus.dedup();
+            sets.status(sus.clone())
+        };
+        words[at] = if st == CLEAN {
+            0
+        } else {
+            stat.push(st);
+            stat.len() as u32
+        };
+        if st != CLEAN
+            && let Some(hs) = g.forced.get(&(at as u32))
+        {
+            for h in hs {
+                if local(g.paths[*h as usize].key) {
+                    moved.set(g, &mut sets, *h, st);
+                }
+            }
+        }
+        at += 2 + n;
+    }
+    (stat, sets)
+}
+
+/// `iets fine-check --serve`: reads commands, one a line, and answers each:
+///
+/// - `load DIR STEP`: keeps the graph in DIR, written at STEP; `ok`.
+/// - `drop DIR`: forgets it; `ok`.
+/// - `gc FILE OUT`: of the graphs in FILE, a line each, which own no job,
+///   forgets those whose traces no other graph needs, and writes them to
+///   OUT; `ok`.
+/// - `check FILE OUT`: checks every graph against the one step of changes
+///   in FILE, and writes to OUT a line per job that is not clean,
+///   `H\tDIR\tINDEX` when its own trace changed and `S\tDIR\tINDEX\tKEY...`
+///   when only queries it read may have, then `Q\tKEY\tFINGERPRINT\tNAME...`
+///   per suspect query, with the fingerprint the newest graph that read it
+///   recorded and the names of its path from the root set; `ok`.
+fn serve() -> i32 {
+    use std::io::BufRead;
+    let mut s = Server::default();
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let f: Vec<&str> = line.split(' ').collect();
+        let reply = match f.as_slice() {
+            ["load", dir, step] => match Graph::load(dir, step.parse().unwrap_or(0), &mut s.keys) {
+                Ok(g) => {
+                    s.graphs.push(g);
+                    s.fresh = false;
+                    "ok\n".to_string()
+                }
+                Err(e) => format!("error {dir}: {e}\n"),
+            },
+            ["drop", dir] => {
+                s.graphs.retain(|g| g.dir != *dir);
+                s.fresh = false;
+                "ok\n".to_string()
+            }
+            ["gc", file, dest] => match std::fs::read_to_string(file) {
+                Ok(t) => {
+                    let dirs: FxHashSet<&str> = t.lines().collect();
+                    let gone: String = s.gc(&dirs).into_iter().map(|d| d + "\n").collect();
+                    match std::fs::write(dest, gone) {
+                        Ok(()) => "ok\n".to_string(),
+                        Err(e) => format!("error {dest}: {e}\n"),
+                    }
+                }
+                Err(e) => format!("error {file}: {e}\n"),
+            },
+            ["check", file, dest] => match std::fs::read_to_string(file) {
+                Ok(t) => {
+                    let c = Changes::read(&t);
+                    let res = s.check(&c);
+                    let mut o = String::new();
+                    let mut suspects: FxHashSet<u32> = FxHashSet::default();
+                    for (g, jobs) in s.graphs.iter().zip(&res) {
+                        for (j, st) in jobs.iter().enumerate() {
+                            match st {
+                                None => {}
+                                Some((true, _)) => {
+                                    let _ = writeln!(o, "H\t{}\t{j}", g.dir);
+                                }
+                                Some((false, set)) => {
+                                    let ks = g.sets.get(*set);
+                                    suspects.extend(ks);
+                                    let ks: Vec<String> =
+                                        ks.iter().map(|k| k.to_string()).collect();
+                                    let _ = writeln!(o, "S\t{}\t{j}\t{}", g.dir, ks.join(" "));
+                                }
+                            }
+                        }
+                    }
+                    let mut ks: Vec<u32> = suspects.into_iter().collect();
+                    ks.sort_unstable();
+                    for k in ks {
+                        let fp = s.store.get(&k).map_or("-", |&(j, _)| {
+                            let g = &s.graphs[j];
+                            g.by_key
+                                .get(&k)
+                                .map_or("-", |p| g.paths[*p as usize].fp.as_str())
+                        });
+                        let names = s.keys.names(k).join("\t");
+                        let _ = writeln!(o, "Q\t{k}\t{fp}\t{names}");
+                    }
+                    match std::fs::write(dest, o) {
+                        Ok(()) => "ok\n".to_string(),
+                        Err(e) => format!("error {dest}: {e}\n"),
+                    }
+                }
+                Err(e) => format!("error {file}: {e}\n"),
+            },
+            _ => format!("error unknown command: {line}\n"),
+        };
+        if std::io::Write::write_all(&mut out, reply.as_bytes()).is_err()
+            || std::io::Write::flush(&mut out).is_err()
+        {
+            break;
+        }
+    }
+    0
+}
+
 /// `iets fine-check CHANGES [--skip TEXT] DAG...`: for each job of each
 /// trace graph that a step of CHANGES invalidates, `DAG\tJOB\tSTEP`. A
 /// whole read whose place holds TEXT is left out, to price a fix there.
+/// `--serve` keeps graphs for many checks (`serve`), `--job N DAG` prints
+/// what job N of a graph observed.
 pub fn check_main(argv: &[String]) -> i32 {
+    if let [flag] = argv
+        && flag == "--serve"
+    {
+        return serve();
+    }
     if let [flag, job, dir] = argv
         && flag == "--job"
     {
@@ -1458,10 +2686,7 @@ fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
         .lines()
         .map(String::from)
         .collect();
-    let words: Vec<u32> = std::fs::read(dir.join("nodes"))?
-        .chunks_exact(4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-        .collect();
+    let words = read_words(&dir.join("nodes"))?;
     let roots = std::fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots
         .lines()
@@ -1470,18 +2695,19 @@ fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
         .unwrap_or(0);
     let mut seen = FxHashSet::default();
     let mut ids = FxHashSet::default();
-    let mut stack = vec![EDGE | t];
-    while let Some(e) = stack.pop() {
-        if e & EDGE == 0 {
-            ids.insert(e);
-            continue;
-        }
-        let t = (e & !EDGE) as usize;
+    let mut stack = vec![t];
+    while let Some(t) = stack.pop() {
+        let t = t as usize;
         if t == 0 || !seen.insert(t) {
             continue;
         }
         let n = words[t + 1] as usize;
-        stack.extend_from_slice(&words[t + 2..t + 2 + n]);
+        scan(&words[t + 2..t + 2 + n], |e| match e {
+            Entry::Obs(o) => {
+                ids.insert(o);
+            }
+            Entry::Edge(c) => stack.push(c),
+        });
     }
     let mut ids: Vec<u32> = ids.into_iter().collect();
     ids.sort_unstable();
@@ -1489,4 +2715,28 @@ fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
         println!("{}", obs[i as usize]);
     }
     Ok(())
+}
+
+/// One entry of a frame or a trace; the read of a query is an edge to the
+/// trace of its force.
+enum Entry {
+    Obs(u32),
+    Edge(u32),
+}
+
+fn scan(es: &[u32], mut f: impl FnMut(Entry)) {
+    let mut i = 0;
+    while i < es.len() {
+        let e = es[i];
+        if e & EDGE == 0 {
+            f(Entry::Obs(e));
+            i += 1;
+        } else if e & QUERY != 0 {
+            f(Entry::Edge(e & !(EDGE | QUERY)));
+            i += 2;
+        } else {
+            f(Entry::Edge(e & !EDGE));
+            i += 1;
+        }
+    }
 }

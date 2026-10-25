@@ -15,8 +15,8 @@ use crate::syntax::symbol::{self, Sym};
 use crate::trace::fine;
 use std::panic::Location;
 #[cfg(feature = "stats2")]
-use std::sync::atomic::{AtomicU8, AtomicUsize};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::{ptr, slice};
 
 /// Most contents the `strings` table records: the capacity of 2^20 buckets,
@@ -388,9 +388,8 @@ impl ThunkObj {
     }
 }
 
-/// Census marks (`stats2`): a byte in header padding is written through a
-/// raw pointer. Single-worker measurement runs only.
-#[cfg(feature = "stats2")]
+/// Census (`stats2`) and fine trace marks: a byte in header padding is
+/// written through a raw pointer. Single-worker runs only.
 #[inline]
 fn mark_byte(p: *const u8, f: impl Fn(u8) -> u8) {
     // SAFETY: `p` is a flags byte inside a live arena object, viewed as an
@@ -423,7 +422,13 @@ impl AttrsObj {
         if self.flags & fine::FLAG != 0 {
             fine::all(self, Location::caller());
         }
+        fine::spread(self);
         self.attrs_raw()
+    }
+
+    /// Sets a flag bit the fine trace owns.
+    pub(crate) fn mark(&self, f: u8) {
+        mark_byte(&self.flags, |v| v | f);
     }
 
     #[inline]
@@ -498,7 +503,7 @@ impl AttrsObj {
         if n != u32::MAX {
             return n as usize;
         }
-        let n = self.iter_quiet().count();
+        let n = self.iter_raw().count();
         self.len.store(n as u32, Ordering::Relaxed);
         n
     }
@@ -533,6 +538,17 @@ impl AttrsObj {
         if self.flags & fine::FLAG != 0 {
             fine::get(self, sym);
         }
+        let r = self.lookup(sym);
+        if self.flags & fine::TAGGED != 0
+            && let Some(a) = r
+        {
+            fine::select(self, a);
+        }
+        r
+    }
+
+    #[inline]
+    fn lookup(&self, sym: Sym) -> Option<&'static Attr> {
         if self.kind == Kind::Attrs {
             #[cfg(feature = "stats2")]
             census::note_get(0, 0);
@@ -550,6 +566,9 @@ impl AttrsObj {
         }
         for leaf in self.leaf_sets().iter().rev() {
             if let Some(a) = leaf.get_flat(sym) {
+                if leaf.flags & fine::TAGGED != 0 {
+                    fine::select(leaf, a);
+                }
                 return Some(a);
             }
         }
@@ -595,6 +614,13 @@ impl AttrsObj {
     /// the fine trace records no read of the whole set.
     #[inline]
     pub(crate) fn iter_quiet(&self) -> AttrIter {
+        fine::spread(self);
+        self.iter_raw()
+    }
+
+    /// `iter` that no trace sees, for the trace itself and for counts.
+    #[inline]
+    pub(crate) fn iter_raw(&self) -> AttrIter {
         let mut it = AttrIter {
             leaves: [&[]; SENTINEL + 1],
             keys: [u64::MAX; SENTINEL + 1],
@@ -1314,6 +1340,7 @@ impl Arena {
         a.len.store(n as u32, Ordering::Relaxed);
         u.flat.set(Word::from_ref(out));
         fine::same(out, a);
+        fine::flattened(out, a);
         out
     }
 

@@ -94,11 +94,8 @@ fn command(argv: Vec<String>, classic: Option<String>) -> i32 {
         return on_big_stack(move || cli::classic::dispatch(&name, &rest));
     }
     let mut rest: Vec<String> = argv[1..].to_vec();
-    if cmd == "fine-check" {
-        return crate::trace::fine::check_main(&rest);
-    }
-    if cmd == "fine-regions" {
-        return crate::trace::fine::regions_main(&rest);
+    if let Some(code) = crate::api::run::fine_command(cmd, &rest) {
+        return code;
     }
     help::set_command("iets");
     let cmd = match cmd.as_str() {

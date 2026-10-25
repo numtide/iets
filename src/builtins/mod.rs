@@ -56,6 +56,10 @@ fn builtins_name(name: &'static str) -> &'static str {
 /// Under one of Nix's own names iets answers as Nix does; its own commands
 /// have every feature, which is the documented divergence.
 fn exposed(name: &'static str) -> bool {
+    // the fine trace's own (`trace::fine`), which mean nothing without it
+    if matches!(builtins_name(name), "fineRoot" | "fineQuery") {
+        return crate::trace::fine::on();
+    }
     if !log::classic() {
         return true;
     }

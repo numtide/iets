@@ -85,6 +85,8 @@ const IMM_FALSE: u64 = TAG_IMM | (2 << 3);
 const IMM_BLACKHOLE: u64 = TAG_IMM | (3 << 3);
 /// `traced`: a forced state, with an id above it.
 const IMM_TRACED: u64 = TAG_IMM | (5 << 3);
+/// On a `traced` word: the thunk is a query cell (`Word::traced_cell`).
+const QUERY_CELL: u64 = 1 << 62;
 /// Forced state written by a helper fiber. Distinct from `EMPTY` so that a
 /// printer can tell a thunk the demand path forced from one only a helper
 /// forced (docs/explanation/evaluation.md, "Why the answer is identical").
@@ -194,6 +196,18 @@ impl Word {
     #[inline]
     pub(crate) fn traced(id: u32) -> Word {
         Word(IMM_TRACED | ((id as u64) << 8))
+    }
+
+    /// `traced`, for a thunk that is a cell of a set some query read, whose
+    /// reads are reads of a query too.
+    #[inline]
+    pub(crate) fn traced_cell(id: u32) -> Word {
+        Word(IMM_TRACED | ((id as u64) << 8) | QUERY_CELL)
+    }
+
+    #[inline]
+    pub(crate) fn is_query_cell(self) -> bool {
+        self.0 & QUERY_CELL != 0
     }
 
     #[inline]

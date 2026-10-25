@@ -10,13 +10,13 @@ use super::word::{
     TAG_THUNK_MAP, Word,
 };
 use crate::compile::ir::{Ir, LambdaIr};
-use crate::trace::fine;
 use crate::eval::{self, Evaluator, Pos};
 use crate::syntax::symbol::{self, Sym};
+use crate::trace::fine;
+use std::panic::Location;
 #[cfg(feature = "stats2")]
 use std::sync::atomic::{AtomicU8, AtomicUsize};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::panic::Location;
 use std::{ptr, slice};
 
 /// Most contents the `strings` table records: the capacity of 2^20 buckets,

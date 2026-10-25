@@ -148,7 +148,10 @@ pub fn on() -> bool {
 pub fn at(pos: u32, stack: &crate::profile::Stack) {
     if on() {
         AT.store(pos, Ordering::Relaxed);
-        STACK.store(stack as *const crate::profile::Stack as *mut _, Ordering::Relaxed);
+        STACK.store(
+            stack as *const crate::profile::Stack as *mut _,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -372,7 +375,11 @@ pub fn all(a: &AttrsObj, at: &'static Location<'static>) {
                 let st = STACK.load(Ordering::Relaxed);
                 // SAFETY: `at` stored the stack of the evaluator that is
                 // running the builtin, which outlives the builtin's call.
-                let frames = if st.is_null() { Vec::new() } else { unsafe { (*st).frames().to_vec() } };
+                let frames = if st.is_null() {
+                    Vec::new()
+                } else {
+                    unsafe { (*st).frames().to_vec() }
+                };
                 (at, AT.load(Ordering::Relaxed), frames)
             });
             s.record(O::All(p));
@@ -436,7 +443,15 @@ pub fn compiled(ev: &Evaluator, path: &[u8], root: IrRef, base: u32) {
         }
         for (id, region, ordinal, keys) in lits {
             let file = file.clone();
-            s.lits.insert(id, Lit { file, region, ordinal, keys });
+            s.lits.insert(
+                id,
+                Lit {
+                    file,
+                    region,
+                    ordinal,
+                    keys,
+                },
+            );
         }
         s.rev = Some(rev);
     });
@@ -632,7 +647,15 @@ impl Walk<'_> {
         }
     }
 
-    fn binds(&mut self, h: &mut Hasher, path: &str, ord: &mut u32, binds: &[BindIr], rec: bool, from: usize) {
+    fn binds(
+        &mut self,
+        h: &mut Hasher,
+        path: &str,
+        ord: &mut u32,
+        binds: &[BindIr],
+        rec: bool,
+        from: usize,
+    ) {
         num(h, binds.len());
         for b in self.by_name(binds, |b| b.sym) {
             self.sym(h, b.sym);
@@ -648,13 +671,22 @@ impl Walk<'_> {
             let Ir::Region { id, body } = b.value else {
                 unreachable!("a split bind is a region");
             };
-            let sub = format!("{path}/{ord}.{}", String::from_utf8_lossy(self.names.name(b.sym)));
-            self.in_bind_env(b, rec, from, |w| w.region(*id, sub, scope_tag(b.scope), body));
+            let sub = format!(
+                "{path}/{ord}.{}",
+                String::from_utf8_lossy(self.names.name(b.sym))
+            );
+            self.in_bind_env(b, rec, from, |w| {
+                w.region(*id, sub, scope_tag(b.scope), body)
+            });
         }
     }
 
     fn rec_env(binds: &[BindIr], from: &[IrRef]) -> Vec<Option<Sym>> {
-        binds.iter().map(|b| Some(b.sym)).chain(from.iter().map(|_| None)).collect()
+        binds
+            .iter()
+            .map(|b| Some(b.sym))
+            .chain(from.iter().map(|_| None))
+            .collect()
     }
 
     fn attrs(&mut self, h: &mut Hasher, path: &str, ord: &mut u32, a: &AttrsIr) {
@@ -690,7 +722,11 @@ impl Walk<'_> {
     fn let_(&mut self, h: &mut Hasher, path: &str, ord: &mut u32, l: &LetIr) {
         let n = l.from.len();
         self.envs.push(Self::rec_env(l.binds, l.from));
-        if !l.binds.first().is_some_and(|b| matches!(b.value, Ir::Region { .. })) {
+        if !l
+            .binds
+            .first()
+            .is_some_and(|b| matches!(b.value, Ir::Region { .. }))
+        {
             tag(h, 14);
             self.binds(h, path, ord, l.binds, true, n);
             self.nodes(h, path, ord, l.from);
@@ -889,7 +925,12 @@ impl State {
     fn prov_line(&self, ev: &Evaluator, i: usize) -> String {
         match &self.provs[i] {
             Prov::Lit(l) => match self.lits.get(l) {
-                Some(l) => format!("P\t{i}\tlit\t{}\t{}\t{}", lossy(&l.file), l.region, l.ordinal),
+                Some(l) => format!(
+                    "P\t{i}\tlit\t{}\t{}\t{}",
+                    lossy(&l.file),
+                    l.region,
+                    l.ordinal
+                ),
                 None => format!("P\t{i}\tlit?\t{l}"),
             },
             Prov::Dir(d) => format!("P\t{i}\tdir\t{}", lossy(d)),
@@ -909,7 +950,11 @@ impl State {
         let nix = ev.describe_pos(crate::eval::Pos(*nix));
         let mut st = String::new();
         for f in frames.iter().rev().take(12) {
-            let _ = write!(st, " < {}", ev.describe_pos(crate::eval::Pos((f >> 32) as u32)));
+            let _ = write!(
+                st,
+                " < {}",
+                ev.describe_pos(crate::eval::Pos((f >> 32) as u32))
+            );
         }
         format!("A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line())
     }
@@ -952,7 +997,11 @@ impl State {
             out.push('\n');
         }
         let mut used = vec![false; self.provs.len()];
-        let mut stack: Vec<u32> = keys.iter().map(|k| k.0).chain(alls.iter().copied()).collect();
+        let mut stack: Vec<u32> = keys
+            .iter()
+            .map(|k| k.0)
+            .chain(alls.iter().copied())
+            .collect();
         while let Some(p) = stack.pop() {
             if std::mem::replace(&mut used[p as usize], true) {
                 continue;
@@ -989,7 +1038,12 @@ impl State {
     /// The trace graph of the run in `dir`: `obs` (a line per observation),
     /// `provs`, `nodes` (the traces as little-endian `u32`, see `nodes`) and
     /// `roots` (the trace of each job, a line each).
-    fn write_dag(&self, ev: &Evaluator, dir: &std::path::Path, roots: &[u32]) -> std::io::Result<()> {
+    fn write_dag(
+        &self,
+        ev: &Evaluator,
+        dir: &std::path::Path,
+        roots: &[u32],
+    ) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
@@ -1031,7 +1085,11 @@ fn roots(v: Word) -> Vec<u32> {
         .iter()
         .map(|c| {
             let w = c.get();
-            let st = if w.is_thunk() { w.thunk_state_cell().get() } else { Word::EMPTY };
+            let st = if w.is_thunk() {
+                w.thunk_state_cell().get()
+            } else {
+                Word::EMPTY
+            };
             if st.is_traced() { st.traced_id() } else { 0 }
         })
         .collect()
@@ -1051,7 +1109,11 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
         let roots = v.map(roots).unwrap_or_default();
         if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
-                let obs = if *t == 0 { Vec::new() } else { s.flatten(&[EDGE | t]) };
+                let obs = if *t == 0 {
+                    Vec::new()
+                } else {
+                    s.flatten(&[EDGE | t])
+                };
                 let p = std::path::Path::new(&dir).join(i.to_string());
                 if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
                     errln!("fine trace: writing {}: {e}", p.display());
@@ -1167,19 +1229,38 @@ impl Changes {
                 if n == "*" {
                     None
                 } else {
-                    Some(Arc::new(n.split(' ').filter(|x| !x.is_empty()).map(String::from).collect()))
+                    Some(Arc::new(
+                        n.split(' ')
+                            .filter(|x| !x.is_empty())
+                            .map(String::from)
+                            .collect(),
+                    ))
                 }
             };
-            let or = |m: &mut FxHashMap<String, u128>, k: &str| *m.entry(k.to_string()).or_insert(0) |= bit(s);
+            let or = |m: &mut FxHashMap<String, u128>, k: &str| {
+                *m.entry(k.to_string()).or_insert(0) |= bit(s)
+            };
             match (f[1], f.len()) {
                 ("CR", 4..) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
                 ("CF", _) => or(&mut c.files, f[2]),
-                ("CL", 6..) => c.lits.entry(f[2..5].join("\t")).or_default().push((s, names(f[5]))),
-                ("CD", 4..) => c.dirs.entry(f[2].into()).or_default().push((s, names(f[3]))),
+                ("CL", 6..) => c
+                    .lits
+                    .entry(f[2..5].join("\t"))
+                    .or_default()
+                    .push((s, names(f[5]))),
+                ("CD", 4..) => c
+                    .dirs
+                    .entry(f[2].into())
+                    .or_default()
+                    .push((s, names(f[3]))),
                 ("CM", _) => or(&mut c.modified, f[2]),
                 ("CT", _) => or(&mut c.trees, f[2]),
                 ("CS", _) => or(&mut c.stats, f[2]),
-                ("CX", 4..) => c.first.entry(f[2].into()).or_default().push((s, f[3].parse().unwrap_or(0))),
+                ("CX", 4..) => c
+                    .first
+                    .entry(f[2].into())
+                    .or_default()
+                    .push((s, f[3].parse().unwrap_or(0))),
                 _ => {}
             }
         }
@@ -1189,8 +1270,16 @@ impl Changes {
 
 /// The steps each job of the trace graph in `dir` must be evaluated again
 /// for: `(job, mask)`.
-fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io::Result<Vec<(usize, u128)>> {
-    let every = if c.steps.is_empty() { 0 } else { u128::MAX >> (128 - c.steps.len()) };
+fn check_dag(
+    c: &Changes,
+    dir: &std::path::Path,
+    skip: Option<&str>,
+) -> std::io::Result<Vec<(usize, u128)>> {
+    let every = if c.steps.is_empty() {
+        0
+    } else {
+        u128::MAX >> (128 - c.steps.len())
+    };
     let mut leaves: Vec<Vec<NameChange>> = Vec::new();
     for line in std::fs::read_to_string(dir.join("provs"))?.lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -1211,7 +1300,11 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
     for line in text.lines() {
         let get = |m: &FxHashMap<String, u128>, k: &str| m.get(k).copied().unwrap_or(0);
         let mut f = line.splitn(4, '\t');
-        let (kind, a, b) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+        let (kind, a, b) = (
+            f.next().unwrap_or(""),
+            f.next().unwrap_or(""),
+            f.next().unwrap_or(""),
+        );
         let m = match kind {
             "R" if a == "?" => every,
             // the file and the region path are next to each other in the line
@@ -1223,15 +1316,24 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
                     .fold(0, |m, (s, _)| m | bit(*s))
             }
             "A" if skip.is_some_and(|re| line.contains(re)) => 0,
-            "A" => leaves[a.parse::<usize>().unwrap()].iter().fold(0, |m, (s, _)| m | bit(*s)),
+            "A" => leaves[a.parse::<usize>().unwrap()]
+                .iter()
+                .fold(0, |m, (s, _)| m | bit(*s)),
             "X" => {
                 let off: u32 = b.parse().unwrap_or(0);
-                c.first.get(a).map_or(0, |v| v.iter().filter(|(_, d)| *d <= off).fold(0, |m, (s, _)| m | bit(*s)))
+                c.first.get(a).map_or(0, |v| {
+                    v.iter()
+                        .filter(|(_, d)| *d <= off)
+                        .fold(0, |m, (s, _)| m | bit(*s))
+                })
             }
             "F" | "C" => get(&c.modified, a),
             "T" => get(&c.trees, a),
             "S" => get(&c.stats, a),
-            "D" => c.dirs.get(a).map_or(0, |v| v.iter().fold(0, |m, (s, _)| m | bit(*s))),
+            "D" => c
+                .dirs
+                .get(a)
+                .map_or(0, |v| v.iter().fold(0, |m, (s, _)| m | bit(*s))),
             _ => 0,
         };
         obs.push(m);
@@ -1267,7 +1369,10 @@ fn check_dag(c: &Changes, dir: &std::path::Path, skip: Option<&str>) -> std::io:
         at += 2 + n;
     }
     let mut out = Vec::new();
-    for (i, line) in std::fs::read_to_string(dir.join("roots"))?.lines().enumerate() {
+    for (i, line) in std::fs::read_to_string(dir.join("roots"))?
+        .lines()
+        .enumerate()
+    {
         let t: usize = line.parse().unwrap_or(0);
         let m = match t {
             0 => 0,
@@ -1322,7 +1427,9 @@ pub fn check_main(argv: &[String]) -> i32 {
             .iter()
             .map(|d| sc.spawn(|| check_dag(&c, std::path::Path::new(d), skip)))
             .collect();
-        hs.into_iter().map(|h| h.join().expect("a checker thread")).collect()
+        hs.into_iter()
+            .map(|h| h.join().expect("a checker thread"))
+            .collect()
     });
     for (d, r) in dags.iter().zip(results) {
         match r {
@@ -1347,13 +1454,20 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?.lines().map(String::from).collect();
+    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
+        .lines()
+        .map(String::from)
+        .collect();
     let words: Vec<u32> = std::fs::read(dir.join("nodes"))?
         .chunks_exact(4)
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
         .collect();
     let roots = std::fs::read_to_string(dir.join("roots"))?;
-    let t: u32 = roots.lines().nth(job).and_then(|l| l.parse().ok()).unwrap_or(0);
+    let t: u32 = roots
+        .lines()
+        .nth(job)
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(0);
     let mut seen = FxHashSet::default();
     let mut ids = FxHashSet::default();
     let mut stack = vec![EDGE | t];

@@ -157,11 +157,162 @@ is `filterAttrs (n: _: !(allArgs ? ${n})) fargs`. The second is a check whose
 answer does not change; a checker that knew `intersectAttrs` could recompute
 it from the listings. The first needs early cutoff.
 
-Early cutoff is the rest. A refactor of shared code (step 80, 61 % of the jobs)
-and a position that moves inside a large file (`perl-packages.nix`,
-`vscode/extensions/default.nix`, up to 2 %) invalidate jobs whose drvPath does
-not change. Only evaluating the changed part again and comparing what it gave
-would keep them.
+A refactor of shared code (step 80, 61 % of the jobs) and a position that
+moves inside a large file (`perl-packages.nix`, `vscode/extensions/default.nix`,
+up to 2 %) also invalidate jobs whose drvPath does not change. Early cutoff,
+below, keeps most of the third kind and of the moved positions.
+
+## Early cutoff with named queries
+
+A trace that changed does not always give a new value. A meta edit changes
+the trace of a package's `outPath`, but not the string. Early cutoff
+evaluates the changed value again and keeps its readers when the value is
+the same.
+
+That value needs a name that the next commit can evaluate. The prototype
+names a value by its attribute path in one package set, the root, which
+`builtins.fineRoot` marks. A batch is then `pkgs = import nixpkgs { ... }`,
+with the configuration of `ci/eval/outpaths.nix`, and its jobs are
+`pkgs.<path>.drvPath`. For the 80,618 jobs of the base commit, these drvPaths
+are the drvPaths of `outpaths.nix`.
+
+### What a query records
+
+- Each cell of the root set is a query, named by its attribute. A set that a
+  query forces to is tagged with the query's path. A cell of a tagged set
+  becomes a query when a lookup or an iteration reaches it.
+- A read of a query records the trace of its force and its path, in place of
+  an edge.
+- The first read of a path records a fingerprint of the value. A scalar or a
+  list of scalars counts by value. A set counts by its names and by those
+  cells that hold no thunk. A function has no fingerprint: a read of it is an
+  edge, and a call of it depends on the traces of every set that holds it.
+- `==` on a tagged set depends on how the set was built.
+
+### Routes
+
+Many paths can reach one thunk. In nixpkgs, `pkgsBuildBuild`,
+`pkgsHostTarget` and the other `pkgs*` sets are `self // { ... }` copies, so
+they share every cell of the root. Each thunk keeps a ring of the paths that
+reached it, and a read records the first of them.
+
+A reader can reach the thunk through any path of the ring, or through no
+tagged set (`callPackage` reads `intersectAttrs` of a union). The check is
+therefore:
+
+| the force of the thunk | the sets above the paths of its ring | the read |
+|---|---|---|
+| clean | clean | clean |
+| changed | clean | a suspect: its path is evaluated again |
+| clean, or suspects | clean, or suspects | a suspect of those suspects |
+| any | one changed | changed |
+
+A ring grows during the run. A reader sees only the paths that existed when
+its trace closed. Without this rule, a set would depend on paths made after
+it, and the check would loop.
+
+A set that a second force reaches (`foo = foo_2`) is not tagged again. Its
+reader gets an edge to that force, and the queries that the force read carry
+over.
+
+### Checking and verifying
+
+`iets fine-check --serve` keeps the graphs in memory. A check marks each job
+as hard, as a suspect with the queries to verify, or as clean. The replay
+then:
+
+1. evaluates the hard jobs, the new jobs, the suspects whose queries no
+   other suspect reads, and `builtins.fineQuery` of the other queries, in
+   batches of 2,000;
+2. keeps a suspect when every query it read keeps its fingerprint;
+3. evaluates the other suspects.
+
+A verified query has a new trace in its batch. The checker reads the newest
+trace of each path, so it never checks a stale trace again. A graph that
+owns no job stays loaded while it holds the newest trace of a query that
+another graph read.
+
+### What queries cost
+
+The 80,618 jobs as `pkgs.<path>.drvPath`, in 8 processes of one worker each,
+at once; the mean of three rounds (`overhead2.sh`):
+
+| run | wall | sum of the processes | largest process |
+|---|---|---|---|
+| the branch's base commit | 14.91 s | 104.3 s | 5.3 GB |
+| this branch, trace off | 15.63 s (+5 %) | 109.3 s (+5 %) | 5.3 GB |
+| trace on | 21.04 s (+41 %) | 151.9 s (+46 %) | 6.6 GB |
+| trace on, queries | 26.63 s (+79 %) | 190.1 s (+82 %) | 7.9 GB |
+| trace on, queries, graph written | 27.75 s (+86 %) | 198.8 s (+91 %) | 7.9 GB |
+
+The base commit varies by 3 % between runs (15.38 s in `compare.sh`), so
+the cost of the trace when it is off is between 1 and 5 %.
+
+A process has 470,000 to 530,000 paths. About 104,000 of them were read as
+queries with a fingerprint, and 84,000 to 113,000 joined the ring of another
+path. Paths are
+made lazily: a first version that gave a path to every cell of every tagged
+set made 16.9 million paths per process and took 118 s.
+
+### What it gives
+
+The same 100 merges, with the same batches and the same trace, once with
+every suspect evaluated and once with the cutoff (`replay2.sh`):
+
+| | every suspect evaluated | cutoff |
+|---|---|---|
+| wrong drvPaths, of 8.06 million | 0 | 0 |
+| jobs evaluated | 365,705, 4.5 % | 226,848, 2.8 % |
+| queries verified | 0 | 57,675 |
+| evaluation | 356.3 s | 244.9 s |
+| check | 122.5 s | 154.3 s |
+| time for the 100 merges | 478.8 s | 399.2 s |
+| time per merge, median | 1.93 s | 2.22 s |
+| time per merge, 90th percentile | 17.1 s | 5.7 s |
+
+The cutoff pays where one change reaches many jobs through a value that
+stays the same:
+
+| merges | what changed | evaluated, without and with the cutoff |
+|---|---|---|
+| 9, 43, 50, 51, 83, 85, 97 | a `by-name` package came (`texFunctions`) | 9,002 to 9,652 jobs, 15.6 to 17.2 s; 27 to 180 jobs and 4 to 34 queries, 1.5 to 4.5 s |
+| 12, 63 | an edit moved the positions in `perl-packages.nix` | about 1,550 jobs, 17 s; about 50 jobs and 50 queries, 4 s |
+| 80 | a refactor of `build-rust-package` | 52,712 jobs, 27.0 s; 40,074 jobs and 4,524 queries, 25.6 s |
+| 52, 88 | a maintainer came or went (`maintainersById`) | 80,625 jobs, 34 to 35 s; 43,637 to 55,441 jobs and 20,003 to 32,107 queries, 32 to 38 s |
+| 6 | a name of `all-packages.nix` went (`conflictingAttrs`) | every job in both |
+
+Step 80 keeps little because a function has no fingerprint. Steps 52 and 88
+keep a third to a half of the jobs, but they verify nearly one query per kept
+job, so they cost as much as evaluating everything. Step 6 changes the
+construction of the root set, which every job reads.
+
+The check costs more with the cutoff, 0.6 to 3.3 s per merge: a kept job
+stays in its old graph, so more graphs stay loaded. A checker that merged
+graphs would not pay that.
+
+The batch shape alone changes little. Without the cutoff, the batches of
+`pkgs` evaluate 365,705 jobs, and those of `outpaths.nix` 365,378.
+
+### Compared with CppNix and stock iets
+
+The same 80,618 jobs at the base commit, in 8 processes, at once; the mean
+of three rounds (`compare.sh`). Both give the drvPaths of the full
+evaluation. A merge is warm for the caches of stock iets only in part: its IR
+cache keeps the files that did not change, and its tracing cache misses.
+
+| run | wall | sum of the processes | largest process |
+|---|---|---|---|
+| CppNix 2.35.2, `nix-instantiate --eval --strict` | 29.93 s | 213.1 s | 5.0 GB |
+| stock iets, no cache | 15.38 s | 108.2 s | 5.3 GB |
+| stock iets, IR cache warm | 14.70 s | 105.0 s | 5.3 GB |
+| stock iets, tracing cache hit (the same commit) | 0.04 s | 0.2 s | |
+| this branch, the full traced run of a first commit | 27.75 s | 198.8 s | 7.9 GB |
+| this branch, a merge (`replay2.sh`, the check included) | 2.22 s median, 5.73 s at the 90th percentile, 38.2 s at most | | |
+
+CppNix has no evaluation cache for this kind of expression: a second run
+takes as long as the first. The resident checker holds every live graph in
+memory, which the table leaves out: 9.9 GB for the 8 graphs of the first
+commit, and more while kept jobs hold older graphs.
 
 ## Limits
 
@@ -172,6 +323,11 @@ would keep them.
 - The trace of `with` lookups, `?` and formal arguments is a name per set; the
   trace of anything that reads a whole set, such as `attrNames` or `==`, is the
   whole set.
+- A query is an attribute path in one package set. A value outside it, or a
+  function, has no cutoff.
+- A route that changed makes every read below it changed, even when the
+  reader took another route: the ring has no record of the route a reader
+  took.
 
 ## Use
 
@@ -182,6 +338,9 @@ IETS_FINE_TRACE= IETS_FINE_DAG=DIR iets eval ...               # the graph of th
 iets fine-regions FILE=AS...                                   # the regions and names of a file
 iets fine-check CHANGES DAG...                                 # the jobs a change invalidates
 iets fine-check --job N DAG                                    # the observations of job N
+iets fine-check --serve                                        # a resident checker (load, drop, gc, check)
+builtins.fineRoot SET                                          # the cells of SET are queries
+builtins.fineQuery VALUE                                       # the fingerprint a query records
 ```
 
 The scripts of the measurements are in `bench/incremental/`. They expect a

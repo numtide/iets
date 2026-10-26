@@ -394,7 +394,7 @@ fn fetchers() {
         (
             "nix eval reads what fetchurl got",
             "nix",
-            vec!["eval", "--raw", "--expr"],
+            vec!["eval", "--impure", "--raw", "--expr"],
             format!(
                 r#"builtins.readFile (builtins.fetchurl {{ url = "{fu}"; sha256 = "{sha}"; }})"#
             ),
@@ -414,7 +414,7 @@ fn fetchers() {
         (
             "fetchurl does not take an invalid path",
             "nix",
-            vec!["eval", "--raw", "--expr"],
+            vec!["eval", "--impure", "--raw", "--expr"],
             format!(
                 r#"builtins.readFile (builtins.fetchurl {{ url = "{fu}"; sha256 = "{sha}"; name = "leftover"; }})"#
             ),
@@ -422,7 +422,7 @@ fn fetchers() {
         (
             "fetchTarball does not take an invalid path",
             "nix",
-            vec!["eval", "--raw", "--expr"],
+            vec!["eval", "--impure", "--raw", "--expr"],
             format!(
                 r#"builtins.readFile (builtins.fetchTarball {{ url = "{tgz}"; sha256 = "{tb_hash}"; name = "leftover-tree"; }} + "/f")"#
             ),
@@ -437,7 +437,7 @@ fn fetchers() {
         r#"builtins.fetchurl {{ url = "{fu}"; sha256 = "{}"; name = "leftover"; }}"#,
         "0".repeat(52)
     );
-    let b = f.both("nix", &["eval", "--raw", "--expr", &e]);
+    let b = f.both("nix", &["eval", "--impure", "--raw", "--expr", &e]);
     c.check(
         "fetchurl with a wrong hash does not take an invalid path",
         b.ours.status.code() == Some(1)
@@ -523,11 +523,6 @@ fn fetch_git() {
             "--impure",
         ),
         (
-            "of a rev in pure mode",
-            format!(r#"{{ url = {path}; rev = "{rev}"; }}"#),
-            "--pure-eval",
-        ),
-        (
             "of a ref",
             format!(r#"{{ url = {path}; ref = "main"; }}"#),
             "--impure",
@@ -570,6 +565,19 @@ fn fetch_git() {
     ] {
         one(&mut c, label, &arg, mode);
     }
+    // a rev locks the result, not where a pure evaluation reads it from: the
+    // repository is no part of the run, so iets refuses where nix reads it
+    // (docs/reference/divergences.md)
+    let pinned = show_expr(&format!(r#"{{ url = {path}; rev = "{rev}"; }}"#));
+    let b = f.both("nix", &["eval", "--pure-eval", "--json", "--expr", &pinned]);
+    c.check(
+        "fetchGit of a rev in pure mode is a read outside the run",
+        b.ours.status.code() == Some(1)
+            && b.real.status.code() == Some(0)
+            && b.ours.stdout.is_empty()
+            && stderr(&b.ours).contains("is forbidden in pure evaluation mode"),
+        show(&b),
+    );
     // a rev and a ref of a local repository are read without the real nix;
     // a dir without `nix` would fall through to the one on PATH
     let nonix = s.no_nix();

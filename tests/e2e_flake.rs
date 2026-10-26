@@ -73,6 +73,18 @@ impl F {
         })
     }
 
+    /// The inputs of this test lie beside the flake: other checkouts, and
+    /// archives a `file:` URL names. A pure evaluation fetches none of them
+    /// (docs/explanation/pure-eval-and-local-sources.md), so the user's
+    /// `iets.toml` says what a user with such inputs says. `--pure-eval`
+    /// still wins where a check asks for it.
+    fn local_inputs(self) -> F {
+        let conf = self.work().join("xdg/iets");
+        fs::create_dir_all(&conf).unwrap();
+        fs::write(conf.join("iets.toml"), "pure = false\n").unwrap();
+        self
+    }
+
     fn work(&self) -> PathBuf {
         self.s.dir().to_path_buf()
     }
@@ -269,7 +281,9 @@ fn sub_flake(f: &F) {
 /// repo, a path flake whose `lib` follows ours, and a `file://` tarball.
 #[test]
 fn inputs_of_every_type() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     let lib = lib_repo(&f);
     let work = f.w("");
     write(
@@ -367,7 +381,9 @@ const SCRATCH: &str = r#"{
 /// the lock) and a `follows`, in every state a working tree can be in.
 #[test]
 fn a_git_working_tree() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     let w = f.work();
     let work = f.w("");
     let work = work.trim_end_matches('/');
@@ -608,7 +624,9 @@ const COUNT: &str = r#"{
 /// revCount is there when Nix has it, and counted only when it is read.
 #[test]
 fn rev_count() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     let w = f.work();
     let work = f.w("");
     let work = work.trim_end_matches('/');
@@ -826,7 +844,9 @@ fn rev_count() {
 /// downloads, unpacks, hashes and keeps the tree in its input store.
 #[test]
 fn iets_fetches_a_tarball_input() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     let w = f.work();
     let work = f.w("");
     let work = work.trim_end_matches('/').to_string();
@@ -1027,7 +1047,7 @@ fn iets_fetches_a_tarball_input() {
     let p = f
         .iets()
         .envs(vars)
-        .args(["nix", "flake", "prefetch-inputs", &pf])
+        .args(["nix", "flake", "prefetch-inputs", "--impure", &pf])
         .output()
         .unwrap();
     let pe = f.iets_eval(
@@ -1075,7 +1095,9 @@ fn iets_fetches_a_tarball_input() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_second_process_waits_for_the_download() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     let w = f.work();
     let work = f.w("");
     let work = work.trim_end_matches('/').to_string();
@@ -1222,7 +1244,9 @@ fn online_inputs() {
 /// case without Nix runs first.
 #[test]
 fn a_git_input_goes_through_nix() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     let lib = lib_repo(&f);
     let gitf = f.w("gitflake");
     write(
@@ -1282,7 +1306,9 @@ fn a_git_input_goes_through_nix() {
 
 #[test]
 fn without_a_lock() {
-    let Some(mut f) = F::new() else { return };
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
     // without inputs, Nix locks to an empty lock in memory and writes no file
     let nl = f.w("nolock");
     write(

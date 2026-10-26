@@ -78,7 +78,9 @@ fn eval(s: &Scratch, attr: &str, flags: &[&str]) -> Outcome {
 
 fn eval_with(s: &Scratch, attr: &str, flags: &[&str], host: &Host) -> Outcome {
     let target = format!("{}#{attr}", s.dir);
-    let mut argv = vec!["eval", "--raw", "--no-tracing-cache"];
+    // the `path:` input lies beside the root, where a pure evaluation does
+    // not fetch (docs/explanation/pure-eval-and-local-sources.md)
+    let mut argv = vec!["eval", "--raw", "--impure", "--no-tracing-cache"];
     argv.extend_from_slice(flags);
     argv.push(&target);
     run(&argv, host)

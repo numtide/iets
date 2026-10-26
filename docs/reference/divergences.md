@@ -592,6 +592,44 @@ The user setting `pure = false` restores Nix's defaults for the native
 commands. A project `iets.toml` may not set it
 (`docs/reference/settings.md`).
 
+## A fetch from the local file system in pure evaluation
+
+Nix's pure evaluation fetches from anywhere on the machine when a hash
+locks the result. iets treats such a fetch as a read: its source may not
+leave the root, which is the tree of the flake on the command line or the
+project, and it is read through that tree
+(`docs/explanation/pure-eval-and-local-sources.md`). These fail in iets
+with `access to absolute path '...' is forbidden in pure evaluation mode
+(use '--impure' to override)` where Nix evaluates, under every command name:
+
+| Source outside the root | Nix, pure | iets, pure |
+|:---|:---|:---|
+| `fetchurl` or `fetchTarball` of a `file:` URL, with a `sha256` | the file, or its hash in a `hash mismatch` error | forbidden |
+| a `tarball` input with a `file:` URL | the tree | forbidden |
+| a `path` input, and `getFlake "path:DIR?narHash=H"` | the tree, or its hash in a `NAR hash mismatch` error | forbidden |
+| a `git` or `hg` input, and `fetchGit` with a `rev`, of a local repository | the commit | forbidden |
+
+A flake that locks `path:/abs`, `git+file:///abs` or `file:///abs.tar.gz`
+outside its own tree therefore needs `--impure`. A relative `path:` input
+is not affected. The check comes before `/nix/store` and the input store are
+asked, so it does not depend on what a cache holds.
+
+Inside the root two things differ:
+
+- A source below the root flake's directory is read through the root tree,
+  so the tree's filter applies. An untracked file is `not tracked by Git`,
+  and a `path` input there has the `narHash` of its tracked files, where
+  Nix copies the directory whole.
+- A link is resolved on the text of the path, and a link that leaves the
+  root is forbidden. This holds for a plain read in a project too:
+  `readFile`, `readDir`, `readFileType`, `hashFile`, `builtins.path`,
+  `import` and the copy of `"${./x}"`. `import` of a link that leaves the
+  root tree of a flake is forbidden as well.
+
+Observe it: `iets eval -E 'builtins.fetchurl { url = "file:///etc/hostname";
+sha256 = ""; }'` is forbidden, and `nix eval --expr` of the same prints the
+hash of the file. `tests/pure.rs` has the cases.
+
 ## Daemon protocol versions
 
 Nix 2.34.8's client talks to a daemon of protocol 1.18 or newer

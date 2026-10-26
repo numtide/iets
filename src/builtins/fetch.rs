@@ -148,6 +148,9 @@ pub(crate) fn path_nar_hash(
     expect: Option<&Hash>,
     pos: Pos,
 ) -> EvalResult<Result<(Hash, i64), Hash>> {
+    // a pure evaluation copies a local tree only from where it may read
+    let (path, _) = store_hooks::local_source(ev, path.as_bytes(), pos)?;
+    let path = &String::from_utf8_lossy(&path).into_owned()[..];
     Ok(match store_hooks::locate(ev, path.as_bytes()) {
         None => source::path_tree(ev, &sys::path_from_internal(path.as_bytes()), expect, pos)?,
         // a store tree's mtimes are all 1, so that is its lastModified

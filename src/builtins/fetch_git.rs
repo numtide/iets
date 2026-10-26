@@ -9,6 +9,7 @@ use crate::sys::OsStrExt;
 use std::path::Path;
 
 use super::fetch::{emit_tree_attrs, input_attrs};
+use super::store_hooks;
 use crate::error;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::flake::{eval_error, flakeref};
@@ -87,6 +88,16 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         check_locked(&args, fixed.as_deref().unwrap_or(&url), pos)?;
     }
     let root = fixed.as_deref().and_then(workdir_root);
+    // a local repository is a source on this machine: a pure evaluation
+    // reads one only where it may read
+    // (docs/explanation/pure-eval-and-local-sources.md)
+    let root = match root {
+        Some(r) if ev.pure() => {
+            let dir = store_hooks::local_dir(ev, r.as_bytes(), pos)?;
+            Some(dir.to_string_lossy().into_owned())
+        }
+        root => root,
+    };
     let only = |keys: &[&str]| args.keys().all(|k| keys.contains(&k.as_str()));
     let tree = match root.as_deref().map(Path::new) {
         Some(root) if only(FROM_WORKDIR) => from_workdir(ev, &args, root, pos)?,

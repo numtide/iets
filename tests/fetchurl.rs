@@ -47,7 +47,9 @@ impl Scratch {
 
     fn run(&self, offline: bool, args: &[&str]) -> Output {
         let mut c = self.bin.cmd();
+        // the directory is the project, so a pure run may fetch the file
         c.args(args)
+            .current_dir(self.dir.path())
             .env("IETS_CACHE_DIR", self.dir.path().join("cache"))
             .env("IETS_CACHE", "0");
         if offline {

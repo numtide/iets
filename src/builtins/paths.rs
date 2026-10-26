@@ -278,10 +278,11 @@ fn realise_existing(
     let p = realise_path(ev, w, pos)?;
     let (p, at) = match follow {
         Some(m) => store_hooks::located(ev, p, m, pos)?,
-        None => {
-            let at = store_hooks::locate(ev, &p);
-            (p, at)
-        }
+        None => match store_hooks::locate(ev, &p) {
+            // the kernel would follow a link above the entry out of the project
+            None => store_hooks::located(ev, p, Follow::Ancestors, pos)?,
+            at => (p, at),
+        },
     };
     let at = store_hooks::check(ev, at, &p, follow.unwrap_or(Follow::Ancestors), pos)?;
     if at.hidden() {

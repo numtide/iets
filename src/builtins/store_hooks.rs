@@ -182,9 +182,11 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
 
 /// Where a read of `path` goes once the symlinks `mode` names are resolved:
 /// the path resolution ended at, and its place in the (virtual) store, `None`
-/// for one the real file system answers. [`resolve_links`] runs only under a
-/// store path this evaluation copied from a local tree. A fetched input's
-/// spool resolves a member's links inside the entry itself, and elsewhere the
+/// for one the real file system answers. [`resolve_links`] runs under a store
+/// path this evaluation copied from a local tree, and in a pure evaluation
+/// under the project: there the kernel would follow a link out of the allow
+/// list, which is judged on the text of the path. A fetched input's spool
+/// resolves a member's links inside the entry itself, and elsewhere the
 /// kernel resolves as the accessor would, so the walk is skipped and this
 /// costs the one lookup the reader needed anyway.
 pub fn located(
@@ -194,21 +196,109 @@ pub fn located(
     pos: Pos,
 ) -> EvalResult<(Vec<u8>, Option<SrcPath>)> {
     let at = locate(ev, &path);
-    if !matches!(
-        &at,
-        Some(SrcPath {
-            src: Src::Fs { .. },
-            ..
-        })
-    ) {
+    let walk = match &at {
+        Some(at) => matches!(at.src, Src::Fs { .. }),
+        None => ev.pure() && ev.in_project(&path),
+    };
+    if !walk {
         return Ok((path, at));
     }
     let res = resolve_links(ev, &path, mode, pos)?;
     if res == path {
         return Ok((path, at));
     }
+    if at.is_none() {
+        // no tree observation covers a link of the project
+        let full = sys::fs::canonicalize(&os(&path));
+        ev.trace().canon(&path, full.ok().as_deref());
+    }
     let at = locate(ev, &res);
     Ok((res, at))
+}
+
+/// `import` and a copy keep the path they were given, as
+/// eval.cc:resolveExprPath does, and the kernel follows the links on the way.
+/// In a pure evaluation the place the links `mode` names lead to must be one
+/// the evaluation may read.
+pub fn confine(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> EvalResult<()> {
+    if !ev.pure() {
+        return Ok(());
+    }
+    let (res, at) = located(ev, path.to_vec(), mode, pos)?;
+    if res != path {
+        check(ev, at, &res, mode, pos)?;
+    }
+    Ok(())
+}
+
+/// `path` as a path under the root tree, when it is at or below the local
+/// directory the root flake was copied from. The tree's filter then hides
+/// what the copy does not hold, as it does for a read.
+fn in_root_tree(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
+    let (sp, dir) = ev.known.root_tree()?;
+    let dir = sys::path_to_internal(&dir);
+    let dir: &[u8] = dir.strip_suffix(b"/").unwrap_or(&dir);
+    let rest = path.strip_prefix(dir)?;
+    if !rest.is_empty() && rest[0] != b'/' {
+        return None;
+    }
+    let mut out = sp.to_full_string().into_bytes();
+    out.extend_from_slice(rest);
+    Some(out)
+}
+
+/// The source of a fetch that is on this machine: a `file:` URL, a `path`
+/// input, a local repository. In a pure evaluation it is a read like any
+/// other, so it goes through the same accessor: a path below the root
+/// flake's directory reads through the root tree and its filter, every link
+/// is resolved on the text of the path, and the allow list judges where that
+/// ends. The path it ends at, and what holds its bytes
+/// (docs/explanation/pure-eval-and-local-sources.md).
+pub fn local_source(ev: &Evaluator, path: &[u8], pos: Pos) -> EvalResult<(Vec<u8>, SrcPath)> {
+    if !ev.pure() {
+        return Ok((path.to_vec(), fs_path(path)));
+    }
+    let path = crate::compile::canon_path(path);
+    let path = in_root_tree(ev, &path).unwrap_or(path);
+    let (path, at) = located(ev, path, Follow::Full, pos)?;
+    let at = check(ev, at, &path, Follow::Full, pos)?;
+    Ok((path, at))
+}
+
+/// [`local_source`] for a directory that a tool opens in place, such as a
+/// repository. No copy can stand for it, so it must be a directory on disk
+/// that the root tree or the project holds.
+pub fn local_dir(ev: &Evaluator, path: &[u8], pos: Pos) -> EvalResult<PathBuf> {
+    if !ev.pure() {
+        return Ok(os(path));
+    }
+    let (res, at) = local_source(ev, path, pos)?;
+    let on_disk = matches!(at.src, Src::Fs { .. }) && !at.hidden();
+    match at.local() {
+        Some(dir) if on_disk && (ev.in_project(&res) || in_root_copy(ev, &res)) => Ok(dir),
+        _ => Err(forbidden(path, pos)),
+    }
+}
+
+/// Whether `path` is the root tree's store path or lies below it.
+fn in_root_copy(ev: &Evaluator, path: &[u8]) -> bool {
+    let Some((sp, _)) = ev.known.root_tree() else {
+        return false;
+    };
+    let root = sp.to_full_string();
+    path.strip_prefix(root.as_bytes())
+        .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
+}
+
+fn forbidden(path: &[u8], pos: Pos) -> Box<Error> {
+    Error::boxed(
+        ErrorKind::Eval,
+        format!(
+            "access to absolute path '{}' is forbidden in pure evaluation mode (use '--impure' to override)",
+            String::from_utf8_lossy(path)
+        ),
+        pos,
+    )
 }
 
 /// `path` on the real file system, for a path [`locate`] does not answer.
@@ -236,14 +326,7 @@ pub fn check(
         }
         return Ok(at);
     }
-    Err(Error::boxed(
-        ErrorKind::Eval,
-        format!(
-            "access to absolute path '{}' is forbidden in pure evaluation mode (use '--impure' to override)",
-            String::from_utf8_lossy(path)
-        ),
-        pos,
-    ))
+    Err(forbidden(path, pos))
 }
 
 /// [`check`] of `path` located afresh.
@@ -556,6 +639,11 @@ pub fn copy_path_to_store(
 ) -> EvalResult<&'static [u8]> {
     if let Some(sp) = ev.src_to_store.get(path) {
         return Ok(sp);
+    }
+    // the entry is copied as it is, a link included, from where the links
+    // above it lead; a copied tree's filter has hidden what lies below a link
+    if locate(ev, path).is_none() {
+        confine(ev, path, Follow::Ancestors, pos)?;
     }
     let at = open(ev, path, pos)?;
     let copy_err = |e: io::Error| {

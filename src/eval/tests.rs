@@ -442,6 +442,55 @@ fn fetchurl_needs_a_sha256_in_every_mode(
     assert_eq!((e.kind, e.msg.as_str()), (kind, want));
 }
 
+/// A hash locks what a fetch gives, not where a pure evaluation takes it
+/// from. A source on this machine is a read, so the allow list judges it, and
+/// the error holds neither the hash of the file nor whether it is there. Nix
+/// 2.34.8 reads each of these
+/// (docs/explanation/pure-eval-and-local-sources.md).
+#[rstest]
+#[case::fetchurl(
+    r#"builtins.fetchurl { url = "file:///etc/hostname"; sha256 = ""; }"#,
+    "/etc/hostname"
+)]
+#[case::fetchurl_of_a_missing_file(
+    r#"builtins.fetchurl { url = "file:///nonexistent/x"; sha256 = ""; }"#,
+    "/nonexistent/x"
+)]
+#[case::fetchurl_of_localhost(
+    r#"builtins.fetchurl { url = "file://localhost/etc/../etc/hostname"; sha256 = ""; }"#,
+    "/etc/hostname"
+)]
+#[case::fetch_tarball(
+    r#"builtins.fetchTarball { url = "file:///etc/hostname"; sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
+    "/etc/hostname"
+)]
+#[case::a_tarball_input(
+    r#"builtins.fetchTree { type = "tarball"; url = "file:///etc/hostname"; narHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
+    "/etc/hostname"
+)]
+#[case::a_path_input(
+    r#"builtins.fetchTree { type = "path"; path = "/etc"; narHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
+    "/etc"
+)]
+#[case::get_flake(
+    r#"builtins.getFlake "path:/etc?narHash=sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=""#,
+    "/etc"
+)]
+#[case::fetch_git(
+    r#"builtins.fetchGit { url = "file:///etc"; rev = "0000000000000000000000000000000000000001"; }"#,
+    "/etc"
+)]
+#[case::a_git_input(
+    r#"builtins.fetchTree { type = "git"; url = "file:///etc"; rev = "0000000000000000000000000000000000000001"; narHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
+    "/etc"
+)]
+fn a_local_fetch_is_a_read_in_pure_evaluation(#[case] src: &str, #[case] path: &str) {
+    let want = format!(
+        "access to absolute path '{path}' is forbidden in pure evaluation mode (use '--impure' to override)"
+    );
+    assert_eq!(eval_pure(src), Err(want), "{src}");
+}
+
 /// The errors `nix-instantiate --eval` gives before `fetchurl` downloads
 /// anything (Nix 2.34.8, primops/fetchTree.cc:fetch).
 #[test]

@@ -165,8 +165,11 @@ evaluation's allow list:
 
 `readFile`, `readDir`, `hashFile` and `builtins.path` resolve every
 component, `pathExists` every component but the last, and `readFileType`
-none, which is what each primop asks `realisePath` for. A path under no such
-store path is left to the kernel.
+none, which is what each primop asks `realisePath` for. In a pure
+evaluation a path in the project is resolved the same way, and a link that
+leaves the project is refused
+([Pure evaluation and local sources](pure-eval-and-local-sources.md)). Any
+other path is left to the kernel.
 
 A flake directory that is itself a symlink to a working tree is that
 working tree: `git.cc` opens the repository, which resolves the path. An

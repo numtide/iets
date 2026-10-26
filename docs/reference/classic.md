@@ -368,6 +368,10 @@ root of `flake.lock` reaches, on up to 25 threads (the default of
 the input store, outside `/nix/store`. A `path:` input is read in place. If an
 input fails, iets prints its error, goes on with the others, and exits 1.
 
+An input whose source is on this machine and outside the flake's tree is
+refused, as in a pure evaluation
+(`docs/explanation/pure-eval-and-local-sources.md`). `--impure` fetches it.
+
 Falls back on: a missing or incomplete `flake.lock` (the real one locks the
 flake first), an input of another type, a flake reference that is not
 local, and any other flag.

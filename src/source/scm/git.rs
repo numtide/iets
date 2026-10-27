@@ -53,6 +53,14 @@ fn of_rev(root: &Path, args: &[&str]) -> Result<u64, String> {
     Ok(String::from_utf8_lossy(&out).trim().parse().unwrap_or(0))
 }
 
+/// git in `root`, with the options of every `trace::Query`.
+fn git_in(root: &Path) -> Command {
+    let mut c = Command::new(sys::program(OsStr::new("git")));
+    c.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
+        .arg(root);
+    c
+}
+
 /// `git ARGS` in `root` with `stdin` as its input; the exit status and the
 /// output. No observation.
 fn piped(root: &Path, args: &[&str], stdin: Vec<u8>) -> Result<(i32, Vec<u8>), String> {
@@ -63,10 +71,7 @@ fn piped(root: &Path, args: &[&str], stdin: Vec<u8>) -> Result<(i32, Vec<u8>), S
             root.display()
         )
     };
-    let mut child = Command::new(sys::program(OsStr::new("git")))
-        .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(root)
+    let mut child = git_in(root)
         .args(args)
         .env("GIT_ATTR_NOSYSTEM", "1")
         .stdin(Stdio::piped())
@@ -429,10 +434,7 @@ impl Scm for Git {
     }
 
     fn untracked(&self, root: &Path, rel: &OsStr) -> Option<String> {
-        let tracked = Command::new(sys::program(OsStr::new("git")))
-            .arg("--no-optional-locks")
-            .arg("-C")
-            .arg(root)
+        let tracked = git_in(root)
             .args(["ls-files", "--error-unmatch", "--"])
             .arg(rel)
             .stdout(Stdio::null())
@@ -473,13 +475,37 @@ impl Scm for Git {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::flake::parse_flake_ref;
     use crate::source::SourceRef;
     use crate::store::nar::tests::{Tree, tree};
     use crate::sys::internal_string;
     use rstest::rstest;
 
-    use std::fs;
+    #[cfg(unix)]
+    use crate::sys::fs::make_executable;
+
+    /// A repository's config may name programs; reading it runs none.
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_runs_no_fsmonitor() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        let marker = root.join("ran");
+        let hook = root.join("hook");
+        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        make_executable(&fs::File::open(&hook).unwrap()).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git").arg("-C").arg(root).args(args).status();
+            assert!(ok.unwrap().success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(root.join("f"), "x").unwrap();
+        git(&["add", "f"]);
+        git(&["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        Git.snapshot(&Trace::default(), root).unwrap();
+        assert!(!marker.exists(), "the fsmonitor ran");
+    }
 
     #[rstest]
     fn a_directory_in_a_repository_is_found(#[from(tree)] d: Tree) {

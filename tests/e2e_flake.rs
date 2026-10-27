@@ -531,8 +531,17 @@ fn a_git_working_tree() {
         let dump = e2e::ok(f.iets().args(["cache", "dump"]).arg(&entry));
         for l in stdout(&dump).lines() {
             if let Some(rest) = l.strip_prefix(&format!("cmd {r} ")) {
-                let sub = rest.split(' ').skip(1).find(|w| !w.starts_with('-'));
-                cmds.extend(sub.map(String::from));
+                let mut words = rest.split(' ').skip(1);
+                while let Some(w) = words.next() {
+                    match w {
+                        "-c" => _ = words.next(),
+                        w if w.starts_with('-') => {}
+                        w => {
+                            cmds.push(w.to_string());
+                            break;
+                        }
+                    }
+                }
             }
         }
     }

@@ -19,6 +19,7 @@ use crate::{Divergence, Target, Verdict, classify, known, no_panic};
 use iets::remote::worker::{Connection, Options, Transport};
 use iets::store::hash::{HashAlgo, hash_bytes};
 use iets::store::nar;
+use iets::sys::tmp;
 use libfuzzer_sys::arbitrary::Unstructured;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use std::ffi::OsStr;
@@ -75,8 +76,8 @@ struct Op {
 
 impl Wire {
     pub fn new(known: Vec<known::Entry>) -> Wire {
-        let dir = env::temp_dir().join(format!("iets-fuzz-wire-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("a scratch directory for the wire target");
+        let dir =
+            tmp::private_dir("iets-fuzz-wire-").expect("a scratch directory for the wire target");
         Wire {
             oracle: Oracle::from_env("IETS_WIRE_ORACLE", "wire-oracle"),
             daemon: Oracle::with_env(

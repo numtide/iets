@@ -260,7 +260,7 @@ impl IrCache {
         let name = &key[2..];
         if let Some(_lock) = cachefs::write_lock(&self.root) {
             let sum = cachefs::checksum(key, &[bytes]);
-            let _ = cachefs::write_atomic(dir, name, cachefs::tag(), &[bytes, &sum]);
+            let _ = cachefs::write_atomic(dir, name, &[bytes, &sum]);
         } else if self.stats {
             errln!("ir-cache skip {name} (a sibling holds the store lock)");
         }

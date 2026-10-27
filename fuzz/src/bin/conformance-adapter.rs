@@ -6,6 +6,7 @@
 use iets::store::drv::Derivation;
 use iets::store::nar;
 use iets::syntax::{self, ast::FileId, symbol::Interner};
+use iets::sys::tmp;
 use iets_fuzz::{canon, sx, wire};
 use sha2::{Digest, Sha256};
 use std::path::{self, Path};
@@ -88,11 +89,11 @@ fn read_nar(file: &str) -> i32 {
     let Ok(input) = fs::read(file) else {
         return 2;
     };
-    let dir = env::temp_dir().join(format!("iets-conformance-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let Ok(dir) = tmp::private_dir("iets-conformance-") else {
+        return 2;
+    };
     let out = dir.join("t");
     let answer = (|| {
-        fs::create_dir_all(&dir).ok()?;
         let consumed = nar::parse_length(&mut &input[..]).ok()?;
         nar::restore_path(&mut &input[..], &out).ok()?;
         let mut dump = Vec::new();

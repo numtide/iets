@@ -274,13 +274,12 @@ pub struct PackWriter {
 impl PackWriter {
     pub fn new(dir: &Path) -> io::Result<PackWriter> {
         cachefs::create_dir(dir)?;
-        let tmp = dir.join(format!(
-            ".pack.{}.{}.tmp",
-            std::process::id(),
-            crate::cachefs::tag()
-        ));
-        let f =
-            sysfs::create_mode(File::options().write(true).create_new(true), 0o600).open(&tmp)?;
+        let (f, tmp) = tempfile::Builder::new()
+            .prefix(".pack.")
+            .suffix(".tmp")
+            .tempfile_in(dir)?
+            .keep()
+            .map_err(|e| e.error)?;
         let mut file = io::BufWriter::with_capacity(1 << 20, f);
         file.write_all(MAGIC)?;
         Ok(PackWriter {

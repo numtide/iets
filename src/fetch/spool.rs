@@ -23,19 +23,18 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::sys::fs as sysfs;
 use crate::sys::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{env, result, str};
+use std::{result, str};
 
 use crate::error::{Error, Result};
 use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::nar::{FileType, NAR_MAX_DEPTH, PathFilter, TreeWriter};
-use crate::sys;
 use crate::treestore::pack::{Id, Packs};
 
 use super::unpack;
@@ -144,34 +143,10 @@ fn show(parts: &[Vec<u8>]) -> String {
         .join("/")
 }
 
-/// A file in TMPDIR, unlinked as soon as it is open: the bytes live exactly as
-/// long as the handle, whatever happens to the process. The name is random and
-/// the open is exclusive, so a name another user can guess cannot make this
-/// truncate and write a file of theirs.
-pub fn scratch(tag: &str) -> Result<File> {
-    let dir = env::temp_dir();
-    let mut last = None;
-    for _ in 0..8 {
-        let path = dir.join(format!("iets-spool-{tag}-{:016x}", random_u64()));
-        match sysfs::no_follow(File::options().read(true).write(true).create_new(true)).open(&path)
-        {
-            Ok(file) => {
-                fs::remove_file(&path)
-                    .map_err(|e| Error::io(format!("cannot unlink {}", path.display()), e))?;
-                return Ok(file);
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some((path, e)),
-            Err(e) => return Err(Error::io(format!("cannot create {}", path.display()), e)),
-        }
-    }
-    let (path, e) = last.expect("a failed attempt");
-    Err(Error::io(format!("cannot create {}", path.display()), e))
-}
-
-fn random_u64() -> u64 {
-    let mut b = [0u8; 8];
-    sys::random(&mut b);
-    u64::from_ne_bytes(b)
+/// An unnamed file in TMPDIR: the bytes live exactly as long as the handle,
+/// and no name exists for another user to plant.
+pub fn scratch() -> Result<File> {
+    tempfile::tempfile().map_err(|e| Error::io("cannot create a scratch file", e))
 }
 
 fn parts_of(rel: &Path) -> Parts {
@@ -339,7 +314,7 @@ impl Tree {
                             })?;
                             let side = match &mut sparse {
                                 Some(f) => f,
-                                None => sparse.insert(scratch("sparse")?),
+                                None => sparse.insert(scratch()?),
                             };
                             expand(&mut entry, pax.as_ref(), side, sparse_at, size).map_err(
                                 |e| {
@@ -740,8 +715,7 @@ pub fn spool_file(dir: &Path) -> io::Result<File> {
     File::options()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(dir.join(SPOOL))
 }
 
@@ -1089,9 +1063,8 @@ impl Read for Bytes<'_> {
 pub(crate) mod tests {
     use super::*;
     use rstest::rstest;
+    use std::fs;
     use tempfile::tempdir;
-
-    use crate::sys::fs::symlink;
 
     use crate::fetch::http;
     use crate::store::hash::Hasher;
@@ -1130,9 +1103,9 @@ pub(crate) mod tests {
 
     /// The NAR the spool writes for `bytes`, and the NAR the tree path writes
     /// for the same archive.
-    fn both(tag: &str, bytes: Vec<u8>) -> (Result<Vec<u8>>, Result<Vec<u8>>) {
+    fn both(bytes: Vec<u8>) -> (Result<Vec<u8>>, Result<Vec<u8>>) {
         let plain = http::decompress(bytes.clone()).unwrap();
-        let mut spool = scratch(tag).unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&plain).unwrap();
         let streamed = Tree::index(spool, u64::MAX).and_then(|t| {
             let mut nar = Vec::new();
@@ -1152,7 +1125,7 @@ pub(crate) mod tests {
     }
 
     fn same(tag: &str, entries: &[(&str, tar::EntryType, u32, &[u8])]) -> Vec<u8> {
-        let (streamed, tree) = both(tag, tar_gz(entries));
+        let (streamed, tree) = both(tar_gz(entries));
         let streamed = streamed.unwrap_or_else(|e| panic!("{tag}: the spool path failed: {e}"));
         let tree = tree.unwrap_or_else(|e| panic!("{tag}: the tree path failed: {e}"));
         assert_eq!(streamed, tree, "{tag}: the two NARs differ");
@@ -1234,9 +1207,9 @@ pub(crate) mod tests {
         #[case] entries: Vec<(&str, tar::EntryType, u32, &[u8])>,
         #[case] why: &str,
     ) {
-        let (streamed, tree) = both(tag, tar_gz(&entries));
+        let (streamed, tree) = both(tar_gz(&entries));
         let e = streamed.unwrap_err().to_string();
-        assert!(e.contains(why), "{e}");
+        assert!(e.contains(why), "{tag}: {e}");
         assert!(tree.is_err(), "the tree path accepted it");
     }
 
@@ -1314,7 +1287,7 @@ pub(crate) mod tests {
 
     fn spooled(entries: &[(&str, tar::EntryType, u32, &[u8])]) -> Tree {
         let plain = http::decompress(tar_gz(entries)).unwrap();
-        let mut spool = scratch("test").unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&plain).unwrap();
         Tree::index(spool, u64::MAX).unwrap()
     }
@@ -1417,23 +1390,6 @@ pub(crate) mod tests {
         assert_eq!(chain, want, "a link to a link that comes later");
     }
 
-    /// A symlink at the guessable name `iets-spool-<pid>-<tag>`: the open must
-    /// not follow it.
-    #[test]
-    fn the_scratch_file_never_follows_a_symlink() {
-        let dir = env::temp_dir();
-        let victim = dir.join(format!("iets-spool-victim-{}", std::process::id()));
-        fs::write(&victim, b"precious").unwrap();
-        let bait = dir.join(format!("iets-spool-{}-bait", std::process::id()));
-        let _ = fs::remove_file(&bait);
-        symlink(&victim, &bait).unwrap();
-        let mut file = scratch("bait").unwrap();
-        file.write_all(b"the archive").unwrap();
-        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
-        fs::remove_file(&bait).unwrap();
-        fs::remove_file(&victim).unwrap();
-    }
-
     /// One pax local extended header and the member it belongs to.
     fn pax_tar(records: &[(&str, String)], name: &str, data: &[u8]) -> Vec<u8> {
         let one = |key: &str, value: &str| {
@@ -1514,7 +1470,7 @@ pub(crate) mod tests {
                 one_zero.clone(),
             ),
         ] {
-            let (streamed, tree) = both(tag, pax_tar(&records, name, &data));
+            let (streamed, tree) = both(pax_tar(&records, name, &data));
             let streamed = streamed.unwrap_or_else(|e| panic!("{tag}: {e}"));
             assert_eq!(streamed, tree.unwrap(), "{tag}: the two NARs differ");
             let want = same(
@@ -1547,7 +1503,7 @@ pub(crate) mod tests {
             },
         );
         assert!(bomb.len() < 4096, "the archive is small: {}", bomb.len());
-        let mut spool = scratch("bomb").unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&bomb).unwrap();
         let e = Tree::index(spool, 1 << 20).unwrap_err().to_string();
         assert!(e.contains("fetch-max-size"), "{e}");
@@ -1561,7 +1517,7 @@ pub(crate) mod tests {
         let names: Vec<String> = (0..32).map(|i| format!("l{i}")).collect();
         entries.extend(names.iter().map(|n| (n.as_str(), HARD, 0o644, &b"f"[..])));
         let tar = http::decompress(tar_gz(&entries)).unwrap();
-        let mut spool = scratch("links").unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&tar).unwrap();
         let e = Tree::index(spool, 1 << 20).unwrap_err().to_string();
         assert!(e.contains("fetch-max-size"), "{e}");
@@ -1583,7 +1539,7 @@ pub(crate) mod tests {
             h.set_mode(0o644);
             b.append_link(&mut h, format!("l{i}"), "s").unwrap();
         }
-        let mut spool = scratch("symlinks").unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&b.into_inner().unwrap()).unwrap();
         let e = Tree::index(spool, 1 << 20).unwrap_err().to_string();
         assert!(e.contains("fetch-max-size"), "{e}");
@@ -1604,7 +1560,7 @@ pub(crate) mod tests {
             ("c", REG, 0o644, b"c"),
         ]))
         .unwrap();
-        let mut spool = scratch("dropped").unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&tar).unwrap();
         Tree::index(spool, 1 << 20).unwrap();
     }
@@ -1613,7 +1569,7 @@ pub(crate) mod tests {
     fn a_member_nested_too_deep_is_refused() {
         let deep = vec!["d"; NAR_MAX_DEPTH + 1].join("/");
         let tar = pax_tar(&[("path", deep)], "x", b"x");
-        let mut spool = scratch("deep").unwrap();
+        let mut spool = scratch().unwrap();
         spool.write_all(&tar).unwrap();
         let e = Tree::index(spool, u64::MAX).unwrap_err().to_string();
         assert!(e.contains("nested deeper"), "{e}");
@@ -1627,7 +1583,7 @@ pub(crate) mod tests {
         let bytes =
             fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tarball/tree.tar.gz"))
                 .unwrap();
-        let (streamed, tree) = both("golden", bytes);
+        let (streamed, tree) = both(bytes);
         let streamed = streamed.unwrap();
         assert_eq!(streamed, tree.unwrap());
         let want = fs::read_to_string(

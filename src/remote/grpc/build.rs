@@ -6,8 +6,8 @@
 //! drives these calls as the dispatcher's backend.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, Seek, Write};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -706,8 +706,9 @@ fn fetch_nars(c: &Client, paths: &[StorePath], on_frame: OnFrame<'_>) -> Result<
 }
 
 /// `--fetch-to DIR`: the farm never copies outputs into a local store, so the
-/// NARs come back over `FetchNars`. Each is spooled beside its destination, so
-/// the restore streams from disk instead of holding the whole NAR in memory.
+/// NARs come back over `FetchNars`. Each is spooled to an unnamed file beside
+/// its destination, so the restore streams from disk instead of holding the
+/// whole NAR in memory.
 pub fn fetch_into_dir(
     c: &mut Client,
     paths: &[StorePath],
@@ -715,28 +716,19 @@ pub fn fetch_into_dir(
     t: &mut Timings,
 ) -> Result<()> {
     t.calls += 1;
-    let spool_path = |i: usize| dir.join(format!(".nar-{i}"));
     let mut open: Option<(usize, File)> = None;
-    let r = fetch_nars(c, paths, &mut |i, bytes, eof| {
+    fetch_nars(c, paths, &mut |i, bytes, eof| {
         if open.as_ref().is_none_or(|(j, _)| *j != i) {
-            open = Some((i, File::create(spool_path(i))?));
+            open = Some((i, tempfile::tempfile_in(dir)?));
         }
         open.as_mut().expect("opened").1.write_all(bytes)?;
         if eof {
-            open = None;
-            let p = spool_path(i);
-            let mut f = File::open(&p)?;
-            let out = restore_path(&mut f, &dir.join(paths[i].base_name()));
-            drop(f);
-            let _ = fs::remove_file(&p);
-            return out;
+            let (_, mut f) = open.take().expect("opened");
+            f.rewind()?;
+            return restore_path(&mut f, &dir.join(paths[i].base_name()));
         }
         Ok(())
-    });
-    for i in 0..paths.len() {
-        let _ = fs::remove_file(spool_path(i));
-    }
-    r
+    })
 }
 
 /// Registers `paths` and their closure in the local nix-daemon so an out-link

@@ -5,8 +5,9 @@
 //! See docs/reference/commands.md.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::{fs, io};
 
 use crate::error::{Error, Result};
 use crate::store::drv::{
@@ -14,6 +15,7 @@ use crate::store::drv::{
 };
 use crate::store::hash::{HashAlgo, hash_bytes};
 use crate::store::path::{StorePath, make_text_path};
+use crate::sys::tmp;
 use serde_json::{Map, Value as J};
 
 /// src/nix/get-env.sh, verbatim: the builder script of the `-env` derivation. Nix embeds
@@ -446,15 +448,7 @@ pub fn make_rc_script(
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_file_name(format!(
-        ".{}.{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
-    })
+    tmp::replace(path, |f| f.write_all(bytes))
 }
 
 /// What a `print-dev-env` cache entry stores: the env output, the files the printed bytes

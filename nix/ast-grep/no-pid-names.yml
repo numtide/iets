@@ -1,0 +1,11 @@
+id: no-pid-names
+message: "a name made from the pid can be guessed and planted: use sys::tmp or tempfile"
+severity: error
+language: rust
+rule:
+  kind: macro_invocation
+  regex: '^format!'
+  has:
+    kind: token_tree
+    regex: 'process::id\(\)'
+    stopBy: end

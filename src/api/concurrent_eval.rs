@@ -8,9 +8,10 @@ use crate::api::{self, EvalArgs, Input};
 use crate::lint::Level;
 use crate::parallel::fiber::MAIN_STACK;
 use crate::session::Session;
+use crate::sys::tmp;
 use rstest::rstest;
 use std::path::Path;
-use std::{env, fs, process, thread};
+use std::{env, fs, thread};
 
 const SLOW: &str = "slow = n: builtins.foldl' (a: b: a + b) 0 (builtins.genList (x: x) n);";
 const WORKERS: [usize; 3] = [1, 4, 8];
@@ -394,13 +395,8 @@ fn check(c: &Case) -> Option<String> {
     let mut runs = Vec::new();
     for w in WORKERS {
         let dir = c.drvs.map(|_| {
-            let d = env::temp_dir().join(format!(
-                "iets-concurrent-eval-{}-{}-{w}",
-                process::id(),
-                c.name
-            ));
-            fs::create_dir_all(&d).expect("create the dump directory");
-            d
+            tmp::private_dir(&format!("iets-concurrent-eval-{}-{w}-", c.name))
+                .expect("create the dump directory")
         });
         let o = outcome(c, w, dir.as_deref());
         let dumped = dir.as_ref().map(|d| {

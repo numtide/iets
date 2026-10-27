@@ -203,7 +203,7 @@ impl Store {
         };
         // under the lock, so a sibling's discard cannot remove it before the rename
         cachefs::create_dir(&dir)?;
-        cachefs::write_atomic(&dir, ENTRY, cachefs::tag(), &chunks).map(|()| true)
+        cachefs::write_atomic(&dir, ENTRY, &chunks).map(|()| true)
     }
 
     /// An entry that holds an answer and an empty read set: the answer

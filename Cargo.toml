@@ -16,6 +16,7 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs", "mm", "net", "param", "thread", "process", "termios"] }
 memchr = "2"
 getrandom = "0.4"
+tempfile = "3"
 toml = "1"
 serde_json = "1"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "transport", "tls-ring"] }
@@ -74,7 +75,6 @@ inherits = "release"
 
 [dev-dependencies]
 rstest = { version = "0.28.0", default-features = false }
-tempfile = "3"
 
 [lints.rust]
 # cargo fuzz builds with `--cfg fuzzing` (src/sys/mod.rs, `elapsed`)

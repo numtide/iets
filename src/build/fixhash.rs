@@ -2,7 +2,7 @@
 //! failed on its hash gets the hash it produced written over the one it
 //! specified, in the one local file evaluation read that holds it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::eval::Evaluator;
 use crate::log;
@@ -12,7 +12,8 @@ use crate::store::hash::{Hash, HashFormat};
 use crate::store::path;
 use crate::sys;
 use crate::sys::fs::copy_mode;
-use std::fs::{self, OpenOptions};
+use crate::sys::tmp;
+use std::fs;
 use std::io::{self, IsTerminal, Write};
 
 /// One rewrite: `old` becomes `new` at byte `at` of `file`, which is
@@ -42,27 +43,12 @@ impl Fix {
         }
         text.splice(self.at..self.at + self.old.len(), self.new.bytes());
         let meta = fs::metadata(&self.file).map_err(err)?;
-        let dir = self.file.parent().unwrap_or(Path::new("."));
-        let name = self.file.file_name().unwrap_or_default().to_string_lossy();
-        let tmp = dir.join(format!(".{}.{}", name, std::process::id()));
-        let write = || -> io::Result<()> {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
+        tmp::replace(&self.file, |f| {
             f.write_all(&text)?;
-            copy_mode(&meta, &f)?;
+            copy_mode(&meta, f)?;
             f.sync_all()
-        };
-        if let Err(e) = write() {
-            let _ = fs::remove_file(&tmp);
-            return Err(err(e));
-        }
-        fs::rename(&tmp, &self.file).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            err(e)
         })
+        .map_err(err)
     }
 }
 
@@ -199,6 +185,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    use std::path::Path;
     use std::slice;
 
     const FAKE: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

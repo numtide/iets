@@ -34,6 +34,7 @@ pub mod fs;
 pub mod net;
 #[cfg_attr(windows, path = "process_windows.rs")]
 pub mod process;
+pub mod tmp;
 #[cfg_attr(windows, path = "tty_windows.rs")]
 pub mod tty;
 #[cfg_attr(windows, path = "vm_windows.rs")]

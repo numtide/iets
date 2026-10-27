@@ -14,6 +14,7 @@ use rustix::fs::{
     utimensat,
 };
 use rustix::io::Errno;
+use rustix::process::geteuid;
 
 /// Removes a symbolic link, whatever it points at.
 pub fn remove_link(p: &Path) -> io::Result<()> {
@@ -81,14 +82,24 @@ pub fn dir_mode(b: &mut DirBuilder, mode: u32) -> &mut DirBuilder {
     b.mode(mode)
 }
 
-/// Narrows `path` to the owner alone when it is wider.
+/// Gives `path` mode 0700 when it has another: wider, or narrower than its
+/// owner can use, as a umask can leave it.
 pub fn restrict_to_owner(path: &Path) {
     let Ok(m) = fs::metadata(path) else {
         return;
     };
-    if m.permissions().mode() & 0o077 != 0 {
+    if m.permissions().mode() & 0o777 != 0o700 {
         let _ = fs::set_permissions(path, Permissions::from_mode(0o700));
     }
+}
+
+pub fn owned_by_me(m: &Metadata) -> bool {
+    m.uid() == geteuid().as_raw()
+}
+
+/// Whether `m` is this user's and closed to everyone else.
+pub fn private_to_me(m: &Metadata) -> bool {
+    owned_by_me(m) && m.permissions().mode() & 0o077 == 0
 }
 
 pub fn make_executable(f: &File) -> io::Result<()> {

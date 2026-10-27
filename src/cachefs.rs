@@ -339,6 +339,8 @@ enum Owner {
     Stale(&'static str),
     /// Not iets's: it holds a name that no store of this shape can have.
     Foreign,
+    /// A link, or another user's: whoever controls it could plant entries.
+    Untrusted(&'static str),
 }
 
 /// A name a store of `shape` puts in its own root: a store-level file, a
@@ -370,8 +372,17 @@ fn all_ours(root: &Path, shape: Shape) -> bool {
 }
 
 fn owner(root: &Path, shape: Shape) -> Owner {
-    if !root.exists() {
-        return Owner::Ready;
+    match fs::symlink_metadata(root) {
+        Err(_) => return Owner::Ready,
+        Ok(m) if m.is_symlink() => return Owner::Untrusted("is a symbolic link"),
+        Ok(m) if !sysfs::owned_by_me(&m) => return Owner::Untrusted("belongs to another user"),
+        Ok(_) => {}
+    }
+    // before anything in it is read or wiped: whoever else could write it
+    // may have planted what is there
+    tighten(root);
+    if !fs::symlink_metadata(root).is_ok_and(|m| sysfs::private_to_me(&m)) {
+        return Owner::Untrusted("is open to other users");
     }
     match fs::read(root.join(VERSION)) {
         Ok(v) if v.trim_ascii() == format(shape) => {}
@@ -406,7 +417,10 @@ fn wipe(root: &Path, shape: Shape) {
         if is_tmp(&name) || is_key(&name, shape) {
             // an entry of another format may not have this one's shape
             let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
-        } else if matches!(shape, Shape::ShardedFiles) && is_shard(&name) {
+        } else if matches!(shape, Shape::ShardedFiles)
+            && is_shard(&name)
+            && e.file_type().is_ok_and(|t| t.is_dir())
+        {
             wipe_shard(&path);
         } else if matches!(shape, Shape::StoreEntries) && name.as_bytes() == PACKS.as_bytes() {
             let _ = fs::remove_dir_all(&path);
@@ -451,11 +465,26 @@ pub fn prepare(root: &Path, shape: Shape, timings: bool) -> bool {
             );
             return false;
         }
+        Owner::Untrusted(why) => {
+            errln!(
+                "error: the cache {} {why}, so iets will not use it",
+                root.display()
+            );
+            return false;
+        }
     }
     if create_dir(root).is_ok() && fs::read(root.join(VERSION)).is_err() {
         let _ = write_atomic(root, VERSION, tag(), &[format(shape)]);
     }
     tighten(root);
+    // after tightening, so only a root iets cannot make private is refused
+    if !fs::symlink_metadata(root).is_ok_and(|m| m.is_dir() && sysfs::private_to_me(&m)) {
+        errln!(
+            "error: the cache {} is not a directory only this user can open, so iets will not use it",
+            root.display()
+        );
+        return false;
+    }
     true
 }
 
@@ -744,6 +773,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::sys::fs::symlink;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -822,6 +853,46 @@ mod tests {
             !d.path().join(VERSION).exists(),
             "and nothing is written into it"
         );
+
+        let link = d.path().join("link");
+        let empty = d.path().join("empty");
+        fs::create_dir(&empty).expect("dir");
+        symlink(&empty, &link).expect("link");
+        assert!(!prepare(&link, Shape::Dirs, false), "a link to a store");
+        assert!(!empty.join(VERSION).exists());
+    }
+
+    /// A stale store open to the group is closed before it is wiped, and a
+    /// shard that is a link is not followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_wipe_never_follows_a_planted_shard_link() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("ir");
+        let victim = d.path().join("victim");
+        fs::create_dir_all(&root).expect("root");
+        fs::create_dir_all(&victim).expect("victim");
+        let key = "0".repeat(62);
+        fs::write(victim.join(&key), "keep").expect("victim file");
+        fs::write(root.join(VERSION), "old").expect("version");
+        symlink(&victim, root.join("ab")).expect("shard link");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).expect("chmod");
+        assert!(prepare(&root, Shape::ShardedFiles, false));
+        assert!(victim.join(&key).exists(), "the link target is untouched");
+        let mode = fs::metadata(&root).expect("root").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    /// A root a umask left unusable is made usable, not refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_without_owner_bits_is_repaired() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("trace");
+        fs::create_dir_all(&root).expect("root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).expect("chmod");
+        assert!(prepare(&root, Shape::Dirs, false));
+        assert!(root.join(VERSION).exists());
     }
 
     #[test]

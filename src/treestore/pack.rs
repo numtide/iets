@@ -147,7 +147,8 @@ impl Pack {
                     .is_some_and(|e| e <= start);
             let shape = match loc.flags {
                 0 => loc.stored == loc.raw,
-                LZ4 => loc.stored < loc.raw,
+                // LZ4 expands a byte at most 255 times
+                LZ4 => loc.stored < loc.raw && loc.raw / 255 <= loc.stored,
                 _ => false,
             };
             if !fits || !shape {
@@ -425,30 +426,32 @@ impl Drop for PackWriter {
 #[derive(Default, Debug)]
 pub struct PackSet {
     packs: Vec<Arc<Pack>>,
+    /// Packs that do not parse, for [`collect`] to remove.
+    broken: Vec<PathBuf>,
 }
 
 impl PackSet {
-    /// Every whole pack in `dir`. A pack that does not parse is removed: it is
-    /// a cache file, and its objects come back with the inputs that need them.
+    /// Every whole pack in `dir`. Only regular files count, so a link never
+    /// leads a later removal out of the store.
     pub fn load(dir: &Path) -> PackSet {
-        let mut packs = Vec::new();
+        let mut set = PackSet::default();
         let Ok(rd) = fs::read_dir(dir) else {
-            return PackSet::default();
+            return set;
         };
         for e in rd.flatten() {
             let path = e.path();
-            if path.extension().is_none_or(|x| x != "pack") {
+            if path.extension().is_none_or(|x| x != "pack")
+                || !e.file_type().is_ok_and(|t| t.is_file())
+            {
                 continue;
             }
             match Pack::open(&path) {
-                Ok(Some(p)) => packs.push(Arc::new(p)),
-                Ok(None) => {
-                    let _ = fs::remove_file(&path);
-                }
+                Ok(Some(p)) => set.packs.push(Arc::new(p)),
+                Ok(None) => set.broken.push(path),
                 Err(_) => {}
             }
         }
-        PackSet { packs }
+        set
     }
 
     pub fn find(&self, id: &Id) -> Option<(&Arc<Pack>, Loc)> {
@@ -529,7 +532,16 @@ pub struct Collected {
 /// a reader that has a pack open keeps reading it after the unlink.
 pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Collected> {
     let mut out = Collected::default();
-    for pack in PackSet::load(dir).packs() {
+    let set = PackSet::load(dir);
+    // a pack that does not parse is a cache file whose objects come back
+    // with the inputs that need them
+    for path in &set.broken {
+        out.removed += 1;
+        if !dry_run {
+            fs::remove_file(path)?;
+        }
+    }
+    for pack in set.packs() {
         let (mut keep, mut dead) = (0u64, 0u64);
         for (id, loc) in pack.ids() {
             if live.contains(&id) {
@@ -643,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn a_set_finds_objects_across_packs_and_drops_a_broken_one() {
+    fn a_set_finds_objects_across_packs_and_only_collect_drops_a_broken_one() {
         let d = tempdir().unwrap();
         let mut a = PackWriter::new(d.path()).unwrap();
         a.add(id_of(b"one"), b"one").unwrap();
@@ -655,9 +667,14 @@ mod tests {
         let packs = Packs::open(d.path());
         assert_eq!(packs.read(&id_of(b"one")).unwrap(), b"one");
         assert_eq!(packs.read(&id_of(b"two")).unwrap(), b"two");
-        assert!(!d.path().join("junk.pack").exists());
         let err = packs.read(&id_of(b"three")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let junk = d.path().join("junk.pack");
+        let live: HashSet<Id> = [id_of(b"one"), id_of(b"two")].into();
+        collect(d.path(), &live, true).unwrap();
+        assert!(junk.exists(), "a dry run removes nothing");
+        assert_eq!(collect(d.path(), &live, false).unwrap().removed, 1);
+        assert!(!junk.exists());
     }
 
     #[test]

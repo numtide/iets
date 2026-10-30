@@ -6,8 +6,6 @@
 use std::collections::BTreeMap;
 use std::str;
 
-use crate::print::json_float;
-
 use super::drv::DrvError;
 
 /// One value of the document, with its children as indices into the arena:
@@ -414,6 +412,34 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
         }
     }
     out.push(b'"');
+}
+
+/// Shortest round-trip float, like nlohmann::json.
+pub fn json_float(f: f64) -> String {
+    if !f.is_finite() {
+        return "null".into();
+    }
+    let sci = format!("{f:e}");
+    let plain = || {
+        let s = format!("{f}");
+        if s.contains('.') { s } else { format!("{s}.0") }
+    };
+    let Some((mant, exp)) = split_sci(&sci) else {
+        return plain();
+    };
+    if (-4..15).contains(&exp) {
+        plain()
+    } else {
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{mant}e{sign}{:02}", exp.abs())
+    }
+}
+
+/// Mantissa and exponent of Rust's `{:e}` output. `None` only if the format
+/// ever stops emitting `<mant>e<exp>`, which callers answer with plain `{}`.
+pub fn split_sci(sci: &str) -> Option<(&str, i32)> {
+    let (mant, exp) = sci.split_once('e')?;
+    Some((mant, exp.parse().ok()?))
 }
 
 #[cfg(test)]

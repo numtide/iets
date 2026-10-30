@@ -21,10 +21,10 @@ use std::time::{Duration, Instant};
 use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
 use crate::eval::Known;
+use crate::locate;
 use crate::parallel::shared::SharedMap;
 use crate::remote::event::Event;
 use crate::remote::plan::{self, Locator, Node, Object, Plan};
-use crate::store::locate;
 use crate::store::path::StorePath;
 use crate::store::source::SourceOrigin;
 

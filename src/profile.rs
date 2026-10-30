@@ -20,10 +20,9 @@ use std::thread::{self, Builder};
 use std::time::Duration;
 
 use crate::eval::error::Pos;
-use crate::log;
-use crate::parallel::interner::Interner;
 use crate::parallel::shared::Files;
 use crate::session::Session;
+use crate::syntax::interner::Interner;
 use crate::syntax::symbol::Sym;
 
 /// Frames below this are left out of a sample, so hashing one stays bounded.
@@ -206,7 +205,7 @@ impl Profile {
             let _ = io::stderr().write_all(&out);
             return;
         }
-        match log::open_sink(Path::new(to)) {
+        match crate::sys::fs::open_sink(Path::new(to)) {
             Ok(mut w) => {
                 let _ = w.write_all(&out);
             }

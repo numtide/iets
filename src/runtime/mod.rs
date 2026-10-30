@@ -1,7 +1,6 @@
 pub mod arena;
 #[cfg(feature = "stats2")]
 pub mod census;
-pub mod heap;
 pub mod value;
 pub mod word;
 

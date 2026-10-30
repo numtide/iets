@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::{mem, result};
 
-use crate::settings::Settings;
-use crate::{log, print};
+use crate::{bytescan, sys};
 
 thread_local! {
     /// The line a record is built in. A thread keeps it, so a record in a
@@ -134,26 +133,20 @@ impl Events {
         let _ = self.sink.set(Some(Mutex::new(w)));
     }
 
-    /// Watches what `IETS_EVENTS` names, where `IETS_EVENTS_TO` says. A path
-    /// that does not open is reported once and the stream stays off, as a
-    /// `json-log-path` that does not open is.
-    pub fn open(&self, settings: &Settings) {
-        if settings.events == 0 {
-            return;
+    /// Watches the groups in `mask`, written to `to`: stderr for `None` or
+    /// `-`. The error is the file that did not open; the stream stays off.
+    pub fn open(&self, mask: u32, to: Option<&str>) -> io::Result<()> {
+        if mask == 0 {
+            return Ok(());
         }
-        self.watch(settings.events);
-        let path = settings.events_to.as_deref().unwrap_or("-");
+        self.watch(mask);
+        let path = to.unwrap_or("-");
         if path == "-" {
             self.write_to(Box::new(io::stderr()));
-            return;
+            return Ok(());
         }
-        match log::open_sink(Path::new(path)) {
-            Ok(w) => self.write_to(w),
-            Err(e) => errln!(
-                "error (ignored): opening events file \"{path}\": {}",
-                crate::error::io_text(&e)
-            ),
-        }
+        self.write_to(sys::fs::open_sink(Path::new(path))?);
+        Ok(())
     }
 
     /// Whether `group` is watched. A site that must gather something before
@@ -183,9 +176,7 @@ impl Events {
 /// `s` as a JSON string. Invalid UTF-8 is replaced, because a path is bytes
 /// and a record is never worth failing a run over.
 fn push_str(out: &mut Vec<u8>, s: &[u8]) {
-    let lossy = String::from_utf8_lossy(s);
-    // the only error is invalid UTF-8, which `lossy` has already replaced
-    let _ = print::json_escape(out, lossy.as_bytes());
+    bytescan::json_str(out, &String::from_utf8_lossy(s));
 }
 
 /// How one value appears in a record: it writes a whole JSON value, and

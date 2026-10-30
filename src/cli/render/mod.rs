@@ -8,6 +8,7 @@ pub mod text;
 use serde_json::Value;
 
 use crate::api::render::Report;
+pub use crate::log::size;
 use crate::session::{self, Session};
 use crate::{error, log};
 use std::io;
@@ -53,17 +54,6 @@ pub fn json(v: &Value, pretty: bool) -> Vec<u8> {
 /// `--pretty`'s default: a terminal on stdout.
 pub fn pretty() -> bool {
     Session::current().out.is_terminal()
-}
-
-/// util.cc:renderSize: KiB at least, one decimal.
-pub fn size(b: u64) -> String {
-    let (mut unit, mut v) = (0, b);
-    while v > 1024 && unit < 8 {
-        unit += 1;
-        v /= 1024;
-    }
-    let scaled = b as f64 / 1024f64.powi(unit.max(1));
-    format!("{scaled:.1} {}iB", b"KKMGTPEZY"[unit as usize] as char)
 }
 
 /// A status line on stderr: what a run did, not what it produced.

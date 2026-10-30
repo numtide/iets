@@ -9,9 +9,8 @@ use std::str::from_utf8;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::runtime::heap::Heap;
-use crate::session::Session;
-use crate::syntax::symbol::{FxHasher, Sym};
+use super::symbol::{FxHasher, Sym};
+use crate::sys::heap::Heap;
 use crate::sys::vm;
 
 const SHARDS: usize = 64;
@@ -127,14 +126,8 @@ fn empty_cache() -> Box<[CacheEntry]> {
     .into_boxed_slice()
 }
 
-impl Default for Interner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// The mapping of [`per_sym`].
-pub(super) fn unmap_per_sym<T>(p: *mut T) {
+pub fn unmap_per_sym<T>(p: *mut T) {
     // SAFETY: the owner's last handle is gone, so nothing reads the table.
     unsafe { vm::unmap(p.cast(), MAX_SYMS * size_of::<T>()) };
 }
@@ -149,18 +142,13 @@ fn prefix(name: &[u8]) -> u64 {
 }
 
 /// `MAX_SYMS` zeroed `T`s, paged in on demand, unmapped by the owner's drop.
-pub(super) fn per_sym<T>() -> *mut T {
+pub fn per_sym<T>() -> *mut T {
     vm::map(MAX_SYMS * size_of::<T>(), true)
         .expect("per-symbol table: mmap failed")
         .cast()
 }
 
 impl Interner {
-    /// An interner whose names live in the session this thread entered.
-    pub fn new() -> Interner {
-        Interner::in_heap(Session::current().heap.clone())
-    }
-
     pub fn in_heap(heap: Arc<Heap>) -> Interner {
         let names = per_sym();
         Interner {
@@ -274,13 +262,17 @@ impl Interner {
 mod tests {
     use super::*;
 
+    fn fresh() -> Interner {
+        Interner::in_heap(Arc::new(Heap::default()))
+    }
+
     use std::thread;
 
     /// A prefix never contradicts byte order: ordering by prefix, then by
     /// name on a tie, is ordering by name.
     #[test]
     fn prefix_order_agrees_with_byte_order() {
-        let mut i = Interner::new();
+        let mut i = fresh();
         let names: [&[u8]; 10] = [
             b"",
             b"a",
@@ -304,7 +296,7 @@ mod tests {
 
     #[test]
     fn intern_is_stable_and_shared() {
-        let mut i = Interner::new();
+        let mut i = fresh();
         let a = i.intern(b"foo");
         let b = i.intern(b"bar");
         assert_ne!(a, b);
@@ -320,7 +312,7 @@ mod tests {
 
     #[test]
     fn empty_name_misses_the_cache_sentinel() {
-        let mut i = Interner::new();
+        let mut i = fresh();
         let e = i.intern(b"");
         assert_eq!(i.name(e), b"");
         assert_eq!(i.intern(b""), e);
@@ -329,7 +321,7 @@ mod tests {
 
     #[test]
     fn concurrent_intern_agrees() {
-        let i = Interner::new();
+        let i = fresh();
         let hs: Vec<_> = (0..8)
             .map(|t| {
                 let mut i = i.clone();

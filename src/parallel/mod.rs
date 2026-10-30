@@ -4,7 +4,6 @@
 pub mod deque;
 pub mod fiber;
 pub mod force;
-pub mod interner;
 pub mod sched;
 pub mod shared;
 pub mod thunk;

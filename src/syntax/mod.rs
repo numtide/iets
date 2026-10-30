@@ -1,6 +1,9 @@
+pub mod allow;
 pub mod ast;
 pub mod dump;
+pub mod interner;
 pub mod lexer;
+pub mod lints;
 pub mod parser;
 pub mod symbol;
 

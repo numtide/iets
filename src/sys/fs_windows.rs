@@ -2,7 +2,7 @@
 //! inode numbers and no inode change time in `std::fs::Metadata`.
 
 use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::mem;
 use std::os::windows::fs::{self as winfs, FileExt, MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
@@ -214,4 +214,10 @@ fn open_for_times(path: &Path, follow: bool) -> io::Result<File> {
         .write(true)
         .custom_flags(flags)
         .open(path)
+}
+
+/// A sink for one line at a time: a file opened for append.
+pub fn open_sink(path: &Path) -> io::Result<Box<dyn Write + Send>> {
+    let f = OpenOptions::new().create(true).append(true).open(path)?;
+    Ok(Box::new(f))
 }

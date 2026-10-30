@@ -1,12 +1,13 @@
 //! Value printers: the `nix-instantiate --eval` format (`printAmbiguous`),
 //! JSON (`printValueAsJSON`), and short forms for error messages.
 
-use crate::bytescan::Escapes;
+use crate::bytescan;
 use std::str;
 
 use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::{self, thunk};
 use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
+use crate::store::json::{json_float, split_sci};
 use crate::syntax::symbol::FxHashSet;
 
 /// C's `%g` with precision 6, as `std::ostream << double` prints.
@@ -43,13 +44,6 @@ pub fn format_g(f: f64) -> String {
         let s = format!("{:.*}", decimals, f);
         strip_zeros(&s).to_string()
     }
-}
-
-/// Mantissa and exponent of Rust's `{:e}` output. `None` only if the format
-/// ever stops emitting `<mant>e<exp>`, which callers answer with plain `{}`.
-fn split_sci(sci: &str) -> Option<(&str, i32)> {
-    let (mant, exp) = sci.split_once('e')?;
-    Some((mant, exp.parse().ok()?))
 }
 
 fn strip_zeros(s: &str) -> &str {
@@ -307,48 +301,8 @@ pub fn json_escape(out: &mut Vec<u8>, s: &[u8]) -> EvalResult<()> {
             Pos::NONE,
         )
     })?;
-    out.push(b'"');
-    // Every byte that needs escaping is ASCII, so copy runs between them.
-    let s = st.as_bytes();
-    let mut done = 0;
-    Escapes::Json.for_each(s, |i| {
-        out.extend_from_slice(&s[done..i]);
-        match s[i] {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            0x08 => out.extend_from_slice(b"\\b"),
-            0x0c => out.extend_from_slice(b"\\f"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            b'\t' => out.extend_from_slice(b"\\t"),
-            c => out.extend_from_slice(format!("\\u{c:04x}").as_bytes()),
-        }
-        done = i + 1;
-    });
-    out.extend_from_slice(&s[done..]);
-    out.push(b'"');
+    bytescan::json_str(out, st);
     Ok(())
-}
-
-/// Shortest round-trip float, like nlohmann::json.
-pub fn json_float(f: f64) -> String {
-    if !f.is_finite() {
-        return "null".into();
-    }
-    let sci = format!("{f:e}");
-    let plain = || {
-        let s = format!("{f}");
-        if s.contains('.') { s } else { format!("{s}.0") }
-    };
-    let Some((mant, exp)) = split_sci(&sci) else {
-        return plain();
-    };
-    if (-4..15).contains(&exp) {
-        plain()
-    } else {
-        let sign = if exp < 0 { '-' } else { '+' };
-        format!("{mant}e{sign}{:02}", exp.abs())
-    }
 }
 
 /// `printValueAsJSON`. Counts against the call depth like Nix's

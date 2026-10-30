@@ -12,7 +12,7 @@ use super::symbol::Sym;
 
 use std::ops;
 
-use crate::lint::allow::Allows;
+use super::allow::Allows;
 
 /// Index into `Ast::exprs`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]

@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::{mem, process, ptr, slice};
 
-use crate::parallel::fiber;
-use crate::sys::vm;
+use super::guard;
+use super::vm;
 
 /// Name bytes come from blocks of this size; a longer name gets its own.
 const NAME_BLOCK: usize = 1 << 20;
@@ -99,7 +99,7 @@ impl Drop for Heap {
         if chunks.is_empty() {
             return;
         }
-        fiber::install_fault_handler();
+        guard::install_fault_handler();
         for (base, len) in chunks {
             tombstone(base, len);
         }

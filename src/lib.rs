@@ -27,6 +27,7 @@ pub(crate) mod flake;
 pub mod ignored;
 pub mod jobs;
 pub mod lint;
+pub mod locate;
 pub mod log;
 pub mod nixbin;
 pub mod parallel;

@@ -13,9 +13,9 @@ use serde_json::{Map, Value};
 use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
-use crate::print;
 use crate::remote::plan::{load_drv, walk};
 use crate::store::drv::{Derivation, DerivationOutput};
+use crate::store::json::json_float;
 use crate::store::path::{IngestionMethod, StorePath};
 use crate::syntax::symbol::FxHashMap;
 
@@ -44,7 +44,7 @@ pub fn show(ev: &Evaluator, roots: &[StorePath], recursive: bool) -> Result<Valu
 
 /// `nlohmann::json::dump`, which `serde_json` matches for everything but a
 /// float: `structuredAttrs` can hold one, and nlohmann writes the shortest
-/// round-trip form with a two-digit exponent (`print::json_float`).
+/// round-trip form with a two-digit exponent (`store::json::json_float`).
 pub fn json_text(v: &Value, pretty: bool) -> Vec<u8> {
     let mut out = Vec::new();
     write_json(&mut out, v, pretty.then_some(0));
@@ -61,7 +61,7 @@ fn write_json(out: &mut Vec<u8>, v: &Value, indent: Option<usize>) {
     match v {
         Value::Number(n) if n.as_i64().is_none() && n.as_u64().is_none() => {
             let f = n.as_f64().unwrap_or(f64::NAN);
-            out.extend_from_slice(print::json_float(f).as_bytes());
+            out.extend_from_slice(json_float(f).as_bytes());
         }
         Value::Array(a) if !a.is_empty() => {
             out.push(b'[');

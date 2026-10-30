@@ -21,11 +21,11 @@ use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::flake::{self, flakeref};
 use crate::lint::{LintId, coerce, purity};
+use crate::locate;
 use crate::runtime::{self, Ctx, Value, Word, ctx_to_arena};
 use crate::source;
 use crate::store::drv::Derivation;
 use crate::store::hash::{Hash, HashAlgo, Hasher, hash_bytes};
-use crate::store::locate;
 use crate::store::nar::FileType;
 use crate::store::path::{
     HASH_PART_LEN, IngestionMethod, StorePath, StorePathError, make_fixed_output_path,

@@ -6,7 +6,7 @@
 //! compiler and the evaluator check a site's line before its level. A
 //! name the registry does not know is the `unknown-allow` lint.
 
-use super::{LintId, N, select};
+use super::lints::{LintId, N, select};
 
 /// One lint per bit.
 pub type Mask = u64;

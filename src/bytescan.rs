@@ -119,6 +119,30 @@ impl Escapes {
     }
 }
 
+/// Appends `s` as a JSON string: quoted, with an escape for every byte in
+/// the `Json` set. Every such byte is ASCII, so the runs between them copy.
+pub fn json_str(out: &mut Vec<u8>, st: &str) {
+    out.push(b'"');
+    let s = st.as_bytes();
+    let mut done = 0;
+    Escapes::Json.for_each(s, |i| {
+        out.extend_from_slice(&s[done..i]);
+        match s[i] {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x0c => out.extend_from_slice(b"\\f"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            c => out.extend_from_slice(format!("\\u{c:04x}").as_bytes()),
+        }
+        done = i + 1;
+    });
+    out.extend_from_slice(&s[done..]);
+    out.push(b'"');
+}
+
 #[cfg(test)]
 mod tests {
     use super::Escapes;

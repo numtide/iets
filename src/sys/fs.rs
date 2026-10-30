@@ -6,7 +6,7 @@ pub use std::os::unix::fs::symlink;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use std::fs::{self, DirBuilder, File, Metadata, OpenOptions, Permissions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
@@ -14,6 +14,8 @@ use rustix::fs::{
     utimensat,
 };
 use rustix::io::Errno;
+
+use super::net::UnixStream;
 
 /// Removes a symbolic link, whatever it points at.
 pub fn remove_link(p: &Path) -> io::Result<()> {
@@ -176,4 +178,14 @@ fn at_flags(follow: bool) -> AtFlags {
     } else {
         AtFlags::SYMLINK_NOFOLLOW
     }
+}
+
+/// A sink for one line at a time: a Unix socket when `path` is one, else a
+/// file opened for append.
+pub fn open_sink(path: &Path) -> io::Result<Box<dyn Write + Send>> {
+    if fs::metadata(path).is_ok_and(|m| is_socket(&m)) {
+        return Ok(Box::new(UnixStream::connect(path)?));
+    }
+    let f = create_mode(OpenOptions::new().create(true).append(true), 0o644).open(path)?;
+    Ok(Box::new(f))
 }

@@ -18,7 +18,7 @@ use super::{ParseError, line_col};
 
 use std::{ops, str};
 
-use crate::lint::allow;
+use super::allow;
 
 type R<T> = Result<T, ParseError>;
 

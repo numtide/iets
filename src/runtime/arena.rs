@@ -8,12 +8,12 @@ use std::{process, ptr, slice};
 
 #[cfg(feature = "stats2")]
 use super::census::Census;
-use super::heap::Heap;
 use super::value::{Ctx, ListObj};
 use super::word::Word;
 use crate::parallel::shared::ArenaUse;
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, FxHashSet};
+use crate::sys::heap::Heap;
 use crate::sys::{self, vm};
 
 const CHUNK: usize = 32 << 20;

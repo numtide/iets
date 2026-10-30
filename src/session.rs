@@ -21,9 +21,10 @@ use crate::jobs::Run;
 use crate::log::Log;
 use crate::profile::Profile;
 use crate::provenance::SourceMap;
-use crate::runtime::heap::Heap;
 use crate::settings::Settings;
 use crate::stdout::Stdout;
+use crate::syntax::interner::Interner;
+use crate::sys::heap::Heap;
 use crate::{config, error, treestore};
 
 #[derive(Default)]
@@ -148,6 +149,13 @@ pub fn bind<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
     }
 }
 
+impl Session {
+    /// An interner whose names live in this session's memory.
+    pub fn interner(&self) -> Interner {
+        Interner::in_heap(self.heap.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,7 +163,7 @@ mod tests {
     use crate::api::{self, EvalArgs, Input};
     use crate::eval::{EvalConfig, Evaluator, Pos};
     use crate::runtime::Word;
-    use crate::runtime::heap::is_released;
+    use crate::sys::heap::is_released;
     use crate::{parallel, print};
     use std::env;
     use std::process::{self, Command};

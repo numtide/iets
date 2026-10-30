@@ -300,7 +300,7 @@ fn summary(all: &BTreeMap<u64, Task>, now: Instant, builds: bool) -> Option<Stri
                 if counts_bytes(*ty) {
                     s.push_str(&format!(
                         ", {}",
-                        crate::cli::render::size(many.iter().map(|k| k.done).sum())
+                        log::size(many.iter().map(|k| k.done).sum())
                     ));
                 }
                 s
@@ -315,11 +315,11 @@ fn one(k: &Task, now: Instant) -> String {
     if k.expected > 0 && counts_bytes(k.ty) {
         s.push_str(&format!(
             ", {} of {}",
-            crate::cli::render::size(k.done),
-            crate::cli::render::size(k.expected)
+            log::size(k.done),
+            log::size(k.expected)
         ));
     } else if counts_bytes(k.ty) && k.done > 0 {
-        s.push_str(&format!(", {}", crate::cli::render::size(k.done)));
+        s.push_str(&format!(", {}", log::size(k.done)));
     } else if k.expected > 0 {
         s.push_str(&format!(", {}/{}", k.done, k.expected));
     }

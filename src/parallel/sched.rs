@@ -280,7 +280,7 @@ impl Runtime {
                 .name(format!("iets-w{i}"))
                 .stack_size(4 << 20)
                 .spawn(session::bind(move || {
-                    fiber::install_overflow_handler();
+                    sys::guard::install_overflow_handler();
                     let mut w = Worker::new(i);
                     rt.prewarm(&mut w);
                     rt.drain_loop(&mut w, || rt.shutdown.load(Ordering::Acquire));
@@ -301,7 +301,7 @@ impl Runtime {
             let _ = force::START.set(Instant::now());
             self.spawn_timeline();
         }
-        fiber::install_overflow_handler();
+        sys::guard::install_overflow_handler();
         let mut w = Worker::new(0);
         // the demand path keeps the stack it has at one worker
         let slot = match self.new_slot_sized(&mut w, user, fiber::MAIN_STACK) {

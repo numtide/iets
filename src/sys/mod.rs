@@ -30,6 +30,8 @@ pub mod fault;
 mod ffi;
 #[cfg_attr(windows, path = "fs_windows.rs")]
 pub mod fs;
+pub mod guard;
+pub mod heap;
 #[cfg_attr(windows, path = "net_windows.rs")]
 pub mod net;
 #[cfg_attr(windows, path = "process_windows.rs")]

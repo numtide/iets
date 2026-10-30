@@ -5,7 +5,7 @@ pub struct Sym(pub u32);
 
 use std::collections::{HashMap, HashSet};
 
-pub use crate::parallel::interner::Interner;
+pub use super::interner::Interner;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// FxHash: one multiply per word. SipHash was 4% of the profile on the

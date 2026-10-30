@@ -15,8 +15,8 @@ use iets::build::render::Style;
 use iets::build::upload::PlanUpload;
 use iets::build::{Dispatcher, Target};
 use iets::eval::Evaluator;
+use iets::locate::locate_in_store;
 use iets::remote::{plan, worker};
-use iets::store::locate::locate_in_store;
 use iets::store::path::StorePath;
 
 fn main() -> ExitCode {

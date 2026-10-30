@@ -15,12 +15,12 @@ use std::vec::IntoIter;
 use crate::eval::{FileInfo, Pos};
 use crate::runtime::Word;
 use crate::runtime::arena::NSTATS;
-use crate::runtime::heap::Heap;
 use crate::session::Session;
 use crate::syntax::ast::FileId;
 use crate::syntax::symbol::{FxHashMap, Sym};
+use crate::sys::heap::Heap;
 
-use super::interner;
+use crate::syntax::interner;
 
 pub struct SharedMap<K, V>(Arc<Mutex<FxHashMap<K, V>>>);
 
@@ -214,7 +214,7 @@ impl SymWords {
 
     #[inline]
     fn slot(&self, s: Sym) -> &AtomicU64 {
-        assert!((s.0 as usize) < super::interner::MAX_SYMS);
+        assert!((s.0 as usize) < interner::MAX_SYMS);
         // SAFETY: in bounds of the mapping.
         unsafe { &*self.0.0.add(s.0 as usize) }
     }

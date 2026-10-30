@@ -10,7 +10,7 @@ use crate::api::MAIN_STACK;
 use crate::cli::{self, help};
 use crate::env::Env;
 use crate::session::{self, Exit, Session, exit};
-use crate::{log, profile, settings};
+use crate::{error, log, profile, settings};
 
 pub fn classic_name(argv0: &OsStr) -> Option<String> {
     let base = Path::new(argv0).file_name()?.to_str()?.to_string();
@@ -73,7 +73,17 @@ pub fn dispatch(session: &Session, argv: Vec<String>, classic: Option<String>) -
         .log
         .progress
         .set_hidden(!session.settings().progress);
-    session.events.open(session.settings());
+    let settings = session.settings();
+    if let Err(e) = session
+        .events
+        .open(settings.events, settings.events_to.as_deref())
+    {
+        errln!(
+            "error (ignored): opening events file \"{}\": {}",
+            settings.events_to.as_deref().unwrap_or("-"),
+            error::io_text(&e)
+        );
+    }
     profile::open(&Session::current());
     let code = command(argv, classic);
     session.profile.write();

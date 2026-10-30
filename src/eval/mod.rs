@@ -28,6 +28,7 @@ use crate::events::{self, Field, Group};
 use crate::lint::allow::Allows;
 use crate::lint::coerce::{or_non_attrs, read_through_copy};
 use crate::lint::{self, Diag, Lints, purity};
+use crate::locate;
 use crate::parallel::shared::{ArenaUse, Counts, Files, SharedMap, SymWords, Totals};
 use crate::profile::{self, Stack};
 use crate::runtime::arena::{self, STAT_NAMES, Stat};
@@ -39,7 +40,6 @@ use crate::runtime::{
 };
 use crate::session::Session;
 use crate::source::LazyStore;
-use crate::store::locate;
 use crate::store::path::{StorePath, store_dir, strip_store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
@@ -110,7 +110,7 @@ impl FileInfo {
     pub fn parsed(&self, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<&(Vec<u8>, Ast)> {
         let parse = || {
             let src = read()?;
-            let ast = syntax::parse(&src, FileId(0), &mut Interner::new()).ok()?;
+            let ast = syntax::parse(&src, FileId(0), &mut Session::current().interner()).ok()?;
             Some((src, ast))
         };
         self.parsed.get_or_init(parse).as_ref()

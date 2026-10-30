@@ -5,7 +5,6 @@ use sha2::{Digest, Sha256};
 
 use crate::syntax;
 use crate::syntax::ast::{Expr, FileId, PathKind};
-use crate::syntax::symbol::Interner;
 
 /// Build id from `build.rs`: the hash of the sources this binary was built from.
 pub const BUILD_ID: &str = env!("IETS_BUILD_ID");
@@ -47,7 +46,7 @@ impl Key {
 /// depends on cwd. A text that does not parse counts as relative (the key
 /// then includes cwd, which is harmless).
 pub fn has_relative_path(src: &str) -> bool {
-    let mut interner = Interner::new();
+    let mut interner = crate::session::Session::current().interner();
     match syntax::parse(src.as_bytes(), FileId(0), &mut interner) {
         Ok(ast) => ast
             .exprs

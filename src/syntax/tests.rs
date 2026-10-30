@@ -1,26 +1,32 @@
+use super::allow::bit;
 use super::ast::{Ast, Expr, ExprId, FileId, Note, StrPart};
 use super::dump::{dump, json, tree};
-use super::symbol::Interner;
+use super::interner::Interner;
+use super::lints::LintId;
 use super::{ParseError, line_col, parse};
-use crate::lint::LintId;
-use crate::lint::allow::bit;
+use crate::sys::heap::Heap;
 use rstest::rstest;
 use serde_json::Value;
+use std::sync::Arc;
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread::Builder;
 
+fn fresh() -> Interner {
+    Interner::in_heap(Arc::new(Heap::default()))
+}
+
 fn dump_src(src: &str) -> String {
-    let mut interner = Interner::new();
+    let mut interner = fresh();
     let ast = parse(src.as_bytes(), FileId(0), &mut interner)
         .unwrap_or_else(|e| panic!("parse of {src:?} failed: {}", e.msg));
     dump(&ast, &interner)
 }
 
 fn parse_error(src: &str) -> ParseError {
-    let mut interner = Interner::new();
+    let mut interner = fresh();
     match parse(src.as_bytes(), FileId(0), &mut interner) {
         Ok(ast) => panic!(
             "expected parse error for {src:?}, got {}",
@@ -68,7 +74,7 @@ const PARSER_ERRORS: &[&str] = &[
 fn lang_corpus(#[files("tests/lang/*.nix")] path: PathBuf) {
     let name = path.file_name().unwrap().to_str().unwrap();
     let src = fs::read(&path).unwrap();
-    let result = parse(&src, FileId(0), &mut Interner::new());
+    let result = parse(&src, FileId(0), &mut fresh());
     let must_fail = (name.starts_with("parse-fail-") && !NOT_PARSER_ERRORS.contains(&name))
         || PARSER_ERRORS.contains(&name);
     match (result, must_fail) {
@@ -331,7 +337,7 @@ fn a_line_ends_at_cr_lf_and_lone_cr() {
 #[test]
 fn allow_comments() {
     let parse_allows = |src: &str| {
-        let mut interner = Interner::new();
+        let mut interner = fresh();
         let ast = parse(src.as_bytes(), FileId(0), &mut interner).unwrap();
         (ast.allows.clone(), ast.notes.clone())
     };
@@ -374,7 +380,7 @@ fn allow_comments() {
 #[test]
 fn spans_cover_tokens() {
     let src = "  f a.b  ";
-    let mut interner = Interner::new();
+    let mut interner = fresh();
     let ast = parse(src.as_bytes(), FileId(0), &mut interner).unwrap();
     let root = ast.span(ast.root);
     assert_eq!((root.start, root.end), (2, 7));
@@ -457,7 +463,7 @@ fn differential_strings_against_nix() {
     let mut accepted: Vec<(String, Vec<u8>)> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
     for s in samples {
-        let mut interner = Interner::new();
+        let mut interner = fresh();
         match parse(s.as_bytes(), FileId(0), &mut interner) {
             Ok(ast) => {
                 let Some(v) = literal_value(&ast, ast.root) else {
@@ -630,7 +636,7 @@ fn an_interpolated_name_is_static_when_nix_has_one_string_node() {
 #[test]
 fn json_gives_every_node_its_kind_and_span() {
     let json_of = |src: &str| {
-        let mut interner = Interner::new();
+        let mut interner = fresh();
         let ast = parse(src.as_bytes(), FileId(0), &mut interner).unwrap();
         let mut out = String::new();
         json(&tree(&ast, &interner), &mut out);

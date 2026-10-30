@@ -7,8 +7,6 @@
 //! The state is a [`Log`], which a [`crate::session::Session`] owns: the
 //! functions here act on the one this thread entered.
 
-use crate::sys::net::UnixStream;
-use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,13 +16,11 @@ use std::{env, mem, process};
 
 use serde_json::{Value, json};
 
-use crate::cli::help;
 use crate::display::{Display, Term, Tty};
 use crate::eval::{Error, Pos};
 use crate::progress::{Board, Mode};
 use crate::session::Session;
 use crate::sys;
-use crate::sys::fs::{create_mode, is_socket};
 use crate::{config, error};
 
 /// Where one session's messages go and what it saw on the way.
@@ -344,7 +340,7 @@ impl Log {
                     let c = config::Config::read(&[]).ok()?;
                     c.str("json-log-path").map(str::to_string)
                 })?;
-                match open_sink(Path::new(&path)) {
+                match sys::fs::open_sink(Path::new(&path)) {
                     Ok(w) => Some(Mutex::new(w)),
                     Err(e) => {
                         let e = error::io_text(&e);
@@ -357,14 +353,6 @@ impl Log {
             })
             .as_ref()
     }
-}
-
-pub(crate) fn open_sink(path: &Path) -> io::Result<Box<dyn Write + Send>> {
-    if fs::metadata(path).is_ok_and(|m| is_socket(&m)) {
-        return Ok(Box::new(UnixStream::connect(path)?));
-    }
-    let f = create_mode(OpenOptions::new().create(true).append(true), 0o644).open(path)?;
-    Ok(Box::new(f))
 }
 
 impl Log {
@@ -574,6 +562,17 @@ pub fn msg(level: u8, text: &str) {
     );
 }
 
+/// util.cc:renderSize: KiB at least, one decimal.
+pub fn size(b: u64) -> String {
+    let (mut unit, mut v) = (0, b);
+    while v > 1024 && unit < 8 {
+        unit += 1;
+        v /= 1024;
+    }
+    let scaled = b as f64 / 1024f64.powi(unit.max(1));
+    format!("{scaled:.1} {}iB", b"KKMGTPEZY"[unit as usize] as char)
+}
+
 /// A line that is not an error record.
 pub fn line(text: &str) {
     cur().log.errln(&on_stderr(&format(text)));
@@ -752,7 +751,7 @@ impl Report {
         let text = self.text();
         out(&self.record(&text), Some(&text));
         match self.code {
-            _ if help::command().is_none() => 1,
+            _ if Session::current().command.lock().unwrap().is_none() => 1,
             "usage" => 2,
             "unsupported" => 3,
             _ => 1,

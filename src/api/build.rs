@@ -15,13 +15,13 @@ use crate::builtins::derivation::DrvInfo;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
+use crate::locate::locate_in_store;
 use crate::provenance::Provenance;
 use crate::remote::plan::{self, Inputs};
 use crate::remote::worker::Missing;
 use crate::settings;
-use crate::store::locate::locate_in_store;
+use crate::srcpath::SourceOrigin;
 use crate::store::path::StorePath;
-use crate::store::source::SourceOrigin;
 use crate::syntax::symbol::FxHashMap;
 
 // What `Dispatch::open` takes, so a caller above this line can name it all

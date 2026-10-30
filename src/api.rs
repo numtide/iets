@@ -16,6 +16,16 @@ pub mod run;
 #[cfg(test)]
 mod concurrent_eval;
 #[cfg(test)]
+mod lint_cases;
+#[cfg(test)]
+mod lint_cli_cases;
+#[cfg(test)]
+mod lint_fixtures;
+#[cfg(test)]
+mod lint_flake_cases;
+#[cfg(test)]
+mod session_tests;
+#[cfg(test)]
 pub mod testkit;
 pub mod value;
 pub mod watch;

@@ -65,19 +65,42 @@ source bytes
 
 Why each stage is shaped as it is: `docs/explanation/evaluation.md`.
 
+## Crates
+
+One workspace, five crates, each a layer over the ones below it. A crate
+names a lower layer by its old module name (`crate::store`, `crate::sys`),
+through a re-export in its root, and `iets` re-exports all of `iets-core`,
+so the paths below hold in every crate.
+
+| crate | holds | depends on |
+|---|---|---|
+| `iets-sys` (`crates/sys`) | the operating system, the session heap, `events`, `display`, `bytescan` | nothing of ours |
+| `iets-syntax` (`crates/syntax`) | lexer, parser, AST, the symbol table, the lint registry | `iets-sys` |
+| `iets-store` (`crates/store`) | hashes, NAR, store paths, derivations | `iets-syntax` |
+| `iets-core` (`crates/core`) | the evaluator and everything below the command line | `iets-store` |
+| `iets` (the root) | `api`, `cli`, `devenv`, the binary, the integration tests | `iets-core` |
+
+Test code is the one exception to the order: a lower crate's test helpers
+reach the crates above through the `testkit` feature, and a test that needs
+`api` lives in `iets` (`src/api/*_tests.rs`, `src/api/lint_*.rs`).
+
 ## Modules
 
 The evaluator:
 
-- `syntax/`: `symbol.rs` (interner), `ast.rs`, `lexer.rs`, `parser.rs`,
+- `syntax/`: `symbol.rs` (`Sym` and the hashers), `interner.rs` (the
+  symbol table, in session memory), `ast.rs`, `lexer.rs`, `parser.rs`,
   `dump.rs` (`iets parse`, as text and as JSON). The parser keeps raw
   bindings; attribute-path merging and scope resolution happen in
-  `compile`.
+  `compile`. `lints.rs` is the lint registry and `allow.rs` the
+  `# iets: allow` comments, here because the parser resolves them.
 - `compile/`: AST to IR (`ir.rs`). Every variable becomes a local slot or a
   `with` lookup. `cache.rs` is the on-disk IR cache.
 - `runtime/`: `arena.rs` (bump allocator per worker, no GC), `word.rs`
   (8-byte tagged word), `value.rs` (heap objects), `census.rs` (the memory
-  census).
+  census). The session memory the arenas and names live in is
+  `sys/heap.rs`; `sys/guard.rs` turns a fault in it, or in a fiber's guard
+  page, into a message.
 - `eval/`: the tree-walking evaluator over IR — `force`, apply, the `with`
   chain, operators, equality, `coerce.rs`, `error.rs`.
 - `builtins/`: primops, one file per family. `store_hooks.rs` maps each
@@ -86,9 +109,10 @@ The evaluator:
   claim protocol.
 - `store/`: pure functions. Nix base32, the four hash algorithms, NAR
   serialization and hashing, store paths, ATerm derivations,
-  `hashDerivationModulo`, `drvdiff.rs`; `locate.rs` finds derivation roots
-  and local-store sources, `source.rs` holds where the bytes of a path are
-  and the origin each source came from. `nar.rs` is the whole NAR
+  `hashDerivationModulo`, `drvdiff.rs`. Nothing here reaches up into the
+  evaluator; `srcpath.rs` in `iets-core` holds where the bytes of a path
+  are and the origin each source came from, because reading them needs
+  the input store. `nar.rs` is the whole NAR
   codec. Its reader follows nix-community/go-nix PR #123: one buffered
   window per side, token groups matched as fixed byte strings, and no
   allocation per entry. `hash_derivation_modulo` drops the `children` of
@@ -121,7 +145,10 @@ Around it:
 - `pure-eval`: `EvalConfig::pure`, read with `Evaluator::pure()`, checked in
   `builtins::store_hooks`.
 - `cachefs.rs`: the on-disk hygiene all three stores share.
-- `lint/`: the lint registry, level resolution, and one file per family.
+- `locate.rs`: derivation roots and local-store sources, asked of the
+  real Nix store.
+- `lint/`: level resolution and one file per family; the registry is
+  `syntax/lints.rs`.
   A lint is here only if it needs evaluation to decide
   (`docs/explanation/lint-scope.md`). `site.rs` finds the byte span of a
   finding.

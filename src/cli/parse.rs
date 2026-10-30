@@ -2,7 +2,6 @@
 
 use crate::cli::{help, render};
 use crate::syntax::ast::FileId;
-use crate::syntax::symbol::Interner;
 use crate::syntax::{dump, line_col, parse};
 use crate::{error, log};
 
@@ -58,7 +57,7 @@ pub fn main(argv: &[String]) -> i32 {
 /// With `-q`, parse every file, report errors, and print totals. Used to
 /// check and time the parser on whole trees such as nixpkgs.
 pub fn cmd_parse(files: &[String], form: Form) -> i32 {
-    let mut interner = Interner::new();
+    let mut interner = crate::session::Session::current().interner();
     let mut errors = 0usize;
     let mut bytes = 0usize;
     let start = Instant::now();

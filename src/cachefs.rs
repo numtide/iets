@@ -18,12 +18,12 @@
 
 use crate::sys::OsStrExt;
 use crate::sys::fs as sysfs;
+use crate::sys::tmp;
 use io::Write;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::str::from_utf8;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs, io, thread};
 
@@ -229,33 +229,14 @@ fn stamp_age(bytes: &[u8]) -> Option<Duration> {
 /// Writes `chunks`, one after the other, to `dir/name` through a temporary
 /// file, so a reader sees either the old contents or the new ones. Several
 /// chunks make one file, which is how an entry of many parts is published in
-/// one rename without first joining it into one buffer. `tag` separates
-/// concurrent writers of one name inside one process.
-pub fn write_atomic(dir: &Path, name: &str, tag: u64, chunks: &[&[u8]]) -> io::Result<()> {
-    let tmp = dir.join(format!(".{name}.{}.{tag}.tmp", std::process::id()));
-    let write = || -> io::Result<()> {
-        let mut f = sysfs::create_mode(
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true),
-            FILE_MODE,
-        )
-        .open(&tmp)?;
+/// one rename without first joining it into one buffer.
+pub fn write_atomic(dir: &Path, name: &str, chunks: &[&[u8]]) -> io::Result<()> {
+    tmp::replace(&dir.join(name), |f| {
         for c in chunks {
             f.write_all(c)?;
         }
         Ok(())
-    };
-    match write() {
-        Ok(()) => fs::rename(&tmp, dir.join(name)).inspect_err(|_| {
-            let _ = fs::remove_file(&tmp);
-        }),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
+    })
 }
 
 /// Bytes of the integrity check an entry of a hashed store carries.
@@ -322,13 +303,6 @@ pub fn open_entry(path: &Path) -> Found {
         Ok(_) => Found::Foreign,
         Err(_) => Found::Missing,
     }
-}
-
-/// A counter that keeps two writers of one name inside one process apart.
-/// Process-wide by nature: the names it disambiguates are process-wide.
-pub fn tag() -> u64 {
-    static N: AtomicU64 = AtomicU64::new(0);
-    N.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Whose directory a store root is, before iets writes to it.
@@ -453,7 +427,7 @@ pub fn prepare(root: &Path, shape: Shape, timings: bool) -> bool {
         }
     }
     if create_dir(root).is_ok() && fs::read(root.join(VERSION)).is_err() {
-        let _ = write_atomic(root, VERSION, tag(), &[format(shape)]);
+        let _ = write_atomic(root, VERSION, &[format(shape)]);
     }
     tighten(root);
     true
@@ -484,7 +458,7 @@ pub fn use_env_key(root: &Path) {
         }
         let mut k = [0u8; 32];
         sys::random(&mut k);
-        let _ = write_atomic(root, ENV_KEY, tag(), &[&k]);
+        let _ = write_atomic(root, ENV_KEY, &[&k]);
         k
     });
 }
@@ -703,7 +677,7 @@ pub fn maybe_sweep(root: &Path, shape: Shape, timings: bool) {
         if !due(root) {
             return;
         }
-        if write_atomic(root, STAMP, tag(), &[now_secs().to_string().as_bytes()]).is_err() {
+        if write_atomic(root, STAMP, &[now_secs().to_string().as_bytes()]).is_err() {
             return;
         }
     }
@@ -741,6 +715,7 @@ pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
     use crate::sys::fs::symlink;

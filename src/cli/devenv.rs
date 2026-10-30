@@ -22,14 +22,14 @@ use crate::store::drv::Derivation;
 use crate::store::nar;
 use crate::store::path::{StorePath, store_dir};
 use crate::store::source::SourceOrigin;
-use crate::sys::OsStrExt;
+use crate::sys::{OsStrExt, tmp};
 use crate::trace::run::Cache;
 use crate::trace::store::Part;
 use crate::{cachefs, config, log};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use std::{env, fs, slice, str};
+use std::{fs, slice, str};
 
 struct DevEnvArgs {
     transport: Transport,
@@ -474,7 +474,9 @@ fn dev_env_full(
         } else {
             let attrs_dir = match d.gc_root.given() {
                 Some(r) => PathBuf::from(format!("{}-attrs", r.display())),
-                None => env::temp_dir().join(format!("iets-dev-env-{}", std::process::id())),
+                // only structured attributes are written there
+                None if built.env.structured_attrs.is_none() => PathBuf::new(),
+                None => tmp::private_dir("iets-dev-env-")?,
             };
             let outputs_dir =
                 Path::new(<std::ffi::OsStr as crate::sys::OsStrExt>::from_bytes(&cwd))
@@ -677,10 +679,8 @@ fn read_env_output(
                 fs::read(p).map_err(|e| CrateError::io(format!("cannot read '{p}'"), e))?
             }
             Transport::Ssh { .. } | Transport::Grpc(_) => {
-                let dir = env::temp_dir().join(format!("iets-dev-env-{}", std::process::id()));
-                fs::create_dir_all(&dir)?;
+                let dir = tmp::private_dir("iets-dev-env-")?;
                 let dest = dir.join(StorePath::parse(p)?.base_name());
-                let _ = fs::remove_file(&dest);
                 conn.nar_from_path(p, &mut |e| sink.event(e), &mut |r| {
                     nar::restore_path(r, &dest)
                 })?;

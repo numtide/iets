@@ -22,13 +22,14 @@
 use crate::oracle::{self, Oracle};
 use crate::{Divergence, Target, Verdict, classify, known, no_panic};
 use iets::store::nar;
+use iets::sys::tmp;
 use libfuzzer_sys::arbitrary::Unstructured;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::{env, fs, io};
+use std::{fs, io};
 
 pub const KINDS: &[&str] = &[
     // Nix accepts the input, iets refuses it
@@ -74,8 +75,8 @@ pub enum Mode {
 impl Nar {
     /// The target `mode` names.
     pub fn new(known: Vec<known::Entry>, mode: Mode) -> Nar {
-        let dir = env::temp_dir().join(format!("iets-fuzz-nar-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("a scratch directory for the nar targets");
+        let dir =
+            tmp::private_dir("iets-fuzz-nar-").expect("a scratch directory for the nar targets");
         Nar {
             oracle: Oracle::from_env("IETS_NAR_ORACLE", "nar-oracle"),
             known,
@@ -313,10 +314,12 @@ fn build(u: &mut Unstructured, path: &Path, depth: usize) -> io::Result<()> {
             let target: &[u8] = u.arbitrary().map_err(bad)?;
             symlink(OsStr::from_bytes(target), path).or_else(|_| symlink("x", path))
         }
-        6 => {
-            rustix::fs::mkfifoat(rustix::fs::CWD, path, rustix::fs::Mode::from_raw_mode(0o644))
-                .map_err(io::Error::from)
-        }
+        6 => rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            path,
+            rustix::fs::Mode::from_raw_mode(0o644),
+        )
+        .map_err(io::Error::from),
         _ => {
             fs::create_dir(path)?;
             if depth < 8 {

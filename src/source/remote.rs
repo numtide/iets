@@ -385,7 +385,7 @@ pub fn store_commit(
     pos: Pos,
 ) -> EvalResult<(StorePath, Hash)> {
     let fail = |e: String| Error::boxed(ErrorKind::Io, e, pos);
-    let mut file = spool::scratch("commit").map_err(|e| fail(e.to_string()))?;
+    let mut file = spool::scratch().map_err(|e| fail(e.to_string()))?;
     let mut offset = 0;
     let mut root = Building::default();
     for (path, entry) in commit.entries {

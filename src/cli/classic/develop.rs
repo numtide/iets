@@ -2,21 +2,18 @@
 //! bash. The rc script is `makeRcScript` plus the tail `CmdDevelop::run` adds.
 //! See `docs/reference/classic.md`.
 
-use crate::sys::process;
+use crate::sys::{process, tmp};
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder};
-use std::io::ErrorKind;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{self, SystemTime};
 
 use super::{Argv, Common, eval_config, fallback, nix};
 use crate::cli::devenv::{self, DevEnv};
 use crate::cli::{self, Input, parse_eval_args};
 use crate::devenv::{escape_shell_arg_always as esc, make_rc_script};
-use crate::sys::fs::dir_mode;
 use crate::{config, error};
 
 const NAME: &str = "nix";
@@ -172,27 +169,13 @@ fn run(d: &Develop, cfg: &config::Config, dev: &DevEnv) -> error::Result<()> {
 /// A fresh directory in `$TMPDIR` that only this user can enter, made with
 /// exclusive creation so it is never something that was already there.
 fn private_dir() -> error::Result<PathBuf> {
-    let tmp = env::temp_dir();
-    for _ in 0..16 {
-        let nanos = SystemTime::now()
-            .duration_since(time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let dir = tmp.join(format!("iets-develop-{}-{nanos}", std::process::id()));
-        match dir_mode(&mut DirBuilder::new(), 0o700).create(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                return Err(error::Error::io(
-                    format!("cannot create '{}'", dir.display()),
-                    e,
-                ));
-            }
-        }
-    }
-    Err(error::Error::Usage(format!(
-        "cannot make a private directory in '{}'",
-        tmp.display()
-    )))
+    tmp::private_dir("iets-develop-").map_err(|e| {
+        let at = env::temp_dir();
+        error::Error::io(
+            format!("cannot create a directory in '{}'", at.display()),
+            e,
+        )
+    })
 }
 
 /// command.cc:MixEnvironment::setEnviron, then develop.cc's `NIX_GCROOT` and `SHELL`.

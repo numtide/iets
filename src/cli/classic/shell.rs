@@ -6,7 +6,7 @@
 
 use crate::sys;
 use crate::sys::OsStrExt;
-use crate::sys::process;
+use crate::sys::{process, tmp};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -495,15 +495,13 @@ fn keep_inputs(
 
 /// nix-build.cc's `runEnv` tail: the environment, the rc file, `execvp`.
 fn exec(s: &Shell, drv: &Derivation, shell: &str, cores: u64) -> error::Result<()> {
-    let tmp_dir = env::temp_dir().join(format!(
-        "nix-shell-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos())
-    ));
-    fs::create_dir_all(&tmp_dir)
-        .map_err(|e| CrateError::io(format!("cannot create '{}'", tmp_dir.display()), e))?;
+    let tmp_dir = tmp::private_dir("nix-shell-").map_err(|e| {
+        let at = env::temp_dir();
+        CrateError::io(
+            format!("cannot create a directory in '{}'", at.display()),
+            e,
+        )
+    })?;
     let tmp = tmp_dir.to_string_lossy().into_owned();
 
     let mut env: BTreeMap<OsString, OsString> = env::vars_os().collect();

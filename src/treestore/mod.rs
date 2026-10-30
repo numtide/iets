@@ -313,13 +313,12 @@ impl Drop for Staged {
 }
 
 pub fn stage(name: &str) -> Option<Staged> {
-    let dir = root()?.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        cachefs::tag()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    cachefs::create_dir(&dir).ok()?;
+    let dir = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempdir_in(root()?)
+        .ok()?
+        .keep();
     Some(Staged { dir })
 }
 
@@ -516,7 +515,7 @@ fn store(
         writer.finish().map_err(Rejected::Io)?;
         let path = root.join(name);
         if !path.exists() {
-            cachefs::write_atomic(root, name, cachefs::tag(), &[&index]).map_err(Rejected::Io)?;
+            cachefs::write_atomic(root, name, &[&index]).map_err(Rejected::Io)?;
         }
     }
     packs.refresh();
@@ -629,7 +628,7 @@ mod tests {
             b.append_data(&mut h, format!("top/{name}"), *bytes)
                 .unwrap();
         }
-        let mut spool = spool::scratch("test").unwrap();
+        let mut spool = spool::scratch().unwrap();
         io::Write::write_all(&mut spool, &b.into_inner().unwrap()).unwrap();
         let tree = Tree::index(spool, u64::MAX).unwrap();
         let mut h = Hasher::new(HashAlgo::Sha256);
@@ -755,7 +754,7 @@ mod tests {
     }
 
     fn file_of(bytes: &[u8]) -> Tree {
-        let mut spool = spool::scratch("test").unwrap();
+        let mut spool = spool::scratch().unwrap();
         io::Write::write_all(&mut spool, bytes).unwrap();
         Tree::file(spool).unwrap()
     }

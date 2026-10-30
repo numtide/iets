@@ -3,10 +3,13 @@
 //! drvPath. Also `placeholder` and `import` of a `.drv` store path.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File, Metadata};
+use std::fs::{File, Metadata};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::{io, mem, str};
+
+use crate::sys::tmp;
 
 use super::text::json;
 use super::{Registry, store_hooks};
@@ -732,7 +735,7 @@ fn derivation_strict_internal(
     // while the drvPath that names it is returned
     if let Some(dir) = &ev.drv.dump_dir {
         let file = dir.join(drv_path.base_name());
-        fs::write(&file, &text).map_err(|e| {
+        tmp::replace(&file, |f| f.write_all(&text)).map_err(|e| {
             Error::boxed(
                 ErrorKind::Io,
                 format!("writing '{}': {e}", file.display()),

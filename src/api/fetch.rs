@@ -31,7 +31,7 @@ pub fn url_hash(url: &str, unpack: bool, algo: HashAlgo) -> Result<Hash> {
         http::get(url, &[], limits, false, &mut h)?;
         return Ok(h.finish());
     }
-    let mut spool = spool::scratch("prefetch")?;
+    let mut spool = spool::scratch()?;
     http::get(url, &[], limits, true, &mut spool)?;
     Tree::index(spool, limits.max_size)?
         .dump(&mut h)

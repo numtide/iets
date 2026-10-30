@@ -479,28 +479,35 @@ dependencies = [
 name = "iets"
 version = "0.2.0"
 dependencies = [
+ "iets-core",
+ "mimalloc",
+ "serde_json",
+]
+
+[[package]]
+name = "iets-core"
+version = "0.2.0"
+dependencies = [
  "blake3",
  "bzip2",
  "crc32fast",
  "flate2",
- "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-util",
- "libc",
+ "iets-store",
+ "iets-syntax",
+ "iets-sys",
  "libmimalloc-sys",
  "lz4_flex",
  "lzma-rust2",
- "md-5",
  "memchr",
- "mimalloc",
  "prost",
  "protox",
  "rustix",
  "rustls",
  "rustls-native-certs",
  "serde_json",
- "sha1",
  "sha2",
  "tar",
  "tokio",
@@ -511,7 +518,6 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "webpki-roots",
- "windows-sys 0.61.2",
  "zstd",
 ]
 
@@ -526,6 +532,37 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml",
+]
+
+[[package]]
+name = "iets-store"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "iets-syntax",
+ "iets-sys",
+ "md-5",
+ "sha1",
+ "sha2",
+]
+
+[[package]]
+name = "iets-syntax"
+version = "0.2.0"
+dependencies = [
+ "iets-sys",
+ "memchr",
+ "serde_json",
+]
+
+[[package]]
+name = "iets-sys"
+version = "0.2.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

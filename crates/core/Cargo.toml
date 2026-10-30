@@ -1,0 +1,56 @@
+[package]
+name = "iets-core"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+iets-sys = { workspace = true }
+iets-syntax = { workspace = true }
+iets-store = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+rustix = { workspace = true }
+memchr = { workspace = true }
+toml = { workspace = true }
+serde_json = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+zstd = { workspace = true }
+lz4_flex = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+webpki-roots = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+lzma-rust2 = { workspace = true }
+bzip2 = { workspace = true }
+libmimalloc-sys = { workspace = true }
+
+[dev-dependencies]
+iets-sys = { workspace = true, features = ["testkit"] }
+iets-store = { workspace = true, features = ["testkit"] }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+
+[build-dependencies]
+sha2 = { workspace = true }
+tonic-prost-build = { workspace = true }
+protox = { workspace = true }
+
+[features]
+# Memory census behind IETS_STATS=2 (docs/reference/settings.md); off the hot path when unset.
+stats2 = []
+# the helpers the tests of `iets` use (`ignored::noted`, `Session::set_stats_for_test`)
+testkit = ["iets-sys/testkit", "iets-store/testkit"]
+
+[lints]
+workspace = true

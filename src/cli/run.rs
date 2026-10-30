@@ -10,7 +10,7 @@ use crate::api::MAIN_STACK;
 use crate::cli::{self, help};
 use crate::env::Env;
 use crate::session::{self, Exit, Session, exit};
-use crate::{error, log, profile, settings};
+use crate::{errln, error, log, profile, settings};
 
 pub fn classic_name(argv0: &OsStr) -> Option<String> {
     let base = Path::new(argv0).file_name()?.to_str()?.to_string();
@@ -51,7 +51,7 @@ pub fn dispatch(session: &Session, argv: Vec<String>, classic: Option<String>) -
     if classic.is_none() {
         match argv.first().map(String::as_str) {
             Some("--version" | "version") => {
-                cli::render::bytes(concat!(env!("IETS_VERSION"), "\n").as_bytes());
+                cli::render::bytes(concat!("iets ", env!("CARGO_PKG_VERSION"), "\n").as_bytes());
                 return 0;
             }
             Some("--help" | "-h" | "help") => {

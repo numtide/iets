@@ -1,0 +1,23 @@
+[package]
+name = "iets-sys"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+rustix = { workspace = true }
+getrandom = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+
+[features]
+# the helpers the tests of the crates above use (`display::tests`, `internal_string`)
+testkit = []
+
+[lints]
+workspace = true

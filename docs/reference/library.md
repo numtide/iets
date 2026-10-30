@@ -11,9 +11,10 @@ points, says what a `Session` owns and maps the value API to Nix's C API.
 same in yours.
 
 `crate::runtime` names the evaluator's types (`Word`, `Arena`, the heap
-objects), but every operation on them is `pub(crate)`. You take a `Word` from
-`api::evaluate`, give it back to the library, and read it through
-`api::value`. You can't build one, dereference one or allocate in the arena,
+objects). Their operations are `pub` because `api` and `cli` live in a crate
+above `iets-core`, but they are not part of this contract. You take a `Word`
+from `api::evaluate`, give it back to the library, and read it through
+`api::value`. Do not build one, dereference one or allocate in the arena,
 because a word made up from bits would let a safe call read any address.
 
 ## Entry points

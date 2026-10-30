@@ -65,6 +65,25 @@ source bytes
 
 Why each stage is shaped as it is: `docs/explanation/evaluation.md`.
 
+## Crates
+
+One workspace, five crates, each a layer over the ones below it. A crate
+names a lower layer by its old module name (`crate::store`, `crate::sys`),
+through a re-export in its root, and `iets` re-exports all of `iets-core`,
+so the paths below hold in every crate.
+
+| crate | holds | depends on |
+|---|---|---|
+| `iets-sys` (`crates/sys`) | the operating system, the session heap, `events`, `display`, `bytescan` | nothing of ours |
+| `iets-syntax` (`crates/syntax`) | lexer, parser, AST, the symbol table, the lint registry | `iets-sys` |
+| `iets-store` (`crates/store`) | hashes, NAR, store paths, derivations | `iets-syntax` |
+| `iets-core` (`crates/core`) | the evaluator and everything below the command line | `iets-store` |
+| `iets` (the root) | `api`, `cli`, `devenv`, the binary, the integration tests | `iets-core` |
+
+Test code is the one exception to the order: a lower crate's test helpers
+reach the crates above through the `testkit` feature, and a test that needs
+`api` lives in `iets` (`src/api/*_tests.rs`, `src/api/lint_*.rs`).
+
 ## Modules
 
 The evaluator:
@@ -90,9 +109,10 @@ The evaluator:
   claim protocol.
 - `store/`: pure functions. Nix base32, the four hash algorithms, NAR
   serialization and hashing, store paths, ATerm derivations,
-  `hashDerivationModulo`, `drvdiff.rs`; `source.rs` holds where the bytes
-  of a path are and the origin each source came from. Nothing here reaches
-  up into the evaluator. `nar.rs` is the whole NAR
+  `hashDerivationModulo`, `drvdiff.rs`. Nothing here reaches up into the
+  evaluator; `srcpath.rs` in `iets-core` holds where the bytes of a path
+  are and the origin each source came from, because reading them needs
+  the input store. `nar.rs` is the whole NAR
   codec. Its reader follows nix-community/go-nix PR #123: one buffered
   window per side, token groups matched as fixed byte strings, and no
   allocation per entry. `hash_derivation_modulo` drops the `children` of

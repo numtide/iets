@@ -5,7 +5,7 @@ let
   fs = lib.fileset;
   root = ../.;
   sourceOf = files: fs.toSource { inherit root; fileset = fs.unions files; };
-  bin = [ ../Cargo.toml ../Cargo.lock ../build.rs ../proto ../src ../docs/reference ];
+  bin = [ ../Cargo.toml ../Cargo.lock ../crates ../src ../docs/reference ];
 in
 {
   bin = sourceOf bin;

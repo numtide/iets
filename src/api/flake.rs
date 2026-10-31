@@ -53,6 +53,13 @@ pub fn url(fr: &FlakeRef) -> String {
             };
             format!("{}+file://{}{dir}", scm.name(), url_path(root))
         }
+        SourceRef::Submodules { root, subdir } => {
+            let dir = match subdir.as_str() {
+                "" => String::new(),
+                d => format!("&dir={d}"),
+            };
+            format!("git+file://{}?submodules=1{dir}", url_path(root))
+        }
         _ => format!("path:{}", fr.dir.display()),
     }
 }
@@ -82,6 +89,38 @@ pub fn info(fr: &FlakeRef) -> Result<Info> {
         source: fr.source.clone(),
         lock,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submodule_url_preserves_subdirectory() {
+        let root = std::env::current_dir().unwrap();
+        let mut fr = FlakeRef {
+            dir: root.join("nested"),
+            source: SourceRef::Submodules {
+                root: root.clone(),
+                subdir: "nested".into(),
+            },
+            attr: vec![],
+            probed: false,
+            lock: None,
+        };
+        assert_eq!(
+            url(&fr),
+            format!("git+file://{}?submodules=1&dir=nested", url_path(&root))
+        );
+        fr.source = SourceRef::Submodules {
+            root: root.clone(),
+            subdir: String::new(),
+        };
+        assert_eq!(
+            url(&fr),
+            format!("git+file://{}?submodules=1", url_path(&root))
+        );
+    }
 }
 
 impl Info {

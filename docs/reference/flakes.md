@@ -31,7 +31,13 @@ prints.
   tree changes nothing. Without a `rev` the working tree is the source, as
   the plain path would be. A `ref` beside a `rev` is advisory. A `ref`
   without a `rev` is an error: iets resolves no reference of a root flake.
-  Other query parameters, `submodules` included, are errors.
+  Other query parameters, including `submodules` on a `git+file:` root,
+  are errors.
+- **Submodules of a local Git working tree**: `.?submodules=1#attr` uses
+  Nix's `fetchTree` to copy the tracked tree with initialized submodules,
+  then evaluates the flake in iets. This needs `nix` on `PATH` and a working
+  Nix store. Tracing-cache hits are disabled for this source because changes
+  inside submodules are not tracked by iets.
 - iets does not take these, so classic mode falls back to Nix on them:
   - registry references (`nixpkgs#hello`, and `x#y` even where `./x`
     exists, as in Nix);
@@ -39,8 +45,8 @@ prints.
     `git:`, `https://….tar.gz`, and a `file:` URL that names no absolute
     path on this machine, `file://host/p` included): iets cannot fetch a
     root flake;
-  - `?query` parameters on a path (`?dir=`, `?rev=`, `?narHash=`), which
-    only a `git+file:` reference takes;
+  - `?query` parameters on a path (`?dir=`, `?rev=`, `?narHash=`), except
+    `?submodules=1` on a bare local Git working-tree path;
   - the schemes the parser does not take (`hg+…`, `sourcehut:`).
 
   Some invalid references are accepted, and an unknown scheme

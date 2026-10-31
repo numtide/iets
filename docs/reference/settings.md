@@ -438,7 +438,9 @@ Some settings are out of reach:
 ## `pure-eval`
 
 `pure-eval` works as in Nix 2.34.8: the evaluation depends only on its
-locked inputs, and the answers and error messages are Nix's.
+locked inputs, and the answers and error messages are Nix's. The one rule
+iets adds is the one on a fetch from the local file system, under **What it
+changes**.
 
 ### When it is on
 
@@ -473,6 +475,12 @@ with `pure-eval`.
   and `builtins.path` of a local path. `pathExists` answers `false` instead. A
   `.drv` this evaluation wrote is not readable either, but `import
   drv.drvPath` works: Nix reads it through the store.
+- A fetch from the local file system is such a read. The file of a `file:`
+  URL and the directory of a `path` input must lie in the root or under a
+  store path the evaluation holds; the repository of a local `git` or `hg`
+  input must be a directory of the root on disk. A hash does not change
+  that. This is iets's rule, not Nix's
+  (`docs/explanation/pure-eval-and-local-sources.md`).
 - `builtins.storePath` is refused.
 - `fetchTarball` and `fetchurl` need a `sha256`. `fetchTree` refuses an
   unlocked input (no `narHash` for `path` and `tarball`, no `rev` for the rest).

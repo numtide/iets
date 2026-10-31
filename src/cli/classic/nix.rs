@@ -440,6 +440,9 @@ fn prefetch_inputs_main(argv: &[String], rest: &[String]) -> i32 {
     let system = config::Config::load(&c.flags.overrides)
         .unwrap_or_else(|e| fallback(NAME, argv, &e.to_string()))
         .system();
+    // `--impure` lets an input come from anywhere on this machine
+    // (docs/explanation/pure-eval-and-local-sources.md)
+    let pure = c.flags.pure.unwrap_or(true);
     let threads = todo.len().min(HTTP_CONNECTIONS);
     let queue = Mutex::new(todo.into_iter());
     let failed = AtomicBool::new(false);
@@ -447,7 +450,7 @@ fn prefetch_inputs_main(argv: &[String], rest: &[String]) -> i32 {
         for _ in 0..threads {
             s.spawn(session::bind(|| {
                 while let Some((name, r)) = queue.lock().unwrap().next() {
-                    let mut ev = EvalConfig::new().system(&system).pure(true).build();
+                    let mut ev = EvalConfig::new().system(&system).pure(pure).build();
                     if let Some(h) = r.nar_hash() {
                         ev.input_names.insert(h.to_string(), name);
                     }

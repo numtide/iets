@@ -165,8 +165,11 @@ evaluation's allow list:
 
 `readFile`, `readDir`, `hashFile` and `builtins.path` resolve every
 component, `pathExists` every component but the last, and `readFileType`
-none, which is what each primop asks `realisePath` for. A path under no such
-store path is left to the kernel.
+none, which is what each primop asks `realisePath` for. In a pure
+evaluation a path in the project is resolved the same way, and a link that
+leaves the project is refused
+([Pure evaluation and local sources](pure-eval-and-local-sources.md)). Any
+other path is left to the kernel.
 
 A flake directory that is itself a symlink to a working tree is that
 working tree: `git.cc` opens the repository, which resolves the path. An
@@ -176,7 +179,11 @@ Nix does.
 ## Locked inputs
 
 An input is locked, so iets knows its store path before anything happens.
-It tries these sources in order, and the first one that works wins.
+It tries these sources in order, and the first one that works wins. An
+input on this machine, a `file:` URL, a `path` or a local `git` or `hg`
+repository, first passes the allow list of pure evaluation, so that no
+cache answers for a file the evaluation may not read
+([Pure evaluation and local sources](pure-eval-and-local-sources.md)).
 
 **`/nix/store`, if the store has the path as valid.** A file at the path is
 not enough: an interrupted build or copy can leave one that the store never

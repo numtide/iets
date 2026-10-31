@@ -28,27 +28,38 @@ fn file_url(p: &Path) -> String {
 /// beside it.
 struct Scratch {
     bin: Iets,
-    dir: TempDir,
+    _dir: TempDir,
+    /// The directory resolved, as the URL and the cwd must agree on its text:
+    /// `/var` is a link on macOS, `TEMP` a short name on Windows runners.
+    root: PathBuf,
     url: String,
 }
 
 #[fixture]
 fn scratch(bin: Iets) -> Scratch {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("hello.txt"), BYTES).unwrap();
-    let url = format!("{}/hello.txt", file_url(dir.path()));
-    Scratch { bin, dir, url }
+    let root = iets::sys::fs::canonicalize(dir.path()).unwrap();
+    fs::write(root.join("hello.txt"), BYTES).unwrap();
+    let url = format!("{}/hello.txt", file_url(&root));
+    Scratch {
+        bin,
+        _dir: dir,
+        root,
+        url,
+    }
 }
 
 impl Scratch {
     fn hello(&self) -> PathBuf {
-        self.dir.path().join("hello.txt")
+        self.root.join("hello.txt")
     }
 
     fn run(&self, offline: bool, args: &[&str]) -> Output {
         let mut c = self.bin.cmd();
+        // the directory is the project, so a pure run may fetch the file
         c.args(args)
-            .env("IETS_CACHE_DIR", self.dir.path().join("cache"))
+            .current_dir(&self.root)
+            .env("IETS_CACHE_DIR", self.root.join("cache"))
             .env("IETS_CACHE", "0");
         if offline {
             c.env("IETS_OFFLINE", "1");

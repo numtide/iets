@@ -9,16 +9,21 @@ use rstest::rstest;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use tempfile::{TempDir, tempdir};
 
-/// The evaluator's form of `p` resolved, as the cwd a project root comes
-/// from is: `/private/var` for `/var` on macOS, `/C:/...` on Windows, which
-/// keeps backslashes out of the string.
+/// `p` resolved. A project root is the cwd's text as given, so a test runs
+/// iets here and names files below it: `/var` is a link on macOS, `TEMP` a
+/// short name on Windows runners.
+fn resolved(p: &Path) -> PathBuf {
+    iets::sys::fs::canonicalize(p).unwrap()
+}
+
+/// The evaluator's form of `p`: `/C:/...` on Windows, which keeps
+/// backslashes out of the string.
 fn internal(p: &Path) -> String {
-    let p = iets::sys::fs::canonicalize(p).unwrap();
-    String::from_utf8(iets::sys::path_to_internal(&p)).unwrap()
+    String::from_utf8(iets::sys::path_to_internal(p)).unwrap()
 }
 
 fn run(bin: &Iets, dir: &Path, args: &[&str]) -> Output {
@@ -163,26 +168,23 @@ fn the_pure_setting_is_the_users_alone(bin: Iets) {
 #[rstest]
 fn get_flake_takes_a_path_its_nar_hash_locks(bin: Iets) {
     let d = tempdir().unwrap();
-    fs::write(d.path().join("flake.nix"), "{ outputs = _: { x = 42; }; }").unwrap();
+    let dir = resolved(d.path());
+    fs::write(dir.join("flake.nix"), "{ outputs = _: { x = 42; }; }").unwrap();
     fs::write(
-        d.path().join("flake.lock"),
+        dir.join("flake.lock"),
         r#"{"nodes":{"root":{}},"root":"root","version":7}"#,
     )
     .unwrap();
-    let at = internal(d.path());
+    let at = internal(&dir);
 
     let tree = format!(r#"(builtins.fetchTree {{ type = "path"; path = "{at}"; }}).narHash"#);
-    let o = run(
-        &bin,
-        d.path(),
-        &["eval", "--impure", "--raw", "--expr", &tree],
-    );
+    let o = run(&bin, &dir, &["eval", "--impure", "--raw", "--expr", &tree]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let hash = stdout(&o);
 
     let get = |query: &str| {
         let e = format!(r#"(builtins.getFlake "path:{at}{query}").x"#);
-        run(&bin, d.path(), &["eval", "--expr", &e])
+        run(&bin, &dir, &["eval", "--expr", &e])
     };
     let right = get(&format!("?narHash={hash}"));
     let wrong = get("?narHash=sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
@@ -197,7 +199,7 @@ fn get_flake_takes_a_path_its_nar_hash_locks(bin: Iets) {
     assert!(e.contains("unlocked flake reference"), "{e}");
 
     let tree = format!(r#"builtins.fetchTree {{ type = "path"; path = "{at}"; narHash = true; }}"#);
-    let o = run(&bin, d.path(), &["eval", "--expr", &tree]);
+    let o = run(&bin, &dir, &["eval", "--expr", &tree]);
     assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
     let e = stderr(&o);
     assert!(
@@ -338,7 +340,7 @@ fn a_local_fetch_out_of_the_project_is_refused(bin: Iets, #[case] expr: &str) {
 #[rstest]
 fn a_local_fetch_in_the_project_reads_the_file(bin: Iets) {
     let d = checkout();
-    let repo = d.path().join("repo");
+    let repo = resolved(d.path()).join("repo");
     let at = internal(&repo);
     let eval = |expr: &str| {
         bin.cmd()
@@ -392,11 +394,12 @@ fn a_local_fetch_in_the_project_reads_the_file(bin: Iets) {
 #[rstest]
 fn a_local_fetch_under_a_flake_stays_in_its_tree(bin: Iets) {
     let d = tempdir().unwrap();
-    let flake = d.path().join("flake");
+    let dir = resolved(d.path());
+    let flake = dir.join("flake");
     fs::create_dir(&flake).unwrap();
-    fs::write(d.path().join("outside.txt"), "out").unwrap();
+    fs::write(dir.join("outside.txt"), "out").unwrap();
     fs::write(flake.join("in.txt"), "in").unwrap();
-    let at = internal(d.path());
+    let at = internal(&dir);
     let hash = "sha256-WClnU00PkJ0Za5f55pITQnd66oe0b6Ut8WU4nbH7jM8=";
     fs::write(
         flake.join("flake.nix"),

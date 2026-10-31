@@ -57,6 +57,11 @@ const GLOBALS: &[(&str, usize)] = &[
     ("-j", 1),
     ("--max-jobs", 1),
     ("--cores", 1),
+    // `nixos-rebuild --verbose` passes this to `nix build`; Nix takes it as
+    // a global flag that raises the log level.
+    ("--verbose", 0),
+    ("-v", 0),
+    ("--quiet", 0),
     ("-k", 0),
     ("--keep-going", 0),
 ];
@@ -781,6 +786,17 @@ mod tests {
     fn eval_takes_print_build_logs() {
         assert!(parse_eval(&args(&["-L", "--expr", "1"])).is_ok());
         assert!(parse_eval(&args(&["--print-build-logs", "--expr", "1"])).is_ok());
+    }
+
+    #[test]
+    fn verbose_is_a_global_flag() {
+        // `nixos-rebuild --verbose` builds with `nix build --verbose`.
+        assert!(parse_build(&args(&["--verbose", ".#a"])).is_ok());
+        assert!(parse_eval(&args(&["--verbose", "--expr", "1"])).is_ok());
+        assert!(parse_build(&args(&["-v", ".#a"])).is_ok());
+        assert!(parse_build(&args(&["--quiet", ".#a"])).is_ok());
+        let before = args(&["--verbose", "build", ".#a"]);
+        assert_eq!(find_sub(&before), Ok(1));
     }
 
     #[test]

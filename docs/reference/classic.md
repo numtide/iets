@@ -177,6 +177,13 @@ stderr, because nix-eval-jobs prints none.
 
 iets handles these subcommands. Every other one runs the real `nix`.
 
+Every subcommand takes the global flags: `--impure`, `--pure-eval`,
+`--no-pure-eval`, `--accept-flake-config`, `--show-trace`, `--log-format`,
+`--experimental-features` and `--extra-experimental-features`, `--option`,
+`-I`/`--include`, `--arg`/`--argstr`, `--store`, `--flake-registry`,
+`--eval-store`, `-j`/`--max-jobs`, `--cores`, `-k`/`--keep-going`,
+`-K`/`--keep-failed`, `--quiet` and `-v`/`--verbose`.
+
 #### `nix eval [INSTALLABLE]`
 
 Flags: `--json`, `--raw`, `--expr E`, `-f`/`--file FILE`, `--impure`,
@@ -526,6 +533,8 @@ these:
   stdout and the exit code stay Nix's. `docs/reference/divergences.md`,
   **Flags and settings with no effect**, has the table and says what iets
   does with a flake's `nixConfig`: nothing.
+- `-v`/`--verbose` has no effect: it raises the log level, and iets has
+  one.
 - `--show-trace` only adds the trace to the `--log-format internal-json`
   error records (`docs/reference/errors.md`). iets always prints the full
   trace it has.

@@ -17,7 +17,7 @@ use serde_json::Value;
 
 const FLAKE: &str = r#"{
   nixConfig.extra-substituters = [ "https://cache.invalid" ];
-  inputs.tb = { url = "file://@CC@/tbA.tar.gz"; flake = false; };
+  inputs.tb = { url = "file://@CC@/flake/tbA.tar.gz"; flake = false; };
   outputs = { self, tb }:
     let
       inherit (import ./config.nix) system;
@@ -56,10 +56,13 @@ fn fixture(s: &Store) -> (String, PathBuf) {
     let cc = s.dir().join("cc");
     s.write("cc/tbA/a", "A");
     s.write("cc/tbB/a", "B");
+    // the archives lie in the flake: a pure evaluation fetches no file
+    // outside its root (docs/explanation/pure-eval-and-local-sources.md)
+    fs::create_dir_all(cc.join("flake")).unwrap();
     for t in ["tbA", "tbB"] {
         ok(Command::new("tar")
             .current_dir(&cc)
-            .args(["-czf", &format!("{t}.tar.gz"), t]));
+            .args(["-czf", &format!("flake/{t}.tar.gz"), t]));
     }
     s.write(
         "cc/flake/flake.nix",
@@ -93,7 +96,7 @@ fn the_tracing_cache() {
         .args(["hash", "path", "--type", "sha256", "--sri"])
         .arg(cc.join("tbB"))));
     let mut lb: Value = serde_json::from_str(&a_text).unwrap();
-    lb["nodes"]["tb"]["locked"]["url"] = format!("file://{}/tbB.tar.gz", cc.display()).into();
+    lb["nodes"]["tb"]["locked"]["url"] = format!("file://{}/flake/tbB.tar.gz", cc.display()).into();
     lb["nodes"]["tb"]["locked"]["narHash"] = hash_b.into();
     let b_text = lb.to_string();
 

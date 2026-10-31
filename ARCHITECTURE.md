@@ -207,6 +207,7 @@ Why the layer exists, and when an operation is warranted:
 | How does a flake reference become bytes? | `docs/explanation/flakes-and-sources.md` |
 | Why is there a plumbing layer, and what did it cost? | `docs/explanation/plumbing-and-porcelain.md` |
 | Why trace a store path back to a file? | `docs/explanation/provenance.md` |
+| Why may a pure evaluation not fetch a local file by its hash? | `docs/explanation/pure-eval-and-local-sources.md` |
 | What was tried and removed? | `docs/explanation/history.md` |
 
 Reference material — every command, setting, error code, lint, builtin,

@@ -17,9 +17,11 @@ use std::{result, slice, thread};
 
 use super::scm::{Commit, Entry};
 use super::{AttrVal, Attrs, Tree, attrs_to_json, parse_nar_hash, str_attr, to_url};
+use crate::builtins::store_hooks;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::fetch::spool;
+use crate::flake::flakeref;
 use crate::log::{self, Activity};
 use crate::progress::Mode;
 use crate::remote::event;
@@ -292,6 +294,7 @@ pub fn ensure_readable(
     attrs: &Attrs,
     pos: Pos,
 ) -> EvalResult<()> {
+    check_local(ev, attrs, pos)?;
     ev.known.lock().entry(sp.clone()).or_default();
     let full = sp.to_full_string();
     if valid_in_store(ev, sp, IngestionMethod::Recursive, nar_hash) {
@@ -450,6 +453,8 @@ pub fn fetch_file(
     pos: Pos,
 ) -> EvalResult<StorePath> {
     let fail = |e: String| Error::boxed(ErrorKind::Eval, e, pos);
+    // before any cache answers, so that what is allowed does not depend on one
+    let local = local_file(ev, url, pos)?;
     let sp = treestore::file_path(name, &expected).map_err(|e| fail(e.to_string()))?;
     ev.known.lock().entry(sp.clone()).or_default();
     if valid_in_store(ev, &sp, IngestionMethod::Flat, &expected) {
@@ -474,7 +479,7 @@ pub fn fetch_file(
         .ok_or_else(|| cannot("iets has no cache directory to hold it".into()))?;
     let mut spool = spool::spool_file(staged.dir()).map_err(|e| cannot(e.to_string()))?;
     let limits = Limits::new(nix_conf(ev.session())).map_err(|e| cannot(e.to_string()))?;
-    http::get(url, &[], limits, false, &mut spool).map_err(|e| cannot(e.to_string()))?;
+    download(ev, url, local, &[], limits, false, &mut spool).map_err(cannot)?;
     let tree = spool::Tree::file(spool).map_err(|e| cannot(e.to_string()))?;
     let entry = treestore::put(name, IngestionMethod::Flat, &expected, staged, tree).map_err(
         |e| match e {
@@ -495,6 +500,70 @@ pub fn fetch_file(
     )?;
     adopt_file(ev, &sp, &entry, expected);
     Ok(sp)
+}
+
+/// The file a `file:` URL names, when a pure evaluation fetches it. Such a
+/// fetch is a read: the allow list judges the path, and the bytes come
+/// through the accessor a `readFile` uses, which follows no link out of what
+/// the evaluation may read (docs/explanation/pure-eval-and-local-sources.md).
+/// `None` for any other URL and in impure evaluation, where
+/// [`http::get`] reads the file as libcurl does.
+fn local_file(ev: &Evaluator, url: &str, pos: Pos) -> EvalResult<Option<SrcPath>> {
+    if !ev.pure() {
+        return Ok(None);
+    }
+    let Some(path) = http::local_path(url) else {
+        return Ok(None);
+    };
+    let (_, at) = store_hooks::local_source(ev, path.as_bytes(), pos)?;
+    Ok(Some(at))
+}
+
+/// [`http::get`], or the read of the [`local_file`] the URL names.
+fn download(
+    ev: &Evaluator,
+    url: &str,
+    local: Option<SrcPath>,
+    headers: &[(String, String)],
+    limits: Limits,
+    decompress: bool,
+    sink: &mut dyn Write,
+) -> result::Result<u64, String> {
+    let Some(at) = local else {
+        return http::get(url, headers, limits, decompress, sink).map_err(|e| e.to_string());
+    };
+    let bytes = at.read(ev, false).map_err(|(_, e)| {
+        let path = http::local_path(url).unwrap_or_default();
+        format!("cannot read '{path}': {}", crate::error::io_text(&e))
+    })?;
+    http::put(url, bytes, limits, decompress, sink).map_err(|e| e.to_string())
+}
+
+/// In pure evaluation, the source of a locked input that is on this machine
+/// passes the allow list before a cache or a fetcher answers for it: the file
+/// of a `file:` URL, the repository of a `git` or `hg` input.
+fn check_local(ev: &Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
+    if !ev.pure() {
+        return Ok(());
+    }
+    let Some(url) = str_attr(attrs, "url") else {
+        return Ok(());
+    };
+    if matches!(str_attr(attrs, "type"), Some("git" | "hg")) {
+        let url = url
+            .strip_prefix("git+")
+            .or_else(|| url.strip_prefix("hg+"))
+            .unwrap_or(url);
+        let dir = match url.strip_prefix('/') {
+            Some(_) => Some(url.to_string()),
+            None => flakeref::file_url_path(url),
+        };
+        if let Some(dir) = dir {
+            store_hooks::local_dir(ev, dir.as_bytes(), pos)?;
+        }
+        return Ok(());
+    }
+    local_file(ev, url, pos).map(drop)
 }
 
 /// [`adopt`] for a flat file, which is addressed by the hash of its bytes and
@@ -648,7 +717,8 @@ fn fetch_tarball(
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
     let limits = Limits::new(nix_conf(ev.session()))
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    http::get_decompressed(&url, &headers, limits, &mut spool)
+    let local = local_file(ev, &url, pos)?;
+    download(ev, &url, local, &headers, limits, true, &mut spool)
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
     let tree = spool::Tree::index(spool, limits.max_size)
         .map_err(|e| fail(format!("iets: cannot unpack input '{name}': {e}")))?;

@@ -340,6 +340,10 @@ pub struct Known {
     pub flake: Option<String>,
     /// Copied from a local path by this evaluation (`read-through-copy`).
     pub copy: bool,
+    /// The tree of the flake on the command line. A fetch from the local
+    /// file system reads below its directory through this copy
+    /// (`builtins::store_hooks::local_source`).
+    pub root: bool,
 }
 
 impl SharedMap<StorePath, Known> {
@@ -378,6 +382,20 @@ impl SharedMap<StorePath, Known> {
         if let Some(k) = self.lock().get_mut(p) {
             k.flake.get_or_insert(name);
         }
+    }
+
+    pub fn mark_root(&self, p: &StorePath) {
+        if let Some(k) = self.lock().get_mut(p) {
+            k.root = true;
+        }
+    }
+
+    /// The root tree and the local directory it stands for.
+    pub fn root_tree(&self) -> Option<(StorePath, PathBuf)> {
+        let t = self.lock();
+        let (p, k) = t.iter().find(|(_, k)| k.root)?;
+        let dir = k.origin.as_ref()?.at.local()?;
+        Some((p.clone(), dir))
     }
 
     /// The locked trees no local directory stands for, by lock node name.
@@ -963,6 +981,7 @@ impl Evaluator {
         if p.starts_with(CorePkgs::PREFIX) {
             return Ok(p);
         }
+        store_hooks::confine(self, &p, store_hooks::Follow::Full, pos)?;
         let mut at = store_hooks::open(self, &p, pos)?;
         read_through_copy(self, &p, pos)?;
         // eval.cc:resolveExprPath follows a symlink on the last component,

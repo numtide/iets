@@ -376,6 +376,33 @@ pub fn get_decompressed(
     get(url, headers, limits, true, sink)
 }
 
+/// The local path a `file:` URL names, decoded and without its query.
+pub fn local_path(url: &str) -> Option<String> {
+    let path = file_path(url)?;
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    Some(worker::percent_decode(path))
+}
+
+/// [`get`] of `url` for bytes the caller read itself: a pure evaluation reads
+/// a `file:` URL through its own accessor
+/// (`builtins::store_hooks::local_source`), not through the kernel.
+pub fn put(
+    url: &str,
+    bytes: Vec<u8>,
+    limits: Limits,
+    decompress: bool,
+    sink: &mut dyn Write,
+) -> Result<u64> {
+    let read_in = Rc::new(Cell::new(0));
+    let raw: Box<dyn Read> = Box::new(Counted(Box::new(io::Cursor::new(bytes)), read_in.clone()));
+    let read = if decompress {
+        decompress_reader(raw, layers_budget(limits.max_size))?
+    } else {
+        raw
+    };
+    drain(url, read, &read_in, limits, sink)
+}
+
 /// [`get_decompressed`], with the decompression optional: `iets prefetch`
 /// hashes the bytes the URL serves, as `nix store prefetch-file` does.
 pub fn get(
@@ -398,8 +425,7 @@ pub fn get(
         )));
     }
     let read_in = Rc::new(Cell::new(0));
-    if let Some(path) = file_path(url) {
-        let path = worker::percent_decode(path.split(['?', '#']).next().unwrap_or(path));
+    if let Some(path) = local_path(url) {
         let file = File::open(sys::path_from_internal(path.as_bytes()))
             .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
         let raw = Counted(Box::new(file), read_in.clone());

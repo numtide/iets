@@ -570,7 +570,8 @@ fn realise(
 ) -> i32 {
     let roots = flat_roots(targets);
     let style = Style {
-        quiet: !n.print_build_logs,
+        // `--quiet` drops the build output, as `--no-build-output` does.
+        quiet: n.c.quiet || !n.print_build_logs,
         ..Style::detect()
     };
     let mut d = match Dispatch::open(transport, options, plan, Provenance::off(), style) {
@@ -795,6 +796,8 @@ mod tests {
         assert!(parse_eval(&args(&["--verbose", "--expr", "1"])).is_ok());
         assert!(parse_build(&args(&["-v", ".#a"])).is_ok());
         assert!(parse_build(&args(&["--quiet", ".#a"])).is_ok());
+        assert!(parse_build(&args(&["--quiet", ".#a"])).unwrap().c.quiet);
+        assert!(!parse_build(&args(&["--verbose", ".#a"])).unwrap().c.quiet);
         let before = args(&["--verbose", "build", ".#a"]);
         assert_eq!(find_sub(&before), Ok(1));
     }

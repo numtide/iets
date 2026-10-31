@@ -611,8 +611,8 @@ with `access to absolute path '...' is forbidden in pure evaluation mode
 
 A flake that locks `path:/abs`, `git+file:///abs` or `file:///abs.tar.gz`
 outside its own tree therefore needs `--impure`. A relative `path:` input
-is not affected. The check comes before `/nix/store` and the input store are
-asked, so it does not depend on what a cache holds.
+that stays in the root is not affected. The check comes before `/nix/store`
+and the input store are asked, so it does not depend on what a cache holds.
 
 Inside the root two things differ:
 
@@ -622,8 +622,9 @@ Inside the root two things differ:
   Nix copies the directory whole.
 - A link is resolved on the text of the path, and a link that leaves the
   root is forbidden. This holds for a plain read in a project too:
-  `readFile`, `readDir`, `readFileType`, `hashFile`, `builtins.path`,
-  `import` and the copy of `"${./x}"`. `import` of a link that leaves the
+  `readFile`, `readDir`, `hashFile`, `builtins.path`, `import`, the copy of
+  `"${./x}"`, and `readFileType` for a link above the last component, which
+  it reports as `symlink` as Nix does. `import` of a link that leaves the
   root tree of a flake is forbidden as well.
 
 Observe it: `iets eval -E 'builtins.fetchurl { url = "file:///etc/hostname";

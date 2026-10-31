@@ -33,7 +33,12 @@ pub fn bytes_lossy(b: &[u8]) {
 }
 
 fn write(b: &[u8]) -> io::Result<()> {
-    Session::current().out.write_all(b)
+    let s = Session::current();
+    if s.out.is_terminal() {
+        s.log.with_display_down(b, || s.out.write_all(b))
+    } else {
+        s.out.write_all(b)
+    }
 }
 
 /// `nlohmann::json::dump`: an object's keys are sorted, `--pretty` indents

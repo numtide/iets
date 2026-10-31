@@ -421,8 +421,8 @@ macro_rules! bail {
         return Err($crate::eval::Error::boxed_fmt($kind, format_args!($($arg)*), $pos))
     };
 }
-pub(crate) use bail;
 use crate::sys;
+pub(crate) use bail;
 
 /// Everything fixed before evaluation starts. A field set after `try_run` clones
 /// the evaluator is one fiber's alone, so there is no setter (docs/explanation/evaluation.md).

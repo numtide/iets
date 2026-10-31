@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::{result, slice, thread};
 
@@ -583,7 +583,7 @@ fn adopt_file(ev: &mut Evaluator, sp: &StorePath, entry: &StoredTree, flat: Hash
 
 /// nix.conf, read once: `store` for the eval store and `access-tokens` for the
 /// forge headers. The file cannot change under a running evaluation.
-fn nix_conf(s: &Session) -> &config::Config {
+pub(crate) fn nix_conf(s: &Session) -> &config::Config {
     s.nix_conf
         .get_or_init(|| config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty()))
 }
@@ -865,7 +865,7 @@ fn nix_eval(
     };
     // git may ask for credentials on the terminal, as under Nix
     let suspended = log::suspend();
-    let mut child = Command::new(&nix)
+    let mut child = nixbin::on_eval_store(&nix)
         .env("IETS_FETCHING", "1")
         .args([
             "--extra-experimental-features",
@@ -982,6 +982,7 @@ mod tests {
     use rstest::rstest;
     use tempfile::tempdir;
 
+    use std::process::Command;
     use std::time::Instant;
 
     use IngestionMethod::{Flat, Recursive};

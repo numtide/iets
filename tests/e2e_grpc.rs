@@ -254,6 +254,95 @@ fn the_same_verdicts_as_the_worker_protocol() {
     assert!(gerr.contains("building fb-chain"), "{gerr}");
 }
 
+/// A flake whose check takes as `src` a commit of a local repository that
+/// `builtins.fetchGit` gets through the real nix (`allRefs` is not an
+/// attribute iets reads a commit with itself). A local repository needs
+/// `--impure`. Returns the flake reference.
+fn fetch_git_flake(s: &Store, dir: &str) -> String {
+    let repo = s.dir().join(dir).join("repo");
+    s.write(&format!("{dir}/repo/a"), "hello @NONCE@\n");
+    e2e::git(&repo, &["init", "-q"]);
+    e2e::git(&repo, &["add", "a"]);
+    e2e::git_commit(&repo, "a", "2026-01-01T00:00:00Z");
+    let rev = stdout(&e2e::git(&repo, &["rev-parse", "HEAD"]));
+    let text = r#"{
+  outputs = { self }: let
+    src = builtins.fetchGit { url = "file://@REPO@"; rev = "@REV@"; allRefs = true; };
+  in {
+    checks.@SYSTEM@.fetched = derivation {
+      name = "iets-grpc-e2e-fetchgit";
+      system = "@SYSTEM@";
+      builder = "@SHELL@";
+      args = [ "-c" "read -r l < ${src}/a; echo \"$l\" > $out" ];
+    };
+  };
+}
+"#
+    .replace("@REPO@", repo.to_str().unwrap())
+    .replace("@REV@", &rev);
+    s.write(&format!("{dir}/flake/flake.nix"), &text);
+    s.write(
+        &format!("{dir}/flake/flake.lock"),
+        r#"{"nodes":{"root":{}},"root":"root","version":7}"#,
+    );
+    format!("path:{}", s.dir().join(dir).join("flake").display())
+}
+
+/// nixbot evaluates with `NIX_REMOTE` naming the farm and `--eval-store
+/// daemon` (numtide/iets#305). The nix that iets runs for a `fetchGit` and
+/// for `path-info` must address the eval store iets reads `/nix/store`
+/// through, not the farm: there the fetched source is not valid.
+#[test]
+fn nix_remote_naming_the_farm_leaves_the_eval_store_alone() {
+    let Some(g) = start() else { return };
+    let s = &g.s;
+    let flake = fetch_git_flake(s, "c8");
+    let gc = s.dir().join("c8/gc");
+    fs::create_dir_all(&gc).unwrap();
+    let o = s
+        .iets()
+        .env("NIX_REMOTE", &g.url)
+        .args([
+            "eval-jobs",
+            "--impure",
+            "--eval-store",
+            "daemon",
+            "--gc-roots-dir",
+        ])
+        .arg(&gc)
+        .args(["--flake", &format!("{flake}#checks.{}", e2e::system())])
+        .output()
+        .unwrap();
+    let job: Value = serde_json::from_str(stdout(&o).lines().next().unwrap_or("null"))
+        .unwrap_or_else(|e| panic!("{e}: {}", stderr(&o)));
+    assert!(
+        o.status.success() && job["drvPath"].is_string(),
+        "{job}\n{}",
+        stderr(&o)
+    );
+
+    // the build uploads the fetched source, which only the eval store has
+    let o = s
+        .iets()
+        .env("NIX_REMOTE", &g.url)
+        .args([
+            "build",
+            "--builder",
+            &g.url,
+            "--no-tracing-cache",
+            "--impure",
+        ])
+        .arg(format!("{flake}#checks.{}.fetched", e2e::system()))
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}\n{}", stderr(&o), g.log());
+    assert!(
+        stdout(&o).ends_with("-iets-grpc-e2e-fetchgit"),
+        "{}",
+        stdout(&o)
+    );
+}
+
 #[test]
 fn a_multi_root_build_names_every_attribute() {
     let Some(g) = start() else { return };

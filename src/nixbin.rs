@@ -4,9 +4,11 @@
 use crate::sys::fs::is_runnable;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::{env, fs};
 
 use crate::session::Session;
+use crate::source;
 
 /// Written by the farm derivation next to its `bin/`: the directory that
 /// holds the nix the farm shadows.
@@ -114,11 +116,52 @@ pub fn nix() -> PathBuf {
     real("nix").unwrap_or_else(|| PathBuf::from("nix"))
 }
 
+/// `nix` run on iets's behalf against the eval store: a fetch whose result
+/// iets reads from `/nix/store`, or a `path-info` on what is there.
+pub fn on_eval_store(nix: impl AsRef<OsStr>) -> Command {
+    let mut c = Command::new(nix);
+    let s = Session::current();
+    let store = source::nix_conf(&s).store();
+    if let Some(remote) = eval_store_remote(env::var_os("NIX_REMOTE").as_deref(), &store) {
+        c.env("NIX_REMOTE", remote);
+    }
+    c
+}
+
+/// What `NIX_REMOTE` must say for a subprocess on the eval store, given
+/// the inherited value and nix.conf's `store`; `None` leaves it alone. iets
+/// answers `auto`, the default, with the daemon (`Transport::parse`), where
+/// Nix takes `NIX_REMOTE` instead. nixbot exports its build store there
+/// beside `--eval-store daemon` (numtide/iets#305), and a fetch into that
+/// store is not in `/nix/store`.
+fn eval_store_remote(inherited: Option<&OsStr>, store: &str) -> Option<String> {
+    inherited?;
+    Some(match store {
+        "auto" | "" => "daemon".into(),
+        s => s.into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sys::fs::{set_executable, symlink};
     use tempfile::tempdir;
+
+    #[test]
+    fn a_subprocess_on_the_eval_store_does_not_follow_nix_remote() {
+        let farm = OsStr::new("grpc://farm:50051");
+        assert_eq!(
+            eval_store_remote(Some(farm), "auto").as_deref(),
+            Some("daemon")
+        );
+        assert_eq!(
+            eval_store_remote(Some(farm), "unix:///run/d").as_deref(),
+            Some("unix:///run/d")
+        );
+        // without NIX_REMOTE, Nix's `auto` finds the same store as iets's
+        assert_eq!(eval_store_remote(None, "auto"), None);
+    }
 
     #[test]
     fn farm_marker_is_found_through_two_hops() {

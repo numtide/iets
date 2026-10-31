@@ -734,10 +734,9 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
 /// that files inside the submodules are unchanged.
 pub fn submodule_root(ev: &mut Evaluator, root: &Path, subdir: &str, pos: Pos) -> EvalResult<Tree> {
     ev.trace().mark_uncacheable();
-    let url = format!(
-        "file://{}",
-        String::from_utf8_lossy(&sys::path_to_internal(root))
-    );
+    let path = String::from_utf8_lossy(&sys::path_to_internal(root)).into_owned();
+    let url = crate::flake::flakeref::fix_git_url(&path)
+        .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     let mut attrs = Attrs::from([
         ("type".into(), AttrVal::Str("git".into())),
         ("url".into(), AttrVal::Str(url)),

@@ -372,7 +372,7 @@ fn a_git_root_with_submodules() {
     git(&dep, &["add", "data"]);
     git(&dep, &["commit", "-q", "-m", "initial"]);
 
-    let repo = f.work().join("repo");
+    let repo = f.work().join("repo with space");
     write(
         &repo.join("flake.nix"),
         r#"{

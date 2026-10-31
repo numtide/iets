@@ -550,7 +550,10 @@ fn check_local(ev: &Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
         return Ok(());
     };
     if matches!(str_attr(attrs, "type"), Some("git" | "hg")) {
-        let url = url.split_once('+').map_or(url, |(_, u)| u);
+        let url = url
+            .strip_prefix("git+")
+            .or_else(|| url.strip_prefix("hg+"))
+            .unwrap_or(url);
         let dir = match url.strip_prefix('/') {
             Some(_) => Some(url.to_string()),
             None => flakeref::file_url_path(url),

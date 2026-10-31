@@ -36,7 +36,9 @@ struct Scratch {
 fn scratch(bin: Iets) -> Scratch {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("hello.txt"), BYTES).unwrap();
-    let url = format!("{}/hello.txt", file_url(dir.path()));
+    // resolved, as the cwd the project root comes from is: /var is a link on macOS
+    let real = iets::sys::fs::canonicalize(dir.path()).unwrap();
+    let url = format!("{}/hello.txt", file_url(&real));
     Scratch { bin, dir, url }
 }
 

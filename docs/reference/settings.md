@@ -476,9 +476,10 @@ with `pure-eval`.
   `.drv` this evaluation wrote is not readable either, but `import
   drv.drvPath` works: Nix reads it through the store.
 - A fetch from the local file system is such a read. The file of a `file:`
-  URL, the directory of a `path` input and the repository of a local `git`
-  or `hg` input must lie in the root, and a hash does not change that. This
-  is iets's rule, not Nix's
+  URL and the directory of a `path` input must lie in the root or under a
+  store path the evaluation holds; the repository of a local `git` or `hg`
+  input must be a directory of the root on disk. A hash does not change
+  that. This is iets's rule, not Nix's
   (`docs/explanation/pure-eval-and-local-sources.md`).
 - `builtins.storePath` is refused.
 - `fetchTarball` and `fetchurl` need a `sha256`. `fetchTree` refuses an

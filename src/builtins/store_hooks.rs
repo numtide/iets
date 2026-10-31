@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::str::from_utf8;
 use std::sync::Arc;
 
+use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::{LintId, purity};
 use crate::source::scm;
@@ -180,15 +181,12 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
     Ok(res)
 }
 
-/// Where a read of `path` goes once the symlinks `mode` names are resolved:
-/// the path resolution ended at, and its place in the (virtual) store, `None`
-/// for one the real file system answers. [`resolve_links`] runs under a store
-/// path this evaluation copied from a local tree, and in a pure evaluation
-/// under the project: there the kernel would follow a link out of the allow
-/// list, which is judged on the text of the path. A fetched input's spool
-/// resolves a member's links inside the entry itself, and elsewhere the
-/// kernel resolves as the accessor would, so the walk is skipped and this
-/// costs the one lookup the reader needed anyway.
+/// Where a read of `path` goes once the symlinks `mode` names are resolved,
+/// and its place in the (virtual) store, `None` for one the real file system
+/// answers. [`resolve_links`] runs under a store path copied from a local
+/// tree, and in a pure evaluation under the project, where the kernel would
+/// follow a link out of an allow list judged on the text of the path.
+/// Elsewhere the kernel or the spool resolves as the accessor would.
 pub fn located(
     ev: &Evaluator,
     path: Vec<u8>,
@@ -258,7 +256,7 @@ pub fn local_source(ev: &Evaluator, path: &[u8], pos: Pos) -> EvalResult<(Vec<u8
     if !ev.pure() {
         return Ok((path.to_vec(), fs_path(path)));
     }
-    let path = crate::compile::canon_path(path);
+    let path = canon_path(path);
     let path = in_root_tree(ev, &path).unwrap_or(path);
     let (path, at) = located(ev, path, Follow::Full, pos)?;
     let at = check(ev, at, &path, Follow::Full, pos)?;
@@ -642,10 +640,11 @@ pub fn copy_path_to_store(
     }
     // the entry is copied as it is, a link included, from where the links
     // above it lead; a copied tree's filter has hidden what lies below a link
-    if locate(ev, path).is_none() {
+    let at = locate(ev, path);
+    if at.is_none() {
         confine(ev, path, Follow::Ancestors, pos)?;
     }
-    let at = open(ev, path, pos)?;
+    let at = check(ev, at, path, Follow::Ancestors, pos)?;
     let copy_err = |e: io::Error| {
         Error::boxed(
             ErrorKind::Io,

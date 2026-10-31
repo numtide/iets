@@ -179,7 +179,11 @@ Nix does.
 ## Locked inputs
 
 An input is locked, so iets knows its store path before anything happens.
-It tries these sources in order, and the first one that works wins.
+It tries these sources in order, and the first one that works wins. An
+input on this machine, a `file:` URL, a `path` or a local `git` or `hg`
+repository, first passes the allow list of pure evaluation, so that no
+cache answers for a file the evaluation may not read
+([Pure evaluation and local sources](pure-eval-and-local-sources.md)).
 
 **`/nix/store`, if the store has the path as valid.** A file at the path is
 not enough: an interrupted build or copy can leave one that the store never

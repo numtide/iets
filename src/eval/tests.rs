@@ -484,6 +484,18 @@ fn fetchurl_needs_a_sha256_in_every_mode(
     r#"builtins.fetchTree { type = "git"; url = "file:///etc"; rev = "0000000000000000000000000000000000000001"; narHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
     "/etc"
 )]
+#[case::fetch_git_with_a_host(
+    r#"builtins.fetchGit { url = "file://localhost/etc"; rev = "0000000000000000000000000000000000000001"; }"#,
+    "/etc"
+)]
+#[case::a_git_input_with_a_host(
+    r#"builtins.fetchTree { type = "git"; url = "file://localhost/etc"; rev = "0000000000000000000000000000000000000001"; narHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
+    "/etc"
+)]
+#[case::a_git_input_with_a_plus(
+    r#"builtins.fetchTree { type = "git"; url = "file:///etc/c++"; rev = "0000000000000000000000000000000000000001"; narHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }"#,
+    "/etc/c++"
+)]
 fn a_local_fetch_is_a_read_in_pure_evaluation(#[case] src: &str, #[case] path: &str) {
     let want = format!(
         "access to absolute path '{path}' is forbidden in pure evaluation mode (use '--impure' to override)"

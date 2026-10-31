@@ -13,6 +13,14 @@ use std::path::Path;
 use std::process::Output;
 use tempfile::{TempDir, tempdir};
 
+/// The evaluator's form of `p` resolved, as the cwd a project root comes
+/// from is: `/private/var` for `/var` on macOS, `/C:/...` on Windows, which
+/// keeps backslashes out of the string.
+fn internal(p: &Path) -> String {
+    let p = iets::sys::fs::canonicalize(p).unwrap();
+    String::from_utf8(iets::sys::path_to_internal(&p)).unwrap()
+}
+
 fn run(bin: &Iets, dir: &Path, args: &[&str]) -> Output {
     bin.cmd()
         .args(args)
@@ -161,8 +169,7 @@ fn get_flake_takes_a_path_its_nar_hash_locks(bin: Iets) {
         r#"{"nodes":{"root":{}},"root":"root","version":7}"#,
     )
     .unwrap();
-    // the evaluator's form, `/C:/...` on Windows, keeps backslashes out of the string
-    let at = String::from_utf8(iets::sys::path_to_internal(d.path())).unwrap();
+    let at = internal(d.path());
 
     let tree = format!(r#"(builtins.fetchTree {{ type = "path"; path = "{at}"; }}).narHash"#);
     let o = run(
@@ -207,7 +214,6 @@ const FORBIDDEN: &str = "is forbidden in pure evaluation mode";
 /// stay in it.
 #[cfg(unix)]
 fn linked() -> TempDir {
-    use std::os::unix::fs::symlink;
     let d = checkout();
     let repo = d.path().join("repo");
     fs::create_dir(repo.join("sub")).unwrap();
@@ -333,7 +339,7 @@ fn a_local_fetch_out_of_the_project_is_refused(bin: Iets, #[case] expr: &str) {
 fn a_local_fetch_in_the_project_reads_the_file(bin: Iets) {
     let d = checkout();
     let repo = d.path().join("repo");
-    let at = String::from_utf8(iets::sys::path_to_internal(&repo)).unwrap();
+    let at = internal(&repo);
     let eval = |expr: &str| {
         bin.cmd()
             .args(["eval", "--raw", "--expr", expr])
@@ -390,7 +396,7 @@ fn a_local_fetch_under_a_flake_stays_in_its_tree(bin: Iets) {
     fs::create_dir(&flake).unwrap();
     fs::write(d.path().join("outside.txt"), "out").unwrap();
     fs::write(flake.join("in.txt"), "in").unwrap();
-    let at = String::from_utf8(iets::sys::path_to_internal(d.path())).unwrap();
+    let at = internal(d.path());
     let hash = "sha256-WClnU00PkJ0Za5f55pITQnd66oe0b6Ut8WU4nbH7jM8=";
     fs::write(
         flake.join("flake.nix"),

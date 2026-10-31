@@ -129,6 +129,8 @@ pub enum SourceRef {
         root: PathBuf,
         subdir: String,
     },
+    /// A local Git working tree with initialized submodules, fetched by Nix.
+    Submodules { root: PathBuf, subdir: String },
     /// One revision of a local repository, which the SCM reads out of it
     /// (git.cc:getAccessorFromCommit). `git+file:///path?rev=…` names this,
     /// and it is the tree of the commit, not of the working tree beside it.
@@ -180,6 +182,7 @@ pub fn tree(ev: &mut Evaluator, r: &SourceRef, pos: Pos) -> EvalResult<Tree> {
         SourceRef::Tracked { scm, root, subdir } => {
             local::tracked_source(ev, *scm, root, subdir, pos)
         }
+        SourceRef::Submodules { root, subdir } => remote::submodule_root(ev, root, subdir, pos),
         SourceRef::Commit {
             scm,
             root,

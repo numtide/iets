@@ -363,6 +363,72 @@ const SCRATCH: &str = r#"{
 }
 "#;
 
+#[test]
+fn a_git_root_with_submodules() {
+    let Some(mut f) = F::new() else { return };
+    let dep = f.work().join("dep");
+    write(&dep.join("data"), "first\n");
+    git(&dep, &["init", "-q"]);
+    git(&dep, &["add", "data"]);
+    git(&dep, &["commit", "-q", "-m", "initial"]);
+
+    let repo = f.work().join("repo");
+    write(
+        &repo.join("flake.nix"),
+        r#"{
+  outputs = { self }: {
+    value = builtins.readFile ./sub/data;
+    info = builtins.toJSON (builtins.removeAttrs self.sourceInfo [ "outPath" ]);
+    drv = derivation {
+      name = "submodule-root";
+      system = "x86_64-linux";
+      builder = "/bin/sh";
+      args = [ "-c" "echo ${self.narHash} > $out" ];
+    };
+  };
+}"#,
+    );
+    git(&repo, &["init", "-q"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            dep.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "initial"]);
+    let r = repo.to_str().unwrap();
+    f.lock(r);
+    for attr in ["value", "info", "drv.drvPath"] {
+        f.check(
+            &format!("submodules: {attr}"),
+            &format!("{r}?submodules=1#{attr}"),
+            &[],
+        );
+    }
+    let value = format!("{r}?submodules=1#value");
+    let before = f.iets_eval(&[], &["--raw", &value]);
+    write(&repo.join("sub/data"), "second\n");
+    let after = f.iets_eval(&[], &["--raw", &value]);
+    f.verdict(
+        stdout(&before) == "first" && stdout(&after) == "second",
+        || {
+            format!(
+                "submodule edit and trace cache: {} -> {}",
+                stdout(&before),
+                stdout(&after)
+            )
+        },
+    );
+    f.check("submodules: dirty file", &value, &[]);
+}
+
 /// A git flake with a `path:` input, a relative `path:` input (no narHash in
 /// the lock) and a `follows`, in every state a working tree can be in.
 #[test]

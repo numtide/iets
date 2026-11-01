@@ -639,12 +639,9 @@ pub fn copy_path_to_store(
         return Ok(sp);
     }
     // the entry is copied as it is, a link included, from where the links
-    // above it lead; a copied tree's filter has hidden what lies below a link
-    let at = locate(ev, path);
-    if at.is_none() {
-        confine(ev, path, Follow::Ancestors, pos)?;
-    }
-    let at = check(ev, at, path, Follow::Ancestors, pos)?;
+    // above it lead, under a copied tree too
+    confine(ev, path, Follow::Ancestors, pos)?;
+    let at = check(ev, locate(ev, path), path, Follow::Ancestors, pos)?;
     let copy_err = |e: io::Error| {
         Error::boxed(
             ErrorKind::Io,

@@ -243,6 +243,9 @@ fn linked() -> TempDir {
 #[case::import("import ./two.nix")]
 #[case::import_below_a_link("import ./up/two.nix")]
 #[case::copy_below_a_link(r#"builtins.readFile "${./up/outside.txt}""#)]
+#[case::copy_below_a_link_of_a_tree(
+    r#""${/. + builtins.unsafeDiscardStringContext (builtins.path { path = ./.; }) + "/up/outside.txt"}""#
+)]
 #[case::path(r#"builtins.readFile (builtins.path { path = ./out.txt; })"#)]
 fn a_link_out_of_the_project_is_not_followed(bin: Iets, #[case] expr: &str) {
     let d = linked();

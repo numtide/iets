@@ -38,7 +38,7 @@ rustls-native-certs = "0.8"
 webpki-roots = "1"
 tar = { version = "0.4", default-features = false }
 flate2 = "1"
-lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "xz"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
 bzip2 = "0.6"
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }

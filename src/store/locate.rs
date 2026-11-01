@@ -3,7 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -68,7 +68,7 @@ pub fn prefetch_references(path: StorePath, session: Arc<Session>) {
 }
 
 fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
-    let out = Command::new(nixbin::nix())
+    let out = nixbin::on_eval_store(nixbin::nix())
         .args([
             "--extra-experimental-features",
             "nix-command",
@@ -106,7 +106,7 @@ pub fn locate_in_store(
         .collect();
     let mut info: HashMap<String, serde_json::Value> = HashMap::new();
     if !ask.is_empty() {
-        let out = Command::new(nixbin::nix())
+        let out = nixbin::on_eval_store(nixbin::nix())
             .args([
                 "--extra-experimental-features",
                 "nix-command",

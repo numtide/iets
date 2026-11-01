@@ -623,6 +623,7 @@ mod tests {
 
     #[rstest]
     #[case("/a b/c", "file:///a%20b/c")]
+    #[case("/a b/?#%.git", "file:///a%20b/%3F%23%25.git")]
     #[case("rel/x", "file:rel/x")]
     #[case("file:///a/b", "file:///a/b")]
     #[case("git+file:///a/b", "file:///a/b")]

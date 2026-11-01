@@ -32,7 +32,7 @@ use crate::store::nar;
 use crate::store::path::{IngestionMethod, StorePath};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::treestore::{self, Rejected, StoredTree};
-use crate::{config, nixbin, trace};
+use crate::{config, nixbin, sys, trace};
 use serde_json::Value;
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
@@ -799,6 +799,67 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
     Ok(())
 }
 
+/// A local Git flake whose submodules must be included in its source tree.
+/// Nix fetches it into the store; a tracing-cache hit cannot safely assume
+/// that files inside the submodules are unchanged.
+pub fn submodule_root(ev: &mut Evaluator, root: &Path, subdir: &str, pos: Pos) -> EvalResult<Tree> {
+    ev.trace().mark_uncacheable();
+    let path = String::from_utf8_lossy(&sys::path_to_internal(root)).into_owned();
+    let url = crate::flake::flakeref::fix_git_url(&path)
+        .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
+    let mut attrs = Attrs::from([
+        ("type".into(), AttrVal::Str("git".into())),
+        ("url".into(), AttrVal::Str(url)),
+        ("submodules".into(), AttrVal::Bool(true)),
+    ]);
+    let got = fetch_with_nix_builtin(&attrs, &root.display().to_string(), "fetchTree", pos)?;
+    let out = got
+        .get("outPath")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::boxed(ErrorKind::Eval, "iets: nix gave no store path", pos))?
+        .to_string();
+    for (k, v) in got {
+        if k == "outPath" {
+            continue;
+        }
+        let value = match v {
+            Value::String(s) => AttrVal::Str(s),
+            Value::Bool(b) => AttrVal::Bool(b),
+            Value::Number(n) => match n.as_u64() {
+                Some(n) => AttrVal::Int(n),
+                None => continue,
+            },
+            _ => continue,
+        };
+        attrs.insert(k, value);
+    }
+    let hash = str_attr(&attrs, "narHash")
+        .and_then(|s| parse_nar_hash(s).ok())
+        .ok_or_else(|| Error::boxed(ErrorKind::Eval, "iets: nix gave no narHash", pos))?;
+    let path = treestore::store_path("source", &hash)
+        .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
+    if out != path.to_full_string() {
+        bail!(
+            ErrorKind::Eval,
+            pos,
+            "iets: nix fetched '{out}' but its narHash implies '{path}'"
+        );
+    }
+    ensure_readable(ev, &path, &hash, &attrs, pos)?;
+    let counter = str_attr(&attrs, "rev").map(|_| {
+        (
+            super::scm::named("git").expect("iets knows git"),
+            root.to_path_buf(),
+        )
+    });
+    Ok(Tree {
+        path,
+        attrs,
+        subdir: subdir.to_string(),
+        counter,
+    })
+}
+
 /// `builtins.fetchGit` of a commit, run by Nix: `args` are the call's
 /// attributes, `shown` is the input as Nix names it. Returns the result's
 /// attributes, with the store path as `outPath`.
@@ -807,12 +868,21 @@ pub fn fetch_git_with_nix(
     shown: &str,
     pos: Pos,
 ) -> EvalResult<serde_json::Map<String, Value>> {
+    fetch_with_nix_builtin(args, shown, "fetchGit", pos)
+}
+
+fn fetch_with_nix_builtin(
+    args: &Attrs,
+    shown: &str,
+    builtin: &str,
+    pos: Pos,
+) -> EvalResult<serde_json::Map<String, Value>> {
     let expr = format!(
-        "let r = builtins.fetchGit (builtins.fromJSON {}); \
+        "let r = builtins.{builtin} (builtins.fromJSON {}); \
          in builtins.toJSON (builtins.removeAttrs r [ \"outPath\" ] // {{ path = r.outPath; }})",
         nix_string_literal(&attrs_to_json(args))
     );
-    let missing = || format!("iets: builtins.fetchGit of '{shown}' needs nix on PATH");
+    let missing = || format!("iets: builtins.{builtin} of '{shown}' needs nix on PATH");
     let what = format!("the Git repository '{shown}'");
     let (ok, stdout, said) = nix_eval(&what, &expr, missing, true, pos)?;
     if !ok {

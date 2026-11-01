@@ -225,12 +225,15 @@ impl Query {
     /// which rewrites `.git/index` whenever any worktree file's stat moved —
     /// an untracked one is enough. The output is byte-identical either way,
     /// but direnv watches that file, so a build would reload the shell for an
-    /// index whose content did not change.
+    /// index whose content did not change. `core.fsmonitor` names a program
+    /// a repository's own config could make git run.
     pub fn argv(self) -> &'static [&'static str] {
         match self {
             Query::GitLsFiles => &[
                 "git",
                 "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
                 "ls-files",
                 "-z",
                 "--cached",
@@ -240,6 +243,8 @@ impl Query {
             Query::GitStatus => &[
                 "git",
                 "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
                 "status",
                 "--porcelain=v1",
                 "-z",
@@ -250,15 +255,26 @@ impl Query {
             Query::GitHead => &[
                 "git",
                 "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
                 "rev-parse",
                 "--verify",
                 "-q",
                 "HEAD",
             ],
-            Query::GitRefs => &["git", "--no-optional-locks", "show-ref", "--head"],
+            Query::GitRefs => &[
+                "git",
+                "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
+                "show-ref",
+                "--head",
+            ],
             Query::GitAttributesFile => &[
                 "git",
                 "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
                 "config",
                 "--path",
                 "--get",

@@ -312,6 +312,51 @@ impl BuildEnvironment {
         }
     }
 
+    /// Every variable with [`rewrite_strings`] applied to its values. A
+    /// function body is code, so only a path the shell reads as one word may
+    /// go into it.
+    fn rewritten(&self, rewrites: &BTreeMap<String, String>) -> Result<BuildEnvironment> {
+        let r = |s: &str| rewrite_strings(s.to_string(), rewrites);
+        let vars = (self.vars.iter())
+            .map(|(name, v)| {
+                let v = match v {
+                    Value::String { exported, value } => Value::String {
+                        exported: *exported,
+                        value: r(value),
+                    },
+                    Value::Array(a) => Value::Array(a.iter().map(|s| r(s)).collect()),
+                    Value::Associative(m) => {
+                        Value::Associative(m.iter().map(|(k, v)| (r(k), r(v))).collect())
+                    }
+                };
+                (name.clone(), v)
+            })
+            .collect();
+        let mut bash_functions = BTreeMap::new();
+        for (name, def) in &self.bash_functions {
+            // one rewrite at a time, as `rewrite_strings` applies them: an
+            // earlier one may put in what a later one replaces
+            let mut body = def.clone();
+            for (from, to) in rewrites {
+                if from == to || from.is_empty() || !body.contains(from.as_str()) {
+                    continue;
+                }
+                if !one_word(to) {
+                    return Err(Error::Usage(format!(
+                        "the function '{name}' names '{to}', which a shell script cannot hold as is"
+                    )));
+                }
+                body = body.replace(from.as_str(), to);
+            }
+            bash_functions.insert(name.clone(), body);
+        }
+        Ok(BuildEnvironment {
+            vars,
+            bash_functions,
+            structured_attrs: self.structured_attrs.clone(),
+        })
+    }
+
     fn get_string(&self, name: &str) -> Result<&str> {
         match self.vars.get(name) {
             Some(Value::String { value, .. }) => Ok(value),
@@ -338,6 +383,14 @@ pub fn escape_shell_arg_always(s: &str) -> String {
     }
     r.push('\'');
     r
+}
+
+/// Whether bash reads `s` as one literal word. No `~`: after a `:` or `=`
+/// bash expands it.
+fn one_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._+,:@%=-".contains(&b))
 }
 
 /// util.cc:rewriteStrings: every rewrite, in map order, applied to every occurrence.
@@ -371,23 +424,6 @@ pub fn make_rc_script(
     attrs_dir: &Path,
     outputs_dir: &Path,
 ) -> Result<RcScript> {
-    let mut out = String::with_capacity(64 << 10);
-    out.push_str("unset shellHook\n");
-    for var in SAVED_VARS {
-        out.push_str(&format!("{var}=${{{var}:-}}\nnix_saved_{var}=\"${var}\"\n"));
-    }
-    env.to_bash(&mut out, IGNORE_VARS);
-    for var in SAVED_VARS {
-        out.push_str(&format!(
-            "{var}=\"${var}${{nix_saved_{var}:+:$nix_saved_{var}}}\"\n"
-        ));
-    }
-    out.push_str("export NIX_BUILD_TOP=\"$(mktemp -d -t nix-shell.XXXXXX)\"\n");
-    for var in ["TMP", "TMPDIR", "TEMP", "TEMPDIR"] {
-        out.push_str(&format!("export {var}=\"$NIX_BUILD_TOP\"\n"));
-    }
-    out.push_str("eval \"${shellHook:-}\"\n");
-
     let mut rewrites = BTreeMap::new();
     let outputs = env
         .vars
@@ -441,10 +477,27 @@ pub fn make_rc_script(
             files.push(target);
         }
     }
-    Ok(RcScript {
-        script: rewrite_strings(out, &rewrites),
-        files,
-    })
+    // the paths go in before quoting, so a path with shell syntax in it,
+    // such as a working directory, stays data
+    let env = env.rewritten(&rewrites)?;
+    let mut out = String::with_capacity(64 << 10);
+    out.push_str("unset shellHook\n");
+    for var in SAVED_VARS {
+        out.push_str(&format!("{var}=${{{var}:-}}\nnix_saved_{var}=\"${var}\"\n"));
+    }
+    env.to_bash(&mut out, IGNORE_VARS);
+    for var in SAVED_VARS {
+        out.push_str(&format!(
+            "{var}=\"${var}${{nix_saved_{var}:+:$nix_saved_{var}}}\"\n"
+        ));
+    }
+    out.push_str("export NIX_BUILD_TOP=\"$(mktemp -d -t nix-shell.XXXXXX)\"\n");
+    for var in ["TMP", "TMPDIR", "TEMP", "TEMPDIR"] {
+        out.push_str(&format!("export {var}=\"$NIX_BUILD_TOP\"\n"));
+    }
+    out.push_str("eval \"${shellHook:-}\"\n");
+
+    Ok(RcScript { script: out, files })
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -512,6 +565,24 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    /// A function body takes only paths bash reads as one literal word,
+    /// checked after each rewrite.
+    #[rstest]
+    #[case::chained(&[("/nix/store/a", "/nix/store/b"), ("/nix/store/b", "/w/$(x)")], false)]
+    #[case::tilde(&[("/nix/store/a", "/w:~/out")], false)]
+    #[case::plain(&[("/nix/store/a", "/w/out")], true)]
+    fn function_rewrites_are_checked_one_at_a_time(
+        #[case] pairs: &[(&str, &str)],
+        #[case] ok: bool,
+    ) {
+        let mut env = BuildEnvironment::default();
+        (env.bash_functions).insert("f".into(), "P=/nix/store/a\n".into());
+        let rewrites = (pairs.iter())
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect();
+        assert_eq!(env.rewritten(&rewrites).is_ok(), ok);
     }
 
     /// Nix 2.34.8 added this file with `nix print-dev-env`; the path is in every `-env.drv`
@@ -649,6 +720,16 @@ mod tests {
                 .contains(&format!("NIX_ATTRS_SH_FILE='{}'\n", sh.display()))
         );
         assert_eq!(rc.files.len(), 2);
+
+        let odd = Path::new("/w/it's $(touch x)/outputs");
+        let rc = make_rc_script(&env, &dir.join("attrs"), odd).unwrap();
+        assert!(
+            rc.script
+                .contains("dev='/w/it'\\''s $(touch x)/outputs/dev'\n")
+        );
+        let mut env = env;
+        (env.bash_functions).insert("f".into(), "cd /nix/store/a-x-env\n".into());
+        assert!(make_rc_script(&env, &dir.join("attrs"), odd).is_err());
     }
 
     #[test]

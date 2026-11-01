@@ -526,15 +526,13 @@ these:
   switches the log format to `raw`. `--quiet` does the same here. In Nix it
   lowers the log level by one.
 - A flag or setting that has no effect gives one warning on stderr, where
-  Nix prints nothing: `-v`, `--eval-store auto` and `log-lines`, and
+  Nix prints nothing: `-v`/`--verbose`, `--eval-store auto` and `log-lines`, and
   `--accept-flake-config` and `accept-flake-config = true` when the flake
   has a `nixConfig`. Any other client setting
   that iets has nothing for (`restrict-eval`, `eval-system`, …) falls back.
   stdout and the exit code stay Nix's. `docs/reference/divergences.md`,
   **Flags and settings with no effect**, has the table and says what iets
   does with a flake's `nixConfig`: nothing.
-- `-v`/`--verbose` has no effect: it raises the log level, and iets has
-  one.
 - `--show-trace` only adds the trace to the `--log-format internal-json`
   error records (`docs/reference/errors.md`). iets always prints the full
   trace it has.

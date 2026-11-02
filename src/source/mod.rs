@@ -29,7 +29,8 @@ pub(crate) use local::{commit_tree, path_tree, workdir};
 pub use lock::Lock;
 pub use remote::LazyStore;
 pub(crate) use remote::{
-    ensure_readable, fetch_file, fetch_git_with_nix, local_daemon, store_commit, valid_in_store,
+    ensure_readable, fetch_file, fetch_git_with_nix, local_daemon, nix_conf, store_commit,
+    valid_in_store,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

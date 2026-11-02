@@ -231,13 +231,14 @@ are errors; a `..` in a name and a member below a symlink are not. The full
 list is in
 [Flakes](../reference/flakes.md#what-the-tree-keeps).
 
-**`git` and `hg`, the last shell-out.** These need a repository, which
-iets cannot clone. It runs
+**`git`.** iets keeps one shallow clone per URL under
+`$XDG_CACHE_HOME/iets/git/` and fetches each locked commit into it, so
+updating an input downloads only what changed. The tree must match the
+lock's `narHash`. Reading `revCount` also fetches the commit history.
+
+**`hg`, the last shell-out.** It runs
 `nix eval --raw --impure --expr '(builtins.fetchTree <locked attrs>).outPath'`
 and then checks that the path `nix` reports is the one the lock implies.
-So a difference in the file set is an error.
-When no `nix` other than iets itself is on `PATH`, the error says so and
-names the command to run first.
 
 `file` inputs are not supported. A `file` input's store path is the *flat*
 hash of the bytes under the input's name, and the lock's `narHash` does not

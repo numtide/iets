@@ -1,8 +1,9 @@
 //! A locked reference's tree: read from `/nix/store` when it is there, else
 //! from the user-level input store (`crate::treestore`), else substituted by
 //! a daemon if one is reachable, else downloaded into the input store by
-//! iets itself (`github`, `gitlab`, `sourcehut`, `tarball`), else fetched by
-//! running `nix` once (`git`, `hg`). Only that last step needs a daemon.
+//! iets itself (`github`, `gitlab`, `sourcehut`, `tarball`, and `git` as a
+//! clone), else fetched by running `nix` once (`hg`). Only that last step
+//! needs a daemon.
 //!
 //! The `narHash` is known before the fetch, so the tree names itself and the
 //! input store refuses anything that does not hash to it.
@@ -17,7 +18,7 @@ use std::{env, result, slice, thread};
 
 use super::scm::{Commit, Entry};
 use super::{AttrVal, Attrs, Tree, attrs_to_json, parse_nar_hash, str_attr, to_url};
-use crate::builtins::store_hooks;
+use crate::builtins::{fetch_git, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::fetch::spool;
@@ -287,7 +288,7 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
 /// user-level input store; a tarball-shaped input in neither is downloaded into
 /// that, and reads come out of the spool by offset (`crate::treestore`). A
 /// reachable daemon is asked to substitute first, since a local copy beats a
-/// download. A `git` or `hg` input still goes through Nix's `fetchTree`, which
+/// download. An `hg` input still goes through Nix's `fetchTree`, which
 /// writes `/nix/store`. Never called for the root tree or a `path` input.
 pub fn ensure_readable(
     ev: &mut Evaluator,
@@ -319,6 +320,9 @@ pub fn ensure_readable(
         let entry = fetch_tarball(ev, sp, attrs, pos)?;
         adopt(ev, sp, &entry);
         return Ok(());
+    }
+    if str_attr(attrs, "type") == Some("git") && !fetch_git::needs_nix(attrs) {
+        return fetch_git_input(ev, sp, nar_hash, &name, attrs, pos);
     }
     fetch_with_nix(&full, &name, attrs, pos)?;
     if ev.trace().stat_now(full.as_bytes(), true) == trace::Kind::Missing {
@@ -585,7 +589,7 @@ fn adopt_file(ev: &mut Evaluator, sp: &StorePath, entry: &StoredTree, flat: Hash
 
 /// nix.conf, read once: `store` for the eval store and `access-tokens` for the
 /// forge headers. The file cannot change under a running evaluation.
-fn nix_conf(s: &Session) -> &config::Config {
+pub fn nix_conf(s: &Session) -> &config::Config {
     s.nix_conf
         .get_or_init(|| config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty()))
 }
@@ -756,8 +760,53 @@ fn fetch_tarball(
     })
 }
 
-/// The last shell-out: a `git` or `hg` input needs a repository, which iets
-/// cannot clone yet, so its locked attrs go to Nix's own `fetchTree` and the
+/// A locked `git` input, read by iets (`fetch_git::from_commit`). The tree
+/// must hash to what the lock says.
+fn fetch_git_input(
+    ev: &mut Evaluator,
+    sp: &StorePath,
+    nar_hash: &Hash,
+    name: &str,
+    attrs: &Attrs,
+    pos: Pos,
+) -> EvalResult<()> {
+    let url = str_attr(attrs, "url").unwrap_or("");
+    // older locks keep a flake's `dir` in the URL (git.cc:getRepoInfo)
+    let url = match url.split_once('?') {
+        Some((base, q)) => {
+            let rest: Vec<&str> = q.split('&').filter(|p| !p.starts_with("dir=")).collect();
+            match rest.is_empty() {
+                true => base.to_string(),
+                false => format!("{base}?{}", rest.join("&")),
+            }
+        }
+        None => url.to_string(),
+    };
+    let tree = fetch_git::from_commit(ev, attrs, &url, None, pos)?;
+    if tree.path != *sp {
+        let got = str_attr(&tree.attrs, "narHash").unwrap_or("");
+        let mut e = Error::new(
+            ErrorKind::HashMismatch,
+            format!(
+                "NAR hash mismatch in input '{name}' ({}), expected '{}' but got '{got}'",
+                to_url(attrs),
+                nar_hash.to_sri()
+            ),
+            pos,
+        );
+        e.hint = Some(
+            "git gave a different tree than the lock names. A .gitattributes filter, \
+             'export-subst' or a submodule can cause that. Run 'nix flake update' \
+             to lock the tree git gives."
+                .into(),
+        );
+        return Err(Box::new(e));
+    }
+    Ok(())
+}
+
+/// The last shell-out: an `hg` input, or a `git` one with `lfs` or
+/// `verifyCommit`, goes to Nix's own `fetchTree` with its locked attrs, and the
 /// store path Nix reports must be the one the lock implies.
 fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     let expr = format!(

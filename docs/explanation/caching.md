@@ -444,7 +444,7 @@ bytes is a new date.
 The input store holds trees whose content address is a flake `narHash`. It
 doesn't hold a substitutable-but-absent `/nix/store` path: `builtins.storePath`
 hands such a path to the daemon, which substitutes it before any read, and
-import-from-derivation is unsupported. `git` and `hg` inputs need a
-repository, which iets cannot clone, so they go through a real `nix` that
-writes `/nix/store`. The NAR hash of a source tree has no store of its own,
+import-from-derivation is unsupported. `hg` inputs go through a real `nix`
+that writes `/nix/store`. `git` inputs are cloned into `git/` in the cache
+directory. The NAR hash of a source tree has no store of its own,
 because the tracing cache's tree observation already holds it.

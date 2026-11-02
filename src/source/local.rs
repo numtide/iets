@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io, mem, thread};
 
-use super::scm::{Scm, Snapshot};
+use super::scm::{self, Commit, Entry, Scm, Snapshot, git};
 use super::{AttrVal, Attrs, Tree, store_commit};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::fetch;
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar;
 use crate::store::path::StorePath;
@@ -147,8 +148,11 @@ pub fn tracked_source(
 
 /// The tree of `rev` in the repository at `root`
 /// (git.cc:getAccessorFromCommit), under the store `name`, without what
-/// `Scm::export_ignored` drops when `export` is set. `None` when the
-/// repository has not got the revision.
+/// `Scm::export_ignored` drops when `export` is set. When `submodules` is
+/// set, it holds the ref the commit was asked by, and each submodule is
+/// fetched and mounted. A submodule may be on this machine only when
+/// `local_ok`. `None` when the repository has not got the revision.
+#[allow(clippy::too_many_arguments)]
 pub fn commit_tree(
     ev: &mut Evaluator,
     scm: &'static dyn Scm,
@@ -156,10 +160,16 @@ pub fn commit_tree(
     rev: &str,
     name: &str,
     export: bool,
+    submodules: Option<&str>,
+    local_ok: bool,
     pos: Pos,
 ) -> EvalResult<Option<Tree>> {
     let commit = scm
         .tree_at(ev.trace(), root, rev, export)
+        .and_then(|c| match (c, submodules) {
+            (Some(c), Some(r#ref)) => mount_submodules(root, c, r#ref, local_ok).map(Some),
+            (c, _) => Ok(c),
+        })
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
     let Some(commit) = commit else {
         return Ok(None);
@@ -180,11 +190,72 @@ pub fn commit_tree(
             ("narHash".into(), AttrVal::Str(hash.to_sri())),
             ("rev".into(), AttrVal::Str(rev.to_string())),
             ("lastModified".into(), AttrVal::Int(last_modified)),
-            ("submodules".into(), AttrVal::Bool(false)),
+            ("submodules".into(), AttrVal::Bool(submodules.is_some())),
         ]),
         subdir: String::new(),
         counter: Some((scm, root.to_path_buf())),
     }))
+}
+
+/// Puts the tree of each submodule of `commit` at its path, fetched in
+/// parallel and with its own submodules. `branch = .` in `.gitmodules`
+/// stands for `r#ref`.
+fn mount_submodules(
+    root: &Path,
+    mut commit: Commit,
+    r#ref: &str,
+    local_ok: bool,
+) -> Result<Commit, String> {
+    let subs = git::submodules_at(root, &commit.rev)?;
+    if subs.is_empty() {
+        return Ok(commit);
+    }
+    let origin = fetch::git::origin_url(root);
+    let fetched: Vec<Result<Commit, String>> = thread::scope(|s| {
+        let jobs: Vec<_> = subs
+            .iter()
+            .map(|sub| {
+                let origin = &origin;
+                s.spawn(move || {
+                    let url = git::resolve_submodule_url(origin, &sub.url);
+                    let branch = match sub.branch.as_str() {
+                        "" => None,
+                        "." => Some(r#ref),
+                        b => Some(b),
+                    };
+                    let want = fetch::git::Want {
+                        url: &url,
+                        rev: Some(&sub.rev),
+                        r#ref: branch,
+                        all_refs: true,
+                        local_ok,
+                    };
+                    let got = fetch::git::open(&want)?;
+                    let scm = scm::named("git").expect("iets knows git");
+                    let commit = scm.tree_at(&Trace::default(), &got.repo, &got.rev, false)?;
+                    let commit = commit.ok_or_else(|| {
+                        format!("iets: cannot read revision {} of '{url}'", got.rev)
+                    })?;
+                    let local_ok = local_ok && fetch::git::is_local(&url);
+                    mount_submodules(&got.repo, commit, &got.r#ref, local_ok)
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().expect("submodule fetch"))
+            .collect()
+    });
+    for (sub, got) in subs.iter().zip(fetched) {
+        let got = got?;
+        commit.entries.retain(|(p, _)| p != &sub.path);
+        if got.entries.is_empty() {
+            commit.entries.push((sub.path.clone(), Entry::Empty));
+        }
+        for (p, e) in got.entries {
+            commit.entries.push(([&sub.path[..], b"/", &p].concat(), e));
+        }
+    }
+    Ok(commit)
 }
 
 /// [`commit_tree`] for a flake root, with its `subdir`. The revision has to
@@ -197,7 +268,7 @@ pub fn commit_source(
     subdir: &str,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", false, pos)? else {
+    let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", false, None, true, pos)? else {
         return Err(Error::boxed(
             ErrorKind::Io,
             format!(

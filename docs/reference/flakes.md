@@ -133,13 +133,10 @@ The root tree and `path:` inputs never need this.
    decides. When no daemon answers, iets skips this step without a word.
 3. **iets downloads it.** `github`, `gitlab`, `sourcehut` and `tarball`
    inputs are one download each, into the input store.
-4. **iets asks Nix.** For `git` and `hg`, iets runs
-   `nix eval --raw --impure --expr '(builtins.fetchTree <locked
-   attrs>).outPath'` and checks that the path Nix reports is the one the
-   lock implies, so a different file set is an error. If no `nix` other than
-   iets itself is on `PATH`, you get
-   `iets: input '<name>' is not in the store and nix is not on PATH; fetch
-   it with nix (...) first`.
+4. **iets clones it.** A `git` input goes into a shallow clone under
+   `$XDG_CACHE_HOME/iets/git/`, and its tree must match the lock's
+   `narHash`. `hg` inputs, and `git` inputs with `lfs` or `verifyCommit`,
+   still go through the real `nix`, which must be on `PATH`.
 
 `file` inputs are not supported. Their store path is the flat hash of the
 bytes, which the lock's `narHash` does not give.
@@ -232,7 +229,7 @@ resolved, because the entry holds no bytes for it.
 entry only when it sends the NAR, straight to whichever builder the build
 targets (`docs/reference/builders.md`).
 
-**What needs a daemon.** `git` and `hg` inputs go through
+**What needs a daemon.** `hg` inputs go through
 `nix eval (builtins.fetchTree ...)`, which writes to `/nix/store`.
 `builtins.storePath` on a path that is not on disk asks the daemon to
 substitute it, and it has no input store entry, because its content address

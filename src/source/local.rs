@@ -13,16 +13,16 @@ use crate::sys::{self, OsStrExt};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{fs, io};
+use std::{fs, io, mem, thread};
 
-use super::scm::Scm;
+use super::scm::{Scm, Snapshot};
 use super::{AttrVal, Attrs, Tree, store_commit};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar;
 use crate::store::path::StorePath;
 use crate::store::source::{SourceOrigin, SrcPath};
-use crate::trace::{self, TreeFp};
+use crate::trace::{self, Kind, Trace, TreeFp};
 use crate::treestore;
 
 /// A directory copied whole, as a `path:` input.
@@ -134,9 +134,13 @@ pub fn tracked_source(
     scm: &'static dyn Scm,
     root: &Path,
     subdir: &str,
+    submodules: bool,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let (mut tree, _) = workdir(ev, scm, root, "source", false, pos)?;
+    let (mut tree, _) = workdir(ev, scm, root, "source", false, submodules, pos)?;
+    if submodules {
+        tree.attrs.insert("submodules".into(), AttrVal::Bool(true));
+    }
     tree.subdir = subdir.to_string();
     Ok(tree)
 }
@@ -209,6 +213,49 @@ pub fn commit_source(
     Ok(tree)
 }
 
+/// Adds each submodule listed in `.gitmodules` as its own working tree, like
+/// git.cc:getAccessorFromWorkdir. A dirty submodule makes the whole tree
+/// dirty. A gitlink missing from `.gitmodules` becomes an empty directory.
+fn add_submodules(
+    trace: &Trace,
+    scm: &dyn Scm,
+    root: &Path,
+    at: &mut Snapshot,
+) -> Result<(), String> {
+    let configured = scm.submodules(trace, root)?;
+    let links = mem::take(&mut at.gitlinks);
+    at.files.extend(links.iter().cloned());
+    let subs = thread::scope(|s| {
+        let running: Vec<_> = links
+            .iter()
+            .filter(|l| configured.contains(*l))
+            .map(|l| s.spawn(|| submodule(trace, scm, l)))
+            .collect();
+        running
+            .into_iter()
+            .map(|h| h.join().expect("submodule snapshot"))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    for sub in subs {
+        at.dirty |= sub.dirty;
+        at.files.extend(sub.files);
+    }
+    Ok(())
+}
+
+fn submodule(trace: &Trace, scm: &dyn Scm, root: &Path) -> Result<Snapshot, String> {
+    let marker = scm.root_marker(root);
+    if trace.stat_now(marker.as_os_str().as_bytes(), true) == Kind::Missing {
+        return Err(format!(
+            "iets: the submodule '{}' is not checked out; run `git submodule update --init`",
+            root.display()
+        ));
+    }
+    let mut at = scm.snapshot(trace, root)?;
+    add_submodules(trace, scm, root, &mut at)?;
+    Ok(at)
+}
+
 /// The working tree of an SCM under the store name `name`, without what
 /// `Scm::export_ignored` drops when `export` is set, and whether it is dirty.
 pub fn workdir(
@@ -217,11 +264,14 @@ pub fn workdir(
     root: &Path,
     name: &str,
     export: bool,
+    submodules: bool,
     pos: Pos,
 ) -> EvalResult<(Tree, bool)> {
-    let at = scm
-        .snapshot(ev.trace(), root)
-        .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
+    let io = |e: String| Error::boxed(ErrorKind::Io, e, pos);
+    let mut at = scm.snapshot(ev.trace(), root).map_err(io)?;
+    if submodules {
+        add_submodules(ev.trace(), scm, root, &mut at).map_err(io)?;
+    }
     let mut accepted = accepted_set(root, &at.files);
     if export {
         let dropped = scm

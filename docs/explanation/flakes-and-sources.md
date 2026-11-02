@@ -101,7 +101,8 @@ tracing cache checks again. git is its only implementation.
 
 For a git working tree, the tree is the set of index entries that still
 exist in the working tree, with the working tree's contents and modes.
-Untracked files, `.git` and submodules are excluded. `git` supplies the
+Untracked files, `.git` and, without `?submodules=1`, submodules are
+excluded. `git` supplies the
 tree before the evaluation starts: `ls-files --stage -v` and
 `status --porcelain -uno` give the file set and the dirty flag, and
 `rev-parse HEAD` and `log -1 --format=%ct` give the revision and its date.

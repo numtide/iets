@@ -348,6 +348,7 @@ impl Scm for Git {
         // getWorkdirInfo reads, still calls it deleted when it is not on disk
         let ls = query(trace, root, Query::GitLsFiles)?;
         let mut files: HashSet<PathBuf> = HashSet::new();
+        let mut gitlinks = Vec::new();
         let mut dirty = false;
         for entry in ls.split(|&b| b == 0).filter(|e| !e.is_empty()) {
             let Some(tab) = entry.iter().position(|&b| b == b'\t') else {
@@ -355,10 +356,13 @@ impl Scm for Git {
             };
             let mut fields = entry[..tab].split(|&b| b == b' ');
             let tag = fields.next().unwrap_or(b"");
+            let file = root.join(OsStr::from_bytes(&entry[tab + 1..]));
             if fields.next().unwrap_or(b"") == b"160000" {
+                if fields.nth(1) == Some(b"0") {
+                    gitlinks.push(file);
+                }
                 continue;
             }
-            let file = root.join(OsStr::from_bytes(&entry[tab + 1..]));
             if tag != b"H" && trace.stat_now(file.as_os_str().as_bytes(), false) == Kind::Missing {
                 dirty = true;
                 continue;
@@ -387,7 +391,47 @@ impl Scm for Git {
             rev: head.or_else(|| (!dirty).then(|| NULL_REV.to_string())),
             last_modified,
             countable: !shallow,
+            gitlinks,
         })
+    }
+
+    fn submodules(&self, trace: &Trace, root: &Path) -> Result<HashSet<PathBuf>, String> {
+        if observe(trace, &root.join(".gitmodules")).is_none() {
+            return Ok(HashSet::new());
+        }
+        let args = [
+            "config",
+            "-z",
+            "-f",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.(path|url)$",
+        ];
+        // Not traced. `.gitmodules` itself was observed above.
+        let (_, out) = run(&Trace::default(), root, &args)?;
+        let mut paths = HashMap::new();
+        let mut urls = HashSet::new();
+        for entry in out.split(|&b| b == 0) {
+            let Some(nl) = entry.iter().position(|&b| b == b'\n') else {
+                continue;
+            };
+            let (key, value) = (&entry[..nl], &entry[nl + 1..]);
+            let Some(key) = key.strip_prefix(b"submodule.") else {
+                continue;
+            };
+            if let Some(name) = key.strip_suffix(b".path") {
+                paths.insert(name, root.join(OsStr::from_bytes(value)));
+            } else if let Some(name) = key.strip_suffix(b".url")
+                && !value.is_empty()
+            {
+                urls.insert(name);
+            }
+        }
+        Ok(paths
+            .into_iter()
+            .filter(|(name, _)| urls.contains(name))
+            .map(|(_, path)| path)
+            .collect())
     }
 
     fn export_ignored(

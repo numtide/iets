@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::{env, result, slice, thread};
 
-use super::scm::{Commit, Entry, named};
+use super::scm::{Commit, Entry};
 use super::{AttrVal, Attrs, Tree, attrs_to_json, parse_nar_hash, str_attr, to_url};
 use crate::builtins::store_hooks;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
@@ -32,7 +32,7 @@ use crate::store::nar;
 use crate::store::path::{IngestionMethod, StorePath};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::treestore::{self, Rejected, StoredTree};
-use crate::{config, nixbin, sys, trace};
+use crate::{config, nixbin, trace};
 use serde_json::Value;
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
@@ -288,7 +288,7 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
 /// that, and reads come out of the spool by offset (`crate::treestore`). A
 /// reachable daemon is asked to substitute first, since a local copy beats a
 /// download. A `git` or `hg` input still goes through Nix's `fetchTree`, which
-/// writes `/nix/store`. Never called for a `path` input.
+/// writes `/nix/store`. Never called for the root tree or a `path` input.
 pub fn ensure_readable(
     ev: &mut Evaluator,
     sp: &StorePath,
@@ -297,17 +297,6 @@ pub fn ensure_readable(
     pos: Pos,
 ) -> EvalResult<()> {
     check_local(ev, attrs, pos)?;
-    readable(ev, sp, nar_hash, attrs, pos)
-}
-
-/// [`ensure_readable`] without the allow list, which does not judge the root.
-fn readable(
-    ev: &mut Evaluator,
-    sp: &StorePath,
-    nar_hash: &Hash,
-    attrs: &Attrs,
-    pos: Pos,
-) -> EvalResult<()> {
     ev.known.lock().entry(sp.clone()).or_default();
     let full = sp.to_full_string();
     if valid_in_store(ev, sp, IngestionMethod::Recursive, nar_hash) {
@@ -812,48 +801,20 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
     Ok(())
 }
 
-/// A local Git flake root with its submodules, which Nix fetches. iets does
-/// not track files inside submodules, so the run is uncacheable.
-pub fn submodule_root(ev: &mut Evaluator, root: &Path, subdir: &str, pos: Pos) -> EvalResult<Tree> {
-    ev.trace().mark_uncacheable();
-    let path = String::from_utf8_lossy(&sys::path_to_internal(root)).into_owned();
-    let url = flakeref::fix_git_url(&path)
-        .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
-    let mut attrs = Attrs::from([
-        ("type".into(), AttrVal::Str("git".into())),
-        ("url".into(), AttrVal::Str(url)),
-        ("submodules".into(), AttrVal::Bool(true)),
-    ]);
-    let (path, hash, mut got) =
-        fetch_git_with_nix("fetchTree", &attrs, &root.display().to_string(), pos)?;
-    got.remove("outPath");
-    attrs.extend(got);
-    readable(ev, &path, &hash, &attrs, pos)?;
-    let counter = str_attr(&attrs, "rev")
-        .map(|_| (named("git").expect("iets knows git"), root.to_path_buf()));
-    Ok(Tree {
-        path,
-        attrs,
-        subdir: subdir.to_string(),
-        counter,
-    })
-}
-
-/// `builtins.<builtin>` of a Git input, run by Nix: `args` are the call's
-/// attributes, `shown` is the input as Nix names it. Returns the store path,
-/// its NAR hash and the result's attributes with `type` and `outPath`.
+/// Runs `builtins.fetchGit` of a commit with Nix. `args` are the call's
+/// attributes and `shown` is the input as Nix names it. Returns the store
+/// path, its NAR hash and the result's attributes with `type` and `outPath`.
 pub fn fetch_git_with_nix(
-    builtin: &str,
     args: &Attrs,
     shown: &str,
     pos: Pos,
 ) -> EvalResult<(StorePath, Hash, Attrs)> {
     let expr = format!(
-        "let r = builtins.{builtin} (builtins.fromJSON {}); \
+        "let r = builtins.fetchGit (builtins.fromJSON {}); \
          in builtins.toJSON (builtins.removeAttrs r [ \"outPath\" ] // {{ path = r.outPath; }})",
         nix_string_literal(&attrs_to_json(args))
     );
-    let missing = || format!("iets: builtins.{builtin} of '{shown}' needs nix on PATH");
+    let missing = || format!("iets: builtins.fetchGit of '{shown}' needs nix on PATH");
     let what = format!("the Git repository '{shown}'");
     let (ok, stdout, said) = nix_eval(&what, &expr, missing, true, pos)?;
     if !ok {

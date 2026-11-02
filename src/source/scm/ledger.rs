@@ -61,6 +61,7 @@ impl Scm for Ledger {
             rev: rev.map(str::to_string),
             last_modified: date.and_then(|d| d.parse().ok()).unwrap_or(0),
             countable: true,
+            gitlinks: Vec::new(),
         })
     }
 

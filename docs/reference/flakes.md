@@ -33,10 +33,8 @@ prints.
   without a `rev` is an error: iets resolves no reference of a root flake.
   Other query parameters, including `submodules` on a `git+file:` root,
   are errors.
-- **Submodules of a local Git working tree**: `.?submodules=1#attr` has
-  Nix's `fetchTree` copy the tree with its initialized submodules into the
-  store, which needs `nix` on `PATH`. iets evaluates the result without the
-  tracing cache, since it does not track files inside submodules.
+- **Submodules of a local Git working tree**: `.?submodules=1#attr`
+  includes the checked-out submodules, nested ones too.
 - iets does not take these, so classic mode falls back to Nix on them:
   - registry references (`nixpkgs#hello`, and `x#y` even where `./x`
     exists, as in Nix);
@@ -271,7 +269,7 @@ source control system iets reads (`docs/explanation/flakes-and-sources.md`).
 
 | Source | What the tree is, and its metadata |
 |:---|:---|
-| git | the files in git's index that still exist in the working tree, with their working-tree contents and modes; untracked files, `.git` and submodules are left out. Clean: `rev`, `shortRev`, `revCount` (not in a shallow clone; deprecated, lint `rev-count`). Dirty: `dirtyRev`, `dirtyShortRev`. `submodules = false` always. `lastModified` is the time of the HEAD commit. iets counts `revCount` only when the evaluation reads it, and the tracing cache keeps the count per revision |
+| git | the files in git's index that still exist in the working tree, with their working-tree contents and modes; untracked files, `.git` and, without `?submodules=1`, submodules are left out. Clean: `rev`, `shortRev`, `revCount` (not in a shallow clone; deprecated, lint `rev-count`). Dirty: `dirtyRev`, `dirtyShortRev`. `submodules` as given. `lastModified` is the time of the HEAD commit. iets counts `revCount` only when the evaluation reads it, and the tracing cache keeps the count per revision |
 | path | the whole directory; `lastModified` is the newest `lstat` mtime in it |
 
 The store path is the fixed-output path of the tree's NAR hash, named

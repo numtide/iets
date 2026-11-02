@@ -190,9 +190,9 @@ fn workdir_root(url: &str) -> Option<String> {
 }
 
 /// git.cc:getAccessorFromWorkdir, with fetchTree.cc:emitTreeAttrs'
-/// `emptyRevFallback`. `None` when Nix must answer: the tree is not a
-/// working tree, it has submodules to copy, or its count needs history
-/// that a shallow clone does not have.
+/// `emptyRevFallback`. Returns `None`, leaving it to Nix, when the path is
+/// not a working tree, when `submodules` and `exportIgnore` are both set, or
+/// when a shallow clone lacks the history for `revCount`.
 fn from_workdir(
     ev: &mut Evaluator,
     args: &Attrs,
@@ -205,18 +205,13 @@ fn from_workdir(
         return Ok(None);
     }
     let submodules = bool_attr(args, "submodules").unwrap_or(false);
-    if submodules {
-        let gitmodules = root.join(".gitmodules");
-        let found = ev
-            .trace()
-            .stat_now(gitmodules.as_os_str().as_bytes(), false);
-        if found != Kind::Missing {
-            return Ok(None);
-        }
+    let export = bool_attr(args, "exportIgnore").unwrap_or(false);
+    // Nix applies exportIgnore inside each submodule. iets does not yet.
+    if submodules && export {
+        return Ok(None);
     }
     let name = str_attr(args, "name").unwrap_or("source");
-    let export = bool_attr(args, "exportIgnore").unwrap_or(false);
-    let (mut tree, dirty) = source::workdir(ev, git, root, name, export, pos)?;
+    let (mut tree, dirty) = source::workdir(ev, git, root, name, export, submodules, pos)?;
     let shallow = bool_attr(args, "shallow").unwrap_or(false);
     if !dirty && !shallow && tree.counter.is_none() {
         return Ok(None);
@@ -300,7 +295,7 @@ fn from_nix(ev: &mut Evaluator, args: &Attrs, shown: &str, pos: Pos) -> EvalResu
     if !locked {
         ev.trace().mark_uncacheable();
     }
-    let (path, nar_hash, attrs) = source::fetch_git_with_nix("fetchGit", args, shown, pos)?;
+    let (path, nar_hash, attrs) = source::fetch_git_with_nix(args, shown, pos)?;
     let mut input = Attrs::new();
     for k in ["type", "rev", "narHash"] {
         input.extend(attrs.get(k).map(|v| (k.to_string(), v.clone())));

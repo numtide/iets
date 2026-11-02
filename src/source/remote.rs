@@ -13,7 +13,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::{result, slice, thread};
+use std::{env, result, slice, thread};
 
 use super::scm::{Commit, Entry};
 use super::{AttrVal, Attrs, Tree, attrs_to_json, parse_nar_hash, str_attr, to_url};
@@ -867,7 +867,18 @@ fn nix_eval(
     };
     // git may ask for credentials on the terminal, as under Nix
     let suspended = log::suspend();
-    let mut child = Command::new(&nix)
+    let mut cmd = Command::new(&nix);
+    // the fetch must land in iets's eval store, not NIX_REMOTE's (#305)
+    if env::var_os("NIX_REMOTE").is_some_and(|v| !v.is_empty()) {
+        let store = nix_conf(&Session::current()).store();
+        let store = if store == "auto" || store.is_empty() {
+            "daemon"
+        } else {
+            &store
+        };
+        cmd.args(["--store", store]);
+    }
+    let mut child = cmd
         .env("IETS_FETCHING", "1")
         .args([
             "--extra-experimental-features",

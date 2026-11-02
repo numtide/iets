@@ -159,12 +159,7 @@ impl Validity {
         let mut ask = vec![path.to_string()];
         if !self.tried {
             self.tried = true;
-            let session = Session::current();
-            if let Some(t @ Transport::Unix(_)) = Transport::parse(&nix_conf(&session).store())
-                && let Ok(c) = Connection::open(&t, &mut |_| {})
-            {
-                self.conn = Some(c);
-            }
+            self.conn = local_daemon();
             if self.conn.is_some() {
                 ask.extend(more());
             }
@@ -179,6 +174,13 @@ impl Validity {
                 None
             }
         }
+    }
+}
+
+pub(crate) fn local_daemon() -> Option<Connection> {
+    match Transport::parse(&nix_conf(&Session::current()).store())? {
+        t @ Transport::Unix(_) => Connection::open(&t, &mut |_| {}).ok(),
+        _ => None,
     }
 }
 

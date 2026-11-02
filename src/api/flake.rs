@@ -53,6 +53,13 @@ pub fn url(fr: &FlakeRef) -> String {
             };
             format!("{}+file://{}{dir}", scm.name(), url_path(root))
         }
+        SourceRef::Submodules { root, subdir } => {
+            let dir = match subdir.as_str() {
+                "" => String::new(),
+                d => format!("&dir={d}"),
+            };
+            format!("git+file://{}?submodules=1{dir}", url_path(root))
+        }
         _ => format!("path:{}", fr.dir.display()),
     }
 }

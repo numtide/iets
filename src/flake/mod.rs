@@ -107,7 +107,9 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
     if let Some(why) = why {
         return Err(Error::Unsupported(why));
     }
-    if p.input.len() > 2 || !p.dir.is_empty() {
+    let submodules =
+        p.bare && p.input.len() == 3 && source::str_attr(&p.input, "submodules") == Some("1");
+    if (p.input.len() > 2 && !submodules) || !p.dir.is_empty() {
         return Err(Error::Unsupported(format!(
             "query parameters in flake reference '{arg}' are not supported"
         )));
@@ -123,7 +125,23 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
         _ if loc.starts_with('/') => loc.as_bytes().to_vec(),
         _ => [cwd, b"/", loc.as_bytes()].concat(),
     };
-    local_flake(&full, !p.bare, parse_attr_path(&p.fragment)?)
+    let mut fr = local_flake(&full, !p.bare, parse_attr_path(&p.fragment)?)?;
+    if submodules {
+        fr.source = match &fr.source {
+            SourceRef::Tracked { scm, root, subdir } if scm.name() == "git" => {
+                SourceRef::Submodules {
+                    root: root.clone(),
+                    subdir: subdir.clone(),
+                }
+            }
+            _ => {
+                return Err(Error::Unsupported(
+                    "'submodules=1' needs a local Git checkout".into(),
+                ));
+            }
+        };
+    }
+    Ok(fr)
 }
 
 /// `git+file:///path[?ref=…&rev=…][&dir=…]`: the flake in `dir` of that
@@ -301,7 +319,9 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
 
     if fr.probed {
         let found = match &fr.source {
-            SourceRef::Tracked { root, .. } => Some(root.as_path()),
+            SourceRef::Tracked { root, .. } | SourceRef::Submodules { root, .. } => {
+                Some(root.as_path())
+            }
             _ => None,
         };
         source::scm::record_detect(ev.trace(), &fr.dir, found);
@@ -716,6 +736,8 @@ mod tests {
             assert!(unsupported(r).contains("only local paths"), "{r}");
         }
         assert!(unsupported(".?dir=sub").contains("query parameters"));
+        assert!(unsupported("path:./sub?submodules=1").contains("query parameters"));
+        assert!(unsupported(".?submodules=1").contains("local Git checkout"));
         assert!(unsupported("hg+https://x.org/a#x").contains("not supported"));
         assert!(matches!(
             parse_flake_ref("./x#%zz", cwd, None),

@@ -57,6 +57,10 @@ const GLOBALS: &[(&str, usize)] = &[
     ("-j", 1),
     ("--max-jobs", 1),
     ("--cores", 1),
+    // nixos-rebuild passes these to `nix build`.
+    ("--verbose", 0),
+    ("-v", 0),
+    ("--quiet", 0),
     ("-k", 0),
     ("--keep-going", 0),
 ];
@@ -568,7 +572,7 @@ fn realise(
 ) -> i32 {
     let roots = flat_roots(targets);
     let style = Style {
-        quiet: !n.print_build_logs,
+        quiet: n.c.quiet || !n.print_build_logs,
         ..Style::detect()
     };
     let mut d = match Dispatch::open(transport, options, plan, Provenance::off(), style) {
@@ -784,6 +788,15 @@ mod tests {
     fn eval_takes_print_build_logs() {
         assert!(parse_eval(&args(&["-L", "--expr", "1"])).is_ok());
         assert!(parse_eval(&args(&["--print-build-logs", "--expr", "1"])).is_ok());
+    }
+
+    #[test]
+    fn log_level_flags_are_global() {
+        assert!(!parse_build(&args(&["--verbose", ".#a"])).unwrap().c.quiet);
+        assert!(parse_build(&args(&["-v", ".#a"])).is_ok());
+        assert!(parse_eval(&args(&["--verbose", "--expr", "1"])).is_ok());
+        assert!(parse_build(&args(&["--quiet", ".#a"])).unwrap().c.quiet);
+        assert_eq!(find_sub(&args(&["--verbose", "build", ".#a"])), Ok(1));
     }
 
     #[test]

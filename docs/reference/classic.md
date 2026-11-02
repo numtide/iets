@@ -177,6 +177,13 @@ stderr, because nix-eval-jobs prints none.
 
 iets handles these subcommands. Every other one runs the real `nix`.
 
+Every subcommand takes the global flags: `--impure`, `--pure-eval`,
+`--no-pure-eval`, `--accept-flake-config`, `--show-trace`, `--log-format`,
+`--experimental-features` and `--extra-experimental-features`, `--option`,
+`-I`/`--include`, `--arg`/`--argstr`, `--store`, `--flake-registry`,
+`--eval-store`, `-j`/`--max-jobs`, `--cores`, `-k`/`--keep-going`,
+`-K`/`--keep-failed`, `--quiet` and `-v`/`--verbose`.
+
 #### `nix eval [INSTALLABLE]`
 
 Flags: `--json`, `--raw`, `--expr E`, `-f`/`--file FILE`, `--impure`,
@@ -523,7 +530,7 @@ these:
   switches the log format to `raw`. `--quiet` does the same here. In Nix it
   lowers the log level by one.
 - A flag or setting that has no effect gives one warning on stderr, where
-  Nix prints nothing: `-v`, `--eval-store auto` and `log-lines`, and
+  Nix prints nothing: `-v`/`--verbose`, `--eval-store auto` and `log-lines`, and
   `--accept-flake-config` and `accept-flake-config = true` when the flake
   has a `nixConfig`. Any other client setting
   that iets has nothing for (`restrict-eval`, `eval-system`, …) falls back.

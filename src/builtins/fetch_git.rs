@@ -17,7 +17,6 @@ use crate::lint::purity;
 use crate::log;
 use crate::runtime::Word;
 use crate::source::{self, AttrVal, Attrs, Tree, bool_attr, scm, str_attr};
-use crate::store::path::StorePath;
 use crate::trace::Kind;
 
 const NULL_REV: &str = "0000000000000000000000000000000000000000";
@@ -301,26 +300,7 @@ fn from_nix(ev: &mut Evaluator, args: &Attrs, shown: &str, pos: Pos) -> EvalResu
     if !locked {
         ev.trace().mark_uncacheable();
     }
-    let got = source::fetch_git_with_nix(args, shown, pos)?;
-    let mut attrs = Attrs::from([("type".into(), AttrVal::Str("git".into()))]);
-    for (k, v) in &got {
-        let v = match v {
-            serde_json::Value::String(s) => AttrVal::Str(s.clone()),
-            serde_json::Value::Bool(b) => AttrVal::Bool(*b),
-            serde_json::Value::Number(n) => match n.as_u64() {
-                Some(n) => AttrVal::Int(n),
-                None => continue,
-            },
-            _ => continue,
-        };
-        attrs.insert(k.clone(), v);
-    }
-    let bad = || Error::boxed(ErrorKind::Eval, "iets: nix gave no store path", pos);
-    let out = str_attr(&attrs, "outPath").ok_or_else(bad)?;
-    let path = StorePath::parse(out).map_err(|_| bad())?;
-    let nar_hash = str_attr(&attrs, "narHash")
-        .and_then(|h| source::parse_nar_hash(h).ok())
-        .ok_or_else(|| Error::boxed(ErrorKind::Eval, "iets: nix gave no narHash", pos))?;
+    let (path, nar_hash, attrs) = source::fetch_git_with_nix("fetchGit", args, shown, pos)?;
     let mut input = Attrs::new();
     for k in ["type", "rev", "narHash"] {
         input.extend(attrs.get(k).map(|v| (k.to_string(), v.clone())));

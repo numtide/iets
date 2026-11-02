@@ -578,12 +578,8 @@ fn fetch_git() {
             && stderr(&b.ours).contains("is forbidden in pure evaluation mode"),
         show(&b),
     );
-    // a rev and a ref of a local repository are read without the real nix;
-    // a dir without `nix` would fall through to the one on PATH
-    let nonix = s.no_nix();
-    let stub = nonix.join("nix");
-    fs::write(&stub, format!("#!{}\nexit 1\n", resolved("bash").display())).unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    // a rev and a ref of a local repository are read without the real nix
+    let nonix = s.failing_nix();
     for arg in [
         format!(r#"{{ url = {path}; rev = "{more}"; }}"#),
         format!(r#"{{ url = {path}; ref = "ann"; }}"#),
@@ -650,4 +646,94 @@ fn fetch_git() {
         "lib.fileset.gitTracked of a clean working tree",
         &f.both("nix", &e),
     );
+}
+
+/// fetchGit with `submodules = true` on a working tree, compared with Nix:
+/// nested submodules, a gitlink missing from `.gitmodules`, and an edit
+/// inside a nested submodule.
+#[test]
+fn fetch_git_submodules() {
+    let s = store!();
+    let f = Farm::new(&s);
+    let mut c = Checks::default();
+    let init = |dir: &Path, file: &str| {
+        fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q"]);
+        fs::write(dir.join(file), format!("{file}\n")).unwrap();
+        git(dir, &["add", "-A"]);
+        e2e::git_commit(dir, "init", "1700000000 +0000");
+    };
+    let add = |repo: &Path, url: &Path, at: &str| {
+        let url = url.to_str().unwrap();
+        let args = [
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            url,
+            at,
+        ];
+        git(repo, &args);
+        git(repo, &["add", "-A"]);
+        e2e::git_commit(repo, "sub", "1700000100 +0000");
+    };
+    let leaf = s.dir().join("leaf");
+    let mid = s.dir().join("mid");
+    let repo = s.dir().join("super repo");
+    init(&leaf, "c");
+    init(&mid, "b");
+    add(&mid, &leaf, "leaf");
+    init(&repo, "a");
+    add(&repo, &mid, "mid");
+    let update = [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+    ];
+    git(&repo, &update);
+    let rev = git(&repo, &["rev-parse", "HEAD"]);
+    git(
+        &repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{rev},unnamed"),
+        ],
+    );
+    e2e::git_commit(&repo, "gitlink", "1700000200 +0000");
+
+    let arg = format!(r#"{{ url = "{}"; submodules = true; }}"#, repo.display());
+    let expr = format!(
+        r#"let r = builtins.fetchGit {arg}; in builtins.removeAttrs r [ "outPath" ] // {{ out = r.outPath; c = builtins.readFile (r + "/mid/leaf/c"); }}"#
+    );
+    let hash = format!("(builtins.fetchGit {arg}).narHash");
+    // iets must match Nix's hash without falling back to nix
+    let native = |c: &mut Checks, label: &str| {
+        c.same(
+            label,
+            &f.both("nix", &["eval", "--impure", "--json", "--expr", &expr]),
+        );
+        let real = f
+            .both("nix", &["eval", "--impure", "--raw", "--expr", &hash])
+            .real;
+        let ours = f
+            .ours("nix")
+            .env("IETS_NIX_BIN_DIR", s.failing_nix())
+            .args(["eval", "--impure", "--raw", "--expr", &hash])
+            .output()
+            .unwrap();
+        c.check(
+            &format!("{label} runs no nix"),
+            ours.status.success() && ours.stdout == real.stdout,
+            stderr(&ours),
+        );
+    };
+    native(&mut c, "fetchGit with submodules");
+    fs::write(repo.join("mid/leaf/c"), "changed\n").unwrap();
+    native(&mut c, "fetchGit with a dirty nested submodule");
 }

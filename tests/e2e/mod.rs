@@ -160,6 +160,17 @@ impl Store {
         d
     }
 
+    /// A dir whose `nix` always fails, for IETS_NIX_BIN_DIR. An empty one
+    /// would let iets fall through to the nix on PATH.
+    pub fn failing_nix(&self) -> PathBuf {
+        let d = self.dir().join("failbin");
+        fs::create_dir_all(&d).unwrap();
+        let stub = d.join("nix");
+        fs::write(&stub, format!("#!{}\nexit 1\n", resolved("bash").display())).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        d
+    }
+
     /// Writes `template` to `name` in the store's dir, with `@SYSTEM@`,
     /// `@SHELL@` (an absolute bash) and `@NONCE@` filled in.
     pub fn write(&self, name: &str, template: &str) -> PathBuf {

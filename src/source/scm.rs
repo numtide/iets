@@ -34,6 +34,8 @@ pub struct Snapshot {
     /// The SCM has the whole history of the revision, so `Scm::rev_count`
     /// has an answer. A shallow clone has not.
     pub countable: bool,
+    /// Submodule paths (gitlinks in the index), absolute.
+    pub gitlinks: Vec<PathBuf>,
 }
 
 /// One entry of a revision's tree.
@@ -77,6 +79,12 @@ pub trait Scm: Sync {
     /// from a tracked file is recorded in `trace`, so the tracing cache
     /// asks again.
     fn snapshot(&self, trace: &Trace, root: &Path) -> Result<Snapshot, String>;
+
+    /// Absolute paths of the submodules that `.gitmodules` lists with a URL.
+    /// Records `.gitmodules` in `trace`.
+    fn submodules(&self, _trace: &Trace, _root: &Path) -> Result<HashSet<PathBuf>, String> {
+        Ok(HashSet::new())
+    }
 
     /// The number of revisions up to `rev` in the working tree at `root`,
     /// for a tree that is `countable`. The answer follows from `rev`, so it

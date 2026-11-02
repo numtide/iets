@@ -129,7 +129,7 @@ pub enum SourceRef {
         root: PathBuf,
         subdir: String,
     },
-    /// A local Git working tree with initialized submodules, fetched by Nix.
+    /// A local Git working tree with its submodules (`?submodules=1`).
     Submodules { root: PathBuf, subdir: String },
     /// One revision of a local repository, which the SCM reads out of it
     /// (git.cc:getAccessorFromCommit). `git+file:///path?rev=…` names this,
@@ -180,9 +180,12 @@ pub fn tree(ev: &mut Evaluator, r: &SourceRef, pos: Pos) -> EvalResult<Tree> {
     match r {
         SourceRef::Path(dir) => local::path_source(ev, dir, pos),
         SourceRef::Tracked { scm, root, subdir } => {
-            local::tracked_source(ev, *scm, root, subdir, pos)
+            local::tracked_source(ev, *scm, root, subdir, false, pos)
         }
-        SourceRef::Submodules { root, subdir } => remote::submodule_root(ev, root, subdir, pos),
+        SourceRef::Submodules { root, subdir } => {
+            let git = scm::named("git").expect("iets knows git");
+            local::tracked_source(ev, git, root, subdir, true, pos)
+        }
         SourceRef::Commit {
             scm,
             root,

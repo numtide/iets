@@ -39,6 +39,12 @@ too, written `file:line:column:«__genList»`, so the time inside it is not
 charged to the lambda that called it. A frame holds no `;` and no space,
 so a path that has either is rewritten.
 
+A forced thunk is a frame too, so a value's cost goes to the binding that
+holds it and not only to the call that forced it. A thunk in a binding is
+`file:line:column:name«thunk»`, at the binding. Any other thunk is
+`file:line:column:«thunk»`, at its expression, and a `mapAttrs` entry is
+`name«attr»`.
+
 ## What it costs
 
 Without `IETS_PROFILE` a call and a return pay one branch: +0.3 %
@@ -55,8 +61,8 @@ to anything but 1, the run stops with an error.
 Each worker can only sample its own stack, and that stack starts at the
 thunk the worker was handed. At many workers you would get many short
 stacks, often one frame each. At one worker, the same `hello` evaluation
-gives stacks of more than 80 frames. Laziness biases the result, as in Nix's
-profiler: the cost of a thunk goes to whichever caller forced it first.
+gives stacks of more than 80 frames. A thunk's cost sits under whichever
+caller forced it first, in its own frame.
 
 ## What it does not see
 

@@ -225,7 +225,13 @@ fn fetch(want: &Want) -> Result<Fetched, String> {
 
     let secs = nix_conf(&Session::current()).int("tarball-ttl");
     let ttl = Duration::from_secs(secs.ok().flatten().unwrap_or(3600));
-    let uses_default = want.r#ref.is_none() && (want.rev.is_none() || want.all_refs);
+    // A rev the clone already holds is read without a fetch, so the remote's
+    // default branch, which `allRefs` would look it up on, is never used.
+    // Asking for it anyway costs a round trip per call: a rev-only fetch
+    // never creates the branch the cached `HEAD` names, so that is never
+    // trusted.
+    let cached_rev = want.rev.is_some() && resolve(&dir, want, "HEAD").is_ok();
+    let uses_default = want.r#ref.is_none() && !cached_rev && (want.rev.is_none() || want.all_refs);
     let r#ref = match want.r#ref {
         Some(r) => r.to_string(),
         None if uses_default => default_ref(&dir, want, ttl),

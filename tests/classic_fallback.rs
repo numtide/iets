@@ -788,6 +788,38 @@ fn fetch_git_remote() {
         let args = ["eval", "--impure", "--json", "--expr", &expr];
         c.same(&format!("fetchGit {label}"), &native(&f, &s, &args));
     }
+    // a cached `allRefs` rev needs nothing from the remote, not even its
+    // default branch: crane fetches every git crate this way, and asking
+    // the remote each time cost a round trip per crate per evaluation. A
+    // clone of its own, which only ever sees fetches by rev.
+    let pinned = s.dir().join("pinned.git");
+    let (from, to) = (s.dir().join("super.git"), pinned.to_str().unwrap());
+    git(
+        s.dir(),
+        &["clone", "-q", "--bare", from.to_str().unwrap(), to],
+    );
+    let pinned_url = format!("file://{to}");
+    let at = format!(
+        r#"(builtins.fetchGit {{ url = "{pinned_url}"; rev = "{feature}"; allRefs = true; }}).rev"#
+    );
+    let eval = || {
+        f.ours("nix")
+            .env("IETS_CACHE", "0")
+            .args(["eval", "--impure", "--raw", "--expr", &at])
+            .output()
+            .unwrap()
+    };
+    let o = eval();
+    c.check("an allRefs rev is fetched", o.status.success(), stderr(&o));
+    let gone = s.dir().join("pinned.git.gone");
+    fs::rename(&pinned, &gone).unwrap();
+    let o = eval();
+    c.check(
+        "a cached allRefs rev does not ask the remote for its HEAD",
+        o.status.success() && !stderr(&o).contains("HEAD ref"),
+        stderr(&o),
+    );
+    fs::rename(&gone, &pinned).unwrap();
     // offline, a cached clone still answers, and a new download is an error
     let offline = |expr: &str| {
         let mut o = f.ours("nix");

@@ -118,7 +118,12 @@ impl EvalArgs {
 
     /// `base` plus what these arguments set: the lints, the IR cache, the
     /// search path and `--dump-drvs`. `base` holds the system and `pure-eval`.
+    /// `cache_dir` goes on `base`'s session, for the stores that are not the
+    /// evaluator's (`Session::set_cache_dir`).
     pub fn config(&self, base: EvalConfig) -> Result<EvalConfig, Box<Error>> {
+        if let Some(d) = &self.cache_dir {
+            base.configured_session().set_cache_dir(d);
+        }
         let c = base
             .lints(lint_config(self)?)
             .ir_cache(self.ir_cache())

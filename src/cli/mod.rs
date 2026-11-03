@@ -122,7 +122,11 @@ pub fn cache_flag(a: &mut EvalArgs, s: &str, mut next: impl FnMut() -> String) -
             }
             a.workers = n;
         }
-        "--cache-dir" => a.cache_dir = Some(next()),
+        "--cache-dir" => {
+            let d = next();
+            Session::current().set_cache_dir(&d);
+            a.cache_dir = Some(d);
+        }
         _ => return false,
     }
     true

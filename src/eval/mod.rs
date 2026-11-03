@@ -704,6 +704,12 @@ impl EvalConfig {
         self.system
     }
 
+    /// The session the evaluator will adopt: the one given to `session`, or
+    /// the thread's when the configuration was made.
+    pub fn configured_session(&self) -> &Arc<Session> {
+        &self.session
+    }
+
     /// `system` and `pure-eval` shape the builtins, so they are fixed
     /// before `builtins::install` (docs/reference/settings.md).
     pub fn build(self) -> Evaluator {

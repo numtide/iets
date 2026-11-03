@@ -21,7 +21,7 @@ because a word made up from bits would let a safe call read any address.
 | What | Where |
 |:---|:---|
 | Create an evaluator | `eval::Evaluator::new()` for the defaults; `eval::EvalConfig::new()`, its setters, then `build()` |
-| Settings of the arguments | `EvalArgs::config(base)` puts the lints, the IR cache, the search path and `--dump-drvs` on an `EvalConfig` |
+| Settings of the arguments | `EvalArgs::config(base)` puts the lints, the IR cache, the search path and `--dump-drvs` on an `EvalConfig`, and `cache_dir` on its session |
 | The state a run owns | `session::Session::new()`, `Session::enter()` ("What the host owns") |
 | Environment settings | `Session::settings()`, `Session::load_settings(&opts)` (docs/reference/settings.md) |
 | Where messages go | `Session::log.write_to(Box<dyn Write + Send>)`, `write_to_stderr()` |
@@ -85,6 +85,13 @@ started them. For your own threads, call `Session::enter` on each, or use
 `session::bind(f)`. A thread that entered no session uses a fallback session
 that writes nowhere. `docs/how-to/embed-the-evaluator.md` has the steps with
 code.
+
+`EvalArgs::cache_dir` moves every cache store of the session, as
+`--cache-dir` does: the IR and tracing caches through the arguments, and the
+input store, the Git and LFS caches and the GC roots through the session
+(`Session::set_cache_dir`). The input store is placed on its first use, so
+set the directory before the first fetch. On the fallback session it moves
+nothing, as that session is every thread's.
 
 ## Sessions and memory
 

@@ -93,7 +93,11 @@ pub fn root(override_dir: Option<&str>) -> Option<PathBuf> {
     if let Some(d) = override_dir {
         return Some(PathBuf::from(d));
     }
-    if let Some(d) = &Session::current().settings().cache_dir {
+    let session = Session::current();
+    if let Some(d) = session.cache_dir.lock().unwrap().clone() {
+        return Some(d);
+    }
+    if let Some(d) = &session.settings().cache_dir {
         return Some(d.clone());
     }
     let base = match env::var_os("XDG_CACHE_HOME") {

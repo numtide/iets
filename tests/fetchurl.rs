@@ -146,3 +146,21 @@ fn without_a_hash_no_evaluation_fetches_and_prefetch_gives_the_hash(scratch: Scr
         "/nix/store/3ay25cl2lpykmx07i7m22qxz7zwzqmvy-hello.txt"
     );
 }
+
+#[rstest]
+fn cache_dir_holds_the_input_store_over_the_environment(scratch: Scratch) {
+    let url = &scratch.url;
+    let call = format!(r#"builtins.fetchurl {{ url = "{url}"; sha256 = "{SHA256}"; }}"#);
+    let flag = scratch.root.join("flag-cache");
+    let o = scratch.eval(false, &["--cache-dir", flag.to_str().unwrap()], &call);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let entry = "3ay25cl2lpykmx07i7m22qxz7zwzqmvy-hello.txt";
+    assert!(
+        flag.join("inputs").join(entry).is_file(),
+        "no entry under --cache-dir"
+    );
+    assert!(
+        !scratch.root.join("cache/inputs").exists(),
+        "the input store went to IETS_CACHE_DIR"
+    );
+}

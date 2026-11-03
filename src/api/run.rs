@@ -282,4 +282,66 @@ mod tests {
         assert_eq!(one, n as u64, "one derivation per list element");
         assert_eq!(four, one, "the helper fibers' derivations are counted too");
     }
+
+    /// A host's `cache_dir` moves the stores the evaluator does not hold,
+    /// the input store among them, as `--cache-dir` does; on a thread that
+    /// entered no session it leaves the process's fallback session alone.
+    /// The session given to the configuration holds the input store even
+    /// on a thread that entered none, with one worker as with several.
+    #[test]
+    fn a_host_cache_dir_holds_the_input_store() {
+        let d = tempdir().unwrap();
+        let root = sys::fs::canonicalize(d.path()).unwrap();
+        fs::write(root.join("hello.txt"), b"hello fetchurl\n").unwrap();
+        // `C:\x` on Windows is `file:///C:/x`
+        let file = root
+            .join("hello.txt")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let url = if file.starts_with('/') {
+            format!("file://{file}")
+        } else {
+            format!("file:///{file}")
+        };
+        let expr = format!(
+            r#"builtins.fetchurl {{ url = "{url}"; sha256 = "113a52l57f2jv9fh9igj2xh2mi0is40flxbkqi69wbh7nlybkcbm"; }}"#
+        );
+        let cache = root.join("cache");
+        let unentered = args("1", &cache, 1);
+        thread::spawn(move || unentered.config(EvalConfig::new()).map(|_| ()))
+            .join()
+            .unwrap()
+            .expect("the arguments configure");
+        let fallback = thread::spawn(|| Session::current().cache_dir.lock().unwrap().clone());
+        assert_eq!(fallback.join().unwrap(), None, "the fallback session moved");
+        // a session handed to the configuration, on a thread that entered none
+        let given = Session::new();
+        let (g, a) = (given.clone(), args("1", &cache, 1));
+        thread::spawn(move || a.config(EvalConfig::new().session(g)).map(|_| ()))
+            .join()
+            .unwrap()
+            .expect("the arguments configure");
+        assert_eq!(*given.cache_dir.lock().unwrap(), Some(cache.clone()));
+
+        for workers in [1, 4] {
+            let cache = root.join(format!("cache-w{workers}"));
+            let a = args(&expr, &cache, workers);
+            thread::spawn(move || {
+                let cfg = EvalConfig::new().pure(false).session(Session::new());
+                Run::over(cfg, &a)
+                    .expect("the arguments configure")
+                    .go(move |ev, _| api::evaluate(ev, a).map(|_| ()))
+                    .expect("the fiber stacks")
+                    .expect("the fetch evaluates")
+            })
+            .join()
+            .unwrap();
+            let entry = cache.join("inputs/3ay25cl2lpykmx07i7m22qxz7zwzqmvy-hello.txt");
+            assert!(
+                entry.is_file(),
+                "no input-store entry under cache_dir, {workers} workers"
+            );
+        }
+    }
 }

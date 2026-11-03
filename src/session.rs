@@ -10,7 +10,9 @@
 
 use std::cell::RefCell;
 use std::panic;
+use std::path::PathBuf;
 use std::process;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -38,6 +40,10 @@ pub struct Session {
     /// Where this run's instrumentation events go (`crate::events`).
     pub events: Events,
     settings: OnceLock<Settings>,
+    /// `--cache-dir` or `EvalArgs::cache_dir`, which the settings are read
+    /// too early to hold: it comes before `IETS_CACHE_DIR` for every store
+    /// (`cachefs::root`). Set with [`Session::set_cache_dir`].
+    pub cache_dir: Mutex<Option<PathBuf>>,
     /// What this run was asked for and does not do (`crate::ignored`).
     pub ignored: Ignored,
     /// The local tree store this run reads fetched trees from
@@ -115,6 +121,18 @@ impl Session {
         let s = Settings::load(options)?;
         let _ = self.settings.set(s);
         Ok(())
+    }
+
+    /// Moves every store of this session under `dir`, the stores that take
+    /// no directory of their own included (`cachefs::root`). The input store
+    /// is placed on its first use, so a later call does not move it. On the
+    /// fallback session, the one of every thread that entered none, it does
+    /// nothing: one host's directory would become every thread's.
+    pub fn set_cache_dir(&self, dir: &str) {
+        if ptr::eq(self, &*fallback()) {
+            return;
+        }
+        *self.cache_dir.lock().unwrap() = Some(PathBuf::from(dir));
     }
 
     /// Settings made elsewhere, for a run whose file did not load.

@@ -13,6 +13,7 @@ use std::{hint, process, ptr};
 use super::deque::Deque;
 use super::fiber::{self, Fiber};
 use super::force;
+use super::interner;
 use super::thunk::WaiterTable;
 use crate::runtime::{Arena, Word};
 use crate::session::{self, Session};
@@ -151,6 +152,8 @@ pub struct Slot {
 pub struct Worker {
     pub idx: usize,
     pub arena: Arena,
+    /// The interner cache this worker lends the fiber it runs.
+    pub icache: interner::Cache,
     pool: Vec<*mut Slot>,
     spinning: bool,
     rng: u64,
@@ -956,6 +959,7 @@ impl Worker {
         Worker {
             idx,
             arena: Arena::new(),
+            icache: interner::empty_cache(),
             pool: Vec::new(),
             spinning: false,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (idx as u64 + 1),

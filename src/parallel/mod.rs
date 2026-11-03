@@ -102,7 +102,10 @@ pub fn try_run<R: Send + 'static>(
     }
     // the workers inherit it, so their arenas map into this session's heap
     let _entered = ev.session().clone().enter();
-    let template = force::SyncEv(ev.clone());
+    let mut template = ev.clone();
+    // every fiber's evaluator borrows its worker's interner cache
+    template.interner.drop_cache();
+    let template = force::SyncEv(template);
     let rt = sched::Runtime::start(workers, Box::new(template), stack_size())?;
     let user = Box::into_raw(Box::new(ev)) as *mut ();
     let out = Arc::new(Mutex::new(None));

@@ -143,6 +143,33 @@ impl DrvHashCache {
     pub fn contains_key(&self, p: &StorePath) -> bool {
         self.0.contains_key(p)
     }
+
+    /// The entries of `inputs` that `self` holds, as a cache of their own:
+    /// what hashing a derivation with those inputs reads.
+    pub fn subset<'a>(&self, inputs: impl Iterator<Item = &'a StorePath>) -> DrvHashCache {
+        let mut c = DrvHashCache::default();
+        for p in inputs {
+            if let Some(h) = self.0.get(p) {
+                c.0.insert(p.clone(), Arc::clone(h));
+            }
+        }
+        c
+    }
+
+    /// Moves the entries of `other` that `self` lacks into `self`.
+    pub fn absorb(&mut self, other: DrvHashCache) {
+        for (k, v) in other.0 {
+            self.0.entry(k).or_insert(v);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Reads a .drv that is not in the cache. Mirrors Store::readInvalidDerivation.

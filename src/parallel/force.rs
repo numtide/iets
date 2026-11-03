@@ -78,6 +78,7 @@ impl Driver for SyncEv {
         // so nothing else references its evaluator.
         let ev = unsafe { ev_of(slot) };
         mem::swap(&mut ev.arena, &mut w.arena);
+        ev.interner.swap_cache(&mut w.icache);
         // a fiber parked in the middle of a task keeps its counters until it
         // is resumed, which a stats line printed meanwhile would not see
         ev.fold_counters();

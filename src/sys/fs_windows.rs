@@ -18,6 +18,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// 100 ns ticks from 1601 to the Unix epoch.
 const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
+/// `sync_all`: Windows has no cheaper ordering barrier.
+pub fn sync_ordered(f: &File) -> io::Result<()> {
+    f.sync_all()
+}
+
 /// Whether `name`, which holds no `/`, names one entry of its directory:
 /// no other separator, no stream, and no device. The devices are the
 /// reserved names of "Naming Files, Paths, and Namespaces": CON, PRN, AUX,

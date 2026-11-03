@@ -422,7 +422,9 @@ impl PackWriter {
         self.file.write_all(&index)?;
         self.file.write_all(&tail)?;
         self.file.flush()?;
-        self.file.get_ref().sync_all()?;
+        // a reader checks the index, not the objects, so the bytes go
+        // down before the name
+        sysfs::sync_ordered(self.file.get_ref())?;
         let name: String = digest.as_bytes()[..16]
             .iter()
             .map(|b| format!("{b:02x}"))

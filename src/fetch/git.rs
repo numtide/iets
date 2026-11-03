@@ -94,7 +94,7 @@ fn run(mut c: Command) -> (bool, String) {
 }
 
 /// `git ARGS` in `dir`: whether it succeeded, and its output.
-fn git(dir: &Path, args: &[&str]) -> (bool, String) {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> (bool, String) {
     run(command(dir, args))
 }
 

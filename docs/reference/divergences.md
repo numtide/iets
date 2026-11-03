@@ -405,8 +405,8 @@ nix. `fetchTarball` and `fetchTree` work for some inputs;
 - A hash mismatch exits with 1. Nix exits with 102.
 - A download error has iets's own text, not curl's.
 
-`builtins.fetchGit` does its own fetching, except with `lfs`, which runs
-the real `nix`. It differs from Nix in these ways:
+`builtins.fetchGit` does its own fetching. It differs from Nix in these
+ways:
 
 - `verifyCommit`, `publicKey` and `publicKeys` work without the
   `verified-fetches` experimental feature.

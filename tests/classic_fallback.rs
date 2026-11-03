@@ -7,6 +7,8 @@ mod hermetic;
 
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -15,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use e2e::classic::{Both, Checks, Farm, NAMES, show};
 use e2e::{Store, ok, resolved, stderr, stdout};
+use sha2::{Digest, Sha256};
 
 #[test]
 fn fallbacks() {
@@ -980,6 +983,109 @@ fn fetch_git_verify_commit() {
     c.check(
         "an ECDSA signature verifies",
         o.status.success(),
+        stderr(&o),
+    );
+}
+
+/// fetchGit with `lfs`: a pointer file holds its object, which a small
+/// batch API server hands out.
+#[test]
+fn fetch_git_lfs() {
+    let s = store!();
+    let f = Farm::new(&s);
+    let mut c = Checks::default();
+    let object = b"the large file\n".repeat(100);
+    let hex = |b: &[u8]| -> String {
+        Sha256::digest(b)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let oid = hex(&object);
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", server.local_addr().unwrap());
+    // the second object only the `.lfsconfig` endpoint hands out
+    let other = b"the other file\n".repeat(100);
+    let other_oid = hex(&other);
+    let batch = |oid: &str, size: usize, path: &str| {
+        format!(
+            r#"{{"objects":[{{"oid":"{oid}","size":{size},"actions":{{"download":{{"href":"{base}/{path}"}}}}}}]}}"#
+        )
+    };
+    let size = object.len();
+    let (first, second) = (batch(&oid, size, "a"), batch(&other_oid, other.len(), "b"));
+    let (served, other_served) = (object.clone(), other.clone());
+    thread::spawn(move || {
+        for conn in server.incoming() {
+            let Ok(mut conn) = conn else { return };
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && conn.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_lowercase();
+            let len = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0);
+            let _ = conn.read_exact(&mut vec![0; len]);
+            let (status, body) = match head.split(' ').take(2).collect::<Vec<_>>()[..] {
+                ["post", "/custom/objects/batch"] => ("200 OK", second.as_bytes()),
+                ["post", p] if !p.starts_with("/custom") => ("200 OK", first.as_bytes()),
+                ["get", "/a"] => ("200 OK", &served[..]),
+                ["get", "/b"] => ("200 OK", &other_served[..]),
+                _ => ("404 Not Found", &b""[..]),
+            };
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = conn.write_all(&[reply.as_bytes(), body].concat());
+        }
+    });
+    let work = s.dir().join("work");
+    fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "trunk"]);
+    // the batch API is at `<origin>.git/info/lfs`
+    git(&work, &["remote", "add", "origin", &format!("{base}/repo")]);
+    fs::write(work.join(".gitattributes"), "*.bin filter=lfs -text\n").unwrap();
+    let pointer =
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n");
+    fs::write(work.join("big.bin"), pointer).unwrap();
+    fs::write(work.join("small"), "small\n").unwrap();
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "lfs", "1700000000 +0000");
+    let rev_was = git(&work, &["rev-parse", "HEAD"]);
+    let rev = rev_was.clone();
+    let expr = format!(
+        r#"builtins.readFile ((builtins.fetchGit {{ url = "file://{}"; rev = "{rev}"; lfs = true; }}) + "/big.bin")"#,
+        work.display()
+    );
+    let args = ["eval", "--impure", "--raw", "--expr", &expr];
+    c.same("fetchGit lfs", &native(&f, &s, &args));
+    // git-lfs takes an `lfs.url` as it is, also from a committed `.lfsconfig`
+    git(&work, &["remote", "remove", "origin"]);
+    let lfsconfig = format!("[lfs]\n\turl = {base}/custom\n");
+    fs::write(work.join(".lfsconfig"), lfsconfig).unwrap();
+    let pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{other_oid}\nsize {}\n",
+        other.len()
+    );
+    fs::write(work.join("big.bin"), pointer).unwrap();
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "lfsconfig", "1700000001 +0000");
+    let rev = git(&work, &["rev-parse", "HEAD"]);
+    let expr = expr.replace(&rev_was, &rev);
+    let mut o = f.ours("nix");
+    o.env("IETS_NIX_BIN_DIR", s.failing_nix());
+    let o = o
+        .args(["eval", "--impure", "--raw", "--expr", &expr])
+        .output()
+        .unwrap();
+    c.check(
+        "a committed .lfsconfig names the endpoint",
+        o.status.success() && o.stdout == other,
         stderr(&o),
     );
 }

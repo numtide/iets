@@ -75,8 +75,8 @@ You get a `hint` only when iets is sure of the fix:
   again.
 - A `git` input whose tree is not the one the lock names has code
   `hash-mismatch` (Nix reports a NAR hash mismatch). The hint names the
-  usual causes: a `.gitattributes` filter such as git-lfs, `export-subst`,
-  or a submodule.
+  usual causes: a `.gitattributes` filter, `export-subst` or a
+  submodule.
 - A file in the working tree of a git flake that git does not track gives
   Nix's error (`Path 'F' in the repository "R" is not tracked by Git.`),
   and the hint is the `git -C "R" add "F"` that makes it visible.

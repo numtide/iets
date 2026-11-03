@@ -38,7 +38,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `derivationStrict` | works | An `env` name, `builder` and `system` must be UTF-8. Nix accepts any bytes. |
 | `div` | works | A `let` binding of `__div` does not change `/`. In Nix it does. |
 | `fetchClosure` | fails | In classic mode it needs the `fetch-closure` feature, as in Nix. |
-| `fetchGit` | works | iets does the fetch itself. With `lfs` it runs the real `nix`, which must be on `PATH`. In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev` fails. |
+| `fetchGit` | works | iets does the fetch itself, Git LFS files included. In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev` fails. |
 | `fetchMercurial` | fails | |
 | `fetchTarball` | partial | Needs a `sha256`. |
 | `fetchTree` | partial | Type `path` works for an absolute path. Types `github`, `gitlab`, `sourcehut`, `git`, `tarball` and `hg` need a `narHash`. Other types fail. In pure evaluation, `path` also needs a `narHash`, and every type but `path` and `tarball` needs a `rev`. In classic mode it needs the `fetch-tree` or `flakes` feature, as in Nix. |

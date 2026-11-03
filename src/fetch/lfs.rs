@@ -149,6 +149,9 @@ fn authenticate(rest: &str) -> Result<(String, Option<String>), String> {
         Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => (h, Some(p)),
         _ => (authority, None),
     };
+    if host.starts_with('-') {
+        return Err(format!("refusing ssh host '{host}'"));
+    }
     let mut args: Vec<String> = Vec::new();
     if let Ok(opts) = env::var("NIX_SSHOPTS") {
         args.extend(shell_split(&opts).map_err(|e| e.to_string())?);
@@ -158,8 +161,8 @@ fn authenticate(rest: &str) -> Result<(String, Option<String>), String> {
     }
     let path = format!("/{path}");
     args.extend([
-        host.to_string(),
         "--".into(),
+        host.to_string(),
         "git-lfs-authenticate".into(),
         path,
         "download".into(),
@@ -369,6 +372,12 @@ fn cache_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_is_never_an_ssh_option() {
+        let e = authenticate("-oFoo/o/r").unwrap_err();
+        assert!(e.contains("refusing ssh host '-oFoo'"), "{e}");
+    }
 
     #[test]
     fn an_scp_origin_is_ssh() {

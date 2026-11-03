@@ -1,7 +1,7 @@
 //! Anonymous memory: mapping, giving back and fencing off address space.
 
-use std::io;
-use std::ptr;
+use std::fs::File;
+use std::{fmt, io, ptr, slice};
 
 use rustix::mm::{MapFlags, MprotectFlags, ProtFlags, mmap_anonymous, munmap};
 
@@ -30,6 +30,68 @@ pub unsafe fn reset(p: *mut u8, len: usize) {
             MapFlags::PRIVATE | MapFlags::FIXED,
         )
     };
+}
+
+/// A file mapped read-only, unmapped when dropped: a spooled tarball, which
+/// every pass over its members reads in place of a `pread` per member.
+pub struct FileMap {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: a read-only mapping; nothing writes through it.
+unsafe impl Send for FileMap {}
+// SAFETY: as above.
+unsafe impl Sync for FileMap {}
+
+impl FileMap {
+    /// The first `len` bytes of `file`, or `None` when they cannot be mapped
+    /// (and the caller reads the file instead).
+    ///
+    /// # Safety
+    /// Nothing truncates `file` while the map lives: a read past its end
+    /// would be `SIGBUS`.
+    pub unsafe fn new(file: &File, len: u64) -> Option<FileMap> {
+        if file.metadata().ok()?.len() < len {
+            return None;
+        }
+        let len = usize::try_from(len).ok().filter(|&n| n > 0)?;
+        // SAFETY: a fresh read-only mapping of a file the caller owns and does
+        // not truncate while the mapping lives.
+        let p = unsafe {
+            rustix::mm::mmap(
+                ptr::null_mut(),
+                len,
+                ProtFlags::READ,
+                MapFlags::SHARED,
+                file,
+                0,
+            )
+        }
+        .ok()?;
+        // the index reads it front to back, the passes after it in tree order
+        // SAFETY: the range is the mapping just made.
+        let _ = unsafe { rustix::mm::madvise(p, len, rustix::mm::Advice::WillNeed) };
+        Some(FileMap { ptr: p.cast(), len })
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: `len` mapped, readable bytes, alive as long as `self`.
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for FileMap {
+    fn drop(&mut self) {
+        // SAFETY: the mapping `new` made; nothing borrows it past `self`.
+        let _ = unsafe { munmap(self.ptr.cast(), self.len) };
+    }
+}
+
+impl fmt::Debug for FileMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FileMap({} bytes)", self.len)
+    }
 }
 
 pub fn page_size() -> usize {

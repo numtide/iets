@@ -27,6 +27,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::sys::fs as sysfs;
+use crate::sys::vm::FileMap;
 use crate::sys::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -113,8 +114,40 @@ pub struct Tree {
 
 #[derive(Debug)]
 enum Source {
-    Spool { spool: File, sparse: Option<File> },
+    /// `map` is the spool mapped once it is written whole: the index and
+    /// every pass over the members read it, where a `pread` each cost as
+    /// much as hashing the member (`FileMap`).
+    Spool {
+        spool: File,
+        sparse: Option<File>,
+        map: Option<FileMap>,
+    },
     Packs(Arc<Packs>),
+}
+
+/// What the index reads the archive through: the mapping, or the file when
+/// it could not be mapped.
+enum Reader<'a> {
+    Map(io::Cursor<&'a [u8]>),
+    File(&'a File),
+}
+
+impl Read for Reader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Reader::Map(c) => c.read(buf),
+            Reader::File(f) => f.read(buf),
+        }
+    }
+}
+
+impl Seek for Reader<'_> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        match self {
+            Reader::Map(c) => c.seek(to),
+            Reader::File(f) => f.seek(to),
+        }
+    }
 }
 
 /// Version byte of the serialized index. A file that starts with anything else
@@ -240,16 +273,24 @@ impl Tree {
         let mut links: BTreeMap<Parts, Parts> = Default::default();
         let mut sparse: Option<File> = None;
         let mut sparse_at = 0u64;
-        let mut room = max_size.saturating_sub(
-            spool
-                .metadata()
-                .map_err(|e| Error::io("cannot read the spooled tarball", e))?
-                .len(),
-        );
+        let spool_len = spool
+            .metadata()
+            .map_err(|e| Error::io("cannot read the spooled tarball", e))?
+            .len();
+        let mut room = max_size.saturating_sub(spool_len);
+        // SAFETY: the spool is an unnamed scratch file (`scratch`), so no
+        // other process can open it, and nothing here truncates it.
+        let map = unsafe { FileMap::new(&spool, spool_len) };
         {
-            let mut src = &spool;
-            src.rewind()
-                .map_err(|e| Error::io("cannot read the spooled tarball", e))?;
+            let src = match &map {
+                Some(m) => Reader::Map(io::Cursor::new(m.bytes())),
+                None => {
+                    let mut f = &spool;
+                    f.rewind()
+                        .map_err(|e| Error::io("cannot read the spooled tarball", e))?;
+                    Reader::File(f)
+                }
+            };
             let mut archive = tar::Archive::new(src);
             let entries = archive
                 .entries_with_seek()
@@ -381,7 +422,7 @@ impl Tree {
             insert(&mut root, &parts, Draft::Leaf(copy), false);
         }
         Ok(Tree {
-            src: Source::Spool { spool, sparse },
+            src: Source::Spool { spool, sparse, map },
             root: Node::Dir(dereference(Draft::finish(root))),
         })
     }
@@ -397,6 +438,7 @@ impl Tree {
             src: Source::Spool {
                 spool,
                 sparse: None,
+                map: None,
             },
             root: Node::File {
                 at: Blob::Spool {
@@ -426,6 +468,7 @@ impl Tree {
             src: Source::Spool {
                 spool,
                 sparse: None,
+                map: None,
             },
             root,
         }
@@ -479,6 +522,20 @@ impl Tree {
         walk(&self.root, ids)
     }
 
+    /// A spool member's bytes in the mapping, when the spool is mapped.
+    fn mapped(&self, offset: u64, size: u64, sparse: bool) -> Option<&[u8]> {
+        let Source::Spool { map: Some(m), .. } = &self.src else {
+            return None;
+        };
+        if sparse {
+            return None;
+        }
+        let b = m.bytes();
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(size).ok()?)?;
+        b.get(start..end)
+    }
+
     /// A spool member's file: no seek, so two threads may read one tree at
     /// once.
     fn spool_source(&self, sparse: bool) -> &File {
@@ -514,11 +571,14 @@ impl Tree {
                 offset,
                 size,
                 sparse,
-            } => Box::new(Bytes {
-                src: self.spool_source(sparse),
-                offset,
-                left: size,
-            }),
+            } => match self.mapped(offset, size, sparse) {
+                Some(b) => Box::new(b),
+                None => Box::new(Bytes {
+                    src: self.spool_source(sparse),
+                    offset,
+                    left: size,
+                }),
+            },
             Blob::Object { id, size } => Box::new(io::Cursor::new(self.object(&id, size)?)),
         })
     }
@@ -583,6 +643,9 @@ impl Tree {
             } => (offset, size, sparse),
             Blob::Object { id, size } => return self.object(&id, size),
         };
+        if let Some(b) = self.mapped(offset, size, sparse) {
+            return Ok(b.to_vec());
+        }
         let mut out = vec![0u8; size as usize];
         sysfs::read_exact_at(self.spool_source(sparse), &mut out, offset)
             .map_err(|_| io::Error::other("the spooled tarball is truncated"))?;

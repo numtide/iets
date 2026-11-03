@@ -438,7 +438,7 @@ impl<'a> Compiler<'a> {
 
     fn expr(&mut self, id: ExprId) -> CResult<IrRef> {
         let ir = self.expr_inner(id)?;
-        Ok(self.alloc(ir))
+        Ok(self.arena.ir_node(ir))
     }
 
     fn expr_inner(&mut self, id: ExprId) -> CResult<Ir> {

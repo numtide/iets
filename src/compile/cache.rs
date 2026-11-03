@@ -1515,7 +1515,7 @@ impl<'a> De<'a, '_> {
             }
         };
         self.nest -= 1;
-        self.ev.arena.alloc(ir)
+        self.ev.arena.ir_node(ir)
     }
 }
 

@@ -246,8 +246,15 @@ impl StorePath {
     }
 
     /// The full path `/nix/store/<hash>-<name>` (store-api.cc:printStorePath).
+    /// Made at its size: `to_string` goes through `Display`, which grows
+    /// the string over its three writes.
     pub fn to_full_string(&self) -> String {
-        self.to_string()
+        let dir = store_dir();
+        let mut s = String::with_capacity(dir.len() + 1 + self.base_name.len());
+        s.push_str(dir);
+        s.push('/');
+        s.push_str(&self.base_name);
+        s
     }
 }
 

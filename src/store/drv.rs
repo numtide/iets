@@ -1059,7 +1059,7 @@ pub fn finalize_with_inputs(
             }
             DerivationOutput::CaFloating { .. } => continue,
         };
-        let actual = actual.to_string();
+        let actual = actual.to_full_string();
         match drv.env_get(&name) {
             None | Some(b"") => drv.env_set(&name, actual.into_bytes()),
             Some(v) if v != actual.as_bytes() => {

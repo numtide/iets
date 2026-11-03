@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod ir;
+mod slices;
 
 use crate::eval::{Error, ErrorKind, Pos};
 use crate::lint::{self, Level, LintId};
@@ -19,6 +20,7 @@ use ir::{
 };
 
 use std::cell::Cell;
+use std::sync::Arc;
 use std::{env, mem};
 
 /// Names visible at the root of every file.
@@ -29,6 +31,7 @@ pub struct Globals {
     pub builtins: Option<&'static AttrsObj>,
 }
 
+#[derive(Clone)]
 enum Scope {
     /// Names and their slots; `shares` when the slots extend the frame of
     /// the scope below instead of opening one (a lambda's body lambda or
@@ -60,7 +63,7 @@ pub struct Compiler<'a> {
     lambdas: Vec<(usize, Cell<bool>)>,
     /// Sorted start offsets of each symbol's `Var`s and `inherit` names,
     /// built on the file's first `x: e`.
-    var_uses: Option<FxHashMap<Sym, Vec<u32>>>,
+    var_uses: Option<Arc<FxHashMap<Sym, Vec<u32>>>>,
     /// Directory of the file being compiled, for relative paths.
     base_dir: Vec<u8>,
     /// Global offset of this file's first byte.
@@ -77,6 +80,8 @@ pub struct Compiler<'a> {
     sym_cur_pos: Sym,
     sym_overrides: Sym,
     sym_body: Sym,
+    /// Threads a huge plain set's bindings may be compiled on (`slices`).
+    threads: usize,
 }
 
 type CResult<T> = Result<T, Box<Error>>;
@@ -187,7 +192,14 @@ impl<'a> Compiler<'a> {
             sym_cur_pos,
             sym_overrides,
             sym_body,
+            threads: 1,
         }
+    }
+
+    /// Lets a huge plain set's bindings be compiled in slices on up to
+    /// `n` threads.
+    pub fn set_threads(&mut self, n: usize) {
+        self.threads = n.max(1);
     }
 
     /// Compile a whole file. `extra_scope`, when given, is a lexical frame
@@ -980,7 +992,29 @@ impl<'a> Compiler<'a> {
         } = m;
         let mut binds: Vec<BindIr> = Vec::with_capacity(statics.len());
         let mut deferred_from: Vec<(usize, Sym, Pos, usize)> = Vec::new();
+        let sliced = if self.threads > 1 && statics.len() >= slices::PAR_MIN {
+            self.lower_statics_parallel(&statics)
+        } else {
+            None
+        };
+        let (mut sliced_values, mut sliced_diags) = match sliced {
+            Some((v, d)) => (Some(v.into_iter()), Some(d.into_iter())),
+            None => (None, None),
+        };
         for (sym, def, bpos) in statics {
+            if let (Some(vs), Some(ds)) = (&mut sliced_values, &mut sliced_diags) {
+                let value = vs.next().unwrap();
+                self.diags.extend(ds.next().unwrap());
+                if let Some(value) = value {
+                    binds.push(BindIr {
+                        sym,
+                        value,
+                        pos: bpos,
+                        scope: BindScope::Own,
+                    });
+                    continue;
+                }
+            }
             match def {
                 Def::Expr(e) => {
                     let value = self.value_expr(e, Some(sym))?;
@@ -1203,7 +1237,7 @@ impl<'a> Compiler<'a> {
         }
         let ast: &'a Ast = self.ast;
         let span = ast.span(body);
-        let uses = self.var_uses.get_or_insert_with(|| var_uses(ast));
+        let uses = self.var_uses.get_or_insert_with(|| Arc::new(var_uses(ast)));
         uses.get(&sym).is_some_and(|v| {
             let i = v.partition_point(|&p| p < span.start);
             v.get(i).is_some_and(|&p| p < span.end)

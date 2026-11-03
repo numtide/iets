@@ -29,11 +29,14 @@ pub fn futex_wake(_word: &AtomicU32, n: u32) {
     }
 }
 
-/// No prefault and no huge pages here: the pages come in on first touch.
+/// No huge pages here.
 ///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.
-pub unsafe fn prefault(_p: *mut u8, _len: usize) {}
+pub unsafe fn advise_huge(_p: *mut u8, _len: usize) {}
+
+/// Linux only: the mapping of the allocator's first arena.
+pub fn note_allocator_arena(_p: *const u8) {}
 
 /// Gives the pages back and leaves fresh zero pages in their place.
 ///

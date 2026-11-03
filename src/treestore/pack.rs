@@ -147,7 +147,8 @@ impl Pack {
                     .is_some_and(|e| e <= start);
             let shape = match loc.flags {
                 0 => loc.stored == loc.raw,
-                LZ4 => loc.stored < loc.raw,
+                // LZ4 expands a byte at most 255 times
+                LZ4 => loc.stored < loc.raw && loc.raw / 255 <= loc.stored,
                 _ => false,
             };
             if !fits || !shape {
@@ -441,30 +442,35 @@ impl Drop for PackWriter {
 #[derive(Default, Debug)]
 pub struct PackSet {
     packs: Vec<Arc<Pack>>,
+    /// Packs that do not parse, with their size, for [`collect`] to remove.
+    broken: Vec<(PathBuf, u64)>,
 }
 
 impl PackSet {
-    /// Every whole pack in `dir`. A pack that does not parse is removed: it is
-    /// a cache file, and its objects come back with the inputs that need them.
+    /// Every whole pack in `dir`. Only regular files count, so a link never
+    /// leads a later removal out of the store.
     pub fn load(dir: &Path) -> PackSet {
-        let mut packs = Vec::new();
+        let mut set = PackSet::default();
         let Ok(rd) = fs::read_dir(dir) else {
-            return PackSet::default();
+            return set;
         };
         for e in rd.flatten() {
             let path = e.path();
-            if path.extension().is_none_or(|x| x != "pack") {
+            if path.extension().is_none_or(|x| x != "pack")
+                || !e.file_type().is_ok_and(|t| t.is_file())
+            {
                 continue;
             }
             match Pack::open(&path) {
-                Ok(Some(p)) => packs.push(Arc::new(p)),
+                Ok(Some(p)) => set.packs.push(Arc::new(p)),
                 Ok(None) => {
-                    let _ = fs::remove_file(&path);
+                    let len = e.metadata().map_or(0, |m| m.len());
+                    set.broken.push((path, len));
                 }
                 Err(_) => {}
             }
         }
-        PackSet { packs }
+        set
     }
 
     pub fn find(&self, id: &Id) -> Option<(&Arc<Pack>, Loc)> {
@@ -539,13 +545,29 @@ pub struct Collected {
     pub freed: u64,
 }
 
+/// Whether `path` went, or would go on a dry run. A pack another process
+/// holds open without delete sharing stays, on Windows, for the next
+/// collection; it is not counted.
+fn remove(path: &Path, dry_run: bool) -> bool {
+    dry_run || fs::remove_file(path).is_ok()
+}
+
 /// Removes every pack that holds no object in `live`, and rewrites a pack whose
 /// dead bytes outweigh its live ones into a new pack of the live ones only. The
 /// caller holds the store's lock, so no writer publishes an entry meanwhile;
 /// a reader that has a pack open keeps reading it after the unlink.
 pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Collected> {
     let mut out = Collected::default();
-    for pack in PackSet::load(dir).packs() {
+    let set = PackSet::load(dir);
+    // a pack that does not parse is a cache file whose objects come back
+    // with the inputs that need them
+    for (path, len) in &set.broken {
+        if remove(path, dry_run) {
+            out.removed += 1;
+            out.freed += len;
+        }
+    }
+    for pack in set.packs() {
         let (mut keep, mut dead) = (0u64, 0u64);
         for (id, loc) in pack.ids() {
             if live.contains(&id) {
@@ -555,24 +577,23 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
             }
         }
         if keep == 0 {
-            out.removed += 1;
-            out.freed += pack.file_len();
-            if !dry_run {
-                fs::remove_file(pack.path())?;
+            if remove(pack.path(), dry_run) {
+                out.removed += 1;
+                out.freed += pack.file_len();
             }
         } else if dead > keep {
-            out.rewritten += 1;
-            out.freed += dead;
             if !dry_run {
                 let mut w = PackWriter::new(dir)?;
                 for (id, loc) in pack.ids().filter(|(id, _)| live.contains(id)) {
                     w.copy(id, pack, loc)?;
                 }
                 let new = w.finish()?;
-                if new.as_deref() != Some(pack.path()) {
-                    fs::remove_file(pack.path())?;
+                if new.as_deref() != Some(pack.path()) && !remove(pack.path(), false) {
+                    continue;
                 }
             }
+            out.rewritten += 1;
+            out.freed += dead;
         }
     }
     Ok(out)
@@ -581,6 +602,8 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn objects() -> Vec<Vec<u8>> {
@@ -659,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn a_set_finds_objects_across_packs_and_drops_a_broken_one() {
+    fn a_set_finds_objects_across_packs_and_only_collect_drops_a_broken_one() {
         let d = tempdir().unwrap();
         let mut a = PackWriter::new(d.path()).unwrap();
         a.add(id_of(b"one"), b"one").unwrap();
@@ -671,9 +694,34 @@ mod tests {
         let packs = Packs::open(d.path());
         assert_eq!(packs.read(&id_of(b"one")).unwrap(), b"one");
         assert_eq!(packs.read(&id_of(b"two")).unwrap(), b"two");
-        assert!(!d.path().join("junk.pack").exists());
         let err = packs.read(&id_of(b"three")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let junk = d.path().join("junk.pack");
+        let live: HashSet<Id> = [id_of(b"one"), id_of(b"two")].into();
+        let dry = collect(d.path(), &live, true).unwrap();
+        assert!(junk.exists(), "a dry run removes nothing");
+        assert_eq!((dry.removed, dry.freed), (1, 10));
+        assert_eq!(collect(d.path(), &live, false).unwrap(), dry);
+        assert!(!junk.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_that_cannot_be_removed_stays_uncounted_and_collection_goes_on() {
+        let d = tempdir().unwrap();
+        fs::write(d.path().join("junk.pack"), b"not a pack").unwrap();
+        let mut w = PackWriter::new(d.path()).unwrap();
+        w.add(id_of(b"dead"), b"dead").unwrap();
+        w.finish().unwrap();
+        fs::set_permissions(d.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let held = collect(d.path(), &HashSet::new(), false).unwrap();
+        fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(held, Collected::default());
+        assert_eq!(PackSet::load(d.path()).packs().len(), 1, "still there");
+        assert_eq!(
+            collect(d.path(), &HashSet::new(), false).unwrap().removed,
+            2
+        );
     }
 
     #[test]

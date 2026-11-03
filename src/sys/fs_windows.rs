@@ -184,6 +184,15 @@ pub fn dir_mode(b: &mut DirBuilder, _mode: u32) -> &mut DirBuilder {
 
 pub fn restrict_to_owner(_path: &Path) {}
 
+/// Windows has no owner bits to read here: the profile's ACLs decide.
+pub fn owned_by_me(_m: &Metadata) -> bool {
+    true
+}
+
+pub fn private_to_me(_m: &Metadata) -> bool {
+    true
+}
+
 pub fn make_executable(_f: &File) -> io::Result<()> {
     Ok(())
 }

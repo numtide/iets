@@ -2120,8 +2120,8 @@ impl Evaluator {
     fn eval_k_apply(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Apply { func, args, pos } = ir);
         let f = self.eval(env, func)?;
-        let mut buf: [Word; 8] = [Word::EMPTY; 8];
         if args.len() <= 8 {
+            let mut buf: [Word; 8] = [Word::EMPTY; 8];
             for (i, a) in args.iter().enumerate() {
                 buf[i] = self.maybe_thunk(env, a);
             }
@@ -2729,6 +2729,82 @@ impl Evaluator {
         parts: &[IrRef],
         pos: Pos,
     ) -> EvalResult<Word> {
+        // `+` of numbers is most of the calls: no string buffers for them
+        if !force_string && let Some((p0, rest)) = parts.split_first() {
+            let v = self.eval(env, p0)?;
+            if matches!(v.view(), Value::Int(_) | Value::Float(_)) {
+                return self.concat_numbers(env, v, rest, pos);
+            }
+            return self.concat_strings(env, force_string, parts, pos, Some(v));
+        }
+        self.concat_strings(env, force_string, parts, pos, None)
+    }
+
+    /// The rest of a `+` chain whose first operand `v` is a number.
+    fn concat_numbers(
+        &mut self,
+        env: &'static EnvObj,
+        v: Word,
+        rest: &[IrRef],
+        pos: Pos,
+    ) -> EvalResult<Word> {
+        let (mut n, mut nf, mut float) = match v.view() {
+            Value::Int(i) => (i, 0.0, false),
+            Value::Float(f) => (0, f, true),
+            _ => unreachable!("concat_numbers starts at a number"),
+        };
+        for part in rest {
+            let v = self.eval(env, part)?;
+            let ppos = ir_pos(part);
+            let ppos = if ppos.is_none() { pos } else { ppos };
+            match (float, v.view()) {
+                (false, Value::Int(i)) => match n.checked_add(i) {
+                    Some(x) => n = x,
+                    None => bail!(
+                        ErrorKind::Eval,
+                        ppos,
+                        "integer overflow in adding {} + {}",
+                        n,
+                        i
+                    ),
+                },
+                (false, Value::Float(f)) => {
+                    float = true;
+                    nf = n as f64 + f;
+                }
+                (true, Value::Int(i)) => nf += i as f64,
+                (true, Value::Float(f)) => nf += f,
+                (false, _) => bail!(
+                    ErrorKind::Eval,
+                    ppos,
+                    "cannot add {} to an integer",
+                    v.value_type().name()
+                ),
+                (true, _) => bail!(
+                    ErrorKind::Eval,
+                    ppos,
+                    "cannot add {} to a float",
+                    v.value_type().name()
+                ),
+            }
+        }
+        Ok(if float {
+            self.mk_float(nf)
+        } else {
+            self.mk_int(n)
+        })
+    }
+
+    /// `eval_concat` past its first part when that is not a number, or of
+    /// an interpolation; `pre` is the first part's value when evaluated.
+    fn concat_strings(
+        &mut self,
+        env: &'static EnvObj,
+        force_string: bool,
+        parts: &[IrRef],
+        pos: Pos,
+        pre: Option<Word>,
+    ) -> EvalResult<Word> {
         let mut first = !force_string;
         let mut first_type = ValueType::String;
         let mut n: i64 = 0;
@@ -2739,8 +2815,11 @@ impl Evaluator {
         let mut nbuf = 0usize;
         let mut spill: Vec<Cow<'static, [u8]>> = Vec::new();
         let mut ctx: Vec<Ctx> = Vec::new();
-        for part in parts {
-            let v = self.eval(env, part)?;
+        for (k, part) in parts.iter().enumerate() {
+            let v = match pre {
+                Some(v) if k == 0 => v,
+                _ => self.eval(env, part)?,
+            };
             let ppos = ir_pos(part);
             // a literal part has no position of its own: the whole concat's stands in
             let ppos = if ppos.is_none() { pos } else { ppos };

@@ -2765,8 +2765,14 @@ impl Evaluator {
                 slots[i].set(w);
             }
         }
+        // a `from` that is a plain variable of this set would copy the slot
+        // before the override replaces it
         for (j, f) in from.iter().enumerate() {
-            let w = self.maybe_thunk(env2, f);
+            let w = if overrides {
+                self.mk_thunk_counted(env2, f)
+            } else {
+                self.maybe_thunk(env2, f)
+            };
             slots[binds.len() + j].set(w);
         }
     }

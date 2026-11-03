@@ -856,6 +856,9 @@ impl Evaluator {
             self.trace.env(b"HOME");
         }
         let ir = r?;
+        if self.prof.on() {
+            self.session.profile.note_ir(ir);
+        }
         self.report_diags(&diags);
         Ok((ir, used_home, diags))
     }
@@ -906,6 +909,9 @@ impl Evaluator {
             if let Some((ir, diags, allows)) = loaded {
                 self.files[file.0 as usize].set_allows(allows);
                 self.report_diags(&diags);
+                if self.prof.on() {
+                    self.session.profile.note_ir(ir);
+                }
                 if cache.stats {
                     errln!(
                         "ir-cache load {} {} {}us",
@@ -1175,6 +1181,39 @@ impl Evaluator {
     /// Evaluate a claimed thunk from its payload word `st`.
     #[inline]
     pub fn run_thunk(&mut self, w: Word, st: Word) -> EvalResult<Word> {
+        if self.prof.on() {
+            self.run_thunk_profiled(w, st)
+        } else {
+            self.run_thunk_plain(w, st)
+        }
+    }
+
+    /// `run_thunk_plain` under a frame for the thunk.
+    #[cold]
+    #[inline(never)]
+    fn run_thunk_profiled(&mut self, w: Word, st: Word) -> EvalResult<Word> {
+        let d = self.prof.depth();
+        match w.thunk_kind() {
+            Kind::Thunk => {
+                self.prof_take();
+                self.prof.enter(profile::thunk_frame(w.as_thunk().ir()));
+            }
+            // `apply` pushes the function's own frame
+            Kind::ThunkApp | Kind::ThunkApp2 => {}
+            _ => {
+                let (md, i) = w.map_desc();
+                self.prof_take();
+                self.prof
+                    .enter(profile::attr_frame(md.out.attrs_raw()[i].sym));
+            }
+        }
+        let v = self.run_thunk_plain(w, st);
+        self.prof_leave(d);
+        v
+    }
+
+    #[inline]
+    fn run_thunk_plain(&mut self, w: Word, st: Word) -> EvalResult<Word> {
         match w.thunk_kind() {
             Kind::Thunk => {
                 let t = w.as_thunk();

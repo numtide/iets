@@ -14,7 +14,7 @@
 //! the only switch.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, Builder};
 use std::time::Duration;
 
+use crate::compile::ir::{AttrElemIr, BindIr, Ir, IrRef, ParamIr};
 use crate::eval::error::Pos;
+use crate::eval::ir_pos;
 use crate::log;
 use crate::parallel::interner::Interner;
 use crate::parallel::shared::Files;
@@ -68,6 +70,49 @@ const ANON: u32 = !PRIMOP;
 #[inline]
 pub fn frame(pos: Pos, name: Option<Sym>) -> u64 {
     ((pos.0 as u64) << 32) | name.map_or(ANON, |s| s.0) as u64
+}
+
+/// Set on a frame that is a thunk. The rest of the word is the address of
+/// the thunk's IR, which `Profile::write` turns into the binding the thunk
+/// came from.
+const THUNK: u64 = 0xFFFE << 48;
+
+/// A thunk with no binding, already resolved to the position of its IR at
+/// sample time, because the arena the IR lives in is gone when the profile is
+/// written.
+const THUNK_AT: u64 = 0xFFFD << 48;
+
+/// A `mapAttrs` entry, named by its attribute. The payload is the symbol.
+const THUNK_ATTR: u64 = 0xFFFC << 48;
+
+/// A forced `mapAttrs` entry.
+#[inline]
+pub fn attr_frame(name: Sym) -> u64 {
+    THUNK_ATTR | name.0 as u64
+}
+
+/// The address or position part of a thunk frame, below the tag.
+const PAYLOAD: u64 = (1 << 48) - 1;
+
+#[inline]
+fn is_thunk(f: u64) -> bool {
+    f >> 48 == 0xFFFE
+}
+
+#[inline]
+fn is_attr(f: u64) -> bool {
+    f >> 48 == 0xFFFC
+}
+
+#[inline]
+fn is_thunk_at(f: u64) -> bool {
+    f >> 48 == 0xFFFD
+}
+
+/// A forced thunk, named by the IR it runs.
+#[inline]
+pub fn thunk_frame(ir: *const Ir) -> u64 {
+    THUNK | (ir as u64 & PAYLOAD)
 }
 
 /// A call site and the builtin it entered.
@@ -116,6 +161,11 @@ impl Stack {
         }
     }
 
+    #[inline]
+    pub fn on(&self) -> bool {
+        self.on
+    }
+
     /// Enters `f`. The whole cost of a call that is not sampled.
     #[inline]
     pub fn enter(&mut self, f: u64) {
@@ -139,7 +189,12 @@ impl Stack {
             cpu_us
         };
         let n = self.frames.len().min(MAX_DEPTH);
-        p.sample(&self.frames[..n], w);
+        if self.frames[..n].iter().any(|&f| is_thunk(f)) {
+            let resolved: Vec<u64> = self.frames[..n].iter().map(|&f| p.resolve(f)).collect();
+            p.sample(&resolved, w);
+        } else {
+            p.sample(&self.frames[..n], w);
+        }
     }
 
     #[inline]
@@ -177,6 +232,9 @@ pub struct Profile {
     hz: AtomicU64,
     /// Where the folded lines go. `-` is stderr.
     to: OnceLock<String>,
+    /// IR address of a binding's value to `(position, name)`, from the
+    /// compiler, so a thunk frame reads as the binding it evaluates.
+    binds: Mutex<HashMap<usize, (Pos, Sym)>>,
 }
 
 impl Profile {
@@ -189,6 +247,119 @@ impl Profile {
     /// What `write` needs to turn a frame into text.
     pub fn names(&self, files: &Files, interner: &Interner) {
         let _ = self.names.set((files.clone(), interner.clone()));
+    }
+
+    /// Records the bindings in one file's IR. The IR is the one thing a
+    /// compile and a cache load both end with, so walking it covers both.
+    pub fn note_ir(&self, root: IrRef) {
+        let mut found: Vec<(usize, Pos, Sym)> = Vec::new();
+        let mut todo: Vec<IrRef> = vec![root];
+        // The IR is a tree, but a cache entry may share a node.
+        let mut seen: HashSet<usize> = HashSet::new();
+        while let Some(ir) = todo.pop() {
+            if !seen.insert(ir as *const Ir as usize) {
+                continue;
+            }
+            let mut bind = |bs: &'static [BindIr]| {
+                for b in bs {
+                    found.push((b.value as *const Ir as usize, b.pos, b.sym));
+                    todo.push(b.value);
+                }
+            };
+            match ir {
+                Ir::Attrs(a) => {
+                    bind(a.binds);
+                    todo.extend(a.from);
+                    for d in a.dynamic {
+                        todo.push(d.name);
+                        todo.push(d.value);
+                    }
+                }
+                Ir::Let(l) => {
+                    bind(l.binds);
+                    todo.extend(l.from);
+                    todo.push(l.body);
+                }
+                Ir::Lambda(l) => {
+                    if let ParamIr::Formals { formals, .. } = &l.param {
+                        todo.extend(formals.iter().filter_map(|f| f.default));
+                    }
+                    todo.push(l.body);
+                }
+                Ir::Concat { parts, .. } => todo.extend(*parts),
+                Ir::SearchPath { name, .. } => todo.push(name),
+                Ir::Select(s) | Ir::SelectCount(s) => {
+                    todo.push(s.subject);
+                    todo.extend(s.default);
+                    for e in s.path {
+                        if let AttrElemIr::Dynamic(d) = e {
+                            todo.push(d);
+                        }
+                    }
+                }
+                Ir::Select1 {
+                    subject, default, ..
+                } => {
+                    todo.push(subject);
+                    todo.extend(*default);
+                }
+                Ir::HasAttr { subject, path } => {
+                    todo.push(subject);
+                    for e in *path {
+                        if let AttrElemIr::Dynamic(d) = e {
+                            todo.push(d);
+                        }
+                    }
+                }
+                Ir::List(xs) => todo.extend(*xs),
+                Ir::Apply { func, args, .. } => {
+                    todo.push(func);
+                    todo.extend(*args);
+                }
+                Ir::With { scope, body, .. } => {
+                    todo.push(scope);
+                    todo.push(body);
+                }
+                Ir::If {
+                    cond, then, else_, ..
+                } => todo.extend([*cond, *then, *else_]),
+                Ir::Assert { cond, body, .. } => todo.extend([*cond, *body]),
+                Ir::Not(a, _) | Ir::Neg(a, _) => todo.push(a),
+                Ir::Eq(a, b, _)
+                | Ir::Ne(a, b, _)
+                | Ir::Lt(a, b, _)
+                | Ir::Gt(a, b, _)
+                | Ir::Le(a, b, _)
+                | Ir::Ge(a, b, _)
+                | Ir::And(a, b, _)
+                | Ir::Or(a, b, _)
+                | Ir::Impl(a, b, _)
+                | Ir::Update(a, b, _)
+                | Ir::ConcatLists(a, b, _)
+                | Ir::Sub(a, b, _)
+                | Ir::Mul(a, b, _)
+                | Ir::Div(a, b, _) => todo.extend([*a, *b]),
+                Ir::Const(_) | Ir::Local { .. } | Ir::WithVar { .. } | Ir::CurPos(_) => {}
+            }
+        }
+        if let Ok(mut g) = self.binds.lock() {
+            g.extend(found.into_iter().map(|(a, p, s)| (a, (p, s))));
+        }
+    }
+
+    /// Replaces a thunk frame that no binding names by its IR's position.
+    fn resolve(&self, f: u64) -> u64 {
+        if !is_thunk(f) {
+            return f;
+        }
+        let addr = (f & PAYLOAD) as usize;
+        if self.binds.lock().is_ok_and(|g| g.contains_key(&addr)) {
+            return f;
+        }
+        // SAFETY: the evaluator that pushed this frame is running, so the
+        // arena holding the IR is alive.
+        let pos = ir_pos(unsafe { &*(addr as *const Ir) });
+        THUNK_AT | pos.0 as u64
     }
 
     fn sample(&self, frames: &[u64], weight: u64) {
@@ -245,6 +416,27 @@ impl Profile {
     /// flame graph tool reads must hold no `;` and no space; a Nix path can
     /// hold either, so both are replaced.
     fn describe(&self, f: u64) -> String {
+        if is_attr(f) {
+            let Some((_, interner)) = self.names.get() else {
+                return "«thunk»".to_string();
+            };
+            let s = format!("{}«attr»", interner.name_str(Sym((f & PAYLOAD) as u32)));
+            return s.replace(';', ",").replace(' ', "_");
+        }
+        if is_thunk_at(f) {
+            return self.describe_thunk(Pos((f & PAYLOAD) as u32), None);
+        }
+        if is_thunk(f) {
+            let known = self
+                .binds
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&((f & PAYLOAD) as usize)).copied());
+            return match known {
+                Some((p, s)) => self.describe_thunk(p, Some(s)),
+                None => "«thunk»".to_string(),
+            };
+        }
         let pos = Pos((f >> 32) as u32);
         let low = f as u32;
         let Some((files, interner)) = self.names.get() else {
@@ -268,6 +460,26 @@ impl Profile {
             s = s.replace(';', ",").replace(' ', "_");
         }
         s
+    }
+
+    /// `file:line:col:name«thunk»` for a thunk whose IR sits in a binding,
+    /// and the IR's own position with no name for any other.
+    fn describe_thunk(&self, pos: Pos, name: Option<Sym>) -> String {
+        let Some((files, interner)) = self.names.get() else {
+            return "«thunk»".to_string();
+        };
+        let at = match files.file_of(pos) {
+            Some((file, off)) => {
+                let (l, c) = file.line_col(off);
+                format!("{}:{l}:{c}", String::from_utf8_lossy(&file.path))
+            }
+            None => "«none»".to_string(),
+        };
+        let s = match name {
+            Some(n) => format!("{at}:{}«thunk»", interner.name_str(n)),
+            None => format!("{at}:«thunk»"),
+        };
+        s.replace(';', ",").replace(' ', "_")
     }
 }
 
@@ -323,6 +535,129 @@ mod tests {
         let mut v: Vec<_> = g.iter().map(|(k, c)| (k.to_vec(), *c)).collect();
         v.sort();
         v
+    }
+
+    use crate::compile::ir::{AttrsIr, BindScope, FormalIr, LambdaIr, LetIr};
+    use crate::runtime::Word;
+
+    fn leak<T>(v: T) -> &'static T {
+        Box::leak(Box::new(v))
+    }
+
+    fn konst() -> IrRef {
+        leak(Ir::Const(Word::NULL))
+    }
+
+    fn bind(sym: u32, value: IrRef, pos: u32) -> BindIr {
+        BindIr {
+            sym: Sym(sym),
+            value,
+            pos: Pos(pos),
+            scope: BindScope::Own,
+        }
+    }
+
+    fn bound(p: &Profile, ir: IrRef) -> Option<(Pos, Sym)> {
+        p.binds
+            .lock()
+            .unwrap()
+            .get(&(ir as *const Ir as usize))
+            .copied()
+    }
+
+    #[test]
+    fn no_frame_reads_as_another_kind() {
+        // `Pos::NONE` puts all ones in the top half of a call frame
+        let none = frame(Pos::NONE, None);
+        let prim = primop_frame(Pos::NONE, Sym(1));
+        let lam = frame(Pos(0x7FFF_FFFE), Some(Sym(1)));
+        for f in [none, prim, lam, frame(Pos(1), None)] {
+            assert!(!is_thunk(f) && !is_thunk_at(f) && !is_attr(f), "{f:#x}");
+        }
+        let ir = konst();
+        let t = thunk_frame(ir);
+        assert!(is_thunk(t) && !is_thunk_at(t) && !is_attr(t));
+        assert_eq!((t & PAYLOAD) as usize, ir as *const Ir as usize);
+        let a = attr_frame(Sym(u32::MAX));
+        assert!(is_attr(a) && !is_thunk(a));
+        assert_eq!((a & PAYLOAD) as u32, u32::MAX);
+        assert!(is_thunk_at(THUNK_AT | 5) && !is_thunk(THUNK_AT | 5));
+    }
+
+    #[test]
+    fn the_ir_walk_finds_the_bindings_of_lets_sets_and_lambdas() {
+        let p = Profile::default();
+        let (a, b, c, d) = (konst(), konst(), konst(), konst());
+        let set = leak(Ir::Attrs(leak(AttrsIr {
+            rec: false,
+            binds: leak([bind(2, b, 20)]),
+            from: &[],
+            dynamic: &[],
+            pos: Pos(0),
+            overrides: None,
+        })));
+        let lam = leak(Ir::Lambda(leak(LambdaIr {
+            param: ParamIr::Formals {
+                has_bind: false,
+                formals: leak([FormalIr {
+                    sym: Sym(9),
+                    default: Some(c),
+                    pos: Pos(0),
+                }]),
+                ellipsis: false,
+            },
+            body: d,
+            pos: Pos(0),
+            name: None,
+            arg: None,
+            closed: true,
+            no_env: false,
+            base: 0,
+            frame: 1,
+        })));
+        let root = leak(Ir::Let(leak(LetIr {
+            binds: leak([bind(1, a, 10), bind(3, set, 30), bind(4, lam, 40)]),
+            from: &[],
+            body: konst(),
+            base: LetIr::OWN_ENV,
+        })));
+        p.note_ir(root);
+        assert_eq!(bound(&p, a), Some((Pos(10), Sym(1))));
+        // a set under a binding, and its own bindings
+        assert_eq!(bound(&p, set), Some((Pos(30), Sym(3))));
+        assert_eq!(bound(&p, b), Some((Pos(20), Sym(2))));
+        assert_eq!(bound(&p, lam), Some((Pos(40), Sym(4))));
+        // a formal's default is not a binding
+        assert_eq!(bound(&p, c), None);
+        assert_eq!(bound(&p, d), None);
+    }
+
+    #[test]
+    fn a_node_two_parents_share_is_walked_once() {
+        let p = Profile::default();
+        let shared = konst();
+        let root = leak(Ir::List(leak([shared, shared])));
+        p.note_ir(root);
+        assert!(p.binds.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unnamed_thunk_is_resolved_to_its_position() {
+        let p = Profile::default();
+        let named = konst();
+        p.note_ir(leak(Ir::Let(leak(LetIr {
+            binds: leak([bind(1, named, 10)]),
+            from: &[],
+            body: konst(),
+            base: LetIr::OWN_ENV,
+        }))));
+        // a binding's thunk keeps its frame, and anything else gets a position
+        assert_eq!(p.resolve(thunk_frame(named)), thunk_frame(named));
+        let anon = leak(Ir::CurPos(Pos(77)));
+        let r = p.resolve(thunk_frame(anon));
+        assert!(is_thunk_at(r));
+        assert_eq!(r & PAYLOAD, 77);
+        assert_eq!(p.resolve(frame(Pos(5), None)), frame(Pos(5), None));
     }
 
     #[test]

@@ -158,6 +158,31 @@ fn parse_store_path(p: &[u8], pos: Pos) -> EvalResult<StorePath> {
     StorePath::parse(s).map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))
 }
 
+/// With other fibers about, the hashes of `drv`'s inputs, copied out of
+/// the shared cache under its lock so the hashing runs without it: one lock
+/// held across the hashing serialized every helper making a derivation.
+/// `None` in a sequential run, which hashes under the lock.
+fn input_hashes(ev: &Evaluator, drv: &Derivation) -> Option<(DrvHashCache, usize)> {
+    if !ev.par.on {
+        return None;
+    }
+    let local = ev
+        .drv
+        .hash_cache
+        .lock()
+        .unwrap()
+        .subset(drv.input_drvs.keys());
+    let known = local.len();
+    Some((local, known))
+}
+
+/// What the hashing with `input_hashes`' cache learned goes back.
+fn give_back(ev: &Evaluator, local: DrvHashCache, known: usize) {
+    if local.len() > known {
+        ev.drv.hash_cache.lock().unwrap().absorb(local);
+    }
+}
+
 /// Mirrors primops.cc:prim_derivationStrict.
 fn derivation_strict(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let attrs = ev.force_attrs(
@@ -680,11 +705,18 @@ fn derivation_strict_internal(
             drv.env_set(o, Vec::new());
             drv.outputs.insert(o.clone(), DerivationOutput::Deferred);
         }
-        modulo = finalize_with_inputs(
-            &mut drv,
-            &mut ev.drv.hash_cache.lock().unwrap(),
-            &mut loader,
-        )
+        modulo = match input_hashes(ev, &drv) {
+            None => finalize_with_inputs(
+                &mut drv,
+                &mut ev.drv.hash_cache.lock().unwrap(),
+                &mut loader,
+            ),
+            Some((mut local, known)) => {
+                let r = finalize_with_inputs(&mut drv, &mut local, &mut loader);
+                give_back(ev, local, known);
+                r
+            }
+        }
         .map_err(|e| drv_err(e, pos))?;
     }
 
@@ -708,12 +740,19 @@ fn derivation_strict_internal(
     let drv_path = drv_path.map_err(|e| drv_err(e, pos))?;
     let h = match &modulo {
         Some(inputs) => hash_derivation_modulo_with(&drv, false, inputs),
-        None => hash_derivation_modulo(
-            &drv,
-            false,
-            &mut ev.drv.hash_cache.lock().unwrap(),
-            &mut loader,
-        ),
+        None => match input_hashes(ev, &drv) {
+            None => hash_derivation_modulo(
+                &drv,
+                false,
+                &mut ev.drv.hash_cache.lock().unwrap(),
+                &mut loader,
+            ),
+            Some((mut local, known)) => {
+                let r = hash_derivation_modulo(&drv, false, &mut local, &mut loader);
+                give_back(ev, local, known);
+                r
+            }
+        },
     }
     .map_err(|e| drv_err(e, pos))?;
     ev.drv

@@ -238,6 +238,9 @@ pub struct Evaluator {
     /// `(prefix, path)` entries, `-I` first then `NIX_PATH`.
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
     pub call_depth: u32,
+    /// `MAX_CALL_DEPTH`, or 0 in a profiled run: the call path's one
+    /// compare picks the profiled copy.
+    call_limit: u32,
     pub try_level: u32,
     pub s: WellKnown,
     pub builtins_word: Word,
@@ -648,6 +651,11 @@ impl EvalConfig {
                 self.search_path
             },
             call_depth: 0,
+            call_limit: if self.session.profile.on() {
+                0
+            } else {
+                MAX_CALL_DEPTH
+            },
             try_level: 0,
             s,
             builtins_word: Word::NULL,
@@ -1661,10 +1669,26 @@ impl Evaluator {
     }
 
     /// Apply `func` to `args` left to right. Returns a forced value.
+    /// `call_limit` is the depth limit, or 0 in a profiled run, so one
+    /// compare serves both and the shadow stack costs a run without a
+    /// profile nothing.
     pub fn apply(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
+        if self.call_depth >= self.call_limit {
+            return self.apply_slow(func, args, pos);
+        }
+        self.call_depth += 1;
+        let r = self.apply_inner::<false>(func, args, pos);
+        self.call_depth -= 1;
+        r
+    }
+
+    /// A call at the depth limit, which fails, or of a profiled run, with
+    /// the frames of the shadow stack.
+    #[inline(never)]
+    fn apply_slow(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
         self.enter_call(pos)?;
         let depth = self.prof.depth();
-        let r = self.apply_inner(func, args, pos);
+        let r = self.apply_inner::<true>(func, args, pos);
         self.prof.unwind(depth);
         self.call_depth -= 1;
         r
@@ -1707,7 +1731,12 @@ impl Evaluator {
         self.prof.unwind(depth);
     }
 
-    fn apply_inner(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fn apply_inner<const PROF: bool>(
+        &mut self,
+        func: Word,
+        args: &[Word],
+        pos: Pos,
+    ) -> EvalResult<Word> {
         let mut cur = self.force(func)?;
         let mut args = args;
         let mut functors = 0u32;
@@ -1730,7 +1759,11 @@ impl Evaluator {
                         let env2 = if lam.no_env {
                             fenv
                         } else {
-                            self.frame_env(fenv, lam, last.frame)
+                            if PROF {
+                                self.frame_env_cold(fenv, lam, last.frame)
+                            } else {
+                                self.frame_env(fenv, lam, last.frame)
+                            }
                         };
                         let mut cur_lam = lam;
                         let mut d = 0;
@@ -1740,12 +1773,20 @@ impl Evaluator {
                                     unreachable!("the walk above found a lambda");
                                 };
                                 cur_lam = inner;
-                                self.prof_leave(d);
+                                if PROF {
+                                    self.prof_leave(d);
+                                }
                             }
                             self.nr_function_calls += 1;
-                            d = self.prof_enter(pos, cur_lam.name);
+                            if PROF {
+                                d = self.prof_enter(pos, cur_lam.name);
+                            }
                             if !cur_lam.no_env {
-                                self.bind_params(env2, cur_lam, *a, pos)?;
+                                if PROF {
+                                    self.bind_params_cold(env2, cur_lam, *a, pos)?;
+                                } else {
+                                    self.bind_params(env2, cur_lam, *a, pos)?;
+                                }
                             }
                         }
                         args = &args[n..];
@@ -1754,7 +1795,9 @@ impl Evaluator {
                         if !args.is_empty()
                             && let Ir::Lambda(inner) = last.body
                         {
-                            self.prof_leave(d);
+                            if PROF {
+                                self.prof_leave(d);
+                            }
                             (fenv, lam) = (env2, inner);
                             continue;
                         }
@@ -1768,7 +1811,9 @@ impl Evaluator {
                             }
                             e
                         })?;
-                        self.prof_leave(d);
+                        if PROF {
+                            self.prof_leave(d);
+                        }
                         break;
                     }
                 }
@@ -1777,12 +1822,18 @@ impl Evaluator {
                     if args.len() < arity {
                         return Ok(self.arena.mk_primop_app(op, args));
                     }
-                    let d = self.prof_enter_op(pos, op.sym);
+                    let d = if PROF {
+                        self.prof_enter_op(pos, op.sym)
+                    } else {
+                        0
+                    };
                     cur = (op.f)(self, &args[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
                     })?;
-                    self.prof_leave(d);
+                    if PROF {
+                        self.prof_leave(d);
+                    }
                     args = &args[arity..];
                 }
                 Value::PrimOpApp(app) => {
@@ -1797,12 +1848,18 @@ impl Evaluator {
                     let mut all: [Word; 8] = [Word::EMPTY; 8];
                     all[..app.args.len()].copy_from_slice(app.args);
                     all[app.args.len()..arity].copy_from_slice(&args[..need]);
-                    let d = self.prof_enter_op(pos, op.sym);
+                    let d = if PROF {
+                        self.prof_enter_op(pos, op.sym)
+                    } else {
+                        0
+                    };
                     cur = (op.f)(self, &all[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
                     })?;
-                    self.prof_leave(d);
+                    if PROF {
+                        self.prof_leave(d);
+                    }
                     args = &args[need..];
                 }
                 Value::Attrs(a) => {
@@ -1840,6 +1897,7 @@ impl Evaluator {
     /// An env of `size` slots for a call of `lam` in the closure env
     /// `fenv`. A lambda that extends its parent's frame starts from a copy
     /// of the parent's slots, above the parent's env.
+    #[inline(always)]
     fn frame_env(
         &mut self,
         fenv: &'static EnvObj,
@@ -1857,7 +1915,31 @@ impl Evaluator {
         env2
     }
 
+    /// `frame_env` for the profiled call path, which keeps its helpers
+    /// out of line so the hot one alone inlines them.
+    #[inline(never)]
+    fn frame_env_cold(
+        &mut self,
+        fenv: &'static EnvObj,
+        lam: &'static LambdaIr,
+        size: u32,
+    ) -> &'static EnvObj {
+        self.frame_env(fenv, lam, size)
+    }
+
+    #[inline(never)]
+    fn bind_params_cold(
+        &mut self,
+        env2: &'static EnvObj,
+        lam: &'static LambdaIr,
+        arg: Word,
+        pos: Pos,
+    ) -> EvalResult<()> {
+        self.bind_params(env2, lam, arg, pos)
+    }
+
     /// `lam`'s params from `arg`, in `env2` from slot `lam.base` on.
+    #[inline(always)]
     fn bind_params(
         &mut self,
         env2: &'static EnvObj,

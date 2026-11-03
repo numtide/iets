@@ -18,10 +18,8 @@ use crate::sys::{self, vm};
 
 const CHUNK: usize = 32 << 20;
 
-// Call it on the thread that fills the chunk: zeroing leaves the chunk in
-// that core's L3. On a helper thread on another CCD, one worker ran 20 % slower.
 fn map_chunk(chunk: usize) -> usize {
-    // SAFETY: prefaulting only changes how the chunk's own pages are backed.
+    // SAFETY: the advice only changes how the chunk's own pages are backed.
     unsafe {
         let Ok(p) = vm::map(chunk, false) else {
             // no unwinding from here: other fibers hold arena pointers,
@@ -29,7 +27,7 @@ fn map_chunk(chunk: usize) -> usize {
             errln!("error: out of memory");
             process::exit(1);
         };
-        sys::prefault(p.cast(), chunk);
+        sys::advise_huge(p.cast(), chunk);
         p as usize
     }
 }
@@ -195,8 +193,7 @@ impl Arena {
     #[cold]
     fn alloc_slow(&mut self, size: usize, align: usize) -> *mut u8 {
         let chunk = CHUNK.max((size + align + CHUNK - 1) & !(CHUNK - 1));
-        // Anonymous mmap, prefaulted in one syscall: MADV_POPULATE_WRITE
-        // zeroes the chunk inside the kernel without one trap per page. The
+        // Anonymous mmap, its pages faulted in as they are touched. The
         // chunk goes with the session's heap.
         let base = map_chunk(chunk) as *mut u8;
         self.heap

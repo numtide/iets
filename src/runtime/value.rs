@@ -1240,6 +1240,16 @@ impl Arena {
         Word::from_ref(l)
     }
 
+    /// A list of `n` cells that `fill` sets before anything else sees it.
+    pub(crate) fn mk_list_filled(&mut self, n: usize, fill: impl FnOnce(&[Cell])) -> Word {
+        let l = self.alloc_list_as(n, Stat::List);
+        // SAFETY: as in `mk_list_as`.
+        let cells =
+            unsafe { slice::from_raw_parts((l as *const ListObj).add(1) as *const Cell, n) };
+        fill(cells);
+        Word::from_ref(l)
+    }
+
     /// `alloc_attrs` with a stats bucket naming the producer.
     pub(crate) fn alloc_attrs_as(&mut self, n: usize, bucket: Stat) -> &'static mut AttrsObj {
         self.stats
@@ -1315,9 +1325,34 @@ impl Arena {
         let cap = a.leaf_sets().iter().map(|l| l.len_raw() as usize).sum();
         let out = self.alloc_attrs_as(cap, Stat::AttrsUpd);
         let mut n = 0;
-        for e in a.iter() {
-            out.init_from(n, e);
-            n += 1;
+        if let [l, r] = a.leaf_sets() {
+            // `a // b`, the usual union: a two-way merge, the right side
+            // winning a tie, skips the loser tree's bookkeeping
+            let (l, r) = (l.attrs_raw(), r.attrs_raw());
+            let (mut i, mut j) = (0, 0);
+            while i < l.len() && j < r.len() {
+                let (x, y) = (l[i].sym, r[j].sym);
+                if x < y {
+                    out.init_from(n, &l[i]);
+                    i += 1;
+                } else {
+                    out.init_from(n, &r[j]);
+                    j += 1;
+                    if x == y {
+                        i += 1;
+                    }
+                }
+                n += 1;
+            }
+            for e in l[i..].iter().chain(&r[j..]) {
+                out.init_from(n, e);
+                n += 1;
+            }
+        } else {
+            for e in a.iter() {
+                out.init_from(n, e);
+                n += 1;
+            }
         }
         out.len.store(n as u32, Ordering::Relaxed);
         // SAFETY: nothing was allocated since `out`, and `out` never had

@@ -2,6 +2,7 @@
 //! `pub fn register(r: &mut Registry)`. See `docs/how-to/add-a-builtin.md`.
 
 pub mod attrs;
+mod bits;
 pub mod context;
 pub mod core;
 pub mod derivation;

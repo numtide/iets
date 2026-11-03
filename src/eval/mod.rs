@@ -1625,7 +1625,8 @@ impl Evaluator {
     fn prof_take(&mut self) {
         if self.prof.due(&self.session.profile) {
             let bytes = self.arena.bytes_since_sample();
-            self.prof.take(&self.session.profile, bytes);
+            let cpu = profile::cpu_us_since_sample();
+            self.prof.take(&self.session.profile, bytes, cpu);
         }
     }
 

@@ -13,6 +13,7 @@
 //! spread of one without it, so there is no feature gate: `IETS_PROFILE` is
 //! the only switch.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
@@ -27,6 +28,7 @@ use crate::parallel::interner::Interner;
 use crate::parallel::shared::Files;
 use crate::session::Session;
 use crate::syntax::symbol::Sym;
+use crate::sys::process::thread_cpu_time;
 
 /// Frames below this are left out of a sample, so hashing one stays bounded.
 /// A nixpkgs attribute reaches about 200.
@@ -78,7 +80,6 @@ pub fn primop_frame(pos: Pos, sym: Sym) -> u64 {
 /// nothing else.
 pub struct Stack {
     frames: Vec<u64>,
-    last_tick: u64,
     /// Avoids a load through the session when the run does not profile.
     on: bool,
 }
@@ -99,14 +100,16 @@ impl Default for Stack {
     fn default() -> Stack {
         Stack {
             frames: Vec::with_capacity(1024),
-            last_tick: 0,
             on: false,
         }
     }
 }
 
 impl Stack {
+    /// Created on the evaluating thread, so CPU time before the run is not
+    /// counted.
     pub fn sampling() -> Stack {
+        cpu_us_since_sample();
         Stack {
             on: true,
             ..Stack::default()
@@ -119,21 +122,21 @@ impl Stack {
         self.frames.push(f);
     }
 
-    /// Whether the tick thread has asked for a sample since this fiber's
-    /// last.
+    /// Whether a tick passed since the run's last sample.
     #[inline]
     pub fn due(&mut self, p: &Profile) -> bool {
-        self.on && p.tick.load(Ordering::Relaxed) != self.last_tick
+        self.on && p.tick.load(Ordering::Relaxed) != p.sampled.load(Ordering::Relaxed)
     }
 
-    /// Credits this fiber's stack with `bytes`, or with one sample when the
-    /// profile weighs time. Cold: 99 times a second per fiber on CPU.
-    pub fn take(&mut self, p: &Profile, bytes: u64) {
-        self.last_tick = p.tick.load(Ordering::Relaxed);
+    /// Credits this stack with `bytes`, or with `cpu_us` when the profile
+    /// weighs time.
+    pub fn take(&mut self, p: &Profile, bytes: u64, cpu_us: u64) {
+        p.sampled
+            .store(p.tick.load(Ordering::Relaxed), Ordering::Relaxed);
         let w = if p.by_bytes.load(Ordering::Relaxed) {
             bytes
         } else {
-            1
+            cpu_us
         };
         let n = self.frames.len().min(MAX_DEPTH);
         p.sample(&self.frames[..n], w);
@@ -162,6 +165,9 @@ pub struct Profile {
     by_bytes: AtomicBool,
     /// Bumped by the tick thread; compared by the call path.
     tick: AtomicU64,
+    /// The tick of the last sample. Per run, not per fiber, so a fiber
+    /// switched in on a sampled tick does not take it again.
+    sampled: AtomicU64,
     stop: AtomicBool,
     folded: Mutex<HashMap<Box<[u64]>, u64>>,
     /// Set by the first evaluator that profiles, for `write` to symbolise
@@ -265,6 +271,14 @@ impl Profile {
     }
 }
 
+/// This thread's CPU time since its last call, in microseconds. CPU and
+/// not wall time, so a wait (a fetch, a subprocess) does not count.
+pub fn cpu_us_since_sample() -> u64 {
+    thread_local!(static LAST: Cell<u64> = const { Cell::new(0) });
+    let now = thread_cpu_time().as_micros() as u64;
+    now - LAST.replace(now)
+}
+
 /// Starts profiling this session, when it asked for it. The tick thread
 /// holds the session: it ends on the first tick after [`Profile::write`].
 pub fn open(session: &Arc<Session>) {
@@ -299,7 +313,7 @@ mod tests {
     /// A call the way the evaluator enters one: sample, then push.
     fn call(s: &mut Stack, p: &Profile, frame: u64, bytes: u64) {
         if s.due(p) {
-            s.take(p, bytes);
+            s.take(p, bytes, 7);
         }
         s.enter(frame);
     }
@@ -320,17 +334,19 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_is_taken_once_per_tick() {
+    fn a_tick_is_sampled_once() {
         let p = Profile::default();
-        let mut s = Stack::sampling();
+        let (mut s, mut other) = (Stack::sampling(), Stack::sampling());
         call(&mut s, &p, 10, 0);
-        p.tick.store(1, Ordering::Relaxed);
+        p.tick.store(3, Ordering::Relaxed);
         call(&mut s, &p, 20, 0);
         call(&mut s, &p, 30, 0);
-        assert_eq!(folded(&p), vec![(vec![10], 1)]);
-        p.tick.store(2, Ordering::Relaxed);
+        // another fiber, switched in on the same tick, takes nothing
+        call(&mut other, &p, 50, 0);
+        assert_eq!(folded(&p), vec![(vec![10], 7)]);
+        p.tick.store(4, Ordering::Relaxed);
         call(&mut s, &p, 40, 0);
-        assert_eq!(folded(&p), vec![(vec![10], 1), (vec![10, 20, 30], 1)]);
+        assert_eq!(folded(&p), vec![(vec![10], 7), (vec![10, 20, 30], 7)]);
     }
 
     #[test]
@@ -345,7 +361,17 @@ mod tests {
         call(&mut s, &p, 30, 0);
         p.tick.store(1, Ordering::Relaxed);
         call(&mut s, &p, 40, 0);
-        assert_eq!(folded(&p), vec![(vec![30], 1)]);
+        assert_eq!(folded(&p), vec![(vec![30], 7)]);
+    }
+
+    #[test]
+    fn a_wait_is_not_cpu_time() {
+        cpu_us_since_sample();
+        thread::sleep(Duration::from_millis(50));
+        assert!(cpu_us_since_sample() < 10_000);
+        let start = thread_cpu_time();
+        while thread_cpu_time() - start < Duration::from_millis(20) {}
+        assert!(cpu_us_since_sample() >= 20_000);
     }
 
     #[test]

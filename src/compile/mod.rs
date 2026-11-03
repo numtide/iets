@@ -33,23 +33,19 @@ pub struct Globals {
 
 #[derive(Clone)]
 enum Scope {
-    /// Names and their slots; `shares` when the slots extend the frame of
-    /// the scope below instead of opening one (a lambda's body lambda or
-    /// `let`).
+    /// Slot `base + i` holds `names[start + i]` of the compiler's name
+    /// stack; a scope of more than `SCAN_MAX` names also gets a map.
+    /// `shares` when the slots extend the frame of the scope below instead
+    /// of opening one (a lambda's body lambda or `let`). A map per scope
+    /// cost more to build than the lookups it saved.
     Lexical {
-        names: FxHashMap<Sym, u32>,
+        start: u32,
+        len: u32,
+        base: u32,
         shares: bool,
+        map: Option<Box<FxHashMap<Sym, u32>>>,
     },
     With,
-}
-
-impl Scope {
-    fn frame(names: FxHashMap<Sym, u32>) -> Scope {
-        Scope::Lexical {
-            names,
-            shares: false,
-        }
-    }
 }
 
 pub struct Compiler<'a> {
@@ -58,6 +54,8 @@ pub struct Compiler<'a> {
     interner: &'a mut Interner,
     globals: &'a Globals,
     scopes: Vec<Scope>,
+    /// The names of every open lexical scope, innermost last.
+    names: Vec<Sym>,
     /// Open lambdas, innermost last: the index in `scopes` of the param
     /// frame and whether the body has read a variable from outside it.
     lambdas: Vec<(usize, Cell<bool>)>,
@@ -128,7 +126,35 @@ enum Def {
     InheritFrom(usize, Sym),
 }
 
+/// Bindings a set is searched for before `Merged::index` is built: most
+/// sets are small, and a hash index per set was rehashing in every compile.
+const SCAN_MAX: usize = 16;
+
 impl Merged {
+    /// The static binding of `sym`.
+    #[inline]
+    fn find(&self, sym: Sym) -> Option<usize> {
+        if self.statics.len() <= SCAN_MAX {
+            return self.statics.iter().position(|s| s.0 == sym);
+        }
+        self.index.get(&sym).copied()
+    }
+
+    fn push_static(&mut self, sym: Sym, def: Def, pos: Pos) -> usize {
+        let i = self.statics.len();
+        self.statics.push((sym, def, pos));
+        let n = i + 1;
+        if n == SCAN_MAX + 1 {
+            self.index.reserve(n);
+            for (j, st) in self.statics.iter().enumerate() {
+                self.index.insert(st.0, j);
+            }
+        } else if n > SCAN_MAX {
+            self.index.insert(sym, i);
+        }
+        i
+    }
+
     fn new(rec: bool, pos: Pos) -> Self {
         Merged {
             rec,
@@ -179,6 +205,7 @@ impl<'a> Compiler<'a> {
             interner,
             globals,
             scopes: Vec::new(),
+            names: Vec::new(),
             lambdas: Vec::new(),
             var_uses: None,
             base_dir: base_dir.to_vec(),
@@ -206,17 +233,65 @@ impl<'a> Compiler<'a> {
     /// (for `scopedImport`) that the runtime supplies as the env above root.
     pub fn compile_root(&mut self, extra_scope: Option<&[Sym]>) -> CResult<IrRef> {
         if let Some(names) = extra_scope {
-            let mut m = FxHashMap::default();
-            for (i, s) in names.iter().enumerate() {
-                m.insert(*s, i as u32);
-            }
-            self.scopes.push(Scope::frame(m));
+            self.push_lexical(names.iter().copied(), 0, false);
         }
         self.parser_notes()?;
         let root = self.ast.root;
         let ir = self.expr(root)?;
         self.scopes.clear();
+        self.names.clear();
         Ok(ir)
+    }
+
+    /// A lexical scope whose names take slots from `base` on, in the env of
+    /// the scope below when `shares`, else in an env of its own.
+    fn push_lexical(&mut self, names: impl IntoIterator<Item = Sym>, base: u32, shares: bool) {
+        let start = self.names.len();
+        self.names.extend(names);
+        let len = self.names.len() - start;
+        let map = (len > SCAN_MAX).then(|| {
+            let mut m = FxHashMap::with_capacity_and_hasher(len, Default::default());
+            for (i, s) in self.names[start..].iter().enumerate() {
+                m.insert(*s, i as u32);
+            }
+            Box::new(m)
+        });
+        self.scopes.push(Scope::Lexical {
+            start: start as u32,
+            len: len as u32,
+            base,
+            shares,
+            map,
+        });
+    }
+
+    fn pop_scope(&mut self) {
+        if let Some(Scope::Lexical { start, .. }) = self.scopes.pop() {
+            self.names.truncate(start as usize);
+        }
+    }
+
+    /// The slot of `sym` in `scope`, if it is a lexical scope that binds it.
+    #[inline]
+    fn slot_in(&self, scope: &Scope, sym: Sym) -> Option<u32> {
+        let Scope::Lexical {
+            start,
+            len,
+            base,
+            map,
+            ..
+        } = scope
+        else {
+            return None;
+        };
+        let k = match map {
+            Some(m) => *m.get(&sym)?,
+            None => {
+                let names = &self.names[*start as usize..(*start + *len) as usize];
+                names.iter().position(|&n| n == sym)? as u32
+            }
+        };
+        Some(base + k)
     }
 
     #[inline]
@@ -324,8 +399,8 @@ impl<'a> Compiler<'a> {
         let n = self.scopes.len();
         for (d, scope) in self.scopes.iter().rev().enumerate() {
             match scope {
-                Scope::Lexical { names, shares } => {
-                    if let Some(&idx) = names.get(&sym) {
+                Scope::Lexical { shares, .. } => {
+                    if let Some(idx) = self.slot_in(scope, sym) {
                         self.note_capture(n - 1 - d);
                         return Some(Ir::Local { depth, idx });
                     }
@@ -469,7 +544,7 @@ impl<'a> Compiler<'a> {
                 let scope = self.expr(*scope)?;
                 self.scopes.push(Scope::With);
                 let body = self.expr(*body)?;
-                self.scopes.pop();
+                self.pop_scope();
                 Ir::With { scope, body, pos }
             }
             Expr::If { cond, then, else_ } => Ir::If {
@@ -523,9 +598,7 @@ impl<'a> Compiler<'a> {
 
     fn lexical_lookup(&self, sym: Sym) -> Option<(u32, u32)> {
         for (d, scope) in self.scopes.iter().rev().enumerate() {
-            if let Scope::Lexical { names, .. } = scope
-                && let Some(&idx) = names.get(&sym)
-            {
+            if let Some(idx) = self.slot_in(scope, sym) {
                 return Some((d as u32, idx));
             }
         }
@@ -829,21 +902,16 @@ impl<'a> Compiler<'a> {
         for elem in prefix {
             match self.attr_name(elem) {
                 Name::Static(sym) => {
-                    let idx = match cur.index.get(&sym) {
-                        Some(&i) => {
+                    let idx = match cur.find(sym) {
+                        Some(i) => {
                             self.open_nested(cur, i, pos)?;
                             i
                         }
-                        None => {
-                            let i = cur.statics.len();
-                            cur.statics.push((
-                                sym,
-                                Def::Nested(Box::new(Merged::new(false, pos))),
-                                pos,
-                            ));
-                            cur.index.insert(sym, i);
-                            i
-                        }
+                        None => cur.push_static(
+                            sym,
+                            Def::Nested(Box::new(Merged::new(false, pos))),
+                            pos,
+                        ),
                     };
                     cur = cur.nested_at(idx);
                 }
@@ -914,7 +982,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_static(&mut self, m: &mut Merged, sym: Sym, def: Def, pos: Pos) -> CResult<()> {
-        if let Some(&i) = m.index.get(&sym) {
+        if let Some(i) = m.find(sym) {
             // Both sides attrs literals: merge (Nix discards the inner `rec`).
             let ast: &'a Ast = self.ast;
             let new_binds: Option<&'a [Bind]> = match &def {
@@ -943,9 +1011,7 @@ impl<'a> Compiler<'a> {
             }
             return Ok(());
         }
-        let i = m.statics.len();
-        m.statics.push((sym, def, pos));
-        m.index.insert(sym, i);
+        m.push_static(sym, def, pos);
         Ok(())
     }
 
@@ -973,7 +1039,7 @@ impl<'a> Compiler<'a> {
                 .iter()
                 .position(|b| b.sym == self.sym_overrides)
                 .map(|i| i as u32);
-            self.scopes.pop();
+            self.pop_scope();
             return Ok(self.alloc(AttrsIr {
                 rec: true,
                 binds,
@@ -1061,7 +1127,7 @@ impl<'a> Compiler<'a> {
             from.push(self.expr(*e)?);
         }
         if !deferred_from.is_empty() {
-            self.scopes.push(Scope::frame(FxHashMap::default()));
+            self.push_lexical([], 0, false);
             // the from-env has `from.len()` anonymous slots at depth 0
             for (fi, name, bpos, bi) in deferred_from {
                 let subject = self.alloc(Ir::Local {
@@ -1070,7 +1136,7 @@ impl<'a> Compiler<'a> {
                 });
                 binds[bi].value = self.inherit_from(subject, name, bpos);
             }
-            self.scopes.pop();
+            self.pop_scope();
         }
         let dynamic = self.lower_dynamics(dynamics)?;
         binds.sort_by_key(|b| b.sym);
@@ -1127,7 +1193,7 @@ impl<'a> Compiler<'a> {
         }
         let (binds, from) = self.lower_rec_binds(merged, base)?;
         let body = self.expr(body)?;
-        self.scopes.pop();
+        self.pop_scope();
         Ok(Ir::Let(self.alloc(LetIr {
             binds,
             from,
@@ -1157,14 +1223,7 @@ impl<'a> Compiler<'a> {
             });
         }
         let at = base.unwrap_or(0);
-        let mut names = FxHashMap::with_capacity_and_hasher(statics.len(), Default::default());
-        for (i, (sym, _, _)) in statics.iter().enumerate() {
-            names.insert(*sym, at + i as u32);
-        }
-        self.scopes.push(Scope::Lexical {
-            names,
-            shares: base.is_some(),
-        });
+        self.push_lexical(statics.iter().map(|s| s.0), at, base.is_some());
         let nbinds = statics.len();
         let mut binds = Vec::with_capacity(nbinds);
         for (i, (sym, def, bpos)) in statics.into_iter().enumerate() {
@@ -1260,14 +1319,9 @@ impl<'a> Compiler<'a> {
                 let named = self.named_in(sym, body);
                 self.lambdas.push((self.scopes.len(), Cell::new(false)));
                 let body = if named {
-                    let mut names = FxHashMap::default();
-                    names.insert(sym, at);
-                    self.scopes.push(Scope::Lexical {
-                        names,
-                        shares: base.is_some(),
-                    });
+                    self.push_lexical([sym], at, base.is_some());
                     let body = self.lambda_body(body, at + 1)?;
-                    self.scopes.pop();
+                    self.pop_scope();
                     body
                 } else {
                     self.expr(body)?
@@ -1305,14 +1359,9 @@ impl<'a> Compiler<'a> {
                         );
                     }
                 }
-                let mut m = FxHashMap::default();
-                let mut idx = at;
-                if let Some(b) = bind {
-                    m.insert(b, idx);
-                    idx += 1;
-                }
+                let idx = at + u32::from(bind.is_some()) + sorted.len() as u32;
                 for f in &sorted {
-                    if m.insert(f.name, idx).is_some() {
+                    if bind == Some(f.name) {
                         return err(
                             ErrorKind::Eval,
                             format!(
@@ -1322,13 +1371,13 @@ impl<'a> Compiler<'a> {
                             pos,
                         );
                     }
-                    idx += 1;
                 }
                 self.lambdas.push((self.scopes.len(), Cell::new(false)));
-                self.scopes.push(Scope::Lexical {
-                    names: m,
-                    shares: base.is_some(),
-                });
+                self.push_lexical(
+                    bind.into_iter().chain(sorted.iter().map(|f| f.name)),
+                    at,
+                    base.is_some(),
+                );
                 let mut firs = Vec::with_capacity(sorted.len());
                 for f in &sorted {
                     let default = match f.default {
@@ -1342,7 +1391,7 @@ impl<'a> Compiler<'a> {
                     });
                 }
                 let body = self.lambda_body(body, idx)?;
-                self.scopes.pop();
+                self.pop_scope();
                 let closed = !self.lambdas.pop().unwrap().1.get();
                 let formals = self.alloc_formals(firs);
                 Ok(self.alloc(LambdaIr {

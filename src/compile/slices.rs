@@ -155,6 +155,7 @@ impl<'a> Compiler<'a> {
             interner,
             globals: self.globals,
             scopes: self.scopes.clone(),
+            names: self.names.clone(),
             lambdas: self
                 .lambdas
                 .iter()

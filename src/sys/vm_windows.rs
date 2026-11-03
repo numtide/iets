@@ -10,6 +10,7 @@
 //! A stack commits its top and a low zone. The kernel grows it through a
 //! guard page, as it does a thread's.
 
+use std::fs::File;
 use std::io;
 use std::mem;
 use std::ptr;
@@ -28,6 +29,22 @@ use windows_sys::Win32::System::ProcessStatus::{
 };
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+/// No mapping here: the spool is read with `pread`.
+#[derive(Debug)]
+pub struct FileMap;
+
+impl FileMap {
+    /// # Safety
+    /// As on Unix.
+    pub unsafe fn new(_file: &File, _len: u64) -> Option<FileMap> {
+        None
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &[]
+    }
+}
 
 pub fn page_size() -> usize {
     // SAFETY: the struct is the one the call fills.

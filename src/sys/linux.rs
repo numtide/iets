@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -12,6 +13,20 @@ use rustix::thread::futex;
 /// signal arrived. The caller looks again.
 pub fn futex_wait(word: &AtomicU32, expected: u32) {
     let _ = futex::wait(word, futex::Flags::PRIVATE, expected, None);
+}
+
+/// Starts writing `len` bytes of `f` from `from` to disk without waiting
+/// for them, so a later sync waits for less. rustix has no wrapper.
+pub fn start_writeback(f: &File, from: u64, len: u64) {
+    // SAFETY: a plain syscall on a descriptor the caller owns, reading no memory.
+    unsafe {
+        libc::sync_file_range(
+            f.as_raw_fd(),
+            from as i64,
+            len as i64,
+            libc::SYNC_FILE_RANGE_WRITE,
+        )
+    };
 }
 
 /// Wakes up to `n` threads sleeping on `word`.

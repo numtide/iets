@@ -51,6 +51,7 @@ use crate::store::nar::{FileType, PathFilter};
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path};
 use crate::sys::errno;
 use crate::trace::Obs;
+use std::cmp::Reverse;
 use std::sync::atomic::Ordering::{self, Relaxed};
 
 /// The store path a tree with this NAR hash has. The one naming site for a
@@ -381,6 +382,9 @@ enum Object {
     Stream,
 }
 
+/// A file's id, and its object unless some pack already holds it.
+type Made = io::Result<(pack::Id, Option<Object>)>;
+
 /// Reads, hashes and, unless some pack already holds it, compresses every
 /// distinct file of `tree` on several threads, a batch at a time so that one
 /// batch bounds the memory, and appends the new ones to `writer` in the tree's
@@ -403,46 +407,62 @@ fn objects(
             end += 1;
         }
         let batch = &files[start..end];
-        let parts: Vec<io::Result<Vec<_>>> = thread::scope(|s| {
-            let workers: Vec<_> = batch
-                .chunks(batch.len().div_ceil(threads))
-                .map(|part| {
-                    s.spawn(move || {
-                        part.iter()
-                            .map(|at| {
-                                if at.size() >= pack::STREAM {
-                                    let id = pack::id_of_reader(&mut tree.blob(at)?)?;
-                                    let new = !packs.contains(&id);
-                                    return Ok((*at, id, new.then_some(Object::Stream)));
-                                }
-                                let bytes = tree.read(at)?;
-                                let id = pack::id_of(&bytes);
-                                let new = !packs.contains(&id);
-                                Ok((*at, id, new.then(|| Object::Ready(pack::prepare(bytes)))))
-                            })
-                            .collect()
-                    })
-                })
+        // the workers take the next file, the biggest first, so a big file
+        // does not hold up a share of small ones behind it
+        let mut order: Vec<usize> = (0..batch.len()).collect();
+        order.sort_unstable_by_key(|&i| Reverse(batch[i].size()));
+        let next = AtomicUsize::new(0);
+        let made: Vec<OnceLock<Made>> = (0..batch.len()).map(|_| OnceLock::new()).collect();
+        let make = |at: &Blob| -> Made {
+            if at.size() >= pack::STREAM {
+                let id = pack::id_of_reader(&mut tree.blob(at)?)?;
+                let new = !packs.contains(&id);
+                return Ok((id, new.then_some(Object::Stream)));
+            }
+            let bytes = tree.read(at)?;
+            let id = pack::id_of(&bytes);
+            let new = !packs.contains(&id);
+            Ok((id, new.then(|| Object::Ready(pack::prepare(bytes)))))
+        };
+        let work = || {
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&k) = order.get(i) else { break };
+                let r = make(&batch[k]);
+                let failed = r.is_err();
+                let _ = made[k].set(r);
+                if failed {
+                    // the others stop at the next file
+                    next.store(order.len(), Ordering::Relaxed);
+                    break;
+                }
+            }
+        };
+        thread::scope(|s| {
+            let helpers: Vec<_> = (1..threads.min(batch.len()))
+                .map(|_| s.spawn(work))
                 .collect();
-            workers
-                .into_iter()
-                .map(|w| w.join().expect("an object worker panicked"))
-                .collect()
+            work();
+            for h in helpers {
+                h.join().expect("an object worker panicked");
+            }
         });
-        for part in parts {
-            for (at, id, prepared) in part? {
-                ids.insert(at, id);
-                match prepared {
-                    Some(Object::Ready(p)) => writer.add_prepared(id, p)?,
-                    Some(Object::Stream) => {
-                        writer.add_stream(id, &mut tree.blob(&at)?, at.size())?
-                    }
-                    None => {
-                        elsewhere.entry(id).or_insert(at);
-                    }
+        for (at, m) in batch.iter().zip(made) {
+            let Some(r) = m.into_inner() else {
+                // a worker failed before this file
+                continue;
+            };
+            let (id, prepared) = r?;
+            ids.insert(*at, id);
+            match prepared {
+                Some(Object::Ready(p)) => writer.add_prepared(id, p)?,
+                Some(Object::Stream) => writer.add_stream(id, &mut tree.blob(at)?, at.size())?,
+                None => {
+                    elsewhere.entry(id).or_insert(*at);
                 }
             }
         }
+        writer.start_writeback();
         start = end;
     }
     Ok((ids, elsewhere))

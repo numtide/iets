@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::slice;
 use std::sync::Arc;
 
 use super::{
@@ -223,7 +222,7 @@ fn finish(
         };
         let r =
             Dispatch::open(transport, options, plan, Provenance::off(), style).and_then(|mut d| {
-                d.upload_only(slice::from_ref(&roots[0].drv))?;
+                d.upload_only(&Root::paths(roots))?;
                 Ok(d)
             });
         match r {

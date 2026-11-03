@@ -344,6 +344,38 @@ fn nix_instantiate() {
             &f.both("nix-instantiate", &a),
         );
     }
+    // ours alone, as real nix would write the derivations itself: every -A
+    // is uploaded, also when neither is in the other's closure
+    let two = s.write(
+        "two.nix",
+        r#"let d = name: derivation { inherit name; system = "@SYSTEM@"; builder = "@SHELL@"; };
+in { a = d "classic-e2e-two-a"; b = d "classic-e2e-two-b"; }
+"#,
+    );
+    let o = f
+        .ours("nix-instantiate")
+        .arg(&two)
+        .args(["-A", "a", "-A", "b"])
+        .output()
+        .unwrap();
+    let out = stdout(&o);
+    c.check(
+        "two -A print two paths",
+        out.lines().count() == 2,
+        stderr(&o),
+    );
+    for d in out.lines() {
+        let v = s
+            .nix("nix-store")
+            .args(["--check-validity", d])
+            .output()
+            .unwrap();
+        c.check(
+            &format!("two -A: {d} is valid"),
+            v.status.success(),
+            stderr(&v),
+        );
+    }
     // a name that is not UTF-8 reaches the evaluator and the fallback intact
     let ff = s.dir().join(OsStr::from_bytes(b"\xff.nix"));
     fs::write(&ff, "{ a = 1; }\n").unwrap();

@@ -478,8 +478,13 @@ impl Tree {
             let system = e.version_made_by().as_u16() >> 8;
             let attrs = e.external_attributes();
             let mut name = e.file_path().as_bytes().to_vec();
-            // Windows archivers sometimes use backslash as the separator
-            if system == 0 && !name.contains(&b'/') {
+            // Windows archivers sometimes use backslash as the separator;
+            // libarchive judges that by the local header's system byte, which
+            // is the high byte of its "version needed" field
+            let mut needed = [0u8; 2];
+            sysfs::read_exact_at(&spool, &mut needed, e.local_header_offset() + 4)
+                .map_err(io_err)?;
+            if needed[1] == 0 && !name.contains(&b'/') {
                 for b in &mut name {
                     if *b == b'\\' {
                         *b = b'/';
@@ -529,8 +534,19 @@ impl Tree {
                     let local = archive.get_entry(e.wayfinder()).map_err(zip_err)?;
                     let mut target = Vec::new();
                     inflating(&local, e.compression_method(), &shown)?
+                        .take(64 * 1024 + 1)
                         .read_to_end(&mut target)
                         .map_err(read_err)?;
+                    if target.len() > 64 * 1024 {
+                        return Err(bad(format!(
+                            "zip symlink '{shown}' has an oversized target"
+                        )));
+                    }
+                    room = room.checked_sub(target.len() as u64).ok_or_else(|| {
+                        bad(format!(
+                            "the zip archive expands to over the fetch-max-size of {max_size} bytes"
+                        ))
+                    })?;
                     insert(&mut root, &parts, Draft::Leaf(Node::Symlink(target)), true);
                 }
                 S_IFCHR | S_IFBLK | S_IFSOCK => {
@@ -1964,6 +1980,15 @@ pub(crate) mod tests {
         assert_eq!(spool_nar(&zip, u64::MAX).unwrap(), want);
     }
 
+    /// The backslash rule goes by the local header's system byte, which a
+    /// Unix-made member has at zero as well: `a\b` is a file in `a`.
+    #[test]
+    fn a_unix_member_with_a_backslash_and_no_slash_is_in_a_directory() {
+        let zip = zip_of(&[("a\\b", Some(0o100644), b"x", false)]);
+        let tar = tar_gz(&[("a/b", REG, 0o644, b"x")]);
+        let want = spool_nar(&http::decompress(tar).unwrap(), u64::MAX).unwrap();
+        assert_eq!(spool_nar(&zip, u64::MAX).unwrap(), want);
+    }
     #[test]
     fn a_zip_with_no_member_is_an_empty_directory() {
         let dest = tempdir().unwrap();

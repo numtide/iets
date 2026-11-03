@@ -19,7 +19,7 @@ use crate::source::{
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::path::{IngestionMethod, check_name};
 use crate::syntax::symbol::Sym;
-use crate::{provenance, sys, treestore};
+use crate::{print, provenance, sys, treestore};
 
 /// The attrs `fetchTree` accepts: strings and paths, booleans, non-negative
 /// integers (fetchTree.cc).
@@ -77,6 +77,14 @@ pub(super) fn input_attrs(
             continue;
         }
         let v = ev.force(attr.cell.get())?;
+        // fetchTree.cc passes the keys on as JSON
+        if name == "publicKeys" {
+            let (mut out_json, mut ctx) = (Vec::new(), Vec::new());
+            print::print_json(ev, v, &mut out_json, &mut ctx, true, pos)?;
+            let json = String::from_utf8_lossy(&out_json).into_owned();
+            out.insert(name, AttrVal::Str(json));
+            continue;
+        }
         let val = match v.view() {
             Value::String(s) => AttrVal::Str(String::from_utf8_lossy(s.bytes).into_owned()),
             Value::Path(p) => AttrVal::Str(String::from_utf8_lossy(p.path).into_owned()),

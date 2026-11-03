@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str;
 use std::time::Duration;
 
 use crate::cachefs;
@@ -14,7 +15,7 @@ use crate::flake::flakeref;
 use crate::log;
 use crate::session::Session;
 use crate::source::nix_conf;
-use crate::store::hash::{HashAlgo, hash_bytes};
+use crate::store::hash::{HashAlgo, base64_decode, hash_bytes};
 use crate::sys;
 
 /// What to fetch: `rev` when locked, else the commit `ref` names, else the
@@ -361,6 +362,44 @@ fn history(dir: &Path, rev: &str) -> Result<PathBuf, String> {
         true => Ok(hist),
         false => Err(format!(
             "Failed to fetch the history of git repository '{url}'"
+        )),
+    }
+}
+
+/// The key type an SSH public key blob starts with, such as
+/// `ecdsa-sha2-nistp256`, which is what an allowed-signers line needs.
+fn blob_type(blob: &[u8]) -> Option<&str> {
+    let len = u32::from_be_bytes(blob.get(..4)?.try_into().ok()?) as usize;
+    str::from_utf8(blob.get(4..4 + len)?).ok()
+}
+
+/// git-utils.cc:verifyCommit. OpenSSH checks `rev`'s signature against
+/// `keys`, each a base64 public key. Its `for *` names our allowed signers,
+/// which rules out a key from the user's GPG keyring.
+pub fn verify_commit(repo: &Path, rev: &str, keys: &[String]) -> Result<(), String> {
+    let mut signers = String::new();
+    for k in keys {
+        let raw = base64_decode(k).map_err(|_| format!("invalid SSH public key '{k}'"))?;
+        let ty = blob_type(&raw).ok_or_else(|| format!("invalid SSH public key '{k}'"))?;
+        signers.push_str(&format!("* {ty} {k}\n"));
+    }
+    let file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    fs::write(file.path(), signers).map_err(|e| e.to_string())?;
+    let allowed = format!("gpg.ssh.allowedSignersFile={}", file.path().display());
+    let out = Command::new(sys::program(OsStr::new("git")))
+        .args(["-c", &allowed, "-C"])
+        .arg(repo)
+        .args(["verify-commit", "--", rev])
+        .output()
+        .map_err(|e| format!("iets: cannot run git: {e}"))?;
+    let text = String::from_utf8_lossy(&[&out.stdout[..], &out.stderr[..]].concat()).into_owned();
+    let good = text
+        .lines()
+        .any(|l| l.starts_with("Good \"git\" signature for * with "));
+    match out.status.success() && good {
+        true => Ok(()),
+        false => Err(format!(
+            "Commit signature verification on commit {rev} failed: {text}"
         )),
     }
 }

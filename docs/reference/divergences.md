@@ -405,17 +405,19 @@ nix. `fetchTarball` and `fetchTree` work for some inputs;
 - A hash mismatch exits with 1. Nix exits with 102.
 - A download error has iets's own text, not curl's.
 
-`builtins.fetchGit` does its own fetching, except with `lfs` or
-`verifyCommit`, which run the real `nix`. It differs from Nix in these ways:
+`builtins.fetchGit` does its own fetching, except with `lfs`, which runs
+the real `nix`. It differs from Nix in these ways:
 
+- `verifyCommit`, `publicKey` and `publicKeys` work without the
+  `verified-fetches` experimental feature.
+- OpenSSH reads each key's type from the key, and `keytype` and a key's
+  `type` are ignored. An ECDSA key verifies. Nix gives OpenSSH the type
+  `ssh-ecdsa`, which it rejects.
 - On a cache hit, the `Git tree '…' is dirty` warning is not printed again.
-- A remote repository is kept as a shallow clone. Reading `revCount` also
-  fetches its commit history.
 - A submodule can point to a local repository only if the superproject is
   local too, and never in pure evaluation. Nix allows both.
 - git can use only the `https`, `http`, `ssh` and `git` transports, plus
   `file` for local repositories, even if your git config allows more.
-- Relative submodule URLs work in a `file:` repository. Nix fails on them.
 - In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev`
   fails.
 

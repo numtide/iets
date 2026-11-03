@@ -135,7 +135,7 @@ The root tree and `path:` inputs never need this.
    inputs are one download each, into the input store.
 4. **iets clones it.** A `git` input goes into a shallow clone under
    `$XDG_CACHE_HOME/iets/git/`, and its tree must match the lock's
-   `narHash`. `hg` inputs, and `git` inputs with `lfs` or `verifyCommit`,
+   `narHash`. `hg` inputs, and `git` inputs with `lfs`,
    still go through the real `nix`, which must be on `PATH`.
 
 `file` inputs are not supported. Their store path is the flat hash of the

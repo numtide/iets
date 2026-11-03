@@ -1966,6 +1966,29 @@ impl Evaluator {
         self.apply(f, &[a, b], pos)
     }
 
+    /// `eval` with a constant or a forced variable read in place: the
+    /// commonest operands, which would otherwise pay a call into the
+    /// dispatcher. For operands; a tail position calls `eval`.
+    #[inline(always)]
+    fn eval_fast(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        match ir {
+            Ir::Const(w) => return Ok(*w),
+            Ir::Local { depth, idx } => {
+                let mut e = env;
+                for _ in 0..*depth {
+                    e = e.up().expect("compile-time depth is valid");
+                }
+                e.mark_read();
+                let w = e.slot(*idx as usize).get();
+                if !w.is_thunk() {
+                    return Ok(w);
+                }
+            }
+            _ => {}
+        }
+        self.eval(env, ir)
+    }
+
     /// Evaluate `ir` in `env` to weak head normal form.
     /// One small handler per node kind, tail-called: each recursion pays
     /// for its own kind's frame, not for the largest arm's.
@@ -2081,7 +2104,7 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_has_attr(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::HasAttr { subject, path } = ir);
-        let mut v = self.eval(env, subject)?;
+        let mut v = self.eval_fast(env, subject)?;
         for elem in path.iter() {
             let name = self.attr_name(env, elem)?;
             let attrs = self.force(v)?;
@@ -2119,7 +2142,7 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_apply(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Apply { func, args, pos } = ir);
-        let f = self.eval(env, func)?;
+        let f = self.eval_fast(env, func)?;
         if args.len() <= 8 {
             let mut buf: [Word; 8] = [Word::EMPTY; 8];
             for (i, a) in args.iter().enumerate() {
@@ -2188,7 +2211,7 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_neg(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Neg(e, pos) = ir);
-        let v = self.eval(env, e)?;
+        let v = self.eval_fast(env, e)?;
         let zero = Word::imm_int(0);
         self.arith(zero, v, ArithOp::Sub, *pos)
     }
@@ -2196,48 +2219,48 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_eq(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Eq(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(self.eq_values_top(a, b, *pos)?))
     }
 
     #[inline(never)]
     fn eval_k_ne(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Ne(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(!self.eq_values_top(a, b, *pos)?))
     }
 
     #[inline(never)]
     fn eval_k_lt(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Lt(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(self.less_than(a, b, *pos)?))
     }
 
     #[inline(never)]
     fn eval_k_gt(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Gt(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(self.less_than(b, a, *pos)?))
     }
 
     #[inline(never)]
     fn eval_k_le(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Le(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(!self.less_than(b, a, *pos)?))
     }
 
     #[inline(never)]
     fn eval_k_ge(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Ge(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(!self.less_than(a, b, *pos)?))
     }
 
@@ -2291,9 +2314,9 @@ impl Evaluator {
         node!(Ir::Update(l, r, pos) = ir);
         // the right operand first, as ExprOpUpdate::evalForUpdate
         // (eval.cc): `tryEval (1 // throw "x")` catches the throw
-        let b = self.eval(env, r)?;
+        let b = self.eval_fast(env, r)?;
         let b = self.force_attrs(b, *pos, "in the right operand of the update (//) operator")?;
-        let a = self.eval(env, l)?;
+        let a = self.eval_fast(env, l)?;
         let a = self.force_attrs(a, *pos, "in the left operand of the update (//) operator")?;
         #[cfg(feature = "stats2")]
         let before = (
@@ -2312,8 +2335,8 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_concat_lists(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::ConcatLists(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         let a = self.force_list(
             a,
             *pos,
@@ -2330,24 +2353,24 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_sub(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Sub(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         self.arith(a, b, ArithOp::Sub, *pos)
     }
 
     #[inline(never)]
     fn eval_k_mul(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Mul(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         self.arith(a, b, ArithOp::Mul, *pos)
     }
 
     #[inline(never)]
     fn eval_k_div(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Div(l, r, pos) = ir);
-        let a = self.eval(env, l)?;
-        let b = self.eval(env, r)?;
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
         self.arith(a, b, ArithOp::Div, *pos)
     }
 
@@ -2359,7 +2382,7 @@ impl Evaluator {
         pos: Pos,
         ctx: &str,
     ) -> EvalResult<bool> {
-        let v = self.eval(env, ir)?;
+        let v = self.eval_fast(env, ir)?;
         match v {
             Word::TRUE => Ok(true),
             Word::FALSE => Ok(false),
@@ -2422,7 +2445,7 @@ impl Evaluator {
         default: Option<IrRef>,
         pos: Pos,
     ) -> EvalResult<Word> {
-        let mut v = self.eval(env, subject)?;
+        let mut v = self.eval_fast(env, subject)?;
         for elem in path {
             let name = self.attr_name(env, elem)?;
             let attr = match default {
@@ -2731,7 +2754,7 @@ impl Evaluator {
     ) -> EvalResult<Word> {
         // `+` of numbers is most of the calls: no string buffers for them
         if !force_string && let Some((p0, rest)) = parts.split_first() {
-            let v = self.eval(env, p0)?;
+            let v = self.eval_fast(env, p0)?;
             if matches!(v.view(), Value::Int(_) | Value::Float(_)) {
                 return self.concat_numbers(env, v, rest, pos);
             }

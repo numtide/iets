@@ -1,6 +1,7 @@
 //! Attribute set primops.
 
 use super::Registry;
+use super::bits::Bits;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::purity;
 use crate::runtime::Word;
@@ -96,23 +97,45 @@ fn remove_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
         pos,
         "while evaluating the second argument passed to builtins.removeAttrs",
     )?;
-    let mut names: Vec<Sym> = Vec::with_capacity(l.len as usize);
+    if l.len == 0 {
+        return Ok(Word::from_ref(a));
+    }
+    // Each name is looked up in the set and its entry marked: sorting the
+    // names took half the builtin on long lists.
+    let flat = ev.arena.flat(a);
+    let src = flat.attrs_raw();
+    let mut marks = Bits::new(src.len());
+    let mut removed = 0;
     for c in l.cells() {
-        let w = c.get();
-        names.push(ev.force_sym(
-            w,
+        let name = ev.force_sym(
+            c.get(),
             pos,
             "while evaluating the values of the second argument passed to builtins.removeAttrs",
-        )?);
+        )?;
+        let Some(at) = flat.get(name) else {
+            continue;
+        };
+        // SAFETY: `get` answers an entry of `src`.
+        let i = unsafe { (at as *const Attr).offset_from(src.as_ptr()) } as usize;
+        if marks.set(i) {
+            removed += 1;
+        }
     }
-    names.sort();
-    names.dedup();
-    let out: Vec<(Sym, Pos, Word)> = a
-        .iter()
-        .filter(|at| names.binary_search(&at.sym).is_err())
-        .map(|at| (at.sym, at.pos, at.cell.get()))
-        .collect();
-    Ok(ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsRemove))
+    // nothing removed: the same entries, so the same set
+    if removed == 0 {
+        return Ok(Word::from_ref(a));
+    }
+    if removed == src.len() {
+        return Ok(ev.arena.mk_attrs_sorted_as(&[], Stat::AttrsRemove));
+    }
+    let out = ev
+        .arena
+        .alloc_attrs_as(src.len() - removed, Stat::AttrsRemove);
+    let kept = src.iter().enumerate().filter(|(i, _)| !marks.get(*i));
+    for (n, (_, at)) in kept.enumerate() {
+        out.init(n, at.sym, at.pos, at.cell.get());
+    }
+    Ok(Word::from_ref(out))
 }
 
 fn intersect_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -268,8 +291,10 @@ fn zip_attrs_with(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
         "while evaluating the second argument passed to builtins.zipAttrsWith",
     )?;
     parallel::fanout_list(ev, l);
-    let mut groups: FxHashMap<Sym, Vec<Word>> = FxHashMap::default();
-    let mut order: Vec<Sym> = Vec::new();
+    // Every set is sorted by symbol, so a stable sort of all the pairs
+    // groups them with each group in list order: one table, where a hash
+    // map and a Vec per group were the builtin's allocations.
+    let mut pairs: Vec<(Sym, Word)> = Vec::new();
     for c in l.cells() {
         let w = c.get();
         let a = ev.force_attrs(
@@ -277,23 +302,21 @@ fn zip_attrs_with(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
             Pos::NONE,
             "while evaluating a value of the list passed as second argument to builtins.zipAttrsWith",
         )?;
-        for attr in a.iter() {
-            let e = groups.entry(attr.sym).or_insert_with(|| {
-                order.push(attr.sym);
-                Vec::new()
-            });
-            e.push(attr.cell.get());
-        }
+        pairs.reserve(a.len_bounds().1);
+        pairs.extend(a.iter().map(|attr| (attr.sym, attr.cell.get())));
     }
-    let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(groups.len());
-    for sym in order {
-        let vals = &groups[&sym];
+    pairs.sort_by_key(|p| p.0);
+    let mut out: Vec<(Sym, Pos, Word)> = Vec::new();
+    let mut vals: Vec<Word> = Vec::new();
+    for group in pairs.chunk_by(|x, y| x.0 == y.0) {
+        let sym = group[0].0;
+        vals.clear();
+        vals.extend(group.iter().map(|p| p.1));
         let name = ev.sym_string(sym);
-        let list = ev.mk_list(vals);
+        let list = ev.mk_list(&vals);
         let v = ev.arena.mk_thunk_app2(f, name, list);
         out.push((sym, Pos::NONE, v));
     }
-    out.sort_by_key(|e| e.0);
     Ok(ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsZip))
 }
 

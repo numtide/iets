@@ -662,7 +662,7 @@ fn derivation_strict_internal(
             .map_err(|e| drv_err(e, pos))?
             .expect("fixed output has a path");
         if !submits_outputs {
-            drv.env_set("out", path.to_string().into_bytes());
+            drv.env_set("out", path.to_full_string().into_bytes());
         }
         drv.outputs.insert("out".into(), out);
     } else if content_addressed {
@@ -769,7 +769,7 @@ fn derivation_strict_internal(
         },
     );
 
-    let drv_path_s = drv_path.to_string();
+    let drv_path_s = drv_path.to_full_string();
     let drv_path_bytes = ev.arena.alloc_bytes(drv_path_s.as_bytes());
     let mut entries = Vec::with_capacity(1 + drv.outputs.len());
     let dp = ev
@@ -799,7 +799,7 @@ fn output_string(
     pos: Pos,
 ) -> EvalResult<Word> {
     let s = match out.path(drv_name, output).map_err(|e| drv_err(e, pos))? {
-        Some(p) => p.to_string(),
+        Some(p) => p.to_full_string(),
         None => downstream_placeholder(drv_path, drv_name, output),
     };
     let output = ev.arena.alloc_bytes(output.as_bytes());

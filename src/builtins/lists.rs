@@ -1,6 +1,7 @@
 //! List primops.
 
 use super::Registry;
+use super::bits::Bits;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::parallel;
 use crate::runtime::arena::Stat;
@@ -144,25 +145,29 @@ fn filter(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the first argument passed to builtins.filter",
     )?;
-    let mut out = Vec::with_capacity(l.len as usize);
-    let mut same = true;
-    for c in l.cells() {
-        let v = c.get();
-        let r = ev.call1(f, v, pos)?;
+    let n = l.len as usize;
+    let mut keep = Bits::new(n);
+    let mut kept = 0;
+    for (i, c) in l.cells().iter().enumerate() {
+        let r = ev.call1(f, c.get(), pos)?;
         if ev.force_bool(
             r,
             pos,
             "while evaluating the return value of the filtering function passed to builtins.filter",
         )? {
-            out.push(v);
-        } else {
-            same = false;
+            keep.set(i);
+            kept += 1;
         }
     }
-    if same {
+    if kept == n {
         return Ok(Word::from_ref(l));
     }
-    Ok(ev.mk_list(&out))
+    Ok(ev.arena.mk_list_filled(kept, |out| {
+        let kept = l.cells().iter().enumerate().filter(|(i, _)| keep.get(*i));
+        for (o, (_, c)) in out.iter().zip(kept) {
+            o.set(c.get());
+        }
+    }))
 }
 
 fn foldl_strict(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

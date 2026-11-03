@@ -235,6 +235,11 @@ pub struct Evaluator {
     pub root_env: &'static EnvObj,
     /// Resolved path -> lazy import thunk (`parallel::import_thunk`).
     import_cache: SharedMap<Vec<u8>, Word>,
+    /// The same thunks by the path `import` was given, as eval.cc's
+    /// `importResolutionCache`: a file imported from many places is
+    /// resolved once, not stat'ed again on every call. Only a resolution
+    /// that succeeded is kept.
+    import_by_given: SharedMap<Vec<u8>, Word>,
     /// `(prefix, path)` entries, `-I` first then `NIX_PATH`.
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
     pub call_depth: u32,
@@ -629,6 +634,7 @@ impl EvalConfig {
             },
             root_env,
             import_cache: Default::default(),
+            import_by_given: Default::default(),
             // a pure evaluation keeps the empty one (eval.cc:EvalState)
             search_path: if self.pure {
                 Vec::new()
@@ -951,6 +957,11 @@ impl Evaluator {
 
     /// `import`: parse, compile, evaluate and cache a file.
     pub fn eval_file(&mut self, path: &[u8], pos: Pos) -> EvalResult<Word> {
+        if let Some(w) = self.import_by_given.get(path) {
+            // the lint is the call site's, so it runs on every call
+            read_through_copy(self, path, pos)?;
+            return self.force(w);
+        }
         let resolved = self.resolve_import_path(path, pos)?;
         // parallel: one lazy thunk per file; forcing it does the work once
         let w = match self.import_cache.get(&resolved) {
@@ -960,6 +971,7 @@ impl Evaluator {
                 self.import_cache.get_or_insert(resolved, t)
             }
         };
+        self.import_by_given.insert(path.to_vec(), w);
         self.force(w)
     }
 

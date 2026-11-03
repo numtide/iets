@@ -265,6 +265,7 @@ impl Fiber {
             self.sp = unsafe {
                 context::seed_stack(
                     self.stack.base.add(vm::STACK_ZONE),
+                    vm::stack_limit(self.stack.base, self.stack.size),
                     self.stack.top(),
                     fiber_main,
                     self as *mut Fiber as *mut (),
@@ -429,6 +430,31 @@ mod tests {
         // Windows decommits the range, so a read there faults.
         #[cfg(unix)]
         assert!(used.iter().all(|w| *w == 0));
+    }
+
+    /// A frame bigger than the committed top of the stack, as an unoptimized
+    /// 72 KB table built in place takes. MSVC's `__chkstk` probes only below
+    /// the TEB's stack limit, so a limit lower than what is committed
+    /// skipped the guard page and the process died at the frame's first
+    /// store, with no message.
+    #[inline(never)]
+    fn big_frame(n: u64) -> u64 {
+        let buf = [n; 1 << 17];
+        hint::black_box(&buf)[(n as usize) % buf.len()]
+    }
+
+    unsafe fn big_frame_entry(p: *mut ()) {
+        let c = unsafe { &*(p as *const Counter) };
+        c.n.store(big_frame(7) as usize, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_frame_larger_than_the_committed_top_fits() {
+        let (c, f) = counting(64 << 20, big_frame_entry);
+        f.state.store(RUNNING, Ordering::Relaxed);
+        unsafe { f.resume() };
+        assert_eq!(f.state.load(Ordering::Relaxed), FINISHED);
+        assert_eq!(c.n.load(Ordering::Relaxed), 7);
     }
 
     #[test]

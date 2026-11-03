@@ -73,7 +73,13 @@ unsafe extern "C" fn trampoline() {
 
 /// # Safety
 /// `low..top` is a writable mapping with room for the frame.
-pub unsafe fn seed_stack(low: *mut u8, top: *mut u8, entry: Entry, arg: *mut ()) -> *mut u8 {
+pub unsafe fn seed_stack(
+    low: *mut u8,
+    limit: *mut u8,
+    top: *mut u8,
+    entry: Entry,
+    arg: *mut (),
+) -> *mut u8 {
     // SAFETY: writes 192 bytes below `top`, inside the mapping.
     unsafe {
         let sp = top.sub(192);
@@ -83,7 +89,7 @@ pub unsafe fn seed_stack(low: *mut u8, top: *mut u8, entry: Entry, arg: *mut ())
         *t.add(1) = entry as usize as u64; // x20
         *t.add(11) = trampoline as *const () as usize as u64; // x30
         *t.add(21) = top as u64; // stack base
-        *t.add(22) = low as u64; // stack limit
+        *t.add(22) = limit as u64; // stack limit: the committed bottom
         *t.add(23) = low as u64; // deallocation stack
         sp
     }

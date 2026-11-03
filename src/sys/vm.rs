@@ -126,6 +126,11 @@ pub fn map_stack(len: usize) -> io::Result<*mut u8> {
 
 pub const STACK_ZONE: usize = 0;
 
+/// Windows' TEB stack limit; nothing reads it here.
+pub fn stack_limit(base: *mut u8, _len: usize) -> *mut u8 {
+    base
+}
+
 /// Bytes at the low end of a stack whose faults mean an overflow.
 pub fn fault_span() -> usize {
     page_size()

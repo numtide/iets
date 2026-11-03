@@ -13,6 +13,7 @@ use crate::runtime::heap::Heap;
 use crate::session::Session;
 use crate::syntax::symbol::{FxHasher, Sym};
 use crate::sys::vm;
+use std::mem;
 
 const SHARDS: usize = 64;
 
@@ -92,8 +93,14 @@ unsafe impl Send for Inner {}
 /// a hit costs one hash and one compare, no lock.
 const CACHE: usize = 1024;
 
+/// A handle's lookup cache. A fiber's evaluator has none while it is
+/// switched out: its worker's cache is swapped in with the arena. A
+/// cache of 128 KiB per fiber was 100 MB at eight workers, zeroed as fibers
+/// were made and freed at exit.
+pub type Cache = Box<[CacheEntry]>;
+
 #[derive(Clone, Copy)]
-struct CacheEntry {
+pub struct CacheEntry {
     hash: u64,
     name: &'static [u8],
     sym: Sym,
@@ -104,16 +111,22 @@ pub struct Interner {
     cache: Box<[CacheEntry]>,
 }
 
+/// A clone has a cache of its own, unless the handle it clones has none.
 impl Clone for Interner {
     fn clone(&self) -> Interner {
         Interner {
             shared: self.shared.clone(),
-            cache: empty_cache(),
+            cache: if self.cache.is_empty() {
+                Box::new([])
+            } else {
+                empty_cache()
+            },
         }
     }
 }
 
-fn empty_cache() -> Box<[CacheEntry]> {
+/// A cache with nothing in it, for a worker to lend its fibers.
+pub fn empty_cache() -> Cache {
     // The empty name hashes to 0, so a sentinel with hash 0 would answer
     // `intern(b"")`; hash 1 with an empty name matches no lookup.
     vec![
@@ -175,6 +188,18 @@ impl Interner {
             }),
             cache: empty_cache(),
         }
+    }
+
+    /// Gives up this handle's cache, for a template whose clones borrow
+    /// their worker's.
+    pub(crate) fn drop_cache(&mut self) {
+        self.cache = Box::new([]);
+    }
+
+    /// Trades caches with a worker on a fiber switch.
+    #[inline]
+    pub(crate) fn swap_cache(&mut self, other: &mut Cache) {
+        mem::swap(&mut self.cache, other);
     }
 
     #[inline]

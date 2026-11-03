@@ -708,3 +708,24 @@ fn builder_rpc_outputs_have_no_placeholder(
 const CA: &str =
     "__contentAddressed = true; outputHashMode = \"recursive\"; outputHashAlgo = \"sha256\";";
 const FOD: &str = "outputHashMode = \"flat\"; outputHash = \"sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\";";
+
+#[test]
+fn newline_starts_matches_line_starts() {
+    let long = "b".repeat(70);
+    for src in [
+        String::new(),
+        "a\n".to_string(),
+        format!("a\n{long}\n\nc\n"),
+        format!("{long}{long}\n{long}"),
+        "\n".repeat(130),
+    ] {
+        assert_eq!(
+            super::newline_starts(src.as_bytes()),
+            Some(crate::syntax::line_starts(src.as_bytes())),
+            "{src:?}"
+        );
+    }
+    let x = "x".repeat(65);
+    assert_eq!(super::newline_starts(format!("{x}\r\n").as_bytes()), None);
+    assert_eq!(super::newline_starts(format!("a\r{x}").as_bytes()), None);
+}

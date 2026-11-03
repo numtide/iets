@@ -81,11 +81,7 @@ pub struct FileInfo {
 
 impl FileInfo {
     pub(crate) fn new(path: Vec<u8>, src: &[u8], base: u32) -> FileInfo {
-        let line_starts = if src.contains(&b'\r') {
-            syntax::line_starts(src)
-        } else {
-            newline_starts(src)
-        };
+        let line_starts = newline_starts(src).unwrap_or_else(|| syntax::line_starts(src));
         FileInfo {
             path,
             base,
@@ -127,18 +123,61 @@ impl FileInfo {
     }
 }
 
-/// `syntax::line_starts` for a source with no `\r`, at memchr speed.
-fn newline_starts(src: &[u8]) -> Vec<u32> {
-    let mut line_starts = vec![0u32];
-    let mut rest = src;
-    let mut off = 0usize;
-    // SAFETY: memchr reads at most `rest.len()` bytes of `rest`.
-    while let Some(i) = memchr::memchr(b'\n', rest) {
-        off += i + 1;
-        line_starts.push(off as u32);
-        rest = &rest[i + 1..];
+/// `syntax::line_starts` for a source with no `\r`, or `None` if it has
+/// one. One pass in 64-byte blocks, each compared into a bit mask: a
+/// `memchr` call per line, after a scan for `\r`, cost twice as much.
+fn newline_starts(src: &[u8]) -> Option<Vec<u32>> {
+    let mut starts = Vec::with_capacity(src.len() / 32 + 2);
+    starts.push(0u32);
+    let mut cr = 0u64;
+    let (blocks, rest) = src.as_chunks::<64>();
+    let mut off = 0u32;
+    for b in blocks {
+        let (mut nl, r) = masks64(b);
+        cr |= r;
+        starts.reserve(nl.count_ones() as usize);
+        while nl != 0 {
+            starts.push(off + nl.trailing_zeros() + 1);
+            nl &= nl - 1;
+        }
+        off += 64;
     }
-    line_starts
+    for (k, &c) in rest.iter().enumerate() {
+        match c {
+            b'\n' => starts.push(off + k as u32 + 1),
+            b'\r' => return None,
+            _ => {}
+        }
+    }
+    (cr == 0).then_some(starts)
+}
+
+/// The bits of the `\n` and of the `\r` bytes of a block.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn masks64(b: &[u8; 64]) -> (u64, u64) {
+    let (mut nl, mut cr) = (0u64, 0u64);
+    // SAFETY: SSE2 is part of x86_64, and each load reads 16 bytes of `b`.
+    unsafe {
+        let (n, r) = (_mm_set1_epi8(b'\n' as i8), _mm_set1_epi8(b'\r' as i8));
+        for i in 0..4 {
+            let v = _mm_loadu_si128(b.as_ptr().add(16 * i).cast::<__m128i>());
+            nl |= u64::from(_mm_movemask_epi8(_mm_cmpeq_epi8(v, n)) as u16) << (16 * i);
+            cr |= u64::from(_mm_movemask_epi8(_mm_cmpeq_epi8(v, r)) as u16) << (16 * i);
+        }
+    }
+    (nl, cr)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn masks64(b: &[u8; 64]) -> (u64, u64) {
+    let (mut nl, mut cr) = (0u64, 0u64);
+    for (j, &c) in b.iter().enumerate() {
+        nl |= u64::from(c == b'\n') << j;
+        cr |= u64::from(c == b'\r') << j;
+    }
+    (nl, cr)
 }
 
 /// The symbols Nix 2.34.8 creates before any other, in its order
@@ -426,6 +465,10 @@ macro_rules! bail {
 }
 use crate::sys;
 pub(crate) use bail;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{
+    __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+};
 use std::hint;
 
 /// Binds a handler's node: `eval` dispatches on the variant, so no other

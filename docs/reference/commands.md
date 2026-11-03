@@ -515,7 +515,7 @@ The expression form also takes the shared evaluation flags.
   `nix store prefetch-file` gives you. Nothing is decompressed. With
   `--unpack`, you get the NAR hash of the unpacked tarball, which is what
   `fetchTarball`, `fetchzip` and `fetchFromGitHub` want. The archive can be
-  compressed with gzip, xz, zstd or bzip2. Zip files are not supported.
+  compressed with gzip, xz, zstd or bzip2, or a zip.
 - `iets prefetch -E EXPR`, `iets prefetch FILE -A ATTR` and
   `iets prefetch FLAKEREF#ATTR` evaluate to one fixed-output derivation and
   build it. The hash in the expression does not matter, so `hash = ""`,

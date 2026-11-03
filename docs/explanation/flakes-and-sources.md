@@ -218,10 +218,11 @@ The connection goes to the eval store: `nix.conf`'s `store`, never the
 and `tarball` are one download and one index, so iets does them itself.
 The URLs and headers are the ones Nix builds. The access token comes from
 `nix.conf`'s `access-tokens`, matched the way Nix matches it. iets undoes
-the four compressions libarchive would detect: gzip, xz, zstd and bzip2.
+the four compressions libarchive would detect, gzip, xz, zstd and bzip2,
+and reads a zip as libarchive does, stored and deflated members alike.
 
-The download streams, and no tree is ever unpacked: iets indexes the tar in
-a spool, then writes the NAR straight from that index. Once the NAR hash
+The download streams, and no tree is ever unpacked: iets indexes the archive
+in a spool, then writes the NAR straight from that index. Once the NAR hash
 matches, every file goes into the input store's packs and the spool is
 deleted.
 

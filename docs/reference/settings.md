@@ -330,7 +330,7 @@ Each Nix setting falls in a class for iets. Other pages refer to the numbers.
 | `access-tokens`, `connect-timeout`, `stalled-download-timeout` | the flake input fetcher. The timeouts default to 15 s and 300 s; 0 is no limit, as in `filetransfer.hh`. `--option` reaches the fetcher too: the session keeps the settings of the first load |
 | `tarball-ttl` | how long iets reuses a fetched Git branch before asking the remote again; 3600 s, as in Nix |
 | `bash-prompt`, `bash-prompt-prefix`, `bash-prompt-suffix` | `nix develop` |
-| `experimental-features` | in classic mode, whether `builtins` has `fetchTree`, `fetchClosure` and `outputOf`, as in Nix; iets's own commands have every feature (`docs/reference/divergences.md`). `parse-toml-timestamps` needs the flag everywhere |
+| `experimental-features` | ignored, as iets has every feature (`docs/reference/divergences.md`) |
 
 An old name is its setting: `build-cores` is `cores`, `binary-caches` is
 `substituters`, and so on for every alias in Nix 2.34.8.

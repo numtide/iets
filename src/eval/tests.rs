@@ -271,6 +271,14 @@ fn reading_a_derivation_output_is_unsupported(
 }
 
 #[test]
+fn a_toml_timestamp_fails_only_where_it_is_used() {
+    let doc = r#"builtins.fromTOML "a = 1\nt = 1979-05-27""#;
+    assert_eq!(eval_str(&format!("({doc}).a")), "1");
+    let e = eval_err(&format!("({doc}).t"));
+    assert!(e.contains("Dates and times are not supported"), "{e}");
+}
+
+#[test]
 fn fetch_mercurial_names_a_way_out() {
     let mut ev = Evaluator::new();
     let e = ev

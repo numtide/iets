@@ -1,27 +1,16 @@
-//! `builtins.fromTOML` on top of the `toml` crate, with Nix's datetime
-//! rendering (`primops/fromTOML.cc: normalizeDatetimeFormat`).
+//! `builtins.fromTOML` on top of the `toml` crate.
 //!
 //! Nix parses with toml11 pinned to `toml::spec::v(1, 0, 0)`; the `toml`
 //! crate implements 1.1 and has no switch for the older spec. [`reject_1_1`]
 //! and the seconds check in [`convert`] take the 1.1-only syntax back out.
 
 use std::str::from_utf8;
-use std::sync::atomic::Ordering;
 
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::runtime::Word;
-use crate::session::Session;
 use crate::syntax::lexer;
 use crate::syntax::symbol::Sym;
 use ::toml::Value as T;
-use std::fmt::Write as _;
-
-/// The `parse-toml-timestamps` experimental feature.
-pub fn set_parse_toml_timestamps(on: bool) {
-    Session::current()
-        .toml_timestamps
-        .store(on, Ordering::Relaxed);
-}
 
 pub fn from_toml(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let s = ev.force_string_no_ctx(
@@ -186,19 +175,11 @@ fn convert(ev: &mut Evaluator, v: ::toml::Value, pos: Pos) -> EvalResult<Word> {
                     "while parsing TOML: a time without seconds is TOML 1.1"
                 );
             }
-            if !ev.session().toml_timestamps.load(Ordering::Relaxed) {
-                bail!(
-                    ErrorKind::Eval,
-                    pos,
-                    "while parsing TOML: Dates and times are not supported"
-                );
-            }
-            let s = format_datetime(&d);
-            let ty = ev.mk_string(b"timestamp");
-            let val = ev.mk_string(s.as_bytes());
-            let ty_sym = ev.sym(b"_type");
-            let mut entries = vec![(ty_sym, Pos::NONE, ty), (ev.s.value, Pos::NONE, val)];
-            ev.mk_attrs(&mut entries, pos)?
+            // a timestamp fails only where it is used
+            let s = ev.mk_string(d.to_string().as_bytes());
+            let sym = ev.sym(b"fromTOML");
+            let op = ev.arena.mk_primop("fromTOML", 1, timestamp, sym);
+            ev.arena.mk_thunk_app(op, s)
         }
         T::Array(items) => {
             let mut words = Vec::with_capacity(items.len());
@@ -220,61 +201,22 @@ fn convert(ev: &mut Evaluator, v: ::toml::Value, pos: Pos) -> EvalResult<Word> {
     })
 }
 
+fn timestamp(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    let s = ev.force_string_no_ctx(args[0], pos, "")?;
+    let s = String::from_utf8_lossy(s).into_owned();
+    bail!(
+        ErrorKind::Eval,
+        pos,
+        "while parsing TOML: Dates and times are not supported ({s})"
+    )
+}
+
 fn no_nul(s: &[u8], pos: Pos) -> EvalResult<()> {
     if let Err(msg) = lexer::no_nul(s) {
         // prim_fromTOML wraps the thrown Error's what(), prefix included
         bail!(ErrorKind::Eval, pos, "while parsing TOML: error: {}", msg);
     }
     Ok(())
-}
-
-/// toml11 < 4 subsecond precision: 3, 6 or 9 digits, or none.
-fn subsecond_precision(ns: u32) -> u32 {
-    if ns == 0 {
-        0
-    } else if ns.is_multiple_of(1_000_000) {
-        3
-    } else if ns.is_multiple_of(1_000) {
-        6
-    } else {
-        9
-    }
-}
-
-fn format_datetime(d: &::toml::value::Datetime) -> String {
-    let mut s = String::new();
-    if let Some(date) = d.date {
-        let _ = write!(s, "{:04}-{:02}-{:02}", date.year, date.month, date.day);
-    }
-    if let Some(time) = d.time {
-        if d.date.is_some() {
-            s.push('T');
-        }
-        let _ = write!(
-            s,
-            "{:02}:{:02}:{:02}",
-            time.hour,
-            time.minute,
-            time.second.unwrap_or(0)
-        );
-        let ns = time.nanosecond.unwrap_or(0);
-        let prec = subsecond_precision(ns);
-        if prec > 0 {
-            let frac = ns / 10u32.pow(9 - prec);
-            let _ = write!(s, ".{:0width$}", frac, width = prec as usize);
-        }
-    }
-    if let Some(off) = d.offset {
-        match off {
-            ::toml::value::Offset::Z => s.push('Z'),
-            ::toml::value::Offset::Custom { minutes } => {
-                let sign = if minutes < 0 { '-' } else { '+' };
-                let m = minutes.unsigned_abs();
-                let _ = write!(s, "{}{:02}:{:02}", sign, m / 60, m % 60);
-            }
-        }
-    }
-    s
 }
 
 #[cfg(test)]

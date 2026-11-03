@@ -162,39 +162,33 @@ fn the_builtins_names() {
     let s = store!();
     let f = Farm::new(&s);
     let mut c = Checks::default();
-    // the builtins Nix gates on a feature are gated in classic mode too
+    let names =
+        |o: &Output| -> Vec<String> { serde_json::from_slice(&o.stdout).unwrap_or_default() };
+    // iets with no feature has the builtins of Nix with every feature
+    let all = "nix-command flakes dynamic-derivations fetch-closure fetch-tree";
     for mode in ["--impure", "--pure-eval"] {
-        for feats in [
-            "",
-            "dynamic-derivations",
-            "dynamic-derivations fetch-closure fetch-tree",
-        ] {
-            let fs = format!("nix-command flakes {feats}");
-            let b = f.both(
-                "nix-instantiate",
-                &[
-                    "--option",
-                    "experimental-features",
-                    &fs,
-                    "--eval",
-                    "--json",
-                    "-E",
-                    "builtins.attrNames builtins",
-                    mode,
-                ],
-            );
-            let names = |o: &Output| -> Vec<String> {
-                serde_json::from_slice(&o.stdout).unwrap_or_default()
-            };
-            let (ours, real) = (names(&b.ours), names(&b.real));
-            let missing: Vec<_> = real.iter().filter(|n| !ours.contains(n)).collect();
-            let extra: Vec<_> = ours.iter().filter(|n| !real.contains(n)).collect();
-            c.check(
-                &format!("builtins {mode} [{feats}]"),
-                !real.is_empty() && missing.is_empty() && extra.is_empty(),
-                format!("missing {missing:?}, extra {extra:?}"),
-            );
-        }
+        let args = |feats| {
+            [
+                "--option",
+                "experimental-features",
+                feats,
+                "--eval",
+                "--json",
+                "-E",
+            ]
+            .into_iter()
+            .chain(["builtins.attrNames builtins", mode])
+            .collect::<Vec<_>>()
+        };
+        let real = names(&f.both("nix-instantiate", &args(all)).real);
+        let ours = names(&f.ours("nix-instantiate").args(args("")).output().unwrap());
+        let missing: Vec<_> = real.iter().filter(|n| !ours.contains(n)).collect();
+        let extra: Vec<_> = ours.iter().filter(|n| !real.contains(n)).collect();
+        c.check(
+            &format!("builtins {mode}"),
+            !real.is_empty() && missing.is_empty() && extra.is_empty(),
+            format!("missing {missing:?}, extra {extra:?}"),
+        );
     }
 }
 

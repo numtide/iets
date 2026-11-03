@@ -23,8 +23,6 @@ use crate::runtime::{Ctx, ListObj, StringObj, Value, Word, ctx_to_arena};
 use crate::store::hash::{Hash, HashAlgo, HashFormat, hash_bytes};
 use crate::syntax::symbol::FxHashMap;
 
-pub use fromtoml::set_parse_toml_timestamps;
-
 pub fn register(r: &mut Registry) {
     r.op("__match", 2, match_);
     r.op("__split", 2, split);

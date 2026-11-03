@@ -27,3 +27,21 @@ drv/shape/impure.drv
 wire/connect-1.18.op
 wire/connect-1.32.op
 wire/connect-1.34.op
+
+# A TOML datetime, which fails when it is used
+lang/eval-okay-fromTOML-062.nix
+lang/eval-okay-fromTOML-063.nix
+lang/eval-okay-fromTOML-064.nix
+lang/eval-okay-fromTOML-065.nix
+lang/eval-okay-fromTOML-066.nix
+lang/eval-okay-fromTOML-067.nix
+lang/eval-okay-fromTOML-068.nix
+lang/eval-okay-fromTOML-069.nix
+lang/eval-okay-fromTOML-070.nix
+lang/eval-okay-fromTOML-071.nix
+lang/eval-okay-fromTOML-072.nix
+lang/eval-okay-fromTOML-073.nix
+lang/eval-okay-fromTOML-074.nix
+lang/eval-okay-fromTOML-075.nix
+lang/eval-okay-fromTOML-076.nix
+lang/eval-okay-fromTOML-timestamps.nix

@@ -28,7 +28,7 @@ use crate::store::path::{
 };
 use crate::syntax::symbol::Sym;
 use crate::trace::{self, Trace};
-use crate::{config, log, parallel, provenance};
+use crate::{log, parallel, provenance};
 
 pub fn register(r: &mut Registry) {
     r.op("derivationStrict", 1, derivation_strict);
@@ -282,12 +282,6 @@ impl Builder<'_> {
 /// derivations.hh:drvFeatureBuilderRpcV0.
 const BUILDER_RPC_V0: &[u8] = b"builder-rpc-v0";
 
-/// primops.cc reads `requiredSystemFeatures` only with this feature on;
-/// iets's own commands have every feature.
-fn dynamic_derivations() -> bool {
-    !log::classic() || config::xp_on("dynamic-derivations")
-}
-
 /// One iteration of the attribute loop in derivationStrictInternal. `key`
 /// is the attribute name; attributes arrive in lexicographic order, so
 /// pushing onto `drv.env` keeps it sorted.
@@ -374,7 +368,7 @@ fn process_attr(
                 names.push(utf8(st, pos)?);
             }
             b.handle_outputs(names.iter().map(String::as_str), pos)?;
-        } else if sym == s.required_system_features && dynamic_derivations() {
+        } else if sym == s.required_system_features {
             let l = ev.force_list(w, pos, "")?;
             for c in l.cells() {
                 let st = ev.force_string(c.get(), pos, "")?;
@@ -403,7 +397,7 @@ fn process_attr(
         s.outputs,
     ]
     .contains(&sym);
-    if sym == s.required_system_features && dynamic_derivations() {
+    if sym == s.required_system_features {
         b.submits_outputs |= raw
             .split(|c| b" \t\n\r".contains(c))
             .any(|f| f == BUILDER_RPC_V0);

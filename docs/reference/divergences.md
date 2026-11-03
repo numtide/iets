@@ -66,8 +66,9 @@ Only the error messages differ. Nix reads TOML 1.0 (toml11 with
 `toml::spec::v(1, 0, 0)`). iets uses a parser for TOML 1.1, and first
 refuses what only 1.1 allows: a newline or a trailing comma inside an
 inline table, the `\e` and `\xHH` escapes, and a time with no seconds.
-Under `parse-toml-timestamps`, datetimes print as Nix prints them (`T`
-separator, 3, 6 or 9 fractional digits).
+A datetime fails only when it is used, so the other values of the file stay
+readable. Nix fails the whole `fromTOML` call, and with
+`parse-toml-timestamps` returns datetimes as attribute sets instead.
 
 ## `builtins.fromJSON`
 
@@ -353,14 +354,11 @@ iets stops; Nix has no limit of its own.
 
 ## Experimental-feature builtins
 
-Nix leaves `fetchTree` out of `builtins` unless `fetch-tree` or `flakes`
-is on, `fetchClosure` unless `fetch-closure` is, and `outputOf` unless
-`dynamic-derivations` is (`experimental-features` in nix.conf or
-`--extra-experimental-features`). Under one of Nix's own names iets does
-the same, so `builtins.attrNames builtins` is the same list on both sides
-whatever the features are. Its own commands have every feature, so
-`builtins ? fetchTree` is true there, and code that branches on it
-(flake-compat) takes the `fetchTree` branch.
+iets has every experimental feature, and the setting is ignored. Nix leaves
+`fetchTree` out of `builtins` unless `fetch-tree` or `flakes` is on,
+`fetchClosure` unless `fetch-closure` is, and `outputOf` unless
+`dynamic-derivations` is. In iets `builtins ? fetchTree` is always true, so
+code that branches on it (flake-compat) takes the `fetchTree` branch.
 
 The same holds for a derivation: `outputHashMode = "text"` needs
 `dynamic-derivations` in Nix, and `outputHashAlgo = "blake3"` needs
@@ -738,7 +736,7 @@ Class 1 covers these flags:
 | `--no-location` | It changes `--xml` output only, and `--xml` falls back. |
 | `--readonly-mode` on `iets eval` | `iets eval` writes to no store. |
 | `-j`, `--cores`, `-k`, `-K` on `nix eval`, `nix-instantiate`, `nix derivation show`, `eval-jobs` | These commands build nothing: iets never builds during evaluation. The building commands send the four values to the daemon. |
-| `--experimental-features`, `--extra-experimental-features` | Every feature is always on (see "Experimental-feature builtins"). `parse-toml-timestamps` is the exception: `iets eval` applies it, and a classic `nix` falls back. |
+| `--experimental-features`, `--extra-experimental-features` | Every feature is always on (see "Experimental-feature builtins"). |
 | `--show-trace`, `--log-format bar` | iets always prints the full trace, and renders builds its own way; `docs/reference/classic.md` lists both. |
 
 These flags are not ignored:

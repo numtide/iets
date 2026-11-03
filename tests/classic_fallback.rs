@@ -788,6 +788,26 @@ fn fetch_git_remote() {
         let args = ["eval", "--impure", "--json", "--expr", &expr];
         c.same(&format!("fetchGit {label}"), &native(&f, &s, &args));
     }
+    // a cached `allRefs` rev is read without asking the remote
+    let leaf_git = s.dir().join("leaf.git");
+    let gone = s.dir().join("leaf.git.gone");
+    fs::rename(&leaf_git, &gone).unwrap();
+    let leaf_rev = git(&leaf, &["rev-parse", "HEAD"]);
+    let at = format!(
+        r#"(builtins.fetchGit {{ url = "{leaf_bare}"; rev = "{leaf_rev}"; allRefs = true; }}).rev"#
+    );
+    let o = f
+        .ours("nix")
+        .env("IETS_CACHE", "0")
+        .args(["eval", "--impure", "--raw", "--expr", &at])
+        .output()
+        .unwrap();
+    c.check(
+        "a cached allRefs rev does not ask the remote for its HEAD",
+        o.status.success() && !stderr(&o).contains("HEAD ref"),
+        stderr(&o),
+    );
+    fs::rename(&gone, &leaf_git).unwrap();
     // offline, a cached clone still answers, and a new download is an error
     let offline = |expr: &str| {
         let mut o = f.ours("nix");

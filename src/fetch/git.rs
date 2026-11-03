@@ -225,7 +225,9 @@ fn fetch(want: &Want) -> Result<Fetched, String> {
 
     let secs = nix_conf(&Session::current()).int("tarball-ttl");
     let ttl = Duration::from_secs(secs.ok().flatten().unwrap_or(3600));
-    let uses_default = want.r#ref.is_none() && (want.rev.is_none() || want.all_refs);
+    // a cached rev needs no fetch, so skip the remote round trip
+    let uses_default = want.r#ref.is_none()
+        && (want.rev.is_none() || (want.all_refs && resolve(&dir, want, "HEAD").is_err()));
     let r#ref = match want.r#ref {
         Some(r) => r.to_string(),
         None if uses_default => default_ref(&dir, want, ttl),

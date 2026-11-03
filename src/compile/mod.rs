@@ -123,7 +123,35 @@ enum Def {
     InheritFrom(usize, Sym),
 }
 
+/// Bindings a set is searched for before `Merged::index` is built: most
+/// sets are small, and a hash index per set was rehashing in every compile.
+const SCAN_MAX: usize = 16;
+
 impl Merged {
+    /// The static binding of `sym`.
+    #[inline]
+    fn find(&self, sym: Sym) -> Option<usize> {
+        if self.statics.len() <= SCAN_MAX {
+            return self.statics.iter().position(|s| s.0 == sym);
+        }
+        self.index.get(&sym).copied()
+    }
+
+    fn push_static(&mut self, sym: Sym, def: Def, pos: Pos) -> usize {
+        let i = self.statics.len();
+        self.statics.push((sym, def, pos));
+        let n = i + 1;
+        if n == SCAN_MAX + 1 {
+            self.index.reserve(n);
+            for (j, st) in self.statics.iter().enumerate() {
+                self.index.insert(st.0, j);
+            }
+        } else if n > SCAN_MAX {
+            self.index.insert(sym, i);
+        }
+        i
+    }
+
     fn new(rec: bool, pos: Pos) -> Self {
         Merged {
             rec,
@@ -817,21 +845,16 @@ impl<'a> Compiler<'a> {
         for elem in prefix {
             match self.attr_name(elem) {
                 Name::Static(sym) => {
-                    let idx = match cur.index.get(&sym) {
-                        Some(&i) => {
+                    let idx = match cur.find(sym) {
+                        Some(i) => {
                             self.open_nested(cur, i, pos)?;
                             i
                         }
-                        None => {
-                            let i = cur.statics.len();
-                            cur.statics.push((
-                                sym,
-                                Def::Nested(Box::new(Merged::new(false, pos))),
-                                pos,
-                            ));
-                            cur.index.insert(sym, i);
-                            i
-                        }
+                        None => cur.push_static(
+                            sym,
+                            Def::Nested(Box::new(Merged::new(false, pos))),
+                            pos,
+                        ),
                     };
                     cur = cur.nested_at(idx);
                 }
@@ -902,7 +925,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_static(&mut self, m: &mut Merged, sym: Sym, def: Def, pos: Pos) -> CResult<()> {
-        if let Some(&i) = m.index.get(&sym) {
+        if let Some(i) = m.find(sym) {
             // Both sides attrs literals: merge (Nix discards the inner `rec`).
             let ast: &'a Ast = self.ast;
             let new_binds: Option<&'a [Bind]> = match &def {
@@ -931,9 +954,7 @@ impl<'a> Compiler<'a> {
             }
             return Ok(());
         }
-        let i = m.statics.len();
-        m.statics.push((sym, def, pos));
-        m.index.insert(sym, i);
+        m.push_static(sym, def, pos);
         Ok(())
     }
 

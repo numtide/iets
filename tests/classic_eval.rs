@@ -609,6 +609,35 @@ fn pure_eval_and_nix_conf() {
             c.env("NIX_CONFIG", "system = aarch64-linux");
         }),
     );
+    // eval-jobs reads nix.conf once, with its `--option`s
+    let jdir = s.dir().join("jobsconf");
+    s.write(
+        "jobsconf/nix.conf",
+        "plugin-files = /nope\npure-eval = true\n",
+    );
+    let jobs = |args: &[&str]| {
+        let o = s
+            .iets()
+            .env("NIX_CONF_DIR", &jdir)
+            .args(["eval-jobs", "--no-instantiate"])
+            .args(args)
+            .args(["-E", "{ x = builtins.currentTime; }"])
+            .output()
+            .unwrap();
+        stderr(&o)
+    };
+    let e = jobs(&[]);
+    c.check(
+        "eval-jobs: nix.conf makes it pure",
+        e.contains("currentTime"),
+        e,
+    );
+    let e = jobs(&["--option", "plugin-files", ""]);
+    c.check(
+        "eval-jobs: --option silences nix.conf",
+        !e.contains("plugin-files"),
+        e,
+    );
     // NIX_USER_CONF_FILES set and empty means no user file
     let cdir = s.dir().join("confdir");
     s.write("confdir/nix.conf", "system = from-system\n");

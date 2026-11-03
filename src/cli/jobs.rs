@@ -17,7 +17,7 @@ use crate::jobs::{self, Line, Opts};
 use crate::remote::worker::{Connection, Transport};
 use crate::runtime::Word;
 use crate::session::{self, Session};
-use crate::{config, ignored, log};
+use crate::{ignored, log};
 use std::fs;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
@@ -245,8 +245,9 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     } else if j.flake {
         a.pure = Some(true);
     } else if a.pure.is_none() {
-        a.pure = config::Config::load(&[])
-            .ok()
+        a.pure = Session::current()
+            .nix_conf
+            .get()
             .and_then(|c| c.bool("pure-eval").ok().flatten());
     }
     let transport = match check_jobs_args(&j) {

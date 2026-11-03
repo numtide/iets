@@ -108,8 +108,14 @@ pub unsafe fn ev_of(slot: *mut Slot) -> &'static mut Evaluator {
 pub unsafe fn init_ctx(ev: &mut Evaluator, slot: *mut Slot) {
     // SAFETY: per the contract; only the slot's own fields are read, and
     // the pointer is stored for `slot_mut` to derive borrows from.
-    let (id, is_main, stack_lo) =
-        unsafe { ((*slot).id, (*slot).is_main, (*slot).fiber.stack.limit()) };
+    let (id, is_main, stack_lo, workers) = unsafe {
+        (
+            (*slot).id,
+            (*slot).is_main,
+            (*slot).fiber.stack.limit(),
+            (*(*slot).rt).n,
+        )
+    };
     ev.par = Ctx {
         on: true,
         id,
@@ -119,6 +125,7 @@ pub unsafe fn init_ctx(ev: &mut Evaluator, slot: *mut Slot) {
         frames: 0,
         fx: Log::default(),
         slot,
+        workers,
     };
     ev.call_depth = 0;
     ev.try_level = 0;

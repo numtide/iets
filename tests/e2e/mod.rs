@@ -60,10 +60,11 @@ impl Store {
             );
             return None;
         };
-        // a socket path has to fit in sun_path, and darwin's TMPDIR is long
+        // darwin's TMPDIR is too long for sun_path, and its /tmp is a symlink,
+        // which nix refuses above a store
         let dir = tempfile::Builder::new()
             .prefix("iets-e2e.")
-            .tempdir_in("/tmp")
+            .tempdir_in(fs::canonicalize("/tmp").expect("/tmp"))
             .expect("tempdir");
         let d = dir.path();
         for sub in ["store", "var", "log", "conf"] {

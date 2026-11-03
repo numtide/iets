@@ -14,7 +14,7 @@ use crate::eval::{self, Evaluator, Pos};
 use crate::syntax::symbol::{self, Sym};
 #[cfg(feature = "stats2")]
 use std::sync::atomic::{AtomicU8, AtomicUsize};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::{ptr, slice};
 
 /// Most contents the `strings` table records: the capacity of 2^20 buckets,
@@ -1377,6 +1377,7 @@ impl Arena {
         Word::from_ref(a)
     }
 
+    #[inline]
     pub(crate) fn alloc_env(&mut self, up: Option<&'static EnvObj>, n: usize) -> &'static EnvObj {
         self.stats
             .note(Stat::Env, size_of::<EnvObj>() + n * size_of::<Cell>());
@@ -1390,8 +1391,14 @@ impl Arena {
             p.write(EnvObj {
                 up: up.map_or(ptr::null(), |e| e as *const EnvObj),
             });
-            let cells = p.add(1) as *mut u64;
-            ptr::write_bytes(cells, 0, n);
+            // A relaxed store per slot: LLVM folds plain stores of a
+            // run-time count, however unrolled, into a memset call, a sixth
+            // of a call-heavy run (`fib`). The env is published later with
+            // release ordering, so relaxed is enough here.
+            let cells = p.add(1) as *const AtomicU64;
+            for i in 0..n {
+                (*cells.add(i)).store(0, Ordering::Relaxed);
+            }
             #[cfg(feature = "stats2")]
             self.stats.census.note_env(p, n);
             &*p

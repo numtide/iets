@@ -53,6 +53,9 @@ pub struct Compiler<'a> {
     scopes: Vec<Scope>,
     /// The names of every open lexical scope, innermost last.
     names: Vec<Sym>,
+    /// Scratch for `exprs`, and the `with` depths of a lookup.
+    sc_refs: Vec<IrRef>,
+    sc_withs: Vec<u32>,
     /// Open lambdas, innermost last: the index in `scopes` of the param
     /// frame and whether the body has read a variable from outside it.
     lambdas: Vec<(usize, Cell<bool>)>,
@@ -201,6 +204,8 @@ impl<'a> Compiler<'a> {
             globals,
             scopes: Vec::new(),
             names: Vec::new(),
+            sc_refs: Vec::new(),
+            sc_withs: Vec::new(),
             lambdas: Vec::new(),
             var_uses: None,
             base_dir: base_dir.to_vec(),
@@ -364,8 +369,23 @@ impl<'a> Compiler<'a> {
         self.arena.alloc(v)
     }
 
-    fn alloc_refs(&mut self, v: Vec<IrRef>) -> &'static [IrRef] {
-        self.arena.alloc_slice(&v)
+    fn alloc_refs(&mut self, v: &[IrRef]) -> &'static [IrRef] {
+        self.arena.alloc_slice(v)
+    }
+
+    /// The IR of each of `ids`, in the arena. Built on a scratch stack that
+    /// nested expressions push above and truncate back to, as the
+    /// parser's `commit`, where a `Vec` per list and call was a heap
+    /// allocation to copy from.
+    fn exprs(&mut self, ids: &[ExprId]) -> CResult<&'static [IrRef]> {
+        let mark = self.sc_refs.len();
+        for &i in ids {
+            let r = self.expr(i)?;
+            self.sc_refs.push(r);
+        }
+        let out = self.arena.alloc_slice(&self.sc_refs[mark..]);
+        self.sc_refs.truncate(mark);
+        Ok(out)
     }
 
     /// A variable read from scope index `s` captures every open lambda
@@ -381,7 +401,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve(&mut self, sym: Sym) -> Option<Ir> {
-        let mut withs: Vec<u32> = Vec::new();
+        // the `with` depths, on a buffer kept across lookups
+        let mut withs = mem::take(&mut self.sc_withs);
+        withs.clear();
         let mut outermost_with = None;
         let mut depth = 0;
         let n = self.scopes.len();
@@ -390,6 +412,7 @@ impl<'a> Compiler<'a> {
                 Scope::Lexical { shares, .. } => {
                     if let Some(idx) = self.slot_in(scope, sym) {
                         self.note_capture(n - 1 - d);
+                        self.sc_withs = withs;
                         return Some(Ir::Local { depth, idx });
                     }
                     if !shares {
@@ -408,20 +431,22 @@ impl<'a> Compiler<'a> {
         }
         // Globals live in Nix's static base env, a lexical scope, so they
         // beat any enclosing `with` (`with { true = 1; }; true` is `true`).
-        if let Some(w) = self.globals.table.get(&sym) {
-            return Some(Ir::Const(*w));
-        }
-        if withs.is_empty() {
-            return None;
-        }
-        Some(
-            Ir::WithVar {
-                sym,
-                withs: &[],
-                pos: Pos::NONE,
-            }
-            .with_withs(self.arena.alloc_slice(&withs)),
-        )
+        let r = if let Some(w) = self.globals.table.get(&sym) {
+            Some(Ir::Const(*w))
+        } else if withs.is_empty() {
+            None
+        } else {
+            Some(
+                Ir::WithVar {
+                    sym,
+                    withs: &[],
+                    pos: Pos::NONE,
+                }
+                .with_withs(self.arena.alloc_slice(&withs)),
+            )
+        };
+        self.sc_withs = withs;
+        r
     }
 
     fn expr(&mut self, id: ExprId) -> CResult<IrRef> {
@@ -505,25 +530,16 @@ impl<'a> Compiler<'a> {
                 if items.is_empty() {
                     return Ok(Ir::Const(self.arena.mk_list(&[])));
                 }
-                let mut v = Vec::with_capacity(items.len());
-                for i in items {
-                    v.push(self.expr(*i)?);
-                }
-                Ir::List(self.alloc_refs(v))
+                Ir::List(self.exprs(items)?)
             }
             Expr::Lambda { param, body } => {
                 Ir::Lambda(self.lambda(*param, *body, pos, None, None)?)
             }
             Expr::Apply { func, args } => {
                 let func = self.expr(*func)?;
-                let args = ast.ids(*args);
-                let mut v = Vec::with_capacity(args.len());
-                for a in args {
-                    v.push(self.expr(*a)?);
-                }
                 Ir::Apply {
                     func,
-                    args: self.alloc_refs(v),
+                    args: self.exprs(ast.ids(*args))?,
                     pos,
                 }
             }
@@ -573,7 +589,7 @@ impl<'a> Compiler<'a> {
                     BinOp::Concat => Ir::ConcatLists(l, r, pos),
                     BinOp::Add => Ir::Concat {
                         force_string: false,
-                        parts: self.alloc_refs(vec![l, r]),
+                        parts: self.alloc_refs(&[l, r]),
                         pos,
                     },
                     BinOp::Sub => Ir::Sub(l, r, pos),
@@ -748,7 +764,7 @@ impl<'a> Compiler<'a> {
         }
         Ok(Ir::Concat {
             force_string: true,
-            parts: self.alloc_refs(v),
+            parts: self.alloc_refs(&v),
             pos,
         })
     }
@@ -805,7 +821,7 @@ impl<'a> Compiler<'a> {
                 let path = self.var_ir(np, pos)?;
                 return Ok(Ir::Apply {
                     func,
-                    args: self.alloc_refs(vec![path, name]),
+                    args: self.alloc_refs(&[path, name]),
                     pos,
                 });
             }
@@ -838,7 +854,7 @@ impl<'a> Compiler<'a> {
         }
         Ok(Ir::Concat {
             force_string: false,
-            parts: self.alloc_refs(v),
+            parts: self.alloc_refs(&v),
             pos,
         })
     }
@@ -1089,10 +1105,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let mut from: Vec<IrRef> = Vec::with_capacity(from_exprs.len());
-        for e in &from_exprs {
-            from.push(self.expr(*e)?);
-        }
+        let from = self.exprs(&from_exprs)?;
         if !deferred_from.is_empty() {
             self.push_lexical([], 0, false);
             // the from-env has `from.len()` anonymous slots at depth 0
@@ -1108,7 +1121,6 @@ impl<'a> Compiler<'a> {
         let dynamic = self.lower_dynamics(dynamics)?;
         binds.sort_by_key(|b| b.sym);
         let binds = self.alloc_binds(binds);
-        let from = self.alloc_refs(from);
         Ok(self.alloc(AttrsIr {
             rec: false,
             binds,
@@ -1216,11 +1228,8 @@ impl<'a> Compiler<'a> {
                 scope,
             });
         }
-        let mut from = Vec::with_capacity(from_exprs.len());
-        for e in from_exprs {
-            from.push(self.expr(e)?);
-        }
-        Ok((self.alloc_binds(binds), self.alloc_refs(from)))
+        let from = self.exprs(&from_exprs)?;
+        Ok((self.alloc_binds(binds), from))
     }
 
     fn var_ir(&mut self, var: Sym, pos: Pos) -> CResult<IrRef> {

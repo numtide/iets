@@ -859,6 +859,131 @@ fn fetch_git_remote() {
     );
 }
 
+/// fetchGit with `verifyCommit`, against a commit signed with an SSH key,
+/// fetched from a remote repository and read from a working tree.
+#[test]
+fn fetch_git_verify_commit() {
+    let s = store!();
+    let f = Farm::new(&s);
+    let mut c = Checks::default();
+    let keygen = |name: &str, kind: &str| {
+        let key = s.dir().join(name);
+        let out = Command::new("ssh-keygen")
+            .args(["-q", "-t", kind, "-N", "", "-f"])
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let public = fs::read_to_string(key.with_extension("pub")).unwrap();
+        (key, public.split(' ').nth(1).unwrap().to_string())
+    };
+    let (signer, good) = keygen("good", "ed25519");
+    let (_, bad) = keygen("bad", "ed25519");
+    let work = s.dir().join("work");
+    fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "trunk"]);
+    fs::write(work.join("a"), "a\n").unwrap();
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "unsigned", "1700000000 +0000");
+    let unsigned = git(&work, &["rev-parse", "HEAD"]);
+    fs::write(work.join("b"), "b\n").unwrap();
+    git(&work, &["add", "-A"]);
+    let key = format!("user.signingkey={}", signer.display());
+    let sign = ["-c", "gpg.format=ssh", "-c", &key, "-c", "user.name=iets"];
+    let sign = [&sign[..], &["-c", "user.email=iets@example.com"]].concat();
+    git(
+        &work,
+        &[&sign[..], &["commit", "-q", "-S", "-m", "signed"]].concat(),
+    );
+    let signed = git(&work, &["rev-parse", "HEAD"]);
+    let bare = s.dir().join("work.git");
+    git(
+        s.dir(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let url = format!("file://{}", bare.display());
+    let list = format!(
+        r#"[ {{ type = "ssh-ed25519"; key = "{bad}"; }} {{ type = "ssh-ed25519"; key = "{good}"; }} ]"#
+    );
+    for (label, arg) in [
+        (
+            "good key",
+            format!(r#"url = "{url}"; rev = "{signed}"; publicKey = "{good}";"#),
+        ),
+        (
+            "wrong key",
+            format!(r#"url = "{url}"; rev = "{signed}"; publicKey = "{bad}";"#),
+        ),
+        (
+            "key list",
+            format!(r#"url = "{url}"; rev = "{signed}"; publicKeys = {list};"#),
+        ),
+        (
+            "unsigned",
+            format!(r#"url = "{url}"; rev = "{unsigned}"; publicKey = "{good}";"#),
+        ),
+        (
+            "verifyCommit off",
+            format!(
+                r#"url = "{url}"; rev = "{unsigned}"; verifyCommit = false; publicKey = "{good}";"#
+            ),
+        ),
+        (
+            "working tree",
+            format!(
+                r#"url = "file://{}"; publicKey = "{good}";"#,
+                work.display()
+            ),
+        ),
+    ] {
+        let expr = format!("(builtins.fetchGit {{ {arg} }}).narHash");
+        let args = [
+            "eval",
+            "--impure",
+            "--raw",
+            "--extra-experimental-features",
+            "verified-fetches",
+            "--expr",
+            &expr,
+        ];
+        c.same(&format!("fetchGit {label}"), &native(&f, &s, &args));
+    }
+    // Nix writes `ssh-ecdsa` into the allowed signers, which OpenSSH rejects
+    let (ecdsa, public) = keygen("ecdsa", "ecdsa");
+    let key = format!("user.signingkey={}", ecdsa.display());
+    let sign = [&["-c", "gpg.format=ssh", "-c", &key][..], &sign[4..]].concat();
+    git(
+        &work,
+        &[
+            &sign[..],
+            &["commit", "-q", "-S", "--allow-empty", "-m", "ecdsa"],
+        ]
+        .concat(),
+    );
+    let rev = git(&work, &["rev-parse", "HEAD"]);
+    let expr = format!(
+        r#"(builtins.fetchGit {{ url = "file://{}"; rev = "{rev}"; keytype = "ssh-ecdsa"; publicKey = "{public}"; }}).narHash"#,
+        work.display()
+    );
+    let mut o = f.ours("nix");
+    o.env("IETS_NIX_BIN_DIR", s.failing_nix());
+    let o = o
+        .args(["eval", "--impure", "--raw", "--expr", &expr])
+        .output()
+        .unwrap();
+    c.check(
+        "an ECDSA signature verifies",
+        o.status.success(),
+        stderr(&o),
+    );
+}
+
 /// Both runs, with a failing `nix` for iets, so a match shows iets fetched
 /// on its own.
 fn native(f: &Farm, s: &Store, args: &[&str]) -> Both {

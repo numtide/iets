@@ -1,4 +1,4 @@
-{ lib, pkgs, stdenv, runCommand, git, jq, nix, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsRiscv64, fuzz }:
+{ lib, pkgs, stdenv, runCommand, git, jq, nix, openssh, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsRiscv64, fuzz }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # LTO, minutes for no extra coverage
@@ -11,7 +11,8 @@ in
 {
   test = craneLib.cargoNextest (withDev // {
     # nix runs the private daemon of tests/e2e
-    nativeCheckInputs = [ git nix ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
+    # ssh-keygen checks the signed commits of the fetchGit tests
+    nativeCheckInputs = [ git nix openssh ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
     # no e2e test may skip for want of nix-daemon
     IETS_TEST_E2E = "1";
     # cargo would create /homeless-shelter, and then that daemon refuses to

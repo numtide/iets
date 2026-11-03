@@ -3,7 +3,7 @@
 //! tree is (git.cc:getAccessorFromWorkdir), so the tracing cache follows its
 //! files. Any other fetch reads a commit (git.cc:getAccessorFromCommit), of
 //! a local repository where it is, else of a clone (`crate::fetch::git`).
-//! Only `lfs` and `verifyCommit` still go to Nix's own `fetchGit`.
+//! Only `lfs` still goes to Nix's own `fetchGit`.
 
 use crate::sys::OsStrExt;
 use std::path::Path;
@@ -100,7 +100,12 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         .map(Path::new)
         .filter(|r| r.join(".git").exists());
     let mut tree = match workdir {
-        Some(root) if unpinned => from_workdir(ev, &args, root, pos)?,
+        Some(root) if unpinned => {
+            let tree = from_workdir(ev, &args, root, pos)?;
+            let rev = str_attr(&tree.attrs, "rev").filter(|r| *r != NULL_REV);
+            verify(&args, rev.map(|r| (root, r)), &shown, pos)?;
+            tree
+        }
         _ => from_commit(ev, &args, &url, workdir, pos)?,
     };
     // fetchTree.cc:emitTreeAttrs with `emptyRevFallback`
@@ -113,14 +118,47 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
     emit_tree_attrs(ev, &tree, None, pos)
 }
 
-/// What only Nix fetches yet: Git LFS files and signed commits.
+/// What only Nix fetches yet: Git LFS files.
 pub(crate) fn needs_nix(args: &Attrs) -> bool {
-    let set = |k| bool_attr(args, k).unwrap_or(false);
-    set("lfs")
-        || set("verifyCommit")
-        || ["publicKey", "publicKeys", "keytype"]
-            .iter()
-            .any(|k| args.contains_key(*k))
+    bool_attr(args, "lfs").unwrap_or(false)
+}
+
+/// git.cc:getPublicKeys. `publicKeys` is the JSON of a list of keys, and
+/// `publicKey` adds one more. OpenSSH reads each key's type from the key.
+fn public_keys(args: &Attrs, pos: Pos) -> EvalResult<Vec<String>> {
+    let mut keys = Vec::new();
+    if let Some(json) = str_attr(args, "publicKeys") {
+        let bad =
+            |e: String| Error::boxed(ErrorKind::Eval, format!("invalid 'publicKeys': {e}"), pos);
+        let list: Vec<serde_json::Value> =
+            serde_json::from_str(json).map_err(|e| bad(e.to_string()))?;
+        for k in list {
+            let key = k.get("key").and_then(|v| v.as_str());
+            keys.push(
+                key.ok_or_else(|| bad("a key has no 'key'".into()))?
+                    .to_string(),
+            );
+        }
+    }
+    keys.extend(str_attr(args, "publicKey").map(String::from));
+    Ok(keys)
+}
+
+/// git.cc:verifyCommit. A `verifyCommit`, or any key, requires `rev` to be
+/// signed by one of the keys. A dirty working tree has no commit to check.
+fn verify(args: &Attrs, repo: Option<(&Path, &str)>, shown: &str, pos: Pos) -> EvalResult<()> {
+    let keys = public_keys(args, pos)?;
+    if !bool_attr(args, "verifyCommit").unwrap_or(!keys.is_empty()) {
+        return Ok(());
+    }
+    let Some((repo, rev)) = repo else {
+        bail!(
+            ErrorKind::Eval,
+            pos,
+            "commit verification is required for Git repository '{shown}', but it's dirty"
+        );
+    };
+    fetch::git::verify_commit(repo, rev, &keys).map_err(|e| Error::boxed(ErrorKind::Eval, e, pos))
 }
 
 /// fetchers.cc:Input::checkLocks for a `narHash` the call gives.
@@ -302,6 +340,7 @@ pub(crate) fn from_commit(
             (got.repo, got.rev, got.r#ref)
         }
     };
+    verify(args, Some((&repo, &rev)), url, pos)?;
     let export = bool_attr(args, "exportIgnore").unwrap_or(false);
     let submodules = bool_attr(args, "submodules").unwrap_or(false);
     let name = str_attr(args, "name").unwrap_or("source");

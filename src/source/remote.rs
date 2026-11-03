@@ -805,8 +805,8 @@ fn fetch_git_input(
     Ok(())
 }
 
-/// The last shell-out: an `hg` input, or a `git` one with `lfs` or
-/// `verifyCommit`, goes to Nix's own `fetchTree` with its locked attrs, and the
+/// The last shell-out: an `hg` input, or a `git` one with `lfs`, goes to
+/// Nix's own `fetchTree` with its locked attrs, and the
 /// store path Nix reports must be the one the lock implies.
 fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     let expr = format!(

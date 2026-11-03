@@ -182,6 +182,29 @@ pub fn scratch() -> Result<File> {
     tempfile::tempfile().map_err(|e| Error::io("cannot create a scratch file", e))
 }
 
+/// An unnamed file, so nothing can truncate it under `Tree::index`'s map.
+pub struct Spool(File);
+
+impl Spool {
+    pub fn scratch() -> Result<Spool> {
+        scratch().map(Spool)
+    }
+
+    pub fn create_in(dir: &Path) -> io::Result<Spool> {
+        tempfile::tempfile_in(dir).map(Spool)
+    }
+}
+
+impl Write for Spool {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
 fn parts_of(rel: &Path) -> Parts {
     rel.components()
         .map(|c| c.as_os_str().as_bytes().to_vec())
@@ -268,7 +291,8 @@ impl Tree {
     /// Indexes the decompressed tar in `spool`, which is read from the start and
     /// kept for `dump`. `max_size` is `fetch-max-size`: the spool and everything
     /// a sparse member expands to must fit in it together.
-    pub fn index(spool: File, max_size: u64) -> Result<Tree> {
+    pub fn index(spool: Spool, max_size: u64) -> Result<Tree> {
+        let Spool(spool) = spool;
         let mut root = DraftDir::new();
         let mut links: BTreeMap<Parts, Parts> = Default::default();
         let mut sparse: Option<File> = None;
@@ -278,8 +302,7 @@ impl Tree {
             .map_err(|e| Error::io("cannot read the spooled tarball", e))?
             .len();
         let mut room = max_size.saturating_sub(spool_len);
-        // SAFETY: the spool is an unnamed scratch file (`scratch`), so no
-        // other process can open it, and nothing here truncates it.
+        // SAFETY: see `Spool`.
         let map = unsafe { FileMap::new(&spool, spool_len) };
         {
             let src = match &map {
@@ -429,7 +452,8 @@ impl Tree {
 
     /// The spool as one regular file, not executable: what `builtins.fetchurl`
     /// downloads (tarball.cc:downloadFile).
-    pub fn file(spool: File) -> Result<Tree> {
+    pub fn file(spool: Spool) -> Result<Tree> {
+        let Spool(spool) = spool;
         let size = spool
             .metadata()
             .map_err(|e| Error::io("cannot read the spooled download", e))?
@@ -768,18 +792,6 @@ pub fn object_ids(n: &Node, out: &mut impl Extend<Id>) {
         Node::Dir(d) => d.iter().for_each(|(_, c)| object_ids(c, out)),
         Node::File { .. } | Node::Symlink(_) => {}
     }
-}
-
-/// The file the download is spooled into, in a staged directory of the store.
-pub const SPOOL: &str = "spool";
-
-/// The spool of a staged download, created for writing and read back to store it.
-pub fn spool_file(dir: &Path) -> io::Result<File> {
-    File::options()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(dir.join(SPOOL))
 }
 
 fn put_u64(e: &mut Vec<u8>, mut n: u64) {
@@ -1168,7 +1180,7 @@ pub(crate) mod tests {
     /// for the same archive.
     fn both(bytes: Vec<u8>) -> (Result<Vec<u8>>, Result<Vec<u8>>) {
         let plain = http::decompress(bytes.clone()).unwrap();
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&plain).unwrap();
         let streamed = Tree::index(spool, u64::MAX).and_then(|t| {
             let mut nar = Vec::new();
@@ -1350,7 +1362,7 @@ pub(crate) mod tests {
 
     fn spooled(entries: &[(&str, tar::EntryType, u32, &[u8])]) -> Tree {
         let plain = http::decompress(tar_gz(entries)).unwrap();
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&plain).unwrap();
         Tree::index(spool, u64::MAX).unwrap()
     }
@@ -1566,7 +1578,7 @@ pub(crate) mod tests {
             },
         );
         assert!(bomb.len() < 4096, "the archive is small: {}", bomb.len());
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&bomb).unwrap();
         let e = Tree::index(spool, 1 << 20).unwrap_err().to_string();
         assert!(e.contains("fetch-max-size"), "{e}");
@@ -1580,7 +1592,7 @@ pub(crate) mod tests {
         let names: Vec<String> = (0..32).map(|i| format!("l{i}")).collect();
         entries.extend(names.iter().map(|n| (n.as_str(), HARD, 0o644, &b"f"[..])));
         let tar = http::decompress(tar_gz(&entries)).unwrap();
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&tar).unwrap();
         let e = Tree::index(spool, 1 << 20).unwrap_err().to_string();
         assert!(e.contains("fetch-max-size"), "{e}");
@@ -1602,7 +1614,7 @@ pub(crate) mod tests {
             h.set_mode(0o644);
             b.append_link(&mut h, format!("l{i}"), "s").unwrap();
         }
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&b.into_inner().unwrap()).unwrap();
         let e = Tree::index(spool, 1 << 20).unwrap_err().to_string();
         assert!(e.contains("fetch-max-size"), "{e}");
@@ -1623,7 +1635,7 @@ pub(crate) mod tests {
             ("c", REG, 0o644, b"c"),
         ]))
         .unwrap();
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&tar).unwrap();
         Tree::index(spool, 1 << 20).unwrap();
     }
@@ -1632,7 +1644,7 @@ pub(crate) mod tests {
     fn a_member_nested_too_deep_is_refused() {
         let deep = vec!["d"; NAR_MAX_DEPTH + 1].join("/");
         let tar = pax_tar(&[("path", deep)], "x", b"x");
-        let mut spool = scratch().unwrap();
+        let mut spool = Spool::scratch().unwrap();
         spool.write_all(&tar).unwrap();
         let e = Tree::index(spool, u64::MAX).unwrap_err().to_string();
         assert!(e.contains("nested deeper"), "{e}");

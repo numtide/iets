@@ -648,7 +648,7 @@ mod tests {
             b.append_data(&mut h, format!("top/{name}"), *bytes)
                 .unwrap();
         }
-        let mut spool = spool::scratch().unwrap();
+        let mut spool = spool::Spool::scratch().unwrap();
         io::Write::write_all(&mut spool, &b.into_inner().unwrap()).unwrap();
         let tree = Tree::index(spool, u64::MAX).unwrap();
         let mut h = Hasher::new(HashAlgo::Sha256);
@@ -774,7 +774,7 @@ mod tests {
     }
 
     fn file_of(bytes: &[u8]) -> Tree {
-        let mut spool = spool::scratch().unwrap();
+        let mut spool = spool::Spool::scratch().unwrap();
         io::Write::write_all(&mut spool, bytes).unwrap();
         Tree::file(spool).unwrap()
     }

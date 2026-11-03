@@ -39,6 +39,8 @@ pub struct Ctx {
     /// The effects of the thunks this helper is forcing, innermost last.
     pub fx: force::Log,
     pub slot: *mut sched::Slot,
+    /// Threads of the run, 1 on the sequential path.
+    pub workers: usize,
 }
 
 impl Default for Ctx {
@@ -52,6 +54,7 @@ impl Default for Ctx {
             frames: 0,
             fx: force::Log::default(),
             slot: ptr::null_mut(),
+            workers: 1,
         }
     }
 }

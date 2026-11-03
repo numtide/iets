@@ -468,8 +468,8 @@ macro_rules! bail {
         return Err($crate::eval::Error::boxed_fmt($kind, format_args!($($arg)*), $pos))
     };
 }
-use crate::sys;
 pub(crate) use bail;
+use crate::sys;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
     __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
@@ -893,7 +893,7 @@ impl Evaluator {
             Origin::Text | Origin::Internal => self.files.add_text(path, &src),
         };
         let base = self.files[file.0 as usize].base;
-        let ast = syntax::parse(&src, file, &mut self.interner)
+        let ast = syntax::parse_threads(&src, file, &mut self.interner, self.par.workers)
             .map_err(|e| Error::boxed(ErrorKind::Parse, e.msg, Pos(base + e.span.start)))?;
         self.files[file.0 as usize].set_allows(ast.allows.clone());
         let t0 = Instant::now();

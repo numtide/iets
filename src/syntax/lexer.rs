@@ -353,6 +353,27 @@ impl<'a> Lexer<'a> {
         self.pos = pos;
     }
 
+    /// Lexes from `pos` on, as if the source before it had been read: a
+    /// chunk of a huge set (`parser::chunks`).
+    pub fn start_at(&mut self, pos: usize) {
+        self.pos = pos;
+        self.noted_to = pos;
+    }
+
+    /// The `# iets:` comments noted so far, unresolved, for the lexer of
+    /// the whole file to take over (`resume_after`).
+    pub fn take_raw_allows(&mut self) -> Vec<(usize, usize)> {
+        mem::take(&mut self.allows)
+    }
+
+    /// Goes on at `pos`, where other lexers of the same source read up to,
+    /// with the comments they noted, in source order.
+    pub fn resume_after(&mut self, pos: usize, allows: impl IntoIterator<Item = (usize, usize)>) {
+        self.allows.extend(allows);
+        self.pos = pos;
+        self.noted_to = self.noted_to.max(pos);
+    }
+
     #[inline]
     fn at(&self, i: usize) -> u8 {
         if i < self.src.len() { self.src[i] } else { 0 }

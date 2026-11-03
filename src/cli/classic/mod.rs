@@ -270,7 +270,10 @@ mod tests {
             flag(&["--extra-experimental-features", "nix-command flakes"]),
             Ok(true)
         );
-        assert!(flag(&["--experimental-features", "flakes parse-toml-timestamps"]).is_err());
+        assert_eq!(
+            flag(&["--experimental-features", "parse-toml-timestamps"]),
+            Ok(true)
+        );
         let all = vec!["-v".to_string()];
         let mut a = Argv { all: &all, i: 0 };
         for f in ["-v", "--verbose", "--no-gc-warning", "--indirect"] {

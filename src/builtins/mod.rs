@@ -17,7 +17,6 @@ pub mod text;
 use crate::eval::{Evaluator, Pos};
 use crate::runtime::{PrimFn, Word};
 use crate::syntax::symbol::Sym;
-use crate::{config, log};
 
 pub struct Registry {
     pub ops: Vec<(&'static str, u8, PrimFn)>,
@@ -48,25 +47,6 @@ pub fn corepkgs(name: &[u8]) -> Option<&'static [u8]> {
 
 fn builtins_name(name: &'static str) -> &'static str {
     name.strip_prefix("__").unwrap_or(name)
-}
-
-/// Whether this run puts `name` in `builtins` at all. Nix leaves three out
-/// until an experimental feature is on, and code branches on whether they are
-/// there: `flake-compat` takes its `fetchTree` path when `builtins ? fetchTree`.
-/// Under one of Nix's own names iets answers as Nix does; its own commands
-/// have every feature, which is the documented divergence.
-fn exposed(name: &'static str) -> bool {
-    if !log::classic() {
-        return true;
-    }
-    match builtins_name(name) {
-        // primops.cc: `fetch-tree` or `flakes`, since the flake machinery is
-        // written in Nix and calls it
-        "fetchTree" => config::xp_on("fetch-tree") || config::xp_on("flakes"),
-        "fetchClosure" => config::xp_on("fetch-closure"),
-        "outputOf" => config::xp_on("dynamic-derivations"),
-        _ => true,
-    }
 }
 
 pub fn install(ev: &mut Evaluator) {
@@ -118,9 +98,6 @@ pub fn install(ev: &mut Evaluator) {
 
     let mut entries: Vec<(Sym, Pos, Word)> = Vec::new();
     for (name, arity, f) in &r.ops {
-        if !exposed(name) {
-            continue;
-        }
         let gsym = ev.sym(name.as_bytes());
         let w = ev.arena.mk_primop(name, *arity, *f, gsym);
         let bsym = ev.sym(builtins_name(name).as_bytes());

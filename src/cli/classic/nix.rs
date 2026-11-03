@@ -31,7 +31,6 @@ use crate::{config, error, ignored, print, session};
 const NAME: &str = "nix";
 /// filetransfer.hh: the default of `http-connections`.
 const HTTP_CONNECTIONS: usize = 25;
-const TOML_TIMESTAMPS: &str = "parse-toml-timestamps";
 
 /// The flags accepted before the subcommand, and how many values each takes.
 /// `global_flag` applies them; `find_sub` only needs the arity.
@@ -135,18 +134,9 @@ pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
     }
     match s {
         "--accept-flake-config" => ignored::flag_for_nix_config(s),
-        // iets has every feature but this one, which changes what `fromTOML`
-        // returns (docs/reference/divergences.md). In classic mode the
-        // value is still a setting, because the builtins Nix gates on a
-        // feature are gated here too (`builtins::install`).
+        // iets has every feature
         "--experimental-features" | "--extra-experimental-features" => {
-            let v = a.value(s)?;
-            if v.split_whitespace().any(|f| f == TOML_TIMESTAMPS) {
-                return Err(format!("'{s} {TOML_TIMESTAMPS}' is not implemented"));
-            }
-            c.flags
-                .overrides
-                .push((s.trim_start_matches('-').to_string(), v));
+            a.value(s)?;
         }
         "--eval-store" => match a.value(s)?.as_str() {
             "auto" | "daemon" | "" => {

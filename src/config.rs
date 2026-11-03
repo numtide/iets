@@ -311,18 +311,6 @@ pub fn user_conf_files() -> Vec<PathBuf> {
     files
 }
 
-/// Whether an experimental feature is on for this run: `experimental-features`
-/// of nix.conf, plus what the command line added. Only classic mode asks,
-/// for the builtins Nix gates on one; iets's own commands have every feature
-/// (docs/reference/divergences.md). Before the settings are read nothing is on,
-/// which is Nix's own default.
-pub fn xp_on(feature: &str) -> bool {
-    Session::current()
-        .nix_conf
-        .get()
-        .is_some_and(|c| (c.list("experimental-features").iter()).any(|f| f == feature))
-}
-
 /// Whether an evaluation may read a derivation output that is already in the
 /// store. Nix refuses that read when `allow-import-from-derivation` is off and
 /// warns with `trace-import-from-derivation`, so both leave it to the real nix.

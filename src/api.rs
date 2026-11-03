@@ -20,7 +20,6 @@ pub mod testkit;
 pub mod value;
 pub mod watch;
 
-use crate::builtins::text;
 use crate::compile::cache::IrCache;
 use crate::env::Env;
 use crate::eval::{self, Error, ErrorKind, EvalConfig, Evaluator, Pos, search_path};
@@ -62,7 +61,6 @@ pub struct EvalArgs {
     pub lint_roots: Vec<String>,
     /// `--lint-scope root|all`; `None` keeps `iets.toml`'s or the default.
     pub lint_scope: Option<Scope>,
-    pub xp_features: Vec<String>,
     pub workers: usize,
     pub timings: bool,
     /// `--no-tracing-cache` or `IETS_CACHE=0`: evaluate, never replay a run.
@@ -100,7 +98,6 @@ impl Default for EvalArgs {
             lints: Vec::new(),
             lint_roots: Vec::new(),
             lint_scope: None,
-            xp_features: Vec::new(),
             workers: parallel::default_workers(),
             timings: false,
             no_tracing_cache: !cache,
@@ -122,13 +119,6 @@ impl EvalArgs {
     /// `base` plus what these arguments set: the lints, the IR cache, the
     /// search path and `--dump-drvs`. `base` holds the system and `pure-eval`.
     pub fn config(&self, base: EvalConfig) -> Result<EvalConfig, Box<Error>> {
-        if self
-            .xp_features
-            .iter()
-            .any(|f| f == "parse-toml-timestamps")
-        {
-            text::set_parse_toml_timestamps(true);
-        }
         let c = base
             .lints(lint_config(self)?)
             .ir_cache(self.ir_cache())
@@ -557,9 +547,6 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.flag("json", a.json);
     k.flag("raw", a.raw);
     k.field("lints", lint_config(a).ok()?.key().as_bytes());
-    for f in &a.xp_features {
-        k.field("xp", f.as_bytes());
-    }
     k.field("system", cfg.current_system().as_bytes());
     if !config::reads_built_outputs(&Session::current()) {
         k.field("built-outputs", b"0");

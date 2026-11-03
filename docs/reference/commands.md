@@ -96,7 +96,7 @@ section lists.
 | `--lint-scope root\|all` | report sites in the lint roots only, or everywhere |
 | `--lint-absolute-path-literals MODE`, `--lint-short-path-literals MODE`, `--lint-url-literals MODE` | Nix's three lint settings |
 | `--readonly-mode` | holds for `eval`, which writes to no store; one `ignored-flag` warning on a command that writes to the store |
-| `--experimental-features F`, `--extra-experimental-features F` | every feature is always on but `parse-toml-timestamps`, which this turns on |
+| `--experimental-features F`, `--extra-experimental-features F` | ignored, as every feature is always on |
 
 `-E` and a `FILE` together are the usage error
 `-E and FILE cannot be combined`. Otherwise the last input wins. In

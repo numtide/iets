@@ -304,9 +304,7 @@ pub fn set_classic() {
     cur().log.classic.store(true, Ordering::Relaxed);
 }
 
-/// Whether this process answers to one of Nix's names. Under those, what an
-/// experimental feature gates is gated (`builtins::install`); iets's own
-/// commands have every feature.
+/// Whether this process answers to one of Nix's names.
 pub fn classic() -> bool {
     cur().log.classic.load(Ordering::Relaxed)
 }

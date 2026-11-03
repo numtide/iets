@@ -199,9 +199,8 @@ Flags: `--json`, `--raw`, `--expr E`, `-f`/`--file FILE`, `--impure`,
 
 - `nix` evaluates purely unless you say otherwise, and `-f` is impure
   (`docs/explanation/evaluation.md`).
-- The experimental features decide whether `builtins` has `fetchTree`,
-  `fetchClosure` and `outputOf`, as in Nix. `parse-toml-timestamps` falls
-  back.
+- Every experimental feature is on, so `builtins` always has `fetchTree`,
+  `fetchClosure` and `outputOf`.
 - `--accept-flake-config` has no effect. It gives one warning when the
   flake on the command line has a `nixConfig`, as iets never applies one
   (`docs/reference/divergences.md`).

@@ -50,8 +50,6 @@ pub struct Session {
     /// Store path to local tree, for the commands that build the map while
     /// the evaluation is live (`crate::provenance`).
     pub source_map: OnceLock<SourceMap>,
-    /// The `parse-toml-timestamps` experimental feature.
-    pub toml_timestamps: AtomicBool,
     /// Every arena chunk and symbol name of this session's evaluators.
     /// Released when the last of the session, its evaluators and its
     /// worker threads lets go (docs/reference/library.md).

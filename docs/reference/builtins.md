@@ -45,7 +45,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `fetchurl` | partial | Needs a `sha256` in every mode. Nix needs one only in pure evaluation. `iets prefetch URL` prints it. A hash mismatch exits with 1. Nix exits with 102. |
 | `flakeRefToString` | works | Accepts some references that Nix refuses. A `git` input that is not a URL fails. |
 | `fromJSON` | works | Error text differs. Refuses nesting deeper than 100,000 levels. |
-| `fromTOML` | works | TOML 1.0, as in Nix. Datetimes need the `parse-toml-timestamps` feature. Error text differs. |
+| `fromTOML` | works | TOML 1.0, as in Nix. A datetime fails when it is used. Error text differs. |
 | `genericClosure` | works | When two keys cannot be compared, the error can name another pair. |
 | `getContext` | works | Fails on the output of a dynamic derivation. Nix builds the producer first. |
 | `getFlake` | partial | Impure evaluation, or pure on `path:DIR?narHash=H` when the tree matches `H`. Needs a local flake with a complete `flake.lock`. |

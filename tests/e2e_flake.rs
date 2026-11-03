@@ -1311,6 +1311,15 @@ fn online_inputs() {
             last(&stderr(&two), 3)
         )
     });
+
+    // a zip archive, 195 members MS-DOS made, stored and deflated, as Nix
+    // reads it (numtide/iets#300)
+    let zip = r#"builtins.fetchTarball { url = "https://github.com/sini/gen/archive/6427d42770e3b1c283b8caf2929ed622e551ebb9.zip"; sha256 = "sha256-iZy+KBldd5UQh1RdCgMbmrYbnKMH0Vy9iJ4mpn1fbzw="; name = "nfu-1965-zip-repro"; }"#;
+    let o = f.iets_eval(&[], &["--raw", "--expr", zip]);
+    let want = stdout(&f.nix(&["eval", "--raw", "--expr", zip]));
+    f.verdict(!want.is_empty() && stdout(&o) == want, || {
+        format!("zip: {} vs {want} {}", stdout(&o), last(&stderr(&o), 3))
+    });
 }
 
 /// iets has no git fetcher, so a missing git input goes to Nix, and without

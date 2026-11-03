@@ -42,6 +42,7 @@ lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "x
 bzip2 = "0.6"
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+rawzip = "0.5.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

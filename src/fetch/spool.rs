@@ -293,6 +293,9 @@ impl Tree {
     /// a sparse member expands to must fit in it together.
     pub fn index(spool: Spool, max_size: u64) -> Result<Tree> {
         let Spool(spool) = spool;
+        if is_zip(&spool) {
+            return Tree::index_zip(spool, max_size);
+        }
         let mut root = DraftDir::new();
         let mut links: BTreeMap<Parts, Parts> = Default::default();
         let mut sparse: Option<File> = None;
@@ -450,6 +453,166 @@ impl Tree {
         })
     }
 
+    /// `index` for a zip, read through its central directory as libarchive
+    /// reads one (archive_read_support_format_zip.c): a member a Unix system
+    /// made has the mode its attributes hold, one MS-DOS made is `0664`, or
+    /// `0775` with the directory bit, and any other has none; a name that
+    /// ends in `/` is a directory, and a mode with no type is a regular file.
+    /// A stored member is read in place; a deflated one is inflated into the
+    /// side file, as a sparse tar member is expanded there.
+    fn index_zip(spool: File, max_size: u64) -> Result<Tree> {
+        let zip_err = |e: rawzip::Error| bad(format!("cannot read the zip archive: {e}"));
+        let io_err = |e: io::Error| Error::io("cannot read the spooled archive", e);
+        let spool_len = spool.metadata().map_err(io_err)?.len();
+        let mut room = max_size.saturating_sub(spool_len);
+        let mut buf = vec![0u8; rawzip::RECOMMENDED_BUFFER_SIZE];
+        let archive = rawzip::ZipArchive::from_file(spool.try_clone().map_err(io_err)?, &mut buf)
+            .map_err(zip_err)?;
+        let mut root = DraftDir::new();
+        let mut side: Option<File> = None;
+        let mut side_at = 0u64;
+        let mut seen = 0u64;
+        let mut entries = archive.entries(&mut buf);
+        while let Some(e) = entries.next_entry().map_err(zip_err)? {
+            seen += 1;
+            let system = e.version_made_by().as_u16() >> 8;
+            let attrs = e.external_attributes();
+            let mut name = e.file_path().as_bytes().to_vec();
+            // Windows archivers sometimes use backslash as the separator;
+            // libarchive judges that by the local header's system byte, which
+            // is the high byte of its "version needed" field
+            let mut needed = [0u8; 2];
+            sysfs::read_exact_at(&spool, &mut needed, e.local_header_offset() + 4)
+                .map_err(io_err)?;
+            if needed[1] == 0 && !name.contains(&b'/') {
+                for b in &mut name {
+                    if *b == b'\\' {
+                        *b = b'/';
+                    }
+                }
+            }
+            let mut mode = match system {
+                3 => attrs >> 16,
+                0 => {
+                    let m = if attrs & 0x10 != 0 {
+                        S_IFDIR | 0o775
+                    } else {
+                        S_IFREG | 0o664
+                    };
+                    if attrs & 0x01 != 0 { m & 0o555 } else { m }
+                }
+                _ => 0,
+            };
+            if mode == 0 {
+                mode |= 0o664;
+            }
+            if name.ends_with(b"/") {
+                mode = (mode & !S_IFMT) | S_IFDIR | 0o111;
+            } else if mode & S_IFMT == 0 {
+                mode |= S_IFREG;
+            }
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            let parts = parts_of(&unpack::member_path(Path::new(OsStr::from_bytes(&name))));
+            if parts.is_empty() {
+                continue;
+            }
+            if parts.len() > NAR_MAX_DEPTH {
+                return Err(bad(format!(
+                    "zip member '{shown}' is nested deeper than {NAR_MAX_DEPTH} directories"
+                )));
+            }
+            let read_err =
+                |e: io::Error| Error::io(format!("cannot read '{shown}' from the zip archive"), e);
+            match mode & S_IFMT {
+                S_IFDIR => insert(&mut root, &parts, Draft::Dir(DraftDir::new()), true),
+                S_IFLNK => {
+                    if e.compressed_size_hint() > 64 * 1024 {
+                        return Err(bad(format!(
+                            "zip symlink '{shown}' has an oversized target"
+                        )));
+                    }
+                    let local = archive.get_entry(e.wayfinder()).map_err(zip_err)?;
+                    let mut target = Vec::new();
+                    inflating(&local, e.compression_method(), &shown)?
+                        .take(64 * 1024 + 1)
+                        .read_to_end(&mut target)
+                        .map_err(read_err)?;
+                    if target.len() > 64 * 1024 {
+                        return Err(bad(format!(
+                            "zip symlink '{shown}' has an oversized target"
+                        )));
+                    }
+                    room = room.checked_sub(target.len() as u64).ok_or_else(|| {
+                        bad(format!(
+                            "the zip archive expands to over the fetch-max-size of {max_size} bytes"
+                        ))
+                    })?;
+                    insert(&mut root, &parts, Draft::Leaf(Node::Symlink(target)), true);
+                }
+                S_IFCHR | S_IFBLK | S_IFSOCK => {
+                    return Err(bad(format!(
+                        "file '{shown}' in zip archive has unsupported file type {:o}",
+                        mode & S_IFMT
+                    )));
+                }
+                // a fifo is a regular file to libarchive, as to Info-ZIP's bug
+                _ => {
+                    let exec = mode & 0o100 != 0;
+                    let local = archive.get_entry(e.wayfinder()).map_err(zip_err)?;
+                    let (start, end) = local.compressed_data_range();
+                    let at = if e.compression_method() == rawzip::CompressionMethod::STORE {
+                        Blob::Spool {
+                            offset: start,
+                            size: end - start,
+                            sparse: false,
+                        }
+                    } else {
+                        let mut from = inflating(&local, e.compression_method(), &shown)?;
+                        let to = match &mut side {
+                            Some(f) => f,
+                            None => side.insert(scratch()?),
+                        };
+                        let size = copy_within(&mut from, to, side_at, room).map_err(read_err)?;
+                        let size = size.ok_or_else(|| {
+                            bad(format!(
+                                "the zip archive expands to over the fetch-max-size of {max_size} bytes"
+                            ))
+                        })?;
+                        room -= size;
+                        let at = Blob::Spool {
+                            offset: side_at,
+                            size,
+                            sparse: true,
+                        };
+                        side_at += size;
+                        at
+                    };
+                    insert(
+                        &mut root,
+                        &parts,
+                        Draft::Leaf(Node::File { at, exec }),
+                        true,
+                    );
+                }
+            }
+        }
+        if seen != archive.entries_hint() {
+            return Err(bad(format!(
+                "the zip archive names {} members but holds {seen}",
+                archive.entries_hint()
+            )));
+        }
+        // SAFETY: see `Spool`.
+        let map = unsafe { FileMap::new(&spool, spool_len) };
+        Ok(Tree {
+            src: Source::Spool {
+                spool,
+                sparse: side,
+                map,
+            },
+            root: Node::Dir(dereference(Draft::finish(root))),
+        })
+    }
     /// The spool as one regular file, not executable: what `builtins.fetchurl`
     /// downloads (tarball.cc:downloadFile).
     pub fn file(spool: Spool) -> Result<Tree> {
@@ -1039,6 +1202,58 @@ pub(super) fn expand(
     side.set_len(base + size)
 }
 
+const S_IFMT: u32 = 0o170000;
+const S_IFSOCK: u32 = 0o140000;
+const S_IFLNK: u32 = 0o120000;
+const S_IFREG: u32 = 0o100000;
+const S_IFBLK: u32 = 0o060000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFCHR: u32 = 0o020000;
+
+/// Whether the spool holds a zip: libarchive bids on the first local header,
+/// or on the end record of an archive with no member.
+fn is_zip(spool: &File) -> bool {
+    let mut magic = [0u8; 4];
+    sysfs::read_exact_at(spool, &mut magic, 0).is_ok()
+        && matches!(&magic, b"PK\x03\x04" | b"PK\x05\x06")
+}
+
+/// A zip member's bytes as stored, inflated when it is deflated, with the
+/// size and CRC the central directory claims checked at the end.
+fn inflating<'a, R: rawzip::ReaderAt>(
+    local: &rawzip::ZipEntry<'a, R>,
+    method: rawzip::CompressionMethod,
+    shown: &str,
+) -> Result<Box<dyn Read + 'a>> {
+    match method {
+        rawzip::CompressionMethod::STORE => Ok(Box::new(local.verifying_reader(local.reader()))),
+        rawzip::CompressionMethod::DEFLATE => Ok(Box::new(
+            local.verifying_reader(flate2::read::DeflateDecoder::new(local.reader())),
+        )),
+        m => Err(bad(format!(
+            "zip member '{shown}' uses compression method {}, which iets does not read",
+            m.as_u16()
+        ))),
+    }
+}
+
+/// Copies `from` into `to` at `base` and answers the size, or `None` once it
+/// passes `room`.
+fn copy_within(from: &mut dyn Read, to: &File, base: u64, room: u64) -> io::Result<Option<u64>> {
+    let mut buf = vec![0u8; CHUNK];
+    let mut size = 0u64;
+    loop {
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            return Ok(Some(size));
+        }
+        size += n as u64;
+        if size > room {
+            return Ok(None);
+        }
+        sysfs::write_all_at(to, &buf[..n], base + size - n as u64)?;
+    }
+}
 /// The map a format 1.0 sparse member holds at the head of its data: decimal
 /// numbers on their own lines, padded out to whole 512-byte blocks.
 fn read_map(entry: &mut impl Read) -> io::Result<Vec<(u64, u64)>> {
@@ -1668,5 +1883,150 @@ pub(crate) mod tests {
         let mut h = Hasher::new(HashAlgo::Sha256);
         h.write_all(&streamed).unwrap();
         assert_eq!(h.finish().to_sri(), want.trim());
+    }
+
+    /// A zip of `entries`: `mode` is the Unix mode a Unix system made the
+    /// member with, or `None` for one made under MS-DOS; `deflate` compresses
+    /// it. A symlink's data is its target.
+    fn zip_of(entries: &[(&str, Option<u32>, &[u8], bool)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut w = rawzip::ZipArchiveWriter::new(&mut out);
+        for (name, mode, data, deflate) in entries {
+            if name.ends_with('/') {
+                let mut d = w.new_dir(*name);
+                if let Some(m) = mode {
+                    d = d.unix_permissions(*m);
+                }
+                d.create().unwrap();
+                continue;
+            }
+            let method = if *deflate {
+                rawzip::CompressionMethod::DEFLATE
+            } else {
+                rawzip::CompressionMethod::STORE
+            };
+            let mut f = w.new_file(*name).compression_method(method);
+            if let Some(m) = mode {
+                f = f.unix_permissions(*m);
+            }
+            let (mut entry, config) = f.start().unwrap();
+            let desc = if *deflate {
+                let enc =
+                    flate2::write::DeflateEncoder::new(&mut entry, flate2::Compression::fast());
+                let mut wr = config.wrap(enc);
+                wr.write_all(data).unwrap();
+                let (enc, desc) = wr.finish().unwrap();
+                enc.finish().unwrap();
+                desc
+            } else {
+                let mut wr = config.wrap(&mut entry);
+                wr.write_all(data).unwrap();
+                wr.finish().unwrap().1
+            };
+            entry.finish(desc).unwrap();
+        }
+        w.finish().unwrap();
+        out
+    }
+
+    /// The NAR the spool writes for the plain archive `bytes`.
+    fn spool_nar(bytes: &[u8], max_size: u64) -> Result<Vec<u8>> {
+        let mut spool = Spool::scratch().unwrap();
+        spool.write_all(bytes).unwrap();
+        let t = Tree::index(spool, max_size)?;
+        let mut nar = Vec::new();
+        t.dump(&mut nar)
+            .map_err(|e| Error::io("cannot dump the spool", e))?;
+        Ok(nar)
+    }
+
+    /// Every rule a zip adds, held to the tar of the same tree: the modes, a
+    /// deflated symlink, a deflated member out of the side file and a stored
+    /// one in place, an implied parent, an empty directory, a repeated
+    /// member, and the one leading directory dereferenced.
+    #[test]
+    fn a_zip_hashes_as_the_tar_of_the_same_tree() {
+        let big = vec![b'z'; 70 * 1024];
+        let zip = zip_of(&[
+            ("t/", Some(0o40755), b"", false),
+            ("t/run", Some(0o100755), b"#!/bin/sh\n", false),
+            ("t/plain", Some(0o100644), b"first", true),
+            ("t/empty/", Some(0o40755), b"", false),
+            ("t/link", Some(0o120777), b"plain", true),
+            ("t/big", Some(0o100644), &big, true),
+            ("t/sub/deep.txt", Some(0o100644), b"d", false),
+            ("t/plain", Some(0o100644), b"second", false),
+        ]);
+        let tar = tar_gz(&[
+            ("t/", DIR, 0o755, b""),
+            ("t/run", REG, 0o755, b"#!/bin/sh\n"),
+            ("t/empty/", DIR, 0o755, b""),
+            ("t/link", SYM, 0o777, b"plain"),
+            ("t/big", REG, 0o644, &big),
+            ("t/sub/deep.txt", REG, 0o644, b"d"),
+            ("t/plain", REG, 0o644, b"second"),
+        ]);
+        let want = spool_nar(&http::decompress(tar).unwrap(), u64::MAX).unwrap();
+        assert_eq!(spool_nar(&zip, u64::MAX).unwrap(), want);
+    }
+
+    /// A member MS-DOS made has no mode of its own: a plain file, never
+    /// executable; a backslash in its name is a separator.
+    #[test]
+    fn an_msdos_member_is_a_plain_file_and_a_backslash_separates() {
+        let zip = zip_of(&[("d\\b.txt", None, b"x", true), ("d/c", None, b"y", false)]);
+        let tar = tar_gz(&[("d/b.txt", REG, 0o644, b"x"), ("d/c", REG, 0o644, b"y")]);
+        let want = spool_nar(&http::decompress(tar).unwrap(), u64::MAX).unwrap();
+        assert_eq!(spool_nar(&zip, u64::MAX).unwrap(), want);
+    }
+
+    /// The backslash rule goes by the local header's system byte, which a
+    /// Unix-made member has at zero as well: `a\b` is a file in `a`.
+    #[test]
+    fn a_unix_member_with_a_backslash_and_no_slash_is_in_a_directory() {
+        let zip = zip_of(&[("a\\b", Some(0o100644), b"x", false)]);
+        let tar = tar_gz(&[("a/b", REG, 0o644, b"x")]);
+        let want = spool_nar(&http::decompress(tar).unwrap(), u64::MAX).unwrap();
+        assert_eq!(spool_nar(&zip, u64::MAX).unwrap(), want);
+    }
+    #[test]
+    fn a_zip_with_no_member_is_an_empty_directory() {
+        let dest = tempdir().unwrap();
+        let mut want = Vec::new();
+        nar::dump_path(dest.path(), &mut want, &mut |_, _| true).unwrap();
+        assert_eq!(spool_nar(&zip_of(&[]), u64::MAX).unwrap(), want);
+    }
+
+    #[test]
+    fn a_zip_that_inflates_past_the_fetch_max_size_is_refused() {
+        let zip = zip_of(&[("big", Some(0o100644), &vec![0u8; 300 * 1024], true)]);
+        let e = spool_nar(&zip, zip.len() as u64 + 100 * 1024).unwrap_err();
+        assert!(e.to_string().contains("fetch-max-size"), "{e}");
+    }
+
+    #[test]
+    fn a_zip_device_member_is_an_error() {
+        let zip = zip_of(&[("dev", Some(0o20644), b"", false)]);
+        let e = spool_nar(&zip, u64::MAX).unwrap_err();
+        assert!(e.to_string().contains("unsupported file type"), "{e}");
+    }
+
+    /// Only stored and deflated members: the other methods name themselves.
+    #[test]
+    fn a_zip_member_of_another_method_is_an_error() {
+        let mut out = Vec::new();
+        let mut w = rawzip::ZipArchiveWriter::new(&mut out);
+        let (mut entry, config) = w
+            .new_file("x")
+            .compression_method(rawzip::CompressionMethod::BZIP2)
+            .start()
+            .unwrap();
+        let mut wr = config.wrap(&mut entry);
+        wr.write_all(b"BZh9").unwrap();
+        let (_, desc) = wr.finish().unwrap();
+        entry.finish(desc).unwrap();
+        w.finish().unwrap();
+        let e = spool_nar(&out, u64::MAX).unwrap_err();
+        assert!(e.to_string().contains("compression method 12"), "{e}");
     }
 }

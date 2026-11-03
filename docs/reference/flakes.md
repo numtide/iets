@@ -148,8 +148,8 @@ whose inputs are all in the input store still evaluates.
 iets downloads with its own HTTP client. Like Nix, it follows up to 10
 redirects, retries a transient status (`docs/reference/settings.md`), sends
 a `user:password` in the URL as Basic credentials, reads `file:/p`,
-`file:///p` and `file://localhost/p` from disk, and undoes gzip, xz, zstd and
-bzip2. The URL is the one Nix builds:
+`file:///p` and `file://localhost/p` from disk, undoes gzip, xz, zstd and
+bzip2, and reads a zip. The URL is the one Nix builds:
 
 | type | URL |
 |---|---|

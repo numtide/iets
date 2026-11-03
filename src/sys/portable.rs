@@ -9,6 +9,10 @@ use super::vm;
 /// single epoch, so there is nothing to tell apart.
 static SLEEP: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
+/// No asynchronous writeback here (Linux's `sync_file_range`): macOS,
+/// the BSDs and Windows only have blocking syncs.
+pub fn start_writeback(_f: &File, _from: u64, _len: u64) {}
+
 /// Sleeps while `*word == expected`. May return early, so the caller looks
 /// again.
 pub fn futex_wait(word: &AtomicU32, expected: u32) {

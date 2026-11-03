@@ -13,7 +13,7 @@
 //! smaller. The checksum covers the index; a payload is trusted because the
 //! tree it belongs to was hashed against the lock before anything named it.
 
-use crate::sys::fs as sysfs;
+use crate::sys::{self, fs as sysfs};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -269,6 +269,8 @@ pub struct PackWriter {
     at: u64,
     entries: Vec<(Id, Loc)>,
     ids: HashSet<Id>,
+    /// The bytes the disk was asked to start writing (`start_writeback`).
+    written_back: u64,
 }
 
 impl PackWriter {
@@ -289,7 +291,22 @@ impl PackWriter {
             at: MAGIC.len() as u64,
             entries: Vec::new(),
             ids: HashSet::new(),
+            written_back: 0,
         })
+    }
+
+    /// Asks the disk to start writing what the pack holds so far, so the
+    /// sync in `finish` waits for the last of it rather than all of it.
+    pub fn start_writeback(&mut self) {
+        let handed = self.at - self.file.buffer().len() as u64;
+        if handed > self.written_back {
+            sys::start_writeback(
+                self.file.get_ref(),
+                self.written_back,
+                handed - self.written_back,
+            );
+            self.written_back = handed;
+        }
     }
 
     pub fn add(&mut self, id: Id, bytes: &[u8]) -> io::Result<()> {

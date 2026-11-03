@@ -57,6 +57,9 @@ pub struct Arena {
     /// to an object without entries, so every empty one can be this one.
     pub(crate) empty_list: Option<&'static ListObj>,
     pub(crate) empty_attrs: Option<Word>,
+    /// Bytes mapped at a time: `CHUNK`, or less for an arena that only
+    /// holds a slice of one file's IR (`compile::slices`).
+    chunk: usize,
 }
 
 /// Position of the bump pointer, to give back the last allocation.
@@ -86,6 +89,17 @@ impl Arena {
         a
     }
 
+    /// `in_heap`, mapping `chunk` bytes at a time (a power of two): for an
+    /// arena that holds little, which a full chunk, prefaulted, would
+    /// waste.
+    pub(crate) fn in_heap_small(heap: Arc<Heap>, chunk: usize) -> Self {
+        debug_assert!(chunk.is_power_of_two());
+        let mut a = Arena::placeholder();
+        a.heap = Some(heap);
+        a.chunk = chunk;
+        a
+    }
+
     /// An arena that reserves nothing, for a slot that a real arena is
     /// swapped into before anything allocates from it.
     pub(crate) fn placeholder() -> Self {
@@ -101,6 +115,7 @@ impl Arena {
             heap: None,
             empty_list: None,
             empty_attrs: None,
+            chunk: CHUNK,
         }
     }
 
@@ -194,7 +209,8 @@ impl Arena {
 
     #[cold]
     fn alloc_slow(&mut self, size: usize, align: usize) -> *mut u8 {
-        let chunk = CHUNK.max((size + align + CHUNK - 1) & !(CHUNK - 1));
+        let unit = self.chunk;
+        let chunk = unit.max((size + align + unit - 1) & !(unit - 1));
         // Anonymous mmap, prefaulted in one syscall: MADV_POPULATE_WRITE
         // zeroes the chunk inside the kernel without one trap per page. The
         // chunk goes with the session's heap.

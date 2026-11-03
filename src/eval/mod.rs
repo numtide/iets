@@ -839,6 +839,7 @@ impl Evaluator {
             base_dir,
             lints.as_ref(),
         );
+        c.set_threads(self.par.workers);
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
         let diags = mem::take(&mut c.diags);

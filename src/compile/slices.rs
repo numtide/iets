@@ -156,6 +156,9 @@ impl<'a> Compiler<'a> {
             globals: self.globals,
             scopes: self.scopes.clone(),
             names: self.names.clone(),
+            sc_refs: Vec::new(),
+            sc_withs: Vec::new(),
+            sc_binds: Vec::new(),
             lambdas: self
                 .lambdas
                 .iter()

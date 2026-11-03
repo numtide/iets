@@ -20,6 +20,7 @@ use ir::{
 };
 
 use std::cell::Cell;
+use std::slice;
 use std::sync::Arc;
 use std::{env, mem};
 
@@ -56,6 +57,10 @@ pub struct Compiler<'a> {
     scopes: Vec<Scope>,
     /// The names of every open lexical scope, innermost last.
     names: Vec<Sym>,
+    /// Scratch for `exprs`, and the `with` depths of a lookup.
+    sc_refs: Vec<IrRef>,
+    sc_withs: Vec<u32>,
+    sc_binds: Vec<BindIr>,
     /// Open lambdas, innermost last: the index in `scopes` of the param
     /// frame and whether the body has read a variable from outside it.
     lambdas: Vec<(usize, Cell<bool>)>,
@@ -206,6 +211,9 @@ impl<'a> Compiler<'a> {
             globals,
             scopes: Vec::new(),
             names: Vec::new(),
+            sc_refs: Vec::new(),
+            sc_withs: Vec::new(),
+            sc_binds: Vec::new(),
             lambdas: Vec::new(),
             var_uses: None,
             base_dir: base_dir.to_vec(),
@@ -376,8 +384,23 @@ impl<'a> Compiler<'a> {
         self.arena.alloc(v)
     }
 
-    fn alloc_refs(&mut self, v: Vec<IrRef>) -> &'static [IrRef] {
-        self.arena.alloc_slice(&v)
+    fn alloc_refs(&mut self, v: &[IrRef]) -> &'static [IrRef] {
+        self.arena.alloc_slice(v)
+    }
+
+    /// The IR of each of `ids`, in the arena. Built on a scratch stack that
+    /// nested expressions push above and truncate back to, as the
+    /// parser's `commit`, where a `Vec` per list and call was a heap
+    /// allocation to copy from.
+    fn exprs(&mut self, ids: &[ExprId]) -> CResult<&'static [IrRef]> {
+        let mark = self.sc_refs.len();
+        for &i in ids {
+            let r = self.expr(i)?;
+            self.sc_refs.push(r);
+        }
+        let out = self.arena.alloc_slice(&self.sc_refs[mark..]);
+        self.sc_refs.truncate(mark);
+        Ok(out)
     }
 
     /// A variable read from scope index `s` captures every open lambda
@@ -393,7 +416,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve(&mut self, sym: Sym) -> Option<Ir> {
-        let mut withs: Vec<u32> = Vec::new();
+        // the `with` depths, on a buffer kept across lookups
+        let mut withs = mem::take(&mut self.sc_withs);
+        withs.clear();
         let mut outermost_with = None;
         let mut depth = 0;
         let n = self.scopes.len();
@@ -402,6 +427,7 @@ impl<'a> Compiler<'a> {
                 Scope::Lexical { shares, .. } => {
                     if let Some(idx) = self.slot_in(scope, sym) {
                         self.note_capture(n - 1 - d);
+                        self.sc_withs = withs;
                         return Some(Ir::Local { depth, idx });
                     }
                     if !shares {
@@ -420,20 +446,22 @@ impl<'a> Compiler<'a> {
         }
         // Globals live in Nix's static base env, a lexical scope, so they
         // beat any enclosing `with` (`with { true = 1; }; true` is `true`).
-        if let Some(w) = self.globals.table.get(&sym) {
-            return Some(Ir::Const(*w));
-        }
-        if withs.is_empty() {
-            return None;
-        }
-        Some(
-            Ir::WithVar {
-                sym,
-                withs: &[],
-                pos: Pos::NONE,
-            }
-            .with_withs(self.arena.alloc_slice(&withs)),
-        )
+        let r = if let Some(w) = self.globals.table.get(&sym) {
+            Some(Ir::Const(*w))
+        } else if withs.is_empty() {
+            None
+        } else {
+            Some(
+                Ir::WithVar {
+                    sym,
+                    withs: &[],
+                    pos: Pos::NONE,
+                }
+                .with_withs(self.arena.alloc_slice(&withs)),
+            )
+        };
+        self.sc_withs = withs;
+        r
     }
 
     fn expr(&mut self, id: ExprId) -> CResult<IrRef> {
@@ -517,25 +545,16 @@ impl<'a> Compiler<'a> {
                 if items.is_empty() {
                     return Ok(Ir::Const(self.arena.mk_list(&[])));
                 }
-                let mut v = Vec::with_capacity(items.len());
-                for i in items {
-                    v.push(self.expr(*i)?);
-                }
-                Ir::List(self.alloc_refs(v))
+                Ir::List(self.exprs(items)?)
             }
             Expr::Lambda { param, body } => {
                 Ir::Lambda(self.lambda(*param, *body, pos, None, None)?)
             }
             Expr::Apply { func, args } => {
                 let func = self.expr(*func)?;
-                let args = ast.ids(*args);
-                let mut v = Vec::with_capacity(args.len());
-                for a in args {
-                    v.push(self.expr(*a)?);
-                }
                 Ir::Apply {
                     func,
-                    args: self.alloc_refs(v),
+                    args: self.exprs(ast.ids(*args))?,
                     pos,
                 }
             }
@@ -585,7 +604,7 @@ impl<'a> Compiler<'a> {
                     BinOp::Concat => Ir::ConcatLists(l, r, pos),
                     BinOp::Add => Ir::Concat {
                         force_string: false,
-                        parts: self.alloc_refs(vec![l, r]),
+                        parts: self.alloc_refs(&[l, r]),
                         pos,
                     },
                     BinOp::Sub => Ir::Sub(l, r, pos),
@@ -691,14 +710,23 @@ impl<'a> Compiler<'a> {
         self.alloc(ir)
     }
 
+    /// Filled in place in the arena, the length known: a `Vec` per
+    /// select path was a heap allocation to copy from. Nested expressions
+    /// allocate after the slice; a failed compile leaves it unreachable.
     fn attr_path(&mut self, path: &[AttrElem]) -> CResult<&'static [AttrElemIr]> {
-        let mut v = Vec::with_capacity(path.len());
-        for e in path {
-            v.push(match e {
+        if path.is_empty() {
+            return Ok(&[]);
+        }
+        let p = self.arena.alloc_raw(
+            path.len() * size_of::<AttrElemIr>(),
+            align_of::<AttrElemIr>(),
+        ) as *mut AttrElemIr;
+        let ast: &'a Ast = self.ast;
+        for (i, e) in path.iter().enumerate() {
+            let x = match e {
                 AttrElem::Static(s) => AttrElemIr::Static(*s),
                 AttrElem::Dynamic(id) => {
                     // A dynamic element that is a constant string is static.
-                    let ast: &'a Ast = self.ast;
                     if let Expr::Str(parts) = ast.expr(*id)
                         && let Some(lit) = ast.single_lit(*parts)
                     {
@@ -707,11 +735,13 @@ impl<'a> Compiler<'a> {
                         AttrElemIr::Dynamic(self.expr(*id)?)
                     }
                 }
-            });
+            };
+            // SAFETY: `p` holds `path.len()` elements; each is written once,
+            // and the slice is read only once all are.
+            unsafe { p.add(i).write(x) };
         }
-        let refs: Vec<&'static AttrElemIr> = Vec::new();
-        drop(refs);
-        Ok(self.alloc_elems(v))
+        // SAFETY: as above, every element is written.
+        Ok(unsafe { slice::from_raw_parts(p, path.len()) })
     }
 
     fn alloc_elems(&mut self, v: Vec<AttrElemIr>) -> &'static [AttrElemIr] {
@@ -723,10 +753,6 @@ impl<'a> Compiler<'a> {
     }
 
     fn alloc_dyn(&mut self, v: Vec<DynBindIr>) -> &'static [DynBindIr] {
-        self.arena.alloc_vec(v)
-    }
-
-    fn alloc_formals(&mut self, v: Vec<FormalIr>) -> &'static [FormalIr] {
         self.arena.alloc_vec(v)
     }
 
@@ -760,7 +786,7 @@ impl<'a> Compiler<'a> {
         }
         Ok(Ir::Concat {
             force_string: true,
-            parts: self.alloc_refs(v),
+            parts: self.alloc_refs(&v),
             pos,
         })
     }
@@ -817,7 +843,7 @@ impl<'a> Compiler<'a> {
                 let path = self.var_ir(np, pos)?;
                 return Ok(Ir::Apply {
                     func,
-                    args: self.alloc_refs(vec![path, name]),
+                    args: self.alloc_refs(&[path, name]),
                     pos,
                 });
             }
@@ -850,7 +876,7 @@ impl<'a> Compiler<'a> {
         }
         Ok(Ir::Concat {
             force_string: false,
-            parts: self.alloc_refs(v),
+            parts: self.alloc_refs(&v),
             pos,
         })
     }
@@ -1057,7 +1083,9 @@ impl<'a> Compiler<'a> {
             pos,
             ..
         } = m;
-        let mut binds: Vec<BindIr> = Vec::with_capacity(statics.len());
+        // on the scratch stack `exprs` uses for refs: nested sets push
+        // above `mark` and truncate back to it
+        let mark = self.sc_binds.len();
         let mut deferred_from: Vec<(usize, Sym, Pos, usize)> = Vec::new();
         let sliced = if self.threads > 1 && statics.len() >= slices::PAR_MIN {
             self.lower_statics_parallel(&statics)
@@ -1073,7 +1101,7 @@ impl<'a> Compiler<'a> {
                 let value = vs.next().unwrap();
                 self.diags.extend(ds.next().unwrap());
                 if let Some(value) = value {
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1085,7 +1113,7 @@ impl<'a> Compiler<'a> {
             match def {
                 Def::Expr(e) => {
                     let value = self.value_expr(e, Some(sym))?;
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1095,7 +1123,7 @@ impl<'a> Compiler<'a> {
                 Def::Nested(n) => {
                     let a = self.lower_attrs(*n)?;
                     let value = self.alloc(Ir::Attrs(a));
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1104,7 +1132,7 @@ impl<'a> Compiler<'a> {
                 }
                 Def::Inherit(var) => {
                     let value = self.var_ir(var, bpos)?;
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1112,21 +1140,19 @@ impl<'a> Compiler<'a> {
                     });
                 }
                 Def::InheritFrom(fi, name) => {
-                    deferred_from.push((fi, name, bpos, binds.len()));
+                    deferred_from.push((fi, name, bpos, self.sc_binds.len() - mark));
                     // placeholder, patched below
-                    binds.push(BindIr {
+                    let value = self.alloc(Ir::Const(Word::NULL));
+                    self.sc_binds.push(BindIr {
                         sym,
-                        value: self.alloc(Ir::Const(Word::NULL)),
+                        value,
                         pos: bpos,
                         scope: BindScope::From,
                     });
                 }
             }
         }
-        let mut from: Vec<IrRef> = Vec::with_capacity(from_exprs.len());
-        for e in &from_exprs {
-            from.push(self.expr(*e)?);
-        }
+        let from = self.exprs(&from_exprs)?;
         if !deferred_from.is_empty() {
             self.push_lexical([], 0, false);
             // the from-env has `from.len()` anonymous slots at depth 0
@@ -1135,14 +1161,15 @@ impl<'a> Compiler<'a> {
                     depth: 0,
                     idx: fi as u32,
                 });
-                binds[bi].value = self.inherit_from(subject, name, bpos);
+                let v = self.inherit_from(subject, name, bpos);
+                self.sc_binds[mark + bi].value = v;
             }
             self.pop_scope();
         }
         let dynamic = self.lower_dynamics(dynamics)?;
-        binds.sort_by_key(|b| b.sym);
-        let binds = self.alloc_binds(binds);
-        let from = self.alloc_refs(from);
+        self.sc_binds[mark..].sort_by_key(|b| b.sym);
+        let binds = self.arena.alloc_slice(&self.sc_binds[mark..]);
+        self.sc_binds.truncate(mark);
         Ok(self.alloc(AttrsIr {
             rec: false,
             binds,
@@ -1250,11 +1277,8 @@ impl<'a> Compiler<'a> {
                 scope,
             });
         }
-        let mut from = Vec::with_capacity(from_exprs.len());
-        for e in from_exprs {
-            from.push(self.expr(e)?);
-        }
-        Ok((self.alloc_binds(binds), self.alloc_refs(from)))
+        let from = self.exprs(&from_exprs)?;
+        Ok((self.alloc_binds(binds), from))
     }
 
     fn var_ir(&mut self, var: Sym, pos: Pos) -> CResult<IrRef> {
@@ -1379,22 +1403,36 @@ impl<'a> Compiler<'a> {
                     at,
                     base.is_some(),
                 );
-                let mut firs = Vec::with_capacity(sorted.len());
-                for f in &sorted {
+                // filled in place in the arena, as `attr_path`
+                let firs = self
+                    .arena
+                    .alloc_raw(sorted.len() * size_of::<FormalIr>(), align_of::<FormalIr>())
+                    as *mut FormalIr;
+                for (i, f) in sorted.iter().enumerate() {
                     let default = match f.default {
                         Some(d) => Some(self.expr(d)?),
                         None => None,
                     };
-                    firs.push(FormalIr {
-                        sym: f.name,
-                        default,
-                        pos: Pos(self.base + f.span.start),
-                    });
+                    // SAFETY: `firs` holds `sorted.len()` formals, each
+                    // written once before the slice is made below.
+                    unsafe {
+                        firs.add(i).write(FormalIr {
+                            sym: f.name,
+                            default,
+                            pos: Pos(self.base + f.span.start),
+                        })
+                    };
                 }
+                // SAFETY: every formal is written.
+                let firs: &'static [FormalIr] = if sorted.is_empty() {
+                    &[]
+                } else {
+                    unsafe { slice::from_raw_parts(firs, sorted.len()) }
+                };
                 let body = self.lambda_body(body, idx)?;
                 self.pop_scope();
                 let closed = !self.lambdas.pop().unwrap().1.get();
-                let formals = self.alloc_formals(firs);
+                let formals = firs;
                 Ok(self.alloc(LambdaIr {
                     param: ParamIr::Formals {
                         has_bind: bind.is_some(),

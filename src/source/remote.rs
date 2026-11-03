@@ -458,7 +458,7 @@ pub fn fetch_file(
     let cannot = |e: String| fail(format!("unable to download '{shown}': {e}"));
     let staged = treestore::stage(sp.base_name())
         .ok_or_else(|| cannot("iets has no cache directory to hold it".into()))?;
-    let mut spool = spool::spool_file(staged.dir()).map_err(|e| cannot(e.to_string()))?;
+    let mut spool = spool::Spool::create_in(staged.dir()).map_err(|e| cannot(e.to_string()))?;
     let limits = Limits::new(nix_conf(ev.session())).map_err(|e| cannot(e.to_string()))?;
     download(ev, url, local, &[], limits, false, &mut spool).map_err(cannot)?;
     let tree = spool::Tree::file(spool).map_err(|e| cannot(e.to_string()))?;
@@ -691,7 +691,7 @@ fn fetch_tarball(
             "iets: cannot fetch input '{name}': no cache directory to hold it"
         ))
     })?;
-    let mut spool = spool::spool_file(staged.dir())
+    let mut spool = spool::Spool::create_in(staged.dir())
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
     let limits = Limits::new(nix_conf(ev.session()))
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;

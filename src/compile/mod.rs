@@ -56,6 +56,7 @@ pub struct Compiler<'a> {
     /// Scratch for `exprs`, and the `with` depths of a lookup.
     sc_refs: Vec<IrRef>,
     sc_withs: Vec<u32>,
+    sc_binds: Vec<BindIr>,
     /// Open lambdas, innermost last: the index in `scopes` of the param
     /// frame and whether the body has read a variable from outside it.
     lambdas: Vec<(usize, Cell<bool>)>,
@@ -206,6 +207,7 @@ impl<'a> Compiler<'a> {
             names: Vec::new(),
             sc_refs: Vec::new(),
             sc_withs: Vec::new(),
+            sc_binds: Vec::new(),
             lambdas: Vec::new(),
             var_uses: None,
             base_dir: base_dir.to_vec(),
@@ -1061,13 +1063,15 @@ impl<'a> Compiler<'a> {
             pos,
             ..
         } = m;
-        let mut binds: Vec<BindIr> = Vec::with_capacity(statics.len());
+        // on the scratch stack `exprs` uses for refs: nested sets push
+        // above `mark` and truncate back to it
+        let mark = self.sc_binds.len();
         let mut deferred_from: Vec<(usize, Sym, Pos, usize)> = Vec::new();
         for (sym, def, bpos) in statics {
             match def {
                 Def::Expr(e) => {
                     let value = self.value_expr(e, Some(sym))?;
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1077,7 +1081,7 @@ impl<'a> Compiler<'a> {
                 Def::Nested(n) => {
                     let a = self.lower_attrs(*n)?;
                     let value = self.alloc(Ir::Attrs(a));
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1086,7 +1090,7 @@ impl<'a> Compiler<'a> {
                 }
                 Def::Inherit(var) => {
                     let value = self.var_ir(var, bpos)?;
-                    binds.push(BindIr {
+                    self.sc_binds.push(BindIr {
                         sym,
                         value,
                         pos: bpos,
@@ -1094,11 +1098,12 @@ impl<'a> Compiler<'a> {
                     });
                 }
                 Def::InheritFrom(fi, name) => {
-                    deferred_from.push((fi, name, bpos, binds.len()));
+                    deferred_from.push((fi, name, bpos, self.sc_binds.len() - mark));
                     // placeholder, patched below
-                    binds.push(BindIr {
+                    let value = self.alloc(Ir::Const(Word::NULL));
+                    self.sc_binds.push(BindIr {
                         sym,
-                        value: self.alloc(Ir::Const(Word::NULL)),
+                        value,
                         pos: bpos,
                         scope: BindScope::From,
                     });
@@ -1114,13 +1119,15 @@ impl<'a> Compiler<'a> {
                     depth: 0,
                     idx: fi as u32,
                 });
-                binds[bi].value = self.inherit_from(subject, name, bpos);
+                let v = self.inherit_from(subject, name, bpos);
+                self.sc_binds[mark + bi].value = v;
             }
             self.pop_scope();
         }
         let dynamic = self.lower_dynamics(dynamics)?;
-        binds.sort_by_key(|b| b.sym);
-        let binds = self.alloc_binds(binds);
+        self.sc_binds[mark..].sort_by_key(|b| b.sym);
+        let binds = self.arena.alloc_slice(&self.sc_binds[mark..]);
+        self.sc_binds.truncate(mark);
         Ok(self.alloc(AttrsIr {
             rec: false,
             binds,

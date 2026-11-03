@@ -246,7 +246,7 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 counter: None,
             }
         }
-        "github" | "gitlab" | "sourcehut" | "git" | "tarball" | "hg" => {
+        "github" | "gitlab" | "sourcehut" | "git" | "tarball" => {
             source::tree(ev, &SourceRef::Locked(attrs), pos)?
         }
         other => bail!(

@@ -2,7 +2,7 @@
 //! supplies what such a tree gives to an evaluation: its root, the files it
 //! tracks, the dirty flag and the metadata of its revision. `KNOWN` is the
 //! one list of the implementations, and the callers reach them through the
-//! functions below it, never by name. A remote input (`git+https:`, `hg+`)
+//! functions below it, never by name. A remote input (`git+https:`)
 //! is a fetcher and is not here.
 
 pub mod git;

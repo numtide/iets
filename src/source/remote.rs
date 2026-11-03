@@ -8,23 +8,21 @@
 //! The `narHash` is known before the fetch, so the tree names itself and the
 //! input store refuses anything that does not hash to it.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::{env, result, slice, thread};
+use std::{result, slice};
 
 use super::scm::{Commit, Entry};
-use super::{AttrVal, Attrs, Tree, attrs_to_json, parse_nar_hash, str_attr, to_url};
+use super::{AttrVal, Attrs, Tree, parse_nar_hash, str_attr, to_url};
 use crate::builtins::{fetch_git, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::fetch::spool;
 use crate::flake::flakeref;
-use crate::log::{self, Activity};
-use crate::progress::Mode;
+use crate::log;
 use crate::remote::event;
 use crate::remote::worker::{Connection, Transport};
 use crate::session::Session;
@@ -33,8 +31,7 @@ use crate::store::nar;
 use crate::store::path::{IngestionMethod, StorePath};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::treestore::{self, Rejected, StoredTree};
-use crate::{config, nixbin, trace};
-use serde_json::Value;
+use crate::{config, trace};
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
 /// store path when this returns. The `fetchTree` builtin and `nix flake
@@ -73,25 +70,6 @@ fn input_name(ev: &Evaluator, attrs: &Attrs) -> String {
     str_attr(attrs, "narHash")
         .and_then(|h| ev.input_names.get(h))
         .unwrap_or_else(|| to_url(attrs))
-}
-
-/// A Nix `"..."` literal holding `s`.
-fn nix_string_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '$' => out.push_str("\\$"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// The evaluator's connection to the eval store, opened on the first input
@@ -324,15 +302,12 @@ pub fn ensure_readable(
     if str_attr(attrs, "type") == Some("git") {
         return fetch_git_input(ev, sp, nar_hash, &name, attrs, pos);
     }
-    fetch_with_nix(&full, &name, attrs, pos)?;
-    if ev.trace().stat_now(full.as_bytes(), true) == trace::Kind::Missing {
-        bail!(
-            ErrorKind::Io,
-            pos,
-            "iets: input '{name}' is not in the store ({full})"
-        );
-    }
-    Ok(())
+    bail!(
+        ErrorKind::Unsupported,
+        pos,
+        "iets: input '{name}' of type '{}' is not supported",
+        str_attr(attrs, "type").unwrap_or("?")
+    )
 }
 
 /// Points every read of `sp` at the input store entry, and records the entry in
@@ -547,7 +522,7 @@ fn download(
 
 /// In pure evaluation, the source of a locked input that is on this machine
 /// passes the allow list before a cache or a fetcher answers for it: the file
-/// of a `file:` URL, the repository of a `git` or `hg` input.
+/// of a `file:` URL, the repository of a `git` input.
 fn check_local(ev: &Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     if !ev.pure() {
         return Ok(());
@@ -555,11 +530,8 @@ fn check_local(ev: &Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     let Some(url) = str_attr(attrs, "url") else {
         return Ok(());
     };
-    if matches!(str_attr(attrs, "type"), Some("git" | "hg")) {
-        let url = url
-            .strip_prefix("git+")
-            .or_else(|| url.strip_prefix("hg+"))
-            .unwrap_or(url);
+    if str_attr(attrs, "type") == Some("git") {
+        let url = url.strip_prefix("git+").unwrap_or(url);
         let dir = match url.strip_prefix('/') {
             Some(_) => Some(url.to_string()),
             None => flakeref::file_url_path(url),
@@ -805,263 +777,14 @@ fn fetch_git_input(
     Ok(())
 }
 
-/// The last shell-out: an `hg` input goes to Nix's own `fetchTree` with its
-/// locked attrs, and the
-/// store path Nix reports must be the one the lock implies.
-fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
-    let expr = format!(
-        "(builtins.fetchTree (builtins.fromJSON {})).outPath",
-        nix_string_literal(&attrs_to_json(attrs))
-    );
-    let missing = || {
-        format!(
-            "iets: input '{name}' is not in the store and nix is not on PATH; \
-             fetch it with nix ({}) first",
-            to_url(attrs)
-        )
-    };
-    let (ok, stdout, _) = nix_eval(&format!("input '{name}'"), &expr, missing, false, pos)?;
-    if !ok {
-        let msg = format!(
-            "iets: nix could not fetch input '{name}' ({})",
-            to_url(attrs)
-        );
-        bail!(ErrorKind::Eval, pos, "{msg}");
-    }
-    let got = String::from_utf8_lossy(&stdout).trim().to_string();
-    if got != full {
-        bail!(
-            ErrorKind::Eval,
-            pos,
-            "iets: nix fetched '{got}' for input '{name}' but the lock implies '{full}'"
-        );
-    }
-    Ok(())
-}
-
-/// Runs `builtins.fetchGit` of a commit with Nix. `args` are the call's
-/// attributes and `shown` is the input as Nix names it. Returns the store
-/// path, its NAR hash and the result's attributes with `type` and `outPath`.
-pub fn fetch_git_with_nix(
-    args: &Attrs,
-    shown: &str,
-    pos: Pos,
-) -> EvalResult<(StorePath, Hash, Attrs)> {
-    let expr = format!(
-        "let r = builtins.fetchGit (builtins.fromJSON {}); \
-         in builtins.toJSON (builtins.removeAttrs r [ \"outPath\" ] // {{ path = r.outPath; }})",
-        nix_string_literal(&attrs_to_json(args))
-    );
-    let missing = || format!("iets: builtins.fetchGit of '{shown}' needs nix on PATH");
-    let what = format!("the Git repository '{shown}'");
-    let (ok, stdout, said) = nix_eval(&what, &expr, missing, true, pos)?;
-    if !ok {
-        let last = said.rfind("error: ").map(|i| said[i + 7..].trim());
-        match last {
-            Some(m) => bail!(ErrorKind::Eval, pos, "{m}"),
-            None => bail!(ErrorKind::Eval, pos, "iets: nix could not fetch {what}"),
-        }
-    }
-    let got: serde_json::Map<String, Value> = serde_json::from_slice(&stdout)
-        .map_err(|e| Error::boxed(ErrorKind::Eval, format!("iets: nix said: {e}"), pos))?;
-    let mut attrs = Attrs::from([("type".into(), AttrVal::Str("git".into()))]);
-    for (k, v) in got {
-        let v = match v {
-            Value::String(s) => AttrVal::Str(s),
-            Value::Bool(b) => AttrVal::Bool(b),
-            Value::Number(n) => match n.as_u64() {
-                Some(n) => AttrVal::Int(n),
-                None => continue,
-            },
-            _ => continue,
-        };
-        let k = if k == "path" { "outPath".into() } else { k };
-        attrs.insert(k, v);
-    }
-    let bad = || Error::boxed(ErrorKind::Eval, "iets: nix gave no store path", pos);
-    let out = str_attr(&attrs, "outPath").ok_or_else(bad)?;
-    let path = StorePath::parse(out).map_err(|_| bad())?;
-    let hash = str_attr(&attrs, "narHash")
-        .and_then(|h| parse_nar_hash(h).ok())
-        .ok_or_else(|| Error::boxed(ErrorKind::Eval, "iets: nix gave no narHash", pos))?;
-    Ok((path, hash, attrs))
-}
-
-/// `nix eval --raw --impure --expr EXPR` for a fetch of `what`, its records
-/// relayed, its errors only into what it said when `keep_errors` is set:
-/// whether it succeeded, its stdout and what it said.
-fn nix_eval(
-    what: &str,
-    expr: &str,
-    missing: impl FnOnce() -> String,
-    keep_errors: bool,
-    pos: Pos,
-) -> EvalResult<(bool, Vec<u8>, String)> {
-    if Session::current().settings().fetching {
-        bail!(
-            ErrorKind::Eval,
-            pos,
-            "iets: recursive fetch of {what}: the nix on PATH is iets itself"
-        );
-    }
-    let Some(nix) = nixbin::real("nix") else {
-        bail!(ErrorKind::Eval, pos, "{}", missing());
-    };
-    let act = Activity::new(
-        log::LVL_TALKATIVE,
-        log::ACT_FETCH_TREE,
-        &format!("fetching {what} with nix"),
-        vec![],
-    );
-    let cannot = |e: io::Error| {
-        Error::boxed(
-            ErrorKind::Io,
-            format!("iets: cannot run nix to fetch {what}: {e}"),
-            pos,
-        )
-    };
-    // git may ask for credentials on the terminal, as under Nix
-    let suspended = log::suspend();
-    let mut cmd = Command::new(&nix);
-    // the fetch must land in iets's eval store, not NIX_REMOTE's (#305)
-    if env::var_os("NIX_REMOTE").is_some_and(|v| !v.is_empty()) {
-        let store = nix_conf(&Session::current()).store();
-        let store = if store == "auto" || store.is_empty() {
-            "daemon"
-        } else {
-            &store
-        };
-        cmd.args(["--store", store]);
-    }
-    let mut child = cmd
-        .env("IETS_FETCHING", "1")
-        .args([
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "--log-format",
-            "internal-json",
-            "eval",
-            "--raw",
-            "--impure",
-            "--expr",
-            expr,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(cannot)?;
-    let mut stdout = child.stdout.take().expect("piped");
-    let read_out = thread::spawn(move || {
-        let mut v = Vec::new();
-        stdout.read_to_end(&mut v).map(|_| v)
-    });
-    let said = relay(child.stderr.take().expect("piped"), &act, keep_errors);
-    let status = child.wait().map_err(cannot)?;
-    let stdout = read_out
-        .join()
-        .unwrap_or_else(|_| Err(io::Error::other("the reader panicked")))
-        .map_err(cannot)?;
-    drop((act, suspended));
-    Ok((status.success(), stdout, said))
-}
-
-/// Nix's records go under `act`; git's `\r` redraws go to a terminal as they
-/// are, as under Nix, or into `act`'s detail. With `keep_errors` an error
-/// is not printed: its innermost message goes into the text, after
-/// `error: `. Returns the text.
-fn relay(from: impl Read, act: &Activity, keep_errors: bool) -> String {
-    let session = Session::current();
-    let terminal = session.log.progress.mode() == Mode::Bar && !log::json();
-    let mut said = String::new();
-    let mut ids = HashMap::new();
-    let mut seg = Vec::new();
-    for b in BufReader::new(from).bytes() {
-        let Ok(b) = b else { break };
-        if b != b'\n' && b != b'\r' {
-            seg.push(b);
-            continue;
-        }
-        let text = String::from_utf8_lossy(&seg).into_owned();
-        seg.clear();
-        if b == b'\r' {
-            match terminal {
-                true => session.log.err(format!("{text}\r").as_bytes()),
-                false => log::detail(act.0, text.trim()),
-            }
-            continue;
-        }
-        let Some(v) = text
-            .strip_prefix("@nix ")
-            .and_then(|j| serde_json::from_str::<Value>(j).ok())
-        else {
-            if !text.is_empty() {
-                log::line(&text);
-                said.push_str(&text);
-                said.push('\n');
-            }
-            continue;
-        };
-        let n = |k: &str| v[k].as_u64().unwrap_or(0);
-        let fields = || v["fields"].as_array().cloned().unwrap_or_default();
-        match v["action"].as_str() {
-            Some("start") => {
-                let id = log::activity_id();
-                ids.insert(n("id"), id);
-                let up = ids.get(&n("parent")).copied().unwrap_or(act.0);
-                let text = v["text"].as_str().unwrap_or("");
-                log::start(id, n("level"), n("type"), text, fields(), up);
-            }
-            Some("stop") => {
-                if let Some(id) = ids.remove(&n("id")) {
-                    log::stop(id);
-                }
-            }
-            Some("result") => {
-                if let Some(&id) = ids.get(&n("id")) {
-                    log::result(id, n("type"), fields());
-                }
-            }
-            Some("msg") => {
-                let msg = v["msg"].as_str().unwrap_or("");
-                if keep_errors && n("level") == 0 {
-                    let raw = v["raw_msg"].as_str().unwrap_or(msg);
-                    said.push_str("error: ");
-                    said.push_str(&log::strip_ansi(raw));
-                    said.push('\n');
-                    continue;
-                }
-                log::line(msg);
-                said.push_str(msg);
-                said.push('\n');
-            }
-            _ => {}
-        }
-    }
-    for (_, id) in ids {
-        log::stop(id);
-    }
-    said
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
     use tempfile::tempdir;
 
-    use std::time::Instant;
-
     use IngestionMethod::{Flat, Recursive};
     use trace::Kind::{Directory, Regular};
-
-    #[test]
-    fn nix_literal_escapes() {
-        assert_eq!(
-            nix_string_literal(r#"{"a":"x\"y${z}\\"}"#),
-            r#""{\"a\":\"x\\\"y\${z}\\\\\"}""#
-        );
-    }
 
     fn attrs(pairs: &[(&str, &str)]) -> Attrs {
         pairs
@@ -1178,54 +901,6 @@ mod tests {
             Some("host")
         );
         assert_eq!(access_token(&c, "gitlab.com", "gitlab.com/z/y"), None);
-    }
-
-    /// What the substitution step costs, against `nix build --no-link`, on a
-    /// store path no substituter has: both must answer "no", and
-    /// the op must be the cheaper way to hear it. Needs a running daemon and a
-    /// nix on `PATH`, so it is ignored by default:
-    /// `cargo test --release -- --ignored --nocapture substitution`.
-    #[test]
-    #[ignore]
-    fn substitution_costs_less_than_the_subprocess() {
-        let path = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-source";
-        let mut store = LazyStore::default();
-        let t = Instant::now();
-        let conn = store.get().expect("a daemon");
-        let connect = t.elapsed();
-        let t = Instant::now();
-        let valid = conn
-            .substitute_paths(&[path.to_string()], &mut |_| {})
-            .unwrap();
-        let op = t.elapsed();
-        assert!(valid.is_empty());
-
-        let nix = nixbin::real("nix").expect("a nix");
-        let t = Instant::now();
-        let status = Command::new(&nix)
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "build",
-                "--no-link",
-                path,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        let subprocess = t.elapsed();
-        assert!(!status.success());
-        errln!(
-            "connect: {:.3}s, QueryValidPaths(substitute): {:.3}s, nix build --no-link: {:.3}s",
-            connect.as_secs_f64(),
-            op.as_secs_f64(),
-            subprocess.as_secs_f64()
-        );
-        // The connection is opened once and the registration reuses it; the op
-        // is what replaces the subprocess.
-        assert!(op < subprocess);
     }
 
     #[rstest]

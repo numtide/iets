@@ -83,9 +83,7 @@ macro_rules! unsupported {
 unsupported!(
     fetch_mercurial,
     "builtins.fetchMercurial is not supported",
-    hint: "use `builtins.fetchTree { type = \"hg\"; url = \"…\"; rev = \"…\"; narHash = \"…\"; }` \
-     or an hg flake input, or run it as nix-instantiate, nix-build or nix-shell, \
-     which fall back to Nix"
+    hint: "run it as nix-instantiate, nix-build or nix-shell, which fall back to Nix"
 );
 unsupported!(
     fetch_closure,

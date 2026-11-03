@@ -80,7 +80,7 @@ outermost `iets.toml` one, else the entry's own directory
 
 - a `file:` URL of `fetchurl`, of `fetchTarball` and of a `tarball` input;
 - the `path` of a `path` input, in `fetchTree` and in `getFlake`;
-- the repository of a local `git` or `hg` input, and of `fetchGit`.
+- the repository of a local `git` input, and of `fetchGit`.
 
 **The accessor** is `store_hooks::local_source`. It does what a read does:
 

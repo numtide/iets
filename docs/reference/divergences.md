@@ -612,7 +612,7 @@ with `access to absolute path '...' is forbidden in pure evaluation mode
 | `fetchurl` or `fetchTarball` of a `file:` URL, with a `sha256` | the file, or its hash in a `hash mismatch` error | forbidden |
 | a `tarball` input with a `file:` URL | the tree | forbidden |
 | a `path` input, and `getFlake "path:DIR?narHash=H"` | the tree, or its hash in a `NAR hash mismatch` error | forbidden |
-| a `git` or `hg` input, and `fetchGit` with a `rev`, of a local repository | the commit | forbidden |
+| a `git` input, and `fetchGit` with a `rev`, of a local repository | the commit | forbidden |
 
 A flake that locks `path:/abs`, `git+file:///abs` or `file:///abs.tar.gz`
 outside its own tree therefore needs `--impure`. A relative `path:` input

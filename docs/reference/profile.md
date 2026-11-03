@@ -19,8 +19,9 @@ frame;frame;frame <count>
 
 ## Weights
 
-With `IETS_PROFILE=eval`, each sample counts one, so a stack's number is
-the time it spent on the CPU.
+With `IETS_PROFILE=eval`, each sample counts the microseconds of CPU time
+since the sample before it, so a stack's number is the time it spent on the
+CPU. Waiting, for a download or a subprocess, does not count.
 
 With `IETS_PROFILE=alloc`, each sample counts the arena bytes allocated
 since the sample before it, so a stack's number is the memory it built.
@@ -40,7 +41,8 @@ so a path that has either is rewritten.
 
 ## What it costs
 
-Without `IETS_PROFILE` the cost is too small to measure. A profile costs
+Without `IETS_PROFILE` a call and a return pay one branch: +0.3 %
+instructions on a NixOS evaluation. A profile costs
 about 0.9 % of a `hello` evaluation, measured with
 `perf stat -e instructions:u`, for `alloc` as for `eval`. `IETS_PROFILE_HZ`
 sets the sample rate, 99 samples a second by default.

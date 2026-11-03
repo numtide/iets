@@ -84,14 +84,32 @@ fn a_folded_line_is_a_stack_and_a_count(bin: Iets) {
     assert!(deepest > 2, "every stack is shallow:\n{folded}");
 }
 
-/// A builtin is a frame too, so time inside one is not blamed on the lambda
-/// that called it.
+/// A builtin is a frame, and its native work is its own, not credited to
+/// whatever is called next.
 #[rstest]
-fn a_builtin_names_itself_in_a_frame(bin: Iets) {
-    let expr = "builtins.length (builtins.foldl' (a: _: a ++ builtins.genList (x: x) 50) [] \
-                (builtins.genList (x: x) 2000))";
+fn a_builtin_keeps_the_time_it_spends_without_calls(bin: Iets) {
+    let expr = "let s = builtins.concatStringsSep \"\" (builtins.genList (x: \"0123456789\") 10000); \
+                next = x: x; \
+                in builtins.foldl' (a: _: next (a + builtins.stringLength \
+                (builtins.hashString \"sha256\" s))) 0 (builtins.genList (x: x) 5000)";
     let (folded, _) = profile(&bin, "eval", expr);
-    assert!(folded.contains(":«"), "no builtin frame:\n{folded}");
+    let (mut hashing, mut all) = (0u64, 0u64);
+    for line in folded.lines() {
+        let (stack, count) = line.rsplit_once(' ').expect("a stack and a count");
+        let count: u64 = count.parse().expect("a count");
+        all += count;
+        if stack
+            .rsplit(';')
+            .next()
+            .is_some_and(|f| f.ends_with(":«__hashString»"))
+        {
+            hashing += count;
+        }
+    }
+    assert!(
+        hashing * 2 > all,
+        "hashString self {hashing} of {all}:\n{folded}"
+    );
 }
 
 /// `alloc` weighs a sample by the arena bytes since the one before it, so

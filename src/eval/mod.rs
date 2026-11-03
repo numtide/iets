@@ -673,6 +673,7 @@ impl EvalConfig {
         };
         builtins::install(&mut ev);
         if ev.session.profile.on() {
+            ev.prof = Stack::sampling();
             ev.session.profile.names(&ev.files, &ev.interner);
         }
         ev
@@ -1633,8 +1634,8 @@ impl Evaluator {
     #[inline]
     fn prof_enter(&mut self, pos: Pos, name: Option<Sym>) -> usize {
         let d = self.prof.depth();
-        self.prof.enter(profile::frame(pos, name));
         self.prof_take();
+        self.prof.enter(profile::frame(pos, name));
         d
     }
 
@@ -1642,9 +1643,16 @@ impl Evaluator {
     #[inline]
     fn prof_enter_op(&mut self, pos: Pos, sym: Sym) -> usize {
         let d = self.prof.depth();
-        self.prof.enter(profile::primop_frame(pos, sym));
         self.prof_take();
+        self.prof.enter(profile::primop_frame(pos, sym));
         d
+    }
+
+    /// Samples before unwinding, so the time goes to the frames that ran.
+    #[inline]
+    fn prof_leave(&mut self, depth: usize) {
+        self.prof_take();
+        self.prof.unwind(depth);
     }
 
     fn apply_inner(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -1680,7 +1688,7 @@ impl Evaluator {
                                     unreachable!("the walk above found a lambda");
                                 };
                                 cur_lam = inner;
-                                self.prof.unwind(d);
+                                self.prof_leave(d);
                             }
                             self.nr_function_calls += 1;
                             d = self.prof_enter(pos, cur_lam.name);
@@ -1694,7 +1702,7 @@ impl Evaluator {
                         if !args.is_empty()
                             && let Ir::Lambda(inner) = last.body
                         {
-                            self.prof.unwind(d);
+                            self.prof_leave(d);
                             (fenv, lam) = (env2, inner);
                             continue;
                         }
@@ -1708,7 +1716,7 @@ impl Evaluator {
                             }
                             e
                         })?;
-                        self.prof.unwind(d);
+                        self.prof_leave(d);
                         break;
                     }
                 }
@@ -1722,7 +1730,7 @@ impl Evaluator {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
                     })?;
-                    self.prof.unwind(d);
+                    self.prof_leave(d);
                     args = &args[arity..];
                 }
                 Value::PrimOpApp(app) => {
@@ -1742,7 +1750,7 @@ impl Evaluator {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
                     })?;
-                    self.prof.unwind(d);
+                    self.prof_leave(d);
                     args = &args[need..];
                 }
                 Value::Attrs(a) => {

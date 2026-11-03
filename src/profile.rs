@@ -1,8 +1,10 @@
 //! Where an evaluation's time went, as a sampled flame graph.
 //!
-//! A tick thread asks for a sample and the call path tests one relaxed load,
-//! so no clock is read per call. Each fiber samples its own shadow stack on
-//! the worker that owns it, and never reads another fiber's. The output is
+//! A tick thread asks for a sample and calls and returns test one relaxed
+//! load, so no clock is read per call. A sample is taken before a push or
+//! pop, so it goes to the stack that ran. Each fiber samples its own shadow
+//! stack on the worker that owns it, and never reads another fiber's. The
+//! output is
 //! the folded form `frame;frame <count>` that `flamegraph.pl` and every
 //! compatible tool read (docs/reference/profile.md).
 //!
@@ -77,6 +79,8 @@ pub fn primop_frame(pos: Pos, sym: Sym) -> u64 {
 pub struct Stack {
     frames: Vec<u64>,
     last_tick: u64,
+    /// Avoids a load through the session when the run does not profile.
+    on: bool,
 }
 
 /// A fiber made from another starts its own stack: `Evaluator` is `Clone`
@@ -84,7 +88,10 @@ pub struct Stack {
 /// fiber for its maker's call chain.
 impl Clone for Stack {
     fn clone(&self) -> Stack {
-        Stack::default()
+        Stack {
+            on: self.on,
+            ..Stack::default()
+        }
     }
 }
 
@@ -93,11 +100,19 @@ impl Default for Stack {
         Stack {
             frames: Vec::with_capacity(1024),
             last_tick: 0,
+            on: false,
         }
     }
 }
 
 impl Stack {
+    pub fn sampling() -> Stack {
+        Stack {
+            on: true,
+            ..Stack::default()
+        }
+    }
+
     /// Enters `f`. The whole cost of a call that is not sampled.
     #[inline]
     pub fn enter(&mut self, f: u64) {
@@ -105,10 +120,10 @@ impl Stack {
     }
 
     /// Whether the tick thread has asked for a sample since this fiber's
-    /// last. One relaxed load and a compare, which is what a call pays.
+    /// last.
     #[inline]
     pub fn due(&mut self, p: &Profile) -> bool {
-        p.tick.load(Ordering::Relaxed) != self.last_tick
+        self.on && p.tick.load(Ordering::Relaxed) != self.last_tick
     }
 
     /// Credits this fiber's stack with `bytes`, or with one sample when the
@@ -192,6 +207,9 @@ impl Profile {
         }
         let mut out = Vec::new();
         for (stack, count) in g.iter() {
+            if stack.is_empty() {
+                out.extend_from_slice("«toplevel»".as_bytes());
+            }
             let mut first = true;
             for f in stack.iter() {
                 if !first {
@@ -278,12 +296,12 @@ pub fn open(session: &Arc<Session>) {
 mod tests {
     use super::*;
 
-    /// A call the way the evaluator enters one: push, then sample if a tick passed.
+    /// A call the way the evaluator enters one: sample, then push.
     fn call(s: &mut Stack, p: &Profile, frame: u64, bytes: u64) {
-        s.enter(frame);
         if s.due(p) {
             s.take(p, bytes);
         }
+        s.enter(frame);
     }
 
     fn folded(p: &Profile) -> Vec<(Vec<u64>, u64)> {
@@ -304,34 +322,36 @@ mod tests {
     #[test]
     fn a_sample_is_taken_once_per_tick() {
         let p = Profile::default();
-        let mut s = Stack::default();
-        p.tick.store(1, Ordering::Relaxed);
+        let mut s = Stack::sampling();
         call(&mut s, &p, 10, 0);
+        p.tick.store(1, Ordering::Relaxed);
         call(&mut s, &p, 20, 0);
+        call(&mut s, &p, 30, 0);
         assert_eq!(folded(&p), vec![(vec![10], 1)]);
         p.tick.store(2, Ordering::Relaxed);
-        call(&mut s, &p, 30, 0);
+        call(&mut s, &p, 40, 0);
         assert_eq!(folded(&p), vec![(vec![10], 1), (vec![10, 20, 30], 1)]);
     }
 
     #[test]
     fn an_unwind_returns_to_a_depth() {
         let p = Profile::default();
-        let mut s = Stack::default();
+        let mut s = Stack::sampling();
         let d = s.depth();
         call(&mut s, &p, 10, 0);
         call(&mut s, &p, 20, 0);
         s.unwind(d);
         assert_eq!(s.depth(), 0);
-        p.tick.store(1, Ordering::Relaxed);
         call(&mut s, &p, 30, 0);
+        p.tick.store(1, Ordering::Relaxed);
+        call(&mut s, &p, 40, 0);
         assert_eq!(folded(&p), vec![(vec![30], 1)]);
     }
 
     #[test]
     fn a_deep_stack_is_capped() {
         let p = Profile::default();
-        let mut s = Stack::default();
+        let mut s = Stack::sampling();
         for i in 0..(MAX_DEPTH as u64 + 10) {
             call(&mut s, &p, i, 0);
             p.tick.store(i + 1, Ordering::Relaxed);
@@ -343,9 +363,10 @@ mod tests {
     fn a_weight_is_bytes_when_the_profile_asks_for_them() {
         let p = Profile::default();
         p.by_bytes.store(true, Ordering::Relaxed);
-        let mut s = Stack::default();
+        let mut s = Stack::sampling();
+        call(&mut s, &p, 10, 0);
         p.tick.store(1, Ordering::Relaxed);
-        call(&mut s, &p, 10, 4096);
+        call(&mut s, &p, 20, 4096);
         assert_eq!(folded(&p), vec![(vec![10], 4096)]);
     }
 }

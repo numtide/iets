@@ -20,7 +20,9 @@ use std::{ops, str};
 
 use crate::lint::allow;
 
-type R<T> = Result<T, ParseError>;
+/// The error is boxed so a result fits in two registers: a 32-byte one
+/// went back through memory from every parser call.
+type R<T> = Result<T, Box<ParseError>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Assoc {
@@ -247,23 +249,23 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn unexpected(&self, t: Token, expecting: Option<&str>) -> ParseError {
+    fn unexpected(&self, t: Token, expecting: Option<&str>) -> Box<ParseError> {
         let what = t.kind.describe();
         let msg = match expecting {
             Some(e) => format!("syntax error, unexpected {what}, {e}"),
             None => format!("syntax error, unexpected {what}"),
         };
-        ParseError {
+        Box::new(ParseError {
             span: t.span(),
             msg,
-        }
+        })
     }
 
-    fn error_at(&self, start: u32, end: u32, msg: String) -> ParseError {
-        ParseError {
+    fn error_at(&self, start: u32, end: u32, msg: String) -> Box<ParseError> {
+        Box::new(ParseError {
             span: Span { start, end },
             msg,
-        }
+        })
     }
 
     #[inline]
@@ -963,7 +965,7 @@ impl<'a> Parser<'a> {
                         start: last_token,
                         end: last_token,
                     };
-                    return Err(e);
+                    return Err(e.into());
                 }
                 part => part?,
             };
@@ -1444,20 +1446,20 @@ impl<'a> DupCx<'a> {
         matches!(self.ast.expr(e), Expr::Attrs { .. })
     }
 
-    fn dup(&self, prefix: &[Sym], pos: u32, prev: u32) -> ParseError {
+    fn dup(&self, prefix: &[Sym], pos: u32, prev: u32) -> Box<ParseError> {
         let name = prefix
             .iter()
             .map(|s| self.interner.name_str(*s).to_string())
             .collect::<Vec<_>>()
             .join(".");
         let (l, c) = line_col(self.src, prev);
-        ParseError {
+        Box::new(ParseError {
             span: Span {
                 start: pos,
                 end: pos,
             },
             msg: format!("attribute '{name}' already defined at {l}:{c}"),
-        }
+        })
     }
 
     fn expand(&self, node: &mut Node, prefix: &mut Vec<Sym>) -> R<()> {

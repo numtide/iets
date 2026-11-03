@@ -40,10 +40,11 @@ crossing inside one temporary file. A killed writer leaves a temporary file
 that no reader looks at and that the sweep removes after a day; the entry it
 was replacing stays whole.
 
-Nothing is fsynced, so a power loss can leave the name pointing at a file
-whose bytes were never written. Those bytes are read like any other bad
-bytes, and the entry goes. Atomicity is per entry, and no reader joins two
-entries.
+Nothing but a pack of the input store is fsynced
+([The input store](#the-input-store-why-it-needs-no-trust)), so a power loss
+can leave the name pointing at a file whose bytes were never written. Those
+bytes are read like any other bad bytes, and the entry goes. Atomicity is
+per entry, and no reader joins two entries.
 
 **Poison and wipe; never repair.** An entry that does not decode is
 deleted and the run continues as a miss. Only bytes a reader read, or a
@@ -342,11 +343,24 @@ The content verifies itself, which removes a lot:
 
 A reader checks little on open: the index's own checksum and its version
 byte, and, for each pack, the checksum of the pack's index and that every
-object it names lies inside it. A failed check wipes the entry or the pack,
-which costs one fetch. It never hashes the tree again, because the name is
+object it names lies inside it. A failed check wipes the entry, which costs
+one fetch, or the pack, which leaves the entries that name its objects as a
+lost pack would (below). It never hashes the tree again, because the name is
 the hash, so an object whose bytes were changed in place under an index that
 still fits is read as it stands. Hashing on every open would read every
 input of every evaluation, and the index exists to avoid that.
+
+So a pack is the one cache file that is synced, before the rename that
+names it: a pack whose name survived a power loss without its bytes would be
+read as it stands. Only the order matters, because a pack lost whole is
+never read as anything. It is not recovered from either: an entry is not
+checked against the packs on open, so an entry whose objects went with the
+pack still opens, and the first read of a missing object fails with "an
+object of this input is missing from the input store". The input is not
+fetched again until its entry, `inputs/<store path base name>`, is removed.
+Linux has `fsync`, which also makes the pack durable. On darwin it is
+`F_BARRIERFSYNC`, which orders the writes, and not `F_FULLFSYNC`, which also
+flushes the drive's cache and costs two to three times as much.
 
 An entry is one file, `inputs/<store path base name>`: the NAR hash and
 size the fetch verified, and an index of every member's name, mode, size and

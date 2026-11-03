@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::cachefs;
+#[cfg(target_vendor = "apple")]
+use std::os::fd::AsRawFd;
 
 pub const PACKS: &str = "packs";
 
@@ -422,7 +424,7 @@ impl PackWriter {
         self.file.write_all(&index)?;
         self.file.write_all(&tail)?;
         self.file.flush()?;
-        self.file.get_ref().sync_all()?;
+        sync_before_rename(self.file.get_ref())?;
         let name: String = digest.as_bytes()[..16]
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -431,6 +433,22 @@ impl PackWriter {
         fs::rename(&self.tmp, &path)?;
         Ok(Some(path))
     }
+}
+
+/// A reader checks a pack's index, not its objects, so the bytes must reach
+/// the disk before the name does. Only the order matters
+/// (docs/explanation/caching.md).
+fn sync_before_rename(f: &File) -> io::Result<()> {
+    // darwin's `sync_all` is `F_FULLFSYNC`, which also flushes the drive's
+    // cache. A file system without barriers falls back to it.
+    #[cfg(target_vendor = "apple")]
+    {
+        // SAFETY: a plain fcntl on our own descriptor; it reads no memory.
+        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
+            return Ok(());
+        }
+    }
+    f.sync_all()
 }
 
 impl Drop for PackWriter {

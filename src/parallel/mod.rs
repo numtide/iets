@@ -95,13 +95,14 @@ pub fn try_run<R: Send + 'static>(
     mut ev: Evaluator,
     f: impl FnOnce(&mut Evaluator) -> R + Send + 'static,
 ) -> Result<R, fiber::StackError> {
+    // the input store reads the current session, and the workers inherit it
+    // so their arenas map into its heap
+    let _entered = ev.session().clone().enter();
     if workers <= 1 {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);
     }
-    // the workers inherit it, so their arenas map into this session's heap
-    let _entered = ev.session().clone().enter();
     let mut template = ev.clone();
     // every fiber's evaluator borrows its worker's interner cache
     template.interner.drop_cache();

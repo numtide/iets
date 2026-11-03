@@ -40,16 +40,56 @@ fn huge() -> bool {
     else {
         return true;
     };
-    if n.wrapping_sub(*HUGE_BASE.get_or_init(|| n)) <= HUGE_FALLBACKS_MAX {
+    if !gate_closes(*HUGE_BASE.get_or_init(|| n), n) {
         return true;
     }
-    HUGE_CLOSED.store(true, Ordering::Relaxed);
+    if !HUGE_CLOSED.swap(true, Ordering::Relaxed) {
+        unadvise_allocator();
+    }
     false
+}
+
+/// A read older than the base, by a worker that lost the race to set it,
+/// counts as no failures.
+fn gate_closes(base: u64, n: u64) -> bool {
+    n.saturating_sub(base) > HUGE_FALLBACKS_MAX
 }
 
 fn vmstat(text: &str, name: &str) -> Option<u64> {
     text.lines()
         .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.trim().parse().ok())
+}
+
+/// The mapping of mimalloc's first arena, which it advises huge before
+/// `main` runs. It keeps its huge pages until the gate closes.
+static ALLOC_ARENA: OnceLock<(usize, usize)> = OnceLock::new();
+
+/// Notes the mapping that holds `p`, an allocation made at start.
+pub fn note_allocator_arena(p: *const u8) {
+    if let Some(r) = fs::read_to_string("/proc/self/maps")
+        .ok()
+        .and_then(|m| mapping_of(&m, p as usize))
+    {
+        let _ = ALLOC_ARENA.set(r);
+    }
+}
+
+fn mapping_of(maps: &str, p: usize) -> Option<(usize, usize)> {
+    maps.lines().find_map(|l| {
+        let (a, b) = l.split_once(' ')?.0.split_once('-')?;
+        let r = (
+            usize::from_str_radix(a, 16).ok()?,
+            usize::from_str_radix(b, 16).ok()?,
+        );
+        (r.0 <= p && p < r.1).then_some(r)
+    })
+}
+
+fn unadvise_allocator() {
+    if let Some(&(a, b)) = ALLOC_ARENA.get() {
+        // SAFETY: advice on the allocator's own mapping keeps its contents.
+        let _ = unsafe { madvise(a as *mut _, b - a, Advice::LinuxNoHugepage) };
+    }
 }
 
 /// Advises `[p, p + len)` to be huge pages while the kernel can fill them.
@@ -96,7 +136,7 @@ pub fn beneath(root: &File, rel: &Path, follow: bool) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::vmstat;
+    use super::{HUGE_FALLBACKS_MAX, gate_closes, mapping_of, vmstat};
 
     #[test]
     fn vmstat_reads_a_counter_by_its_whole_name() {
@@ -104,5 +144,19 @@ mod tests {
         assert_eq!(vmstat(text, "thp_fault_fallback"), Some(42));
         assert_eq!(vmstat(text, "thp_fault_fallback_charge"), Some(7));
         assert_eq!(vmstat(text, "compact_stall"), None);
+    }
+
+    #[test]
+    fn an_older_counter_read_keeps_the_gate_open() {
+        assert!(!gate_closes(100, 99));
+        assert!(!gate_closes(100, 100 + HUGE_FALLBACKS_MAX));
+        assert!(gate_closes(100, 101 + HUGE_FALLBACKS_MAX));
+    }
+
+    #[test]
+    fn mapping_of_finds_the_range_holding_an_address() {
+        let maps = "1000-2000 rw-p 0 00:00 0\n7f00-8f00 rw-p 0 00:00 0 [heap]\n";
+        assert_eq!(mapping_of(maps, 0x7f10), Some((0x7f00, 0x8f00)));
+        assert_eq!(mapping_of(maps, 0x2000), None);
     }
 }

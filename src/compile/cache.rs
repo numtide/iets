@@ -730,6 +730,10 @@ struct De<'a, 'e> {
     body_of: Option<usize>,
     nest: u32,
     ok: bool,
+    /// The heads of the binding frames being read, innermost last: one
+    /// scratch stack, where three `Vec`s per set were most of a warm
+    /// run's heap allocations.
+    heads: Vec<(Sym, Pos, BindScope)>,
 }
 
 /// The IR of an entry, allocated in the evaluator's arena with positions
@@ -759,6 +763,7 @@ pub fn deserialize(
         body_of: None,
         nest: 0,
         ok: true,
+        heads: Vec::new(),
     };
     let n = d.count();
     d.syms.reserve(n);
@@ -1064,16 +1069,21 @@ impl<'a> De<'a, '_> {
     /// The permutation that moves entries from their stored order to
     /// `Sym` order: `perm[old] = new`. `extra` identity slots follow.
     fn perm(syms: &[Sym], extra: usize) -> Option<Vec<u32>> {
-        if syms.windows(2).all(|w| w[0] < w[1]) {
+        Self::perm_by(syms.len(), |i| syms[i], extra)
+    }
+
+    /// `perm` of the `n` symbols `sym(0..n)`.
+    fn perm_by(n: usize, sym: impl Fn(usize) -> Sym, extra: usize) -> Option<Vec<u32>> {
+        if (1..n).all(|i| sym(i - 1) < sym(i)) {
             return None;
         }
-        let mut order: Vec<u32> = (0..syms.len() as u32).collect();
-        order.sort_by_key(|&i| syms[i as usize]);
-        let mut perm = vec![0u32; syms.len() + extra];
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        order.sort_by_key(|&i| sym(i as usize));
+        let mut perm = vec![0u32; n + extra];
         for (new, old) in order.iter().enumerate() {
             perm[*old as usize] = new as u32;
         }
-        for (i, p) in perm.iter_mut().enumerate().skip(syms.len()) {
+        for (i, p) in perm.iter_mut().enumerate().skip(n) {
             *p = i as u32;
         }
         Some(perm)
@@ -1124,13 +1134,12 @@ impl<'a> De<'a, '_> {
         extend: bool,
     ) -> (&'static [BindIr], &'static [IrRef], usize) {
         let n = self.count();
-        let mut syms = Vec::with_capacity(n);
-        let mut poss = Vec::with_capacity(n);
-        let mut scopes = Vec::with_capacity(n);
+        // nested sets push above `mark` and truncate back to it
+        let mark = self.heads.len();
         for _ in 0..n {
-            syms.push(self.sym());
-            poss.push(self.pos());
-            scopes.push(match ScopeTag::from_u8(self.u8()) {
+            let sym = self.sym();
+            let pos = self.pos();
+            let scope = match ScopeTag::from_u8(self.u8()) {
                 Some(ScopeTag::Own) => BindScope::Own,
                 Some(ScopeTag::Outer) => BindScope::Outer,
                 Some(ScopeTag::From) => BindScope::From,
@@ -1138,15 +1147,20 @@ impl<'a> De<'a, '_> {
                     self.ok = false;
                     BindScope::Own
                 }
-            });
+            };
+            self.heads.push((sym, pos, scope));
         }
         let nfrom = self.count();
         // a `From` bind is evaluated in the env of the `from` thunks, which
         // `eval::inherit_env` does not make for an empty `from` list
-        if nfrom == 0 && scopes.contains(&BindScope::From) {
+        if nfrom == 0 && self.heads[mark..].iter().any(|h| h.2 == BindScope::From) {
             self.ok = false;
         }
-        let perm = Self::perm(&syms, if sorted { nfrom } else { 0 });
+        let perm = Self::perm_by(
+            n,
+            |i| self.heads[mark + i].0,
+            if sorted { nfrom } else { 0 },
+        );
         let at = if sorted {
             self.open_frame(extend, n + nfrom, perm.clone())
         } else {
@@ -1165,7 +1179,8 @@ impl<'a> De<'a, '_> {
             if !self.ok {
                 break;
             }
-            let value = match scopes[i] {
+            let (sym, pos, scope) = self.heads[mark + i];
+            let value = match scope {
                 // `inherit x` reads the scope outside the binds
                 BindScope::Outer if sorted => {
                     let f = if extend {
@@ -1191,12 +1206,13 @@ impl<'a> De<'a, '_> {
             };
             let new = perm.as_ref().map_or(i, |p| p[i] as usize);
             out_mut[new] = BindIr {
-                sym: syms[i],
+                sym,
                 value,
-                pos: poss[i],
-                scope: scopes[i],
+                pos,
+                scope,
             };
         }
+        self.heads.truncate(mark);
         let from = self.fill(nfrom, |d| d.node());
         (out, from, at)
     }

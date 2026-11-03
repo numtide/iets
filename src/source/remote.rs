@@ -321,7 +321,7 @@ pub fn ensure_readable(
         adopt(ev, sp, &entry);
         return Ok(());
     }
-    if str_attr(attrs, "type") == Some("git") && !fetch_git::needs_nix(attrs) {
+    if str_attr(attrs, "type") == Some("git") {
         return fetch_git_input(ev, sp, nar_hash, &name, attrs, pos);
     }
     fetch_with_nix(&full, &name, attrs, pos)?;
@@ -805,8 +805,8 @@ fn fetch_git_input(
     Ok(())
 }
 
-/// The last shell-out: an `hg` input, or a `git` one with `lfs`, goes to
-/// Nix's own `fetchTree` with its locked attrs, and the
+/// The last shell-out: an `hg` input goes to Nix's own `fetchTree` with its
+/// locked attrs, and the
 /// store path Nix reports must be the one the lock implies.
 fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     let expr = format!(
@@ -820,23 +820,12 @@ fn fetch_with_nix(full: &str, name: &str, attrs: &Attrs, pos: Pos) -> EvalResult
             to_url(attrs)
         )
     };
-    let (ok, stdout, said) = nix_eval(&format!("input '{name}'"), &expr, missing, false, pos)?;
+    let (ok, stdout, _) = nix_eval(&format!("input '{name}'"), &expr, missing, false, pos)?;
     if !ok {
         let msg = format!(
             "iets: nix could not fetch input '{name}' ({})",
             to_url(attrs)
         );
-        // fetchers.cc:Input::checkLocks
-        if str_attr(attrs, "type") == Some("git") && said.contains("NAR hash mismatch in input") {
-            let mut e = Error::new(ErrorKind::HashMismatch, msg, pos);
-            e.hint = Some(
-                "git gave a different tree than the lock names: a .gitattributes filter \
-                 (such as git-lfs), 'export-subst' or a submodule can cause that; \
-                 fix it, or run 'nix flake update' to lock the tree git gives"
-                    .into(),
-            );
-            return Err(Box::new(e));
-        }
         bail!(ErrorKind::Eval, pos, "{msg}");
     }
     let got = String::from_utf8_lossy(&stdout).trim().to_string();

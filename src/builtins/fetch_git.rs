@@ -3,7 +3,6 @@
 //! tree is (git.cc:getAccessorFromWorkdir), so the tracing cache follows its
 //! files. Any other fetch reads a commit (git.cc:getAccessorFromCommit), of
 //! a local repository where it is, else of a clone (`crate::fetch::git`).
-//! Only `lfs` still goes to Nix's own `fetchGit`.
 
 use crate::sys::OsStrExt;
 use std::path::Path;
@@ -91,7 +90,7 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
             "exportIgnore and submodules are not supported together yet"
         );
     }
-    let Some(url) = fixed.filter(|_| !needs_nix(&args)) else {
+    let Some(url) = fixed else {
         return from_nix(ev, &args, &shown, pos);
     };
     let unpinned = !args.contains_key("rev") && !args.contains_key("ref");
@@ -116,11 +115,6 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
     }
     check_nar_hash(&args, &tree, &shown, pos)?;
     emit_tree_attrs(ev, &tree, None, pos)
-}
-
-/// What only Nix fetches yet: Git LFS files.
-pub(crate) fn needs_nix(args: &Attrs) -> bool {
-    bool_attr(args, "lfs").unwrap_or(false)
 }
 
 /// git.cc:getPublicKeys. `publicKeys` is the JSON of a list of keys, and
@@ -348,7 +342,8 @@ pub(crate) fn from_commit(
     // a pure evaluation reads a local repository only where `local_dir`
     // allows, which a submodule's URL would get around
     let local_ok = fetch::git::is_local(url) && !ev.pure();
-    let tree = source::commit_tree(ev, git, &repo, &rev, name, export, r, local_ok, pos)?;
+    let lfs = bool_attr(args, "lfs").unwrap_or(false);
+    let tree = source::commit_tree(ev, git, &repo, &rev, name, export, r, local_ok, lfs, pos)?;
     let Some(mut tree) = tree else {
         bail!(
             ErrorKind::Io,

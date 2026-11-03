@@ -151,7 +151,8 @@ pub fn tracked_source(
 /// `Scm::export_ignored` drops when `export` is set. When `submodules` is
 /// set, it holds the ref the commit was asked by, and each submodule is
 /// fetched and mounted. A submodule may be on this machine only when
-/// `local_ok`. `None` when the repository has not got the revision.
+/// `local_ok`. With `lfs`, LFS files hold their objects. `None` when the
+/// repository has not got the revision.
 #[allow(clippy::too_many_arguments)]
 pub fn commit_tree(
     ev: &mut Evaluator,
@@ -162,12 +163,17 @@ pub fn commit_tree(
     export: bool,
     submodules: Option<&str>,
     local_ok: bool,
+    lfs: bool,
     pos: Pos,
 ) -> EvalResult<Option<Tree>> {
     let commit = scm
         .tree_at(ev.trace(), root, rev, export)
+        .and_then(|c| match c {
+            Some(mut c) if lfs => fetch::lfs::smudge(root, rev, &mut c.entries).map(|_| Some(c)),
+            c => Ok(c),
+        })
         .and_then(|c| match (c, submodules) {
-            (Some(c), Some(r#ref)) => mount_submodules(root, c, r#ref, local_ok).map(Some),
+            (Some(c), Some(r#ref)) => mount_submodules(root, c, r#ref, local_ok, lfs).map(Some),
             (c, _) => Ok(c),
         })
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
@@ -205,6 +211,7 @@ fn mount_submodules(
     mut commit: Commit,
     r#ref: &str,
     local_ok: bool,
+    lfs: bool,
 ) -> Result<Commit, String> {
     let subs = git::submodules_at(root, &commit.rev)?;
     if subs.is_empty() {
@@ -233,11 +240,14 @@ fn mount_submodules(
                     let got = fetch::git::open(&want)?;
                     let scm = scm::named("git").expect("iets knows git");
                     let commit = scm.tree_at(&Trace::default(), &got.repo, &got.rev, false)?;
-                    let commit = commit.ok_or_else(|| {
+                    let mut commit = commit.ok_or_else(|| {
                         format!("iets: cannot read revision {} of '{url}'", got.rev)
                     })?;
+                    if lfs {
+                        fetch::lfs::smudge(&got.repo, &got.rev, &mut commit.entries)?;
+                    }
                     let local_ok = local_ok && fetch::git::is_local(&url);
-                    mount_submodules(&got.repo, commit, &got.r#ref, local_ok)
+                    mount_submodules(&got.repo, commit, &got.r#ref, local_ok, lfs)
                 })
             })
             .collect();
@@ -268,7 +278,8 @@ pub fn commit_source(
     subdir: &str,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", false, None, true, pos)? else {
+    let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", false, None, true, false, pos)?
+    else {
         return Err(Error::boxed(
             ErrorKind::Io,
             format!(

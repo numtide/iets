@@ -412,6 +412,28 @@ pub fn get(
     decompress: bool,
     sink: &mut dyn Write,
 ) -> Result<u64> {
+    request(url, headers, None, limits, decompress, sink)
+}
+
+/// [`get`] with a POST of `body`, for an API such as Git LFS's batch API.
+pub fn post(
+    url: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+    limits: Limits,
+    sink: &mut dyn Write,
+) -> Result<u64> {
+    request(url, headers, Some(body), limits, false, sink)
+}
+
+fn request(
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<Vec<u8>>,
+    limits: Limits,
+    decompress: bool,
+    sink: &mut dyn Write,
+) -> Result<u64> {
     let undo = |r: Box<dyn Read>| {
         if decompress {
             decompress_reader(r, layers_budget(limits.max_size))
@@ -425,7 +447,7 @@ pub fn get(
         )));
     }
     let read_in = Rc::new(Cell::new(0));
-    if let Some(path) = local_path(url) {
+    if let Some(path) = local_path(url).filter(|_| body.is_none()) {
         let file = File::open(sys::path_from_internal(path.as_bytes()))
             .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
         let raw = Counted(Box::new(file), read_in.clone());
@@ -439,7 +461,7 @@ pub fn get(
             .enable_all()
             .build()
             .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
-        rt.block_on(stream(&target, &sent, limits, tx))
+        rt.block_on(stream(&target, &sent, body, limits, tx))
     });
     let queued = Queued {
         rx,
@@ -544,6 +566,7 @@ fn drain(
 async fn stream(
     url: &str,
     headers: &[(String, String)],
+    mut body: Option<Vec<u8>>,
     limits: Limits,
     tx: tokio::sync::mpsc::Sender<result::Result<Vec<u8>, String>>,
 ) -> Result<()> {
@@ -556,12 +579,13 @@ async fn stream(
     let (mut redirects, mut attempt) = (0usize, 0u32);
     loop {
         let creds = if credentials { headers } else { &[] };
-        let (status, location, mut body, driver) = once(&current, creds, limits).await?;
+        let (status, location, mut res, driver) =
+            once(&current, creds, body.as_deref(), limits).await?;
         match status {
             200 => {
                 let mut sent = Ok(());
                 loop {
-                    let next = body.frame().await.transpose().map_err(|e| {
+                    let next = res.frame().await.transpose().map_err(|e| {
                         if is_stall(&e) {
                             bad(&current, "the download stalled (stalled-download-timeout)")
                         } else {
@@ -596,6 +620,10 @@ async fn stream(
                     return Err(bad(&current, &format!("HTTP {status} with no Location")));
                 };
                 let next = resolve(&current, &to);
+                // RFC 9110: only 307 and 308 repeat the method
+                if !matches!(status, 307 | 308) {
+                    body = None;
+                }
                 credentials = redirect(&first, &Url::parse(&current)?, &Url::parse(&next)?)
                     .map_err(|why| bad(&next, why))?;
                 current = next;
@@ -642,7 +670,12 @@ type Started = (
 /// the connection task that must live as long as the body. `connect-timeout`
 /// covers TCP and TLS, as `CURLOPT_CONNECTTIMEOUT` does; the wait for the
 /// status line counts as a stall.
-async fn once(url: &str, headers: &[(String, String)], limits: Limits) -> Result<Started> {
+async fn once(
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&[u8]>,
+    limits: Limits,
+) -> Result<Started> {
     let u = Url::parse(url)?;
     let timed_out = || bad(url, "the connection timed out (connect-timeout)");
     let io = within(limits.connect, timed_out, async {
@@ -674,7 +707,7 @@ async fn once(url: &str, headers: &[(String, String)], limits: Limits) -> Result
     let driver = tokio::spawn(conn);
 
     let mut req = hyper::Request::builder()
-        .method("GET")
+        .method(if body.is_some() { "POST" } else { "GET" })
         .uri(&u.target)
         .header("host", u.authority())
         .header("user-agent", concat!("iets/", env!("CARGO_PKG_VERSION")));
@@ -682,7 +715,9 @@ async fn once(url: &str, headers: &[(String, String)], limits: Limits) -> Result
         req = req.header(name.as_str(), value.as_str());
     }
     let req = req
-        .body(String::new())
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+            body.unwrap_or_default().to_vec(),
+        )))
         .map_err(|e| bad(url, &format!("bad request: {e}")))?;
     let res = sender.send_request(req).await.map_err(|e| {
         if is_stall(&e) {

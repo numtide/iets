@@ -4,6 +4,7 @@
 
 pub mod git;
 pub mod http;
+pub mod lfs;
 pub mod roots;
 pub mod spool;
 pub mod unpack;

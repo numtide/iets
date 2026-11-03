@@ -478,7 +478,7 @@ with `pure-eval`.
   drv.drvPath` works: Nix reads it through the store.
 - A fetch from the local file system is such a read. The file of a `file:`
   URL and the directory of a `path` input must lie in the root or under a
-  store path the evaluation holds; the repository of a local `git` or `hg`
+  store path the evaluation holds; the repository of a local `git`
   input must be a directory of the root on disk. A hash does not change
   that. This is iets's rule, not Nix's
   (`docs/explanation/pure-eval-and-local-sources.md`).
@@ -492,7 +492,7 @@ with `pure-eval`.
 
 Classic mode falls back to the real nix on these, so the answer is Nix's:
 
-- an unlocked `git` or `hg` input: Nix names it with query parameters
+- an unlocked `git` input: Nix names it with query parameters
   (`?shallow=1`) that iets does not reproduce;
 - `getFlake` on a reference that may be locked, one with a `rev` or a
   `narHash`;

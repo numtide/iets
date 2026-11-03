@@ -181,7 +181,7 @@ Nix does.
 
 An input is locked, so iets knows its store path before anything happens.
 It tries these sources in order, and the first one that works wins. An
-input on this machine, a `file:` URL, a `path` or a local `git` or `hg`
+input on this machine, a `file:` URL, a `path` or a local `git`
 repository, first passes the allow list of pure evaluation, so that no
 cache answers for a file the evaluation may not read
 ([Pure evaluation and local sources](pure-eval-and-local-sources.md)).
@@ -236,9 +236,7 @@ list is in
 updating an input downloads only what changed. The tree must match the
 lock's `narHash`. Reading `revCount` also fetches the commit history.
 
-**`hg`, the last shell-out.** It runs
-`nix eval --raw --impure --expr '(builtins.fetchTree <locked attrs>).outPath'`
-and then checks that the path `nix` reports is the one the lock implies.
+`hg` inputs are not supported.
 
 `file` inputs are not supported. A `file` input's store path is the *flat*
 hash of the bytes under the input's name, and the lock's `narHash` does not

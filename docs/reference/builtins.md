@@ -41,7 +41,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `fetchGit` | works | iets does the fetch itself, Git LFS files included. In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev` fails. |
 | `fetchMercurial` | fails | |
 | `fetchTarball` | partial | Needs a `sha256`. |
-| `fetchTree` | partial | Type `path` works for an absolute path. Types `github`, `gitlab`, `sourcehut`, `git`, `tarball` and `hg` need a `narHash`. Other types fail. In pure evaluation, `path` also needs a `narHash`, and every type but `path` and `tarball` needs a `rev`. In classic mode it needs the `fetch-tree` or `flakes` feature, as in Nix. |
+| `fetchTree` | partial | Type `path` works for an absolute path. Types `github`, `gitlab`, `sourcehut`, `git` and `tarball` need a `narHash`. Other types fail. In pure evaluation, `path` also needs a `narHash`, and every type but `path` and `tarball` needs a `rev`. In classic mode it needs the `fetch-tree` or `flakes` feature, as in Nix. |
 | `fetchurl` | partial | Needs a `sha256` in every mode. Nix needs one only in pure evaluation. `iets prefetch URL` prints it. A hash mismatch exits with 1. Nix exits with 102. |
 | `flakeRefToString` | works | Accepts some references that Nix refuses. A `git` input that is not a URL fails. |
 | `fromJSON` | works | Error text differs. Refuses nesting deeper than 100,000 levels. |

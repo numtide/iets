@@ -450,11 +450,7 @@ fn a_bad_config_stops_only_what_reads_a_setting(bin: Iets) {
 fn eval_says_what_it_does_not_support(bin: Iets) {
     let o = run(&bin, &["eval", "--expr", "builtins.fetchMercurial ./."]);
     assert_eq!(o.status.code(), Some(3));
-    assert!(
-        stderr(&o).contains(r#"builtins.fetchTree { type = "hg";"#),
-        "{}",
-        stderr(&o)
-    );
+    assert!(stderr(&o).contains("fall back to Nix"), "{}", stderr(&o));
 }
 
 #[rstest]

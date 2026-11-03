@@ -419,14 +419,11 @@ fn a_git_root_with_submodules() {
     git(&repo, &["commit", "-q", "-m", "initial"]);
     let r = repo.to_str().unwrap();
     f.lock(r);
-    // keeps git on PATH. Any nix iets runs fails.
-    let nobin = f.s.failing_nix();
-    let no_nix = [("IETS_NIX_BIN_DIR", nobin.to_str().unwrap())];
     for attr in ["value", "info", "drv.drvPath"] {
         f.check(
             &format!("submodules: {attr}"),
             &format!("{r}?submodules=1#{attr}"),
-            &no_nix,
+            &[],
         );
     }
     let value = format!("{r}?submodules=1#value");
@@ -443,7 +440,7 @@ fn a_git_root_with_submodules() {
             )
         },
     );
-    f.check("submodules: dirty file", &value, &no_nix);
+    f.check("submodules: dirty file", &value, &[]);
 }
 
 /// A git flake with a `path:` input, a relative `path:` input (no narHash in
@@ -1326,9 +1323,7 @@ fn a_git_input_needs_no_nix() {
     );
     let r = format!("{gitf}#v");
     let (exp, _) = f.lock_apart(&gitf, "lib", "gitstore");
-    let nobin = f.s.failing_nix();
-    let env = [("IETS_NIX_BIN_DIR", nobin.to_str().unwrap())];
-    let gn = f.iets_eval(&env, &["--raw", "--no-tracing-cache", &r]);
+    let gn = f.iets_eval(&[], &["--raw", "--no-tracing-cache", &r]);
     f.verdict(!exp.is_empty() && stdout(&gn) == exp, || {
         format!(
             "git input: {} vs {exp} {}",

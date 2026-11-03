@@ -454,7 +454,7 @@ A name falls back in these cases:
      pure evaluation;
    - `fetchTarball` and `fetchurl` without a `sha256`;
    - `fetchTree` with a URL string, with an input type other than `path`,
-     `github`, `gitlab`, `sourcehut`, `git`, `tarball` or `hg`, or without
+     `github`, `gitlab`, `sourcehut`, `git` or `tarball`, or without
      a `narHash` for a type other than `path`, or, in pure evaluation,
      without a `rev` for a type other than `path` and `tarball`;
    - `getFlake` on anything but a local path, or in pure evaluation on a

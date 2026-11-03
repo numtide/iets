@@ -58,9 +58,10 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         bail!(ErrorKind::Eval, pos, "input attribute 'url' is missing");
     };
     let fixed = match flakeref::fix_git_url(&url) {
-        Ok(u) => Some(u),
+        Ok(u) => u,
         Err(e @ error::Error::Unsupported(_)) if ev.pure() => return Err(eval_error(e, pos)),
-        Err(error::Error::Unsupported(_)) => None,
+        // git reads an SCP-like URL itself
+        Err(error::Error::Unsupported(_)) => url.clone(),
         Err(e) => return Err(eval_error(e, pos)),
     };
     let submodules = bool_attr(&args, "submodules").unwrap_or(false);
@@ -69,9 +70,9 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
             .or_insert(AttrVal::Bool(true));
     }
     if ev.pure() {
-        check_locked(&args, fixed.as_deref().unwrap_or(&url), pos)?;
+        check_locked(&args, &fixed, pos)?;
     }
-    let root = fixed.as_deref().and_then(workdir_root);
+    let root = workdir_root(&fixed);
     // a local repository is a source on this machine: a pure evaluation
     // reads one only where it may read
     // (docs/explanation/pure-eval-and-local-sources.md)
@@ -82,7 +83,7 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         }
         root => root,
     };
-    let shown = input_string(&args, fixed.as_deref().unwrap_or(&url)).unwrap_or(url.clone());
+    let shown = input_string(&args, &fixed).unwrap_or(url.clone());
     if submodules && bool_attr(&args, "exportIgnore") == Some(true) {
         bail!(
             ErrorKind::Unsupported,
@@ -90,9 +91,7 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
             "exportIgnore and submodules are not supported together yet"
         );
     }
-    let Some(url) = fixed else {
-        return from_nix(ev, &args, &shown, pos);
-    };
+    let url = fixed;
     let unpinned = !args.contains_key("rev") && !args.contains_key("ref");
     let workdir = root
         .as_deref()
@@ -379,30 +378,6 @@ fn is_ref_name(r: &str) -> bool {
         && !r.contains("..")
         && !r.contains("//")
         && r.bytes().all(plain)
-}
-
-/// Nix's `fetchGit` with the call's own attributes. A result with a `rev`
-/// asked for follows from it, so only the store path is an observation;
-/// any other depends on the repository now, and the run is uncacheable.
-fn from_nix(ev: &mut Evaluator, args: &Attrs, shown: &str, pos: Pos) -> EvalResult<Word> {
-    let locked = str_attr(args, "rev").is_some_and(|r| r != NULL_REV);
-    if !locked {
-        ev.trace().mark_uncacheable();
-    }
-    let (path, nar_hash, attrs) = source::fetch_git_with_nix(args, shown, pos)?;
-    let mut input = Attrs::new();
-    for k in ["type", "rev", "narHash"] {
-        input.extend(attrs.get(k).map(|v| (k.to_string(), v.clone())));
-    }
-    input.extend(args.get("url").map(|v| ("url".to_string(), v.clone())));
-    source::ensure_readable(ev, &path, &nar_hash, &input, pos)?;
-    let tree = Tree {
-        path,
-        attrs,
-        subdir: String::new(),
-        counter: None,
-    };
-    emit_tree_attrs(ev, &tree, None, pos)
 }
 
 #[cfg(test)]

@@ -279,7 +279,6 @@ fn fetch_mercurial_names_a_way_out() {
     assert_eq!(e.kind, crate::eval::ErrorKind::Unsupported);
     assert_eq!(e.msg, "builtins.fetchMercurial is not supported");
     let hint = e.hint.unwrap_or_default();
-    assert!(hint.contains(r#"type = "hg""#), "{hint}");
     assert!(hint.contains("nix-instantiate"), "{hint}");
 }
 

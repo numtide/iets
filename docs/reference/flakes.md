@@ -135,8 +135,7 @@ The root tree and `path:` inputs never need this.
    inputs are one download each, into the input store.
 4. **iets clones it.** A `git` input goes into a shallow clone under
    `$XDG_CACHE_HOME/iets/git/`, and its tree must match the lock's
-   `narHash`. `hg` inputs still go through the real `nix`, which must be
-   on `PATH`.
+   `narHash`.
 
 `file` inputs are not supported. Their store path is the flat hash of the
 bytes, which the lock's `narHash` does not give.
@@ -229,9 +228,7 @@ resolved, because the entry holds no bytes for it.
 entry only when it sends the NAR, straight to whichever builder the build
 targets (`docs/reference/builders.md`).
 
-**What needs a daemon.** `hg` inputs go through
-`nix eval (builtins.fetchTree ...)`, which writes to `/nix/store`.
-`builtins.storePath` on a path that is not on disk asks the daemon to
+**What needs a daemon.** `builtins.storePath` on a path that is not on disk asks the daemon to
 substitute it, and it has no input store entry, because its content address
 is not a flake `narHash`.
 

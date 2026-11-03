@@ -8,8 +8,7 @@ It evaluates, fetches `github:`, `gitlab:`, `sourcehut:` and `tarball`
 inputs, and builds on a `grpc://` builder. Stripped and compressed with
 `xz -9`, it was 3.1 MB when last measured.
 
-It runs `git` for a project that is a git checkout, and `nix` for a locked
-`git` or `hg` input. If the machine has no CA bundle, the binary trusts the
+It runs `git` for a project that is a git checkout and for a `git` input. If the machine has no CA bundle, the binary trusts the
 Mozilla roots built into it, and `NIX_SSL_CERT_FILE` overrides them
 ([Settings](../reference/settings.md)).
 

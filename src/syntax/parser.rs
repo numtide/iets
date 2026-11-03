@@ -20,6 +20,8 @@ use std::{ops, str};
 
 use crate::lint::allow;
 
+mod chunks;
+
 /// The error is boxed so a result fits in two registers: a 32-byte one
 /// went back through memory from every parser call.
 type R<T> = Result<T, Box<ParseError>>;
@@ -110,6 +112,12 @@ pub struct Parser<'a> {
     /// as the parser adds nodes.
     ind_strs: Vec<(ExprId, bool)>,
     depth: u32,
+    max_depth: u32,
+    /// Threads a huge set's bindings may be parsed on (`chunks`); 1 parses
+    /// everything in order.
+    threads: usize,
+    /// A set was considered for chunks; only the first is.
+    par_tried: bool,
 }
 
 /// Nix has no limit and reports a stack overflow from its SIGSEGV handler.
@@ -121,9 +129,36 @@ const MAX_PARSE_DEPTH: u32 = 50_000;
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], interner: &'a mut Interner) -> Self {
+        Self::with_ast(src, interner, Ast::default())
+    }
+
+    /// A parser whose first huge set may be parsed in chunks on `threads`
+    /// threads.
+    pub fn with_threads(src: &'a [u8], interner: &'a mut Interner, threads: usize) -> Self {
+        let mut p = Self::new(src, interner);
+        p.threads = threads.max(1);
+        p
+    }
+
+    /// A parser for the bindings of one chunk, `src[start..]`, `len` bytes
+    /// long; never chunked again.
+    fn chunk(src: &'a [u8], interner: &'a mut Interner, start: usize, len: usize) -> Self {
+        let mut ast = Ast::default();
+        let cap = len / 12 + 8;
+        ast.exprs.reserve(cap);
+        ast.spans.reserve(cap);
+        let mut p = Self::with_ast(&[], interner, ast);
+        p.src = src;
+        p.lx = Lexer::new(src);
+        p.lx.start_at(start);
+        p.par_tried = true;
+        p
+    }
+
+    /// A parser that adds to `ast`, whose tables `chunk` sized already.
+    fn with_ast(src: &'a [u8], interner: &'a mut Interner, mut ast: Ast) -> Self {
         let sym_or = interner.intern(b"or");
         let sym_body = interner.intern(b"body");
-        let mut ast = Ast::default();
         let cap = src.len() / 12 + 8;
         ast.exprs.reserve(cap);
         ast.spans.reserve(cap);
@@ -145,6 +180,9 @@ impl<'a> Parser<'a> {
             sym_body,
             ind_strs: Vec::new(),
             depth: 0,
+            max_depth: MAX_PARSE_DEPTH,
+            threads: 1,
+            par_tried: false,
         }
     }
 
@@ -152,7 +190,7 @@ impl<'a> Parser<'a> {
     #[inline]
     fn deeper(&mut self) -> R<()> {
         self.depth += 1;
-        if self.depth > MAX_PARSE_DEPTH {
+        if self.depth > self.max_depth {
             let t = self.peek();
             return Err(self.error_at(
                 t.start,
@@ -1116,6 +1154,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_binds_until(&mut self, closer: Tok) -> R<()> {
+        if self.threads > 1 {
+            self.maybe_chunks(closer);
+        }
         loop {
             let t = self.peek();
             if t.kind == closer {
@@ -1187,6 +1228,25 @@ impl<'a> Parser<'a> {
             });
         }
         Ok(())
+    }
+
+    /// Parses the bindings of the first set with more than
+    /// `chunks::CHUNKED_MIN` of source left in chunks. Out of line: a
+    /// sequential parse never gets here.
+    #[cold]
+    #[inline(never)]
+    fn maybe_chunks(&mut self, closer: Tok) {
+        if closer != Tok::RBrace || self.par_tried {
+            return;
+        }
+        let at = self
+            .tok
+            .or(self.next)
+            .map_or(self.lx.pos(), |t| t.start as usize);
+        if self.src.len() - at > chunks::CHUNKED_MIN {
+            self.par_tried = true;
+            self.parallel_binds(at);
+        }
     }
 
     fn static_inherit_name(&self, elem: AttrElem, t: Token) -> R<Sym> {

@@ -962,7 +962,7 @@ impl Evaluator {
             Origin::Text | Origin::Internal => self.files.add_text(path, &src),
         };
         let base = self.files[file.0 as usize].base;
-        let ast = syntax::parse(&src, file, &mut self.interner)
+        let ast = syntax::parse_threads(&src, file, &mut self.interner, self.par.workers)
             .map_err(|e| Error::boxed(ErrorKind::Parse, e.msg, Pos(base + e.span.start)))?;
         self.files[file.0 as usize].set_allows(ast.allows.clone());
         let t0 = Instant::now();

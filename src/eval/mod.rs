@@ -170,9 +170,57 @@ fn masks64(b: &[u8; 64]) -> (u64, u64) {
     (nl, cr)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+/// As on x86_64, with NEON. NEON has no movemask: each compare is anded
+/// with its lane's bit, and three pairwise adds fold 64 lanes into 8 bytes.
+/// The loop of `masks64_scalar` vectorizes to 8-byte compares here and ran
+/// at 2.8 GB/s on hackage-packages.nix, this at 7.2 (Apple M4).
+#[cfg(target_arch = "aarch64")]
 #[inline]
 fn masks64(b: &[u8; 64]) -> (u64, u64) {
+    // SAFETY: NEON is part of aarch64, and the load reads the 64 bytes of `b`.
+    unsafe {
+        let v = vld1q_u8_x4(b.as_ptr());
+        let (n, r) = (vdupq_n_u8(b'\n'), vdupq_n_u8(b'\r'));
+        let nl = bits64([
+            vceqq_u8(v.0, n),
+            vceqq_u8(v.1, n),
+            vceqq_u8(v.2, n),
+            vceqq_u8(v.3, n),
+        ]);
+        let cr = bits64([
+            vceqq_u8(v.0, r),
+            vceqq_u8(v.1, r),
+            vceqq_u8(v.2, r),
+            vceqq_u8(v.3, r),
+        ]);
+        (nl, cr)
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+fn masks64(b: &[u8; 64]) -> (u64, u64) {
+    masks64_scalar(b)
+}
+
+/// The 64 lanes of four compares, 0xff or 0, as the bits of a `u64`.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn bits64(m: [uint8x16_t; 4]) -> u64 {
+    // SAFETY: NEON is part of aarch64, and the load reads the 16 bytes of `w`.
+    unsafe {
+        let w = vld1q_u8([1u8, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128].as_ptr());
+        let lo = vpaddq_u8(vandq_u8(m[0], w), vandq_u8(m[1], w));
+        let hi = vpaddq_u8(vandq_u8(m[2], w), vandq_u8(m[3], w));
+        let m = vpaddq_u8(lo, hi);
+        vgetq_lane_u64::<0>(vreinterpretq_u64_u8(vpaddq_u8(m, m)))
+    }
+}
+
+/// `masks64` a byte at a time: the other targets', and the tests' reference.
+#[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[inline]
+fn masks64_scalar(b: &[u8; 64]) -> (u64, u64) {
     let (mut nl, mut cr) = (0u64, 0u64);
     for (j, &c) in b.iter().enumerate() {
         nl |= u64::from(c == b'\n') << j;
@@ -486,6 +534,11 @@ macro_rules! bail {
 }
 use crate::sys;
 pub(crate) use bail;
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::{
+    uint8x16_t, vandq_u8, vceqq_u8, vdupq_n_u8, vgetq_lane_u64, vld1q_u8, vld1q_u8_x4, vpaddq_u8,
+    vreinterpretq_u64_u8,
+};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
     __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,

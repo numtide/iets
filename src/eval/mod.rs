@@ -81,11 +81,7 @@ pub struct FileInfo {
 
 impl FileInfo {
     pub(crate) fn new(path: Vec<u8>, src: &[u8], base: u32) -> FileInfo {
-        let line_starts = if src.contains(&b'\r') {
-            syntax::line_starts(src)
-        } else {
-            newline_starts(src)
-        };
+        let line_starts = newline_starts(src).unwrap_or_else(|| syntax::line_starts(src));
         FileInfo {
             path,
             base,
@@ -127,18 +123,61 @@ impl FileInfo {
     }
 }
 
-/// `syntax::line_starts` for a source with no `\r`, at memchr speed.
-fn newline_starts(src: &[u8]) -> Vec<u32> {
-    let mut line_starts = vec![0u32];
-    let mut rest = src;
-    let mut off = 0usize;
-    // SAFETY: memchr reads at most `rest.len()` bytes of `rest`.
-    while let Some(i) = memchr::memchr(b'\n', rest) {
-        off += i + 1;
-        line_starts.push(off as u32);
-        rest = &rest[i + 1..];
+/// `syntax::line_starts` for a source with no `\r`, or `None` if it has
+/// one. One pass in 64-byte blocks, each compared into a bit mask: a
+/// `memchr` call per line, after a scan for `\r`, cost twice as much.
+fn newline_starts(src: &[u8]) -> Option<Vec<u32>> {
+    let mut starts = Vec::with_capacity(src.len() / 32 + 2);
+    starts.push(0u32);
+    let mut cr = 0u64;
+    let (blocks, rest) = src.as_chunks::<64>();
+    let mut off = 0u32;
+    for b in blocks {
+        let (mut nl, r) = masks64(b);
+        cr |= r;
+        starts.reserve(nl.count_ones() as usize);
+        while nl != 0 {
+            starts.push(off + nl.trailing_zeros() + 1);
+            nl &= nl - 1;
+        }
+        off += 64;
     }
-    line_starts
+    for (k, &c) in rest.iter().enumerate() {
+        match c {
+            b'\n' => starts.push(off + k as u32 + 1),
+            b'\r' => return None,
+            _ => {}
+        }
+    }
+    (cr == 0).then_some(starts)
+}
+
+/// The bits of the `\n` and of the `\r` bytes of a block.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn masks64(b: &[u8; 64]) -> (u64, u64) {
+    let (mut nl, mut cr) = (0u64, 0u64);
+    // SAFETY: SSE2 is part of x86_64, and each load reads 16 bytes of `b`.
+    unsafe {
+        let (n, r) = (_mm_set1_epi8(b'\n' as i8), _mm_set1_epi8(b'\r' as i8));
+        for i in 0..4 {
+            let v = _mm_loadu_si128(b.as_ptr().add(16 * i).cast::<__m128i>());
+            nl |= u64::from(_mm_movemask_epi8(_mm_cmpeq_epi8(v, n)) as u16) << (16 * i);
+            cr |= u64::from(_mm_movemask_epi8(_mm_cmpeq_epi8(v, r)) as u16) << (16 * i);
+        }
+    }
+    (nl, cr)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn masks64(b: &[u8; 64]) -> (u64, u64) {
+    let (mut nl, mut cr) = (0u64, 0u64);
+    for (j, &c) in b.iter().enumerate() {
+        nl |= u64::from(c == b'\n') << j;
+        cr |= u64::from(c == b'\r') << j;
+    }
+    (nl, cr)
 }
 
 /// The symbols Nix 2.34.8 creates before any other, in its order
@@ -243,6 +282,9 @@ pub struct Evaluator {
     /// `(prefix, path)` entries, `-I` first then `NIX_PATH`.
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
     pub call_depth: u32,
+    /// `MAX_CALL_DEPTH`, or 0 in a profiled run: the call path's one
+    /// compare picks the profiled copy.
+    call_limit: u32,
     pub try_level: u32,
     pub s: WellKnown,
     pub builtins_word: Word,
@@ -428,6 +470,22 @@ macro_rules! bail {
 }
 use crate::sys;
 pub(crate) use bail;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{
+    __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+};
+use std::hint;
+
+/// Binds a handler's node: `eval` dispatches on the variant, so no other
+/// reaches the handler.
+macro_rules! node {
+    ($pat:pat = $ir:expr) => {
+        let $pat = $ir else {
+            // SAFETY: see above.
+            unsafe { hint::unreachable_unchecked() }
+        };
+    };
+}
 
 /// Everything fixed before evaluation starts. A field set after `try_run` clones
 /// the evaluator is one fiber's alone, so there is no setter (docs/explanation/evaluation.md).
@@ -642,6 +700,11 @@ impl EvalConfig {
                 self.search_path
             },
             call_depth: 0,
+            call_limit: if self.session.profile.on() {
+                0
+            } else {
+                MAX_CALL_DEPTH
+            },
             try_level: 0,
             s,
             builtins_word: Word::NULL,
@@ -1661,10 +1724,26 @@ impl Evaluator {
     }
 
     /// Apply `func` to `args` left to right. Returns a forced value.
+    /// `call_limit` is the depth limit, or 0 in a profiled run, so one
+    /// compare serves both and the shadow stack costs a run without a
+    /// profile nothing.
     pub fn apply(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
+        if self.call_depth >= self.call_limit {
+            return self.apply_slow(func, args, pos);
+        }
+        self.call_depth += 1;
+        let r = self.apply_inner::<false>(func, args, pos);
+        self.call_depth -= 1;
+        r
+    }
+
+    /// A call at the depth limit, which fails, or of a profiled run, with
+    /// the frames of the shadow stack.
+    #[inline(never)]
+    fn apply_slow(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
         self.enter_call(pos)?;
         let depth = self.prof.depth();
-        let r = self.apply_inner(func, args, pos);
+        let r = self.apply_inner::<true>(func, args, pos);
         self.prof.unwind(depth);
         self.call_depth -= 1;
         r
@@ -1707,7 +1786,12 @@ impl Evaluator {
         self.prof.unwind(depth);
     }
 
-    fn apply_inner(&mut self, func: Word, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fn apply_inner<const PROF: bool>(
+        &mut self,
+        func: Word,
+        args: &[Word],
+        pos: Pos,
+    ) -> EvalResult<Word> {
         let mut cur = self.force(func)?;
         let mut args = args;
         let mut functors = 0u32;
@@ -1730,7 +1814,11 @@ impl Evaluator {
                         let env2 = if lam.no_env {
                             fenv
                         } else {
-                            self.frame_env(fenv, lam, last.frame)
+                            if PROF {
+                                self.frame_env_cold(fenv, lam, last.frame)
+                            } else {
+                                self.frame_env(fenv, lam, last.frame)
+                            }
                         };
                         let mut cur_lam = lam;
                         let mut d = 0;
@@ -1740,12 +1828,20 @@ impl Evaluator {
                                     unreachable!("the walk above found a lambda");
                                 };
                                 cur_lam = inner;
-                                self.prof_leave(d);
+                                if PROF {
+                                    self.prof_leave(d);
+                                }
                             }
                             self.nr_function_calls += 1;
-                            d = self.prof_enter(pos, cur_lam.name);
+                            if PROF {
+                                d = self.prof_enter(pos, cur_lam.name);
+                            }
                             if !cur_lam.no_env {
-                                self.bind_params(env2, cur_lam, *a, pos)?;
+                                if PROF {
+                                    self.bind_params_cold(env2, cur_lam, *a, pos)?;
+                                } else {
+                                    self.bind_params(env2, cur_lam, *a, pos)?;
+                                }
                             }
                         }
                         args = &args[n..];
@@ -1754,7 +1850,9 @@ impl Evaluator {
                         if !args.is_empty()
                             && let Ir::Lambda(inner) = last.body
                         {
-                            self.prof_leave(d);
+                            if PROF {
+                                self.prof_leave(d);
+                            }
                             (fenv, lam) = (env2, inner);
                             continue;
                         }
@@ -1768,7 +1866,9 @@ impl Evaluator {
                             }
                             e
                         })?;
-                        self.prof_leave(d);
+                        if PROF {
+                            self.prof_leave(d);
+                        }
                         break;
                     }
                 }
@@ -1777,12 +1877,18 @@ impl Evaluator {
                     if args.len() < arity {
                         return Ok(self.arena.mk_primop_app(op, args));
                     }
-                    let d = self.prof_enter_op(pos, op.sym);
+                    let d = if PROF {
+                        self.prof_enter_op(pos, op.sym)
+                    } else {
+                        0
+                    };
                     cur = (op.f)(self, &args[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
                     })?;
-                    self.prof_leave(d);
+                    if PROF {
+                        self.prof_leave(d);
+                    }
                     args = &args[arity..];
                 }
                 Value::PrimOpApp(app) => {
@@ -1797,12 +1903,18 @@ impl Evaluator {
                     let mut all: [Word; 8] = [Word::EMPTY; 8];
                     all[..app.args.len()].copy_from_slice(app.args);
                     all[app.args.len()..arity].copy_from_slice(&args[..need]);
-                    let d = self.prof_enter_op(pos, op.sym);
+                    let d = if PROF {
+                        self.prof_enter_op(pos, op.sym)
+                    } else {
+                        0
+                    };
                     cur = (op.f)(self, &all[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
                     })?;
-                    self.prof_leave(d);
+                    if PROF {
+                        self.prof_leave(d);
+                    }
                     args = &args[need..];
                 }
                 Value::Attrs(a) => {
@@ -1840,6 +1952,7 @@ impl Evaluator {
     /// An env of `size` slots for a call of `lam` in the closure env
     /// `fenv`. A lambda that extends its parent's frame starts from a copy
     /// of the parent's slots, above the parent's env.
+    #[inline(always)]
     fn frame_env(
         &mut self,
         fenv: &'static EnvObj,
@@ -1857,7 +1970,31 @@ impl Evaluator {
         env2
     }
 
+    /// `frame_env` for the profiled call path, which keeps its helpers
+    /// out of line so the hot one alone inlines them.
+    #[inline(never)]
+    fn frame_env_cold(
+        &mut self,
+        fenv: &'static EnvObj,
+        lam: &'static LambdaIr,
+        size: u32,
+    ) -> &'static EnvObj {
+        self.frame_env(fenv, lam, size)
+    }
+
+    #[inline(never)]
+    fn bind_params_cold(
+        &mut self,
+        env2: &'static EnvObj,
+        lam: &'static LambdaIr,
+        arg: Word,
+        pos: Pos,
+    ) -> EvalResult<()> {
+        self.bind_params(env2, lam, arg, pos)
+    }
+
     /// `lam`'s params from `arg`, in `env2` from slot `lam.base` on.
+    #[inline(always)]
     fn bind_params(
         &mut self,
         env2: &'static EnvObj,
@@ -1966,236 +2103,412 @@ impl Evaluator {
         self.apply(f, &[a, b], pos)
     }
 
-    /// Evaluate `ir` in `env` to weak head normal form.
-    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+    /// `eval` with a constant or a forced variable read in place: the
+    /// commonest operands, which would otherwise pay a call into the
+    /// dispatcher. For operands; a tail position calls `eval`.
+    #[inline(always)]
+    fn eval_fast(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
-            Ir::Const(w) => Ok(*w),
+            Ir::Const(w) => return Ok(*w),
             Ir::Local { depth, idx } => {
                 let mut e = env;
                 for _ in 0..*depth {
                     e = e.up().expect("compile-time depth is valid");
                 }
                 e.mark_read();
-                self.force_cell(e.slot(*idx as usize))
+                let w = e.slot(*idx as usize).get();
+                if !w.is_thunk() {
+                    return Ok(w);
+                }
             }
-            Ir::WithVar { sym, withs, pos } => self.eval_with_var(env, *sym, withs, *pos),
-            Ir::CurPos(pos) => Ok(self.mk_pos_attrs(*pos)),
+            _ => {}
+        }
+        self.eval(env, ir)
+    }
+
+    /// Evaluate `ir` in `env` to weak head normal form.
+    /// One small handler per node kind, tail-called: each recursion pays
+    /// for its own kind's frame, not for the largest arm's.
+    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        match ir {
+            Ir::Const(w) => Ok(*w),
+            Ir::Local { .. } => self.eval_k_local(env, ir),
+            Ir::WithVar { .. } => self.eval_k_with_var(env, ir),
+            Ir::CurPos(..) => self.eval_k_cur_pos(env, ir),
+            Ir::Concat { .. } => self.eval_k_concat(env, ir),
+            Ir::SearchPath { .. } => self.eval_k_search_path(env, ir),
+            Ir::Select(..) => self.eval_k_select(env, ir),
+            Ir::SelectCount(..) => self.eval_k_select_count(env, ir),
+            Ir::Select1 { .. } => self.eval_k_select1(env, ir),
+            Ir::HasAttr { .. } => self.eval_k_has_attr(env, ir),
+            Ir::Attrs(..) => self.eval_k_attrs(env, ir),
+            Ir::List(..) => self.eval_k_list(env, ir),
+            Ir::Lambda(..) => self.eval_k_lambda(env, ir),
+            Ir::Apply { .. } => self.eval_k_apply(env, ir),
+            Ir::Let(..) => self.eval_k_let(env, ir),
+            Ir::With { .. } => self.eval_k_with(env, ir),
+            Ir::If { .. } => self.eval_k_if(env, ir),
+            Ir::Assert { .. } => self.eval_k_assert(env, ir),
+            Ir::Not(..) => self.eval_k_not(env, ir),
+            Ir::Neg(..) => self.eval_k_neg(env, ir),
+            Ir::Eq(..) => self.eval_k_eq(env, ir),
+            Ir::Ne(..) => self.eval_k_ne(env, ir),
+            Ir::Lt(..) => self.eval_k_lt(env, ir),
+            Ir::Gt(..) => self.eval_k_gt(env, ir),
+            Ir::Le(..) => self.eval_k_le(env, ir),
+            Ir::Ge(..) => self.eval_k_ge(env, ir),
+            Ir::And(..) => self.eval_k_and(env, ir),
+            Ir::Or(..) => self.eval_k_or(env, ir),
+            Ir::Impl(..) => self.eval_k_impl(env, ir),
+            Ir::Update(..) => self.eval_k_update(env, ir),
+            Ir::ConcatLists(..) => self.eval_k_concat_lists(env, ir),
+            Ir::Sub(..) => self.eval_k_sub(env, ir),
+            Ir::Mul(..) => self.eval_k_mul(env, ir),
+            Ir::Div(..) => self.eval_k_div(env, ir),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_k_local(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Local { depth, idx } = ir);
+        let mut e = env;
+        for _ in 0..*depth {
+            e = e.up().expect("compile-time depth is valid");
+        }
+        e.mark_read();
+        self.force_cell(e.slot(*idx as usize))
+    }
+
+    #[inline(never)]
+    fn eval_k_with_var(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::WithVar { sym, withs, pos } = ir);
+        self.eval_with_var(env, *sym, withs, *pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_cur_pos(&mut self, _env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::CurPos(pos) = ir);
+        Ok(self.mk_pos_attrs(*pos))
+    }
+
+    #[inline(never)]
+    fn eval_k_concat(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(
             Ir::Concat {
                 force_string,
                 parts,
-                pos,
-            } => self.eval_concat(env, *force_string, parts, *pos),
-            Ir::SearchPath { name, pos } => {
-                let n = self.eval(env, name)?;
-                let n = self.force_string_no_ctx(n, *pos, "while evaluating a path segment")?;
-                let entries = self.search_path.clone();
-                let p = self.find_file(&entries, n, *pos)?;
-                Ok(self.arena.mk_path(&p))
-            }
-            Ir::Select(s) => self.eval_select(env, s.subject, s.path, s.default, s.pos),
-            Ir::SelectCount(s) => self.eval_select_count(env, s),
+                pos
+            } = ir
+        );
+        self.eval_concat(env, *force_string, parts, *pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_search_path(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::SearchPath { name, pos } = ir);
+        let n = self.eval(env, name)?;
+        let n = self.force_string_no_ctx(n, *pos, "while evaluating a path segment")?;
+        let entries = self.search_path.clone();
+        let p = self.find_file(&entries, n, *pos)?;
+        Ok(self.arena.mk_path(&p))
+    }
+
+    #[inline(never)]
+    fn eval_k_select(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Select(s) = ir);
+        self.eval_select(env, s.subject, s.path, s.default, s.pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_select_count(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::SelectCount(s) = ir);
+        self.eval_select_count(env, s)
+    }
+
+    #[inline(never)]
+    fn eval_k_select1(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(
             Ir::Select1 {
                 subject,
                 sym,
                 default,
-                pos,
-            } => self.eval_select1(env, subject, *sym, *default, *pos),
-            Ir::HasAttr { subject, path } => {
-                let mut v = self.eval(env, subject)?;
-                for elem in path.iter() {
-                    let name = self.attr_name(env, elem)?;
-                    let attrs = self.force(v)?;
-                    match attrs.as_attrs().and_then(|a| a.get(name)) {
-                        Some(a) => v = a.cell.get(),
-                        None => return Ok(Word::FALSE),
-                    }
-                }
-                Ok(Word::TRUE)
+                pos
+            } = ir
+        );
+        self.eval_select1(env, subject, *sym, *default, *pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_has_attr(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::HasAttr { subject, path } = ir);
+        let mut v = self.eval_fast(env, subject)?;
+        for elem in path.iter() {
+            let name = self.attr_name(env, elem)?;
+            let attrs = self.force(v)?;
+            match attrs.as_attrs().and_then(|a| a.get(name)) {
+                Some(a) => v = a.cell.get(),
+                None => return Ok(Word::FALSE),
             }
-            Ir::Attrs(a) => self.eval_attrs(env, a),
-            Ir::List(items) => {
-                let l = self.arena.alloc_list_as(items.len(), Stat::ListLit);
-                for (c, item) in l.cells().iter().zip(items.iter()) {
-                    let w = self.maybe_thunk(env, item);
-                    c.set(w);
-                }
-                Ok(Word::from_ref(l))
+        }
+        Ok(Word::TRUE)
+    }
+
+    #[inline(never)]
+    fn eval_k_attrs(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Attrs(a) = ir);
+        self.eval_attrs(env, a)
+    }
+
+    #[inline(never)]
+    fn eval_k_list(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::List(items) = ir);
+        let l = self.arena.alloc_list_as(items.len(), Stat::ListLit);
+        for (c, item) in l.cells().iter().zip(items.iter()) {
+            let w = self.maybe_thunk(env, item);
+            c.set(w);
+        }
+        Ok(Word::from_ref(l))
+    }
+
+    #[inline(never)]
+    fn eval_k_lambda(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Lambda(l) = ir);
+        Ok(self.arena.mk_lambda(env, l))
+    }
+
+    #[inline(never)]
+    fn eval_k_apply(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Apply { func, args, pos } = ir);
+        let f = self.eval_fast(env, func)?;
+        if args.len() <= 8 {
+            let mut buf: [Word; 8] = [Word::EMPTY; 8];
+            for (i, a) in args.iter().enumerate() {
+                buf[i] = self.maybe_thunk(env, a);
             }
-            Ir::Lambda(l) => Ok(self.arena.mk_lambda(env, l)),
-            Ir::Apply { func, args, pos } => {
-                let f = self.eval(env, func)?;
-                let mut buf: [Word; 8] = [Word::EMPTY; 8];
-                if args.len() <= 8 {
-                    for (i, a) in args.iter().enumerate() {
-                        buf[i] = self.maybe_thunk(env, a);
-                    }
-                    self.apply(f, &buf[..args.len()], *pos)
-                } else {
-                    let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk(env, a)).collect();
-                    self.apply(f, &v, *pos)
-                }
-            }
-            Ir::Let(l) => {
-                let env2 = if l.base == LetIr::OWN_ENV {
-                    self.alloc_rec_env(env, l.binds, l.from, false)
-                } else {
-                    // the lambda's call made the slots; `inherit x` reads
-                    // its params, which live in the same env
-                    self.fill_rec_slots(env, env, l.base as usize, l.binds, l.from, false);
-                    env
-                };
-                self.eval(env2, l.body)
-            }
-            Ir::With { scope, body, .. } => {
-                let env2 = self.arena.alloc_env(Some(env), 1);
-                let w = self.maybe_thunk(env, scope);
-                env2.slot(0).set(w);
-                self.eval(env2, body)
-            }
+            self.apply(f, &buf[..args.len()], *pos)
+        } else {
+            let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk(env, a)).collect();
+            self.apply(f, &v, *pos)
+        }
+    }
+
+    #[inline(never)]
+    fn eval_k_let(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Let(l) = ir);
+        let env2 = if l.base == LetIr::OWN_ENV {
+            self.alloc_rec_env(env, l.binds, l.from, false)
+        } else {
+            // the lambda's call made the slots; `inherit x` reads
+            // its params, which live in the same env
+            self.fill_rec_slots(env, env, l.base as usize, l.binds, l.from, false);
+            env
+        };
+        self.eval(env2, l.body)
+    }
+
+    #[inline(never)]
+    fn eval_k_with(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::With { scope, body, .. } = ir);
+        let env2 = self.arena.alloc_env(Some(env), 1);
+        let w = self.maybe_thunk(env, scope);
+        env2.slot(0).set(w);
+        self.eval(env2, body)
+    }
+
+    #[inline(never)]
+    fn eval_k_if(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(
             Ir::If {
                 cond,
                 then,
                 else_,
-                pos,
-            } => {
-                let c = self.eval_bool(env, cond, *pos, "while evaluating a branch condition")?;
-                self.eval(env, if c { then } else { else_ })
-            }
-            Ir::Assert { cond, body, pos } => {
-                if !self.eval_bool(env, cond, *pos, "in the condition of the assert statement")? {
-                    bail!(ErrorKind::Assert, *pos, "assertion failed");
-                }
-                self.eval(env, body)
-            }
-            Ir::Not(e, pos) => {
-                let b = self.eval_bool(env, e, *pos, "in the argument of the not operator")?;
-                Ok(Word::from_bool(!b))
-            }
-            Ir::Neg(e, pos) => {
-                let v = self.eval(env, e)?;
-                let zero = Word::imm_int(0);
-                self.arith(zero, v, ArithOp::Sub, *pos)
-            }
-            Ir::Eq(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                Ok(Word::from_bool(self.eq_values_top(a, b, *pos)?))
-            }
-            Ir::Ne(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                Ok(Word::from_bool(!self.eq_values_top(a, b, *pos)?))
-            }
-            Ir::Lt(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                Ok(Word::from_bool(self.less_than(a, b, *pos)?))
-            }
-            Ir::Gt(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                Ok(Word::from_bool(self.less_than(b, a, *pos)?))
-            }
-            Ir::Le(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                Ok(Word::from_bool(!self.less_than(b, a, *pos)?))
-            }
-            Ir::Ge(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                Ok(Word::from_bool(!self.less_than(a, b, *pos)?))
-            }
-            Ir::And(l, r, pos) => {
-                if !self.eval_bool(env, l, *pos, "in the left operand of the AND (&&) operator")? {
-                    return Ok(Word::FALSE);
-                }
-                let b = self.eval_bool(
-                    env,
-                    r,
-                    *pos,
-                    "in the right operand of the AND (&&) operator",
-                )?;
-                Ok(Word::from_bool(b))
-            }
-            Ir::Or(l, r, pos) => {
-                if self.eval_bool(env, l, *pos, "in the left operand of the OR (||) operator")? {
-                    return Ok(Word::TRUE);
-                }
-                let b =
-                    self.eval_bool(env, r, *pos, "in the right operand of the OR (||) operator")?;
-                Ok(Word::from_bool(b))
-            }
-            Ir::Impl(l, r, pos) => {
-                if !self.eval_bool(
-                    env,
-                    l,
-                    *pos,
-                    "in the left operand of the IMPL (->) operator",
-                )? {
-                    return Ok(Word::TRUE);
-                }
-                let b = self.eval_bool(
-                    env,
-                    r,
-                    *pos,
-                    "in the right operand of the IMPL (->) operator",
-                )?;
-                Ok(Word::from_bool(b))
-            }
-            Ir::Update(l, r, pos) => {
-                // the right operand first, as ExprOpUpdate::evalForUpdate
-                // (eval.cc): `tryEval (1 // throw "x")` catches the throw
-                let b = self.eval(env, r)?;
-                let b =
-                    self.force_attrs(b, *pos, "in the right operand of the update (//) operator")?;
-                let a = self.eval(env, l)?;
-                let a =
-                    self.force_attrs(a, *pos, "in the left operand of the update (//) operator")?;
-                #[cfg(feature = "stats2")]
-                let before = (
-                    census::upd_path(a, b),
-                    a.flags,
-                    b.flags,
-                    self.arena.bytes_allocated,
-                    matches!(r, Ir::Update(..)),
-                );
-                let out = self.update_attrs(a, b);
-                #[cfg(feature = "stats2")]
-                self.note_upd(a, b, out, *pos, before);
-                Ok(out)
-            }
-            Ir::ConcatLists(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                let a = self.force_list(
-                    a,
-                    *pos,
-                    "in the left operand of the list concatenation operator",
-                )?;
-                let b = self.force_list(
-                    b,
-                    *pos,
-                    "in the right operand of the list concatenation operator",
-                )?;
-                Ok(self.concat_lists(&[a, b]))
-            }
-            Ir::Sub(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                self.arith(a, b, ArithOp::Sub, *pos)
-            }
-            Ir::Mul(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                self.arith(a, b, ArithOp::Mul, *pos)
-            }
-            Ir::Div(l, r, pos) => {
-                let a = self.eval(env, l)?;
-                let b = self.eval(env, r)?;
-                self.arith(a, b, ArithOp::Div, *pos)
-            }
+                pos
+            } = ir
+        );
+        let c = self.eval_bool(env, cond, *pos, "while evaluating a branch condition")?;
+        self.eval(env, if c { then } else { else_ })
+    }
+
+    #[inline(never)]
+    fn eval_k_assert(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Assert { cond, body, pos } = ir);
+        if !self.eval_bool(env, cond, *pos, "in the condition of the assert statement")? {
+            bail!(ErrorKind::Assert, *pos, "assertion failed");
         }
+        self.eval(env, body)
+    }
+
+    #[inline(never)]
+    fn eval_k_not(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Not(e, pos) = ir);
+        let b = self.eval_bool(env, e, *pos, "in the argument of the not operator")?;
+        Ok(Word::from_bool(!b))
+    }
+
+    #[inline(never)]
+    fn eval_k_neg(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Neg(e, pos) = ir);
+        let v = self.eval_fast(env, e)?;
+        let zero = Word::imm_int(0);
+        self.arith(zero, v, ArithOp::Sub, *pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_eq(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Eq(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        Ok(Word::from_bool(self.eq_values_top(a, b, *pos)?))
+    }
+
+    #[inline(never)]
+    fn eval_k_ne(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Ne(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        Ok(Word::from_bool(!self.eq_values_top(a, b, *pos)?))
+    }
+
+    #[inline(never)]
+    fn eval_k_lt(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Lt(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        Ok(Word::from_bool(self.less_than(a, b, *pos)?))
+    }
+
+    #[inline(never)]
+    fn eval_k_gt(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Gt(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        Ok(Word::from_bool(self.less_than(b, a, *pos)?))
+    }
+
+    #[inline(never)]
+    fn eval_k_le(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Le(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        Ok(Word::from_bool(!self.less_than(b, a, *pos)?))
+    }
+
+    #[inline(never)]
+    fn eval_k_ge(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Ge(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        Ok(Word::from_bool(!self.less_than(a, b, *pos)?))
+    }
+
+    #[inline(never)]
+    fn eval_k_and(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::And(l, r, pos) = ir);
+        if !self.eval_bool(env, l, *pos, "in the left operand of the AND (&&) operator")? {
+            return Ok(Word::FALSE);
+        }
+        let b = self.eval_bool(
+            env,
+            r,
+            *pos,
+            "in the right operand of the AND (&&) operator",
+        )?;
+        Ok(Word::from_bool(b))
+    }
+
+    #[inline(never)]
+    fn eval_k_or(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Or(l, r, pos) = ir);
+        if self.eval_bool(env, l, *pos, "in the left operand of the OR (||) operator")? {
+            return Ok(Word::TRUE);
+        }
+        let b = self.eval_bool(env, r, *pos, "in the right operand of the OR (||) operator")?;
+        Ok(Word::from_bool(b))
+    }
+
+    #[inline(never)]
+    fn eval_k_impl(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Impl(l, r, pos) = ir);
+        if !self.eval_bool(
+            env,
+            l,
+            *pos,
+            "in the left operand of the IMPL (->) operator",
+        )? {
+            return Ok(Word::TRUE);
+        }
+        let b = self.eval_bool(
+            env,
+            r,
+            *pos,
+            "in the right operand of the IMPL (->) operator",
+        )?;
+        Ok(Word::from_bool(b))
+    }
+
+    #[inline(never)]
+    fn eval_k_update(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Update(l, r, pos) = ir);
+        // the right operand first, as ExprOpUpdate::evalForUpdate
+        // (eval.cc): `tryEval (1 // throw "x")` catches the throw
+        let b = self.eval_fast(env, r)?;
+        let b = self.force_attrs(b, *pos, "in the right operand of the update (//) operator")?;
+        let a = self.eval_fast(env, l)?;
+        let a = self.force_attrs(a, *pos, "in the left operand of the update (//) operator")?;
+        #[cfg(feature = "stats2")]
+        let before = (
+            census::upd_path(a, b),
+            a.flags,
+            b.flags,
+            self.arena.bytes_allocated,
+            matches!(r, Ir::Update(..)),
+        );
+        let out = self.update_attrs(a, b);
+        #[cfg(feature = "stats2")]
+        self.note_upd(a, b, out, *pos, before);
+        Ok(out)
+    }
+
+    #[inline(never)]
+    fn eval_k_concat_lists(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::ConcatLists(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        let a = self.force_list(
+            a,
+            *pos,
+            "in the left operand of the list concatenation operator",
+        )?;
+        let b = self.force_list(
+            b,
+            *pos,
+            "in the right operand of the list concatenation operator",
+        )?;
+        Ok(self.concat_lists(&[a, b]))
+    }
+
+    #[inline(never)]
+    fn eval_k_sub(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Sub(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        self.arith(a, b, ArithOp::Sub, *pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_mul(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Mul(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        self.arith(a, b, ArithOp::Mul, *pos)
+    }
+
+    #[inline(never)]
+    fn eval_k_div(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        node!(Ir::Div(l, r, pos) = ir);
+        let a = self.eval_fast(env, l)?;
+        let b = self.eval_fast(env, r)?;
+        self.arith(a, b, ArithOp::Div, *pos)
     }
 
     #[inline]
@@ -2206,7 +2519,7 @@ impl Evaluator {
         pos: Pos,
         ctx: &str,
     ) -> EvalResult<bool> {
-        let v = self.eval(env, ir)?;
+        let v = self.eval_fast(env, ir)?;
         match v {
             Word::TRUE => Ok(true),
             Word::FALSE => Ok(false),
@@ -2269,7 +2582,7 @@ impl Evaluator {
         default: Option<IrRef>,
         pos: Pos,
     ) -> EvalResult<Word> {
-        let mut v = self.eval(env, subject)?;
+        let mut v = self.eval_fast(env, subject)?;
         for elem in path {
             let name = self.attr_name(env, elem)?;
             let attr = match default {
@@ -2576,6 +2889,82 @@ impl Evaluator {
         parts: &[IrRef],
         pos: Pos,
     ) -> EvalResult<Word> {
+        // `+` of numbers is most of the calls: no string buffers for them
+        if !force_string && let Some((p0, rest)) = parts.split_first() {
+            let v = self.eval_fast(env, p0)?;
+            if matches!(v.view(), Value::Int(_) | Value::Float(_)) {
+                return self.concat_numbers(env, v, rest, pos);
+            }
+            return self.concat_strings(env, force_string, parts, pos, Some(v));
+        }
+        self.concat_strings(env, force_string, parts, pos, None)
+    }
+
+    /// The rest of a `+` chain whose first operand `v` is a number.
+    fn concat_numbers(
+        &mut self,
+        env: &'static EnvObj,
+        v: Word,
+        rest: &[IrRef],
+        pos: Pos,
+    ) -> EvalResult<Word> {
+        let (mut n, mut nf, mut float) = match v.view() {
+            Value::Int(i) => (i, 0.0, false),
+            Value::Float(f) => (0, f, true),
+            _ => unreachable!("concat_numbers starts at a number"),
+        };
+        for part in rest {
+            let v = self.eval(env, part)?;
+            let ppos = ir_pos(part);
+            let ppos = if ppos.is_none() { pos } else { ppos };
+            match (float, v.view()) {
+                (false, Value::Int(i)) => match n.checked_add(i) {
+                    Some(x) => n = x,
+                    None => bail!(
+                        ErrorKind::Eval,
+                        ppos,
+                        "integer overflow in adding {} + {}",
+                        n,
+                        i
+                    ),
+                },
+                (false, Value::Float(f)) => {
+                    float = true;
+                    nf = n as f64 + f;
+                }
+                (true, Value::Int(i)) => nf += i as f64,
+                (true, Value::Float(f)) => nf += f,
+                (false, _) => bail!(
+                    ErrorKind::Eval,
+                    ppos,
+                    "cannot add {} to an integer",
+                    v.value_type().name()
+                ),
+                (true, _) => bail!(
+                    ErrorKind::Eval,
+                    ppos,
+                    "cannot add {} to a float",
+                    v.value_type().name()
+                ),
+            }
+        }
+        Ok(if float {
+            self.mk_float(nf)
+        } else {
+            self.mk_int(n)
+        })
+    }
+
+    /// `eval_concat` past its first part when that is not a number, or of
+    /// an interpolation; `pre` is the first part's value when evaluated.
+    fn concat_strings(
+        &mut self,
+        env: &'static EnvObj,
+        force_string: bool,
+        parts: &[IrRef],
+        pos: Pos,
+        pre: Option<Word>,
+    ) -> EvalResult<Word> {
         let mut first = !force_string;
         let mut first_type = ValueType::String;
         let mut n: i64 = 0;
@@ -2586,8 +2975,11 @@ impl Evaluator {
         let mut nbuf = 0usize;
         let mut spill: Vec<Cow<'static, [u8]>> = Vec::new();
         let mut ctx: Vec<Ctx> = Vec::new();
-        for part in parts {
-            let v = self.eval(env, part)?;
+        for (k, part) in parts.iter().enumerate() {
+            let v = match pre {
+                Some(v) if k == 0 => v,
+                _ => self.eval(env, part)?,
+            };
             let ppos = ir_pos(part);
             // a literal part has no position of its own: the whole concat's stands in
             let ppos = if ppos.is_none() { pos } else { ppos };

@@ -28,7 +28,9 @@ impl Display for ParseError {
 impl error::Error for ParseError {}
 
 pub fn parse(src: &[u8], file: FileId, interner: &mut Interner) -> Result<Ast, ParseError> {
-    parser::Parser::new(src, interner).parse_file(file)
+    parser::Parser::new(src, interner)
+        .parse_file(file)
+        .map_err(|e| *e)
 }
 
 /// `parse`, with the bindings of a huge set parsed in chunks on up to
@@ -39,7 +41,9 @@ pub fn parse_threads(
     interner: &mut Interner,
     threads: usize,
 ) -> Result<Ast, ParseError> {
-    parser::Parser::with_threads(src, interner, threads).parse_file(file)
+    parser::Parser::with_threads(src, interner, threads)
+        .parse_file(file)
+        .map_err(|e| *e)
 }
 
 /// 1-based line and column of a byte offset. The column counts bytes, like

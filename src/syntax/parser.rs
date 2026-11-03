@@ -125,6 +125,11 @@ pub struct Parser<'a> {
 /// the pipeline runs out of stack.
 const MAX_PARSE_DEPTH: u32 = 50_000;
 
+/// Room for `n + 8` entries in an emptied table.
+fn reserve<T>(v: &mut Vec<T>, n: usize) {
+    v.reserve((n + 8).saturating_sub(v.len()));
+}
+
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], interner: &'a mut Interner) -> Self {
         Self::with_ast(src, interner, Ast::default())
@@ -157,9 +162,19 @@ impl<'a> Parser<'a> {
     fn with_ast(src: &'a [u8], interner: &'a mut Interner, mut ast: Ast) -> Self {
         let sym_or = interner.intern(b"or");
         let sym_body = interner.intern(b"body");
-        let cap = src.len() / 12 + 8;
+        let n = src.len();
+        let cap = n / 12 + 8;
         ast.exprs.reserve(cap);
         ast.spans.reserve(cap);
+        // The side tables and the scratch stacks at about twice their mean
+        // size per source byte (nixos-server's files): grown by doubling,
+        // each step copied a table the parse had long left, from memory.
+        reserve(&mut ast.ids, n / 36);
+        reserve(&mut ast.elems, n / 26);
+        reserve(&mut ast.parts, n / 60);
+        reserve(&mut ast.bytes, n / 2);
+        reserve(&mut ast.binds, n / 40);
+        reserve(&mut ast.formals, n / 86);
         Parser {
             src,
             lx: Lexer::new(src),
@@ -168,12 +183,12 @@ impl<'a> Parser<'a> {
             last_end: 0,
             interner,
             ast,
-            sc_ids: Vec::new(),
-            sc_elems: Vec::new(),
-            sc_parts: Vec::new(),
-            sc_binds: Vec::new(),
+            sc_ids: Vec::with_capacity(n / 72 + 8),
+            sc_elems: Vec::with_capacity(n / 52 + 8),
+            sc_parts: Vec::with_capacity(n / 120 + 8),
+            sc_binds: Vec::with_capacity(n / 80 + 8),
             sc_names: Vec::new(),
-            sc_formals: Vec::new(),
+            sc_formals: Vec::with_capacity(n / 172 + 8),
             sym_or,
             sym_body,
             ind_strs: Vec::new(),

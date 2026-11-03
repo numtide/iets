@@ -879,6 +879,7 @@ impl<'a> Compiler<'a> {
 
     fn merge_binds(&mut self, rec: bool, binds: &[Bind], pos: Pos) -> CResult<Merged> {
         let mut m = Merged::new(rec, pos);
+        m.statics.reserve(binds.len());
         for b in binds {
             self.add_bind(&mut m, b)?;
         }

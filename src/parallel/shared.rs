@@ -7,7 +7,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Index;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::vec::IntoIter;
@@ -82,24 +82,59 @@ impl<K: Hash + Eq, V: Clone> SharedMap<K, V> {
 }
 
 struct FilesInner {
-    list: Vec<&'static FileInfo>,
-    ids: HashMap<Vec<u8>, FileId>,
-    /// Global source offset the next file starts at (`Pos` space).
-    next_base: u32,
-    /// Owns the entries, so references to them outlive every lock.
+    /// `list[i]` points at file `i`, stored before `len` publishes it, so
+    /// a lookup takes no lock: compiles on every worker read the table, and
+    /// a mutex around it was contended at eight workers.
+    list: *mut AtomicPtr<FileInfo>,
+    len: AtomicUsize,
+    adder: Mutex<Adder>,
+    /// Owns the entries, so references to them outlive the table.
     heap: Arc<Heap>,
 }
 
+/// What only an add touches.
+struct Adder {
+    ids: HashMap<Vec<u8>, FileId>,
+    /// Global source offset the next file starts at (`Pos` space).
+    next_base: u32,
+}
+
+// SAFETY: the list holds atomics only, each written once before `len`
+// publishes it; the mapping lives as long as this.
+unsafe impl Sync for FilesInner {}
+unsafe impl Send for FilesInner {}
+
+impl Drop for FilesInner {
+    fn drop(&mut self) {
+        interner::unmap_per_sym(self.list);
+    }
+}
+
 impl FilesInner {
-    fn push(&mut self, path: &[u8], src: &[u8]) -> FileId {
-        let id = FileId(self.list.len() as u32);
-        let base = self.next_base;
-        self.next_base = base
-            .checked_add(src.len() as u32 + 1)
+    /// Appends `info`, its line table already made outside the lock.
+    fn push(&self, a: &mut Adder, mut info: FileInfo, src_len: usize) -> FileId {
+        let n = self.len.load(Ordering::Relaxed);
+        assert!(n < interner::MAX_SYMS, "too many files");
+        let base = a.next_base;
+        a.next_base = base
+            .checked_add(src_len as u32 + 1)
             .expect("sources exceed 4 GiB");
-        let info = FileInfo::new(path.to_vec(), src, base);
-        self.list.push(self.heap.keep(info));
-        id
+        info.base = base;
+        let p: *const FileInfo = self.heap.keep(info);
+        // SAFETY: `n` is below the mapping's length, and only the holder of
+        // the adder lock writes past `len`.
+        unsafe { (*self.list.add(n)).store(p as *mut FileInfo, Ordering::Release) };
+        self.len.store(n + 1, Ordering::Release);
+        FileId(n as u32)
+    }
+
+    fn get(&self, i: usize) -> Option<&'static FileInfo> {
+        if i >= self.len.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: entries below `len` were stored before it, point into the
+        // session heap and are never written again.
+        Some(unsafe { &*(*self.list.add(i)).load(Ordering::Acquire) })
     }
 }
 
@@ -107,7 +142,7 @@ impl FilesInner {
 /// table only, never the source text. The entries live as long as the
 /// session.
 #[derive(Clone)]
-pub struct Files(Arc<Mutex<FilesInner>>);
+pub struct Files(Arc<FilesInner>);
 
 impl Default for Files {
     fn default() -> Self {
@@ -122,34 +157,44 @@ impl Files {
     }
 
     pub fn in_heap(heap: Arc<Heap>) -> Files {
-        Files(Arc::new(Mutex::new(FilesInner {
-            list: Vec::new(),
-            ids: HashMap::new(),
-            next_base: 0,
+        Files(Arc::new(FilesInner {
+            list: interner::per_sym(),
+            len: AtomicUsize::new(0),
+            adder: Mutex::new(Adder {
+                ids: HashMap::new(),
+                next_base: 0,
+            }),
             heap,
-        })))
+        }))
     }
 
     /// Register the file at `path`, or return its id: every compile of one
-    /// path reads the same text.
+    /// path reads the same text. The line table is made outside the lock;
+    /// a racing add of the same path keeps the first.
     pub fn add(&self, path: &[u8], src: &[u8]) -> FileId {
-        let mut g = self.0.lock().unwrap();
-        if let Some(id) = g.ids.get(path) {
+        if let Some(id) = self.0.adder.lock().unwrap().ids.get(path) {
             return *id;
         }
-        let id = g.push(path, src);
-        g.ids.insert(path.to_vec(), id);
+        let info = FileInfo::new(path.to_vec(), src, 0);
+        let mut a = self.0.adder.lock().unwrap();
+        if let Some(id) = a.ids.get(path) {
+            return *id;
+        }
+        let id = self.0.push(&mut a, info, src.len());
+        a.ids.insert(path.to_vec(), id);
         id
     }
 
     /// Register a text that `path` only names (`«string»`, `«arg»`): two
     /// texts may share a name.
     pub fn add_text(&self, path: &[u8], src: &[u8]) -> FileId {
-        self.0.lock().unwrap().push(path, src)
+        let info = FileInfo::new(path.to_vec(), src, 0);
+        self.0
+            .push(&mut self.0.adder.lock().unwrap(), info, src.len())
     }
 
     pub fn get(&self, i: usize) -> Option<&'static FileInfo> {
-        self.0.lock().unwrap().list.get(i).copied()
+        self.0.get(i)
     }
 
     /// The file whose base range holds `pos`, and the offset inside it.
@@ -157,14 +202,24 @@ impl Files {
         if pos.is_none() {
             return None;
         }
-        let g = self.0.lock().unwrap();
-        let i = g.list.partition_point(|f| f.base <= pos.0);
-        let f = *g.list.get(i.checked_sub(1)?)?;
+        let n = self.len();
+        // the bases grow with the index: the last file starting at or
+        // before `pos`
+        let (mut lo, mut hi) = (0, n);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.0.get(mid)?.base <= pos.0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let f = self.0.get(lo.checked_sub(1)?)?;
         Some((f, pos.0 - f.base))
     }
 
     pub fn len(&self) -> usize {
-        self.0.lock().unwrap().list.len()
+        self.0.len.load(Ordering::Acquire)
     }
 
     pub fn is_empty(&self) -> bool {

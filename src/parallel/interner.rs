@@ -90,7 +90,7 @@ unsafe impl Send for Inner {}
 
 /// Per-handle direct-mapped lookup cache in front of the shared table:
 /// a hit costs one hash and one compare, no lock.
-const CACHE: usize = 1024;
+const CACHE: usize = 4096;
 
 #[derive(Clone, Copy)]
 struct CacheEntry {

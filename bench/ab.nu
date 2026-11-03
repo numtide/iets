@@ -1,16 +1,33 @@
 #!/usr/bin/env nu
 # Usage: bench/ab.nu [--runs N] [--skip-outpaths] BEFORE AFTER
-# Interleaved A/B of two iets binaries: one hyperfine invocation per
-# workload (`--warmup 1 --runs N`, default 7) so the runs alternate, on
-# nixos-server at 1 and 4 workers and pure from a checkout at 1, nixos-minimal at 1 worker, and outpaths
-# chunk 0 of 8 (`eval-jobs --no-instantiate`) at 1 worker. Prints the
-# median wall, mean user and sys, the peak RSS of one extra timed run, and
-# the wall change. Run it on an idle box.
+# Interleaved A/B of two iets binaries, on nixos-server at 1 and 4 workers
+# and pure from a checkout at 1, nixos-minimal at 1 worker, and outpaths
+# chunk 0 of 8 (`eval-jobs --no-instantiate`) at 1 worker. After one warmup
+# each, N pairs (default 8, even) run in the order AB, BA, AB, ..., so a
+# machine that drifts during the run moves both sides alike, and each binary
+# runs second in half the pairs, so a cache the first run warms favors
+# neither; hyperfine runs one command's runs and then the other's, and
+# cannot. Prints the median wall,
+# mean user and sys, the median peak RSS, and the change: the median of each
+# pair's change, which drift does not bias as it biases two medians. Needs
+# GNU time. Run it on an idle box.
 
-def rss-mb [bin: string, args: list<string>]: nothing -> int {
-  let r = (^/usr/bin/env time -f "TIME %M" $bin ...$args | complete)
-  let line = ($r.stderr | lines | where $it starts-with "TIME " | last)
-  ($line | split row " " | get 1 | into int) / 1024 | math round
+# One run: wall from the clock around it (GNU time's %e has 10 ms steps),
+# user, sys and peak RSS from GNU time.
+def run-once [bin: string, args: list<string>]: nothing -> record {
+  let t0 = (date now)
+  let r = (^/usr/bin/env time -f "TIME %U %S %M" $bin ...$args | complete)
+  let wall = (((date now) - $t0) | into int) / 1e9
+  if $r.exit_code != 0 {
+    error make {msg: $"($bin) ($args | str join ' ') exited ($r.exit_code):\n($r.stderr | lines | last 5 | str join "\n")"}
+  }
+  let f = ($r.stderr | lines | where $it starts-with "TIME " | last | split row " ")
+  {
+    wall: $wall
+    user: ($f | get 1 | into float)
+    sys: ($f | get 2 | into float)
+    rss_mb: (($f | get 3 | into int) / 1024 | math round)
+  }
 }
 
 # Everything that can fail or be interrupted once the temporary files exist,
@@ -35,39 +52,51 @@ def measure [
   }
   mut rows = []
   for c in $cases {
-    let json = (mktemp --tmpdir ab.XXXXXX)
-    let a = ([$before] ++ $c.args | str join " ")
-    let b = ([$after] ++ $c.args | str join " ")
-    ^hyperfine -N --warmup 1 --runs $runs --export-json $json $a $b out+err> /dev/null
-    let res = (open --raw $json | from json | get results)
-    rm -f $json
-    let ra = ($res | get 0)
-    let rb = ($res | get 1)
-    let rss_a = (rss-mb $before $c.args)
-    let rss_b = (rss-mb $after $c.args)
+    run-once $before $c.args | ignore
+    run-once $after $c.args | ignore
+    mut a = []
+    mut b = []
+    for i in 0..<$runs {
+      if $i mod 2 == 0 {
+        $a = ($a | append (run-once $before $c.args))
+        $b = ($b | append (run-once $after $c.args))
+      } else {
+        $b = ($b | append (run-once $after $c.args))
+        $a = ($a | append (run-once $before $c.args))
+      }
+    }
+    let ra = $a
+    let rb = $b
+    let change = (0..<$runs | each {|i| (($rb | get $i).wall - ($ra | get $i).wall) / ($ra | get $i).wall } | math median)
     $rows = ($rows | append {
       workload: $c.name
-      before_wall: ($ra.median | math round --precision 3)
-      after_wall: ($rb.median | math round --precision 3)
-      change: $"(((($rb.median - $ra.median) / $ra.median) * 100) | math round --precision 1)%"
-      before_user: ($ra.user | math round --precision 2)
-      after_user: ($rb.user | math round --precision 2)
-      before_sys: ($ra.system | math round --precision 2)
-      after_sys: ($rb.system | math round --precision 2)
-      before_rss: $rss_a
-      after_rss: $rss_b
+      before_wall: ($ra.wall | math median | math round --precision 3)
+      after_wall: ($rb.wall | math median | math round --precision 3)
+      change: $"(($change * 100) | math round --precision 1)%"
+      before_user: ($ra.user | math avg | math round --precision 2)
+      after_user: ($rb.user | math avg | math round --precision 2)
+      before_sys: ($ra.sys | math avg | math round --precision 2)
+      after_sys: ($rb.sys | math avg | math round --precision 2)
+      before_rss: ($ra.rss_mb | math median | math round)
+      after_rss: ($rb.rss_mb | math median | math round)
     })
   }
   $rows
 }
 
 def main [
-  --runs: int = 7
+  --runs: int = 8
   --skip-outpaths
   before: string
   after: string
 ] {
+  if $runs <= 0 or $runs mod 2 != 0 {
+    error make {msg: $"--runs must be even and positive, so AB and BA pairs balance: ($runs)"}
+  }
   cd ($env.FILE_PWD | path join "..")
+  if (^/usr/bin/env time -f "%M" true | complete).exit_code != 0 {
+    error make {msg: "ab.nu needs GNU time for `time -f`"}
+  }
   let np = ($env.NIXPKGS? | default "/nix/store/ah3pxz4xa52hd6vhbx17vcsci0b8bmbr-source")
   let server = $"($env.PWD)/bench/workloads/nixos-server.nix"
   let minimal = $"($env.PWD)/bench/workloads/nixos-minimal.nix"

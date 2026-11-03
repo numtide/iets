@@ -1312,7 +1312,7 @@ fn online_inputs() {
 /// so the daemon's store has the input only once iets's Nix fetches it: the
 /// case without Nix runs first.
 #[test]
-fn a_git_input_goes_through_nix() {
+fn a_git_input_needs_no_nix() {
     let Some(mut f) = F::new().map(F::local_inputs) else {
         return;
     };
@@ -1325,21 +1325,17 @@ fn a_git_input_goes_through_nix() {
         ),
     );
     let r = format!("{gitf}#v");
-    let (exp, path) = f.lock_apart(&gitf, "lib", "gitstore");
-    let env = f.no_nix();
-    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (exp, _) = f.lock_apart(&gitf, "lib", "gitstore");
+    let nobin = f.s.failing_nix();
+    let env = [("IETS_NIX_BIN_DIR", nobin.to_str().unwrap())];
     let gn = f.iets_eval(&env, &["--raw", "--no-tracing-cache", &r]);
-    f.verdict(
-        !gn.status.success()
-            && stderr(&gn).contains("nix is not on PATH")
-            && stderr(&gn).contains("input 'lib'"),
-        || format!("git input, no nix: {}", last(&stderr(&gn), 2)),
-    );
-    let gf = f.iets_eval(&[], &["--raw", "--no-tracing-cache", &r]);
-    f.verdict(
-        !exp.is_empty() && stdout(&gf) == exp && Path::new(&path).exists(),
-        || format!("git input: {} vs {exp}", stdout(&gf)),
-    );
+    f.verdict(!exp.is_empty() && stdout(&gn) == exp, || {
+        format!(
+            "git input: {} vs {exp} {}",
+            stdout(&gn),
+            last(&stderr(&gn), 3)
+        )
+    });
 
     // a tree that is not the one the lock names: the hint names the causes
     let gm = f.w("gitmismatch");

@@ -405,14 +405,17 @@ nix. `fetchTarball` and `fetchTree` work for some inputs;
 - A hash mismatch exits with 1. Nix exits with 102.
 - A download error has iets's own text, not curl's.
 
-`builtins.fetchGit` copies a local working tree without a `ref` or a `rev`
-itself. It also reads a commit of a local repository by `rev` or `ref`
-itself, without `submodules`. Every other fetch runs the real `nix`, which
-must be on `PATH`. It differs from Nix in these ways:
+`builtins.fetchGit` does its own fetching, except with `lfs` or
+`verifyCommit`, which run the real `nix`. It differs from Nix in these ways:
 
 - On a cache hit, the `Git tree '…' is dirty` warning is not printed again.
-- When a fetch through nix fails, you see only nix's innermost error.
-- A shallow working tree with `shallow = false` goes to nix.
+- A remote repository is kept as a shallow clone. Reading `revCount` also
+  fetches its commit history.
+- A submodule can point to a local repository only if the superproject is
+  local too, and never in pure evaluation. Nix allows both.
+- git can use only the `https`, `http`, `ssh` and `git` transports, plus
+  `file` for local repositories, even if your git config allows more.
+- Relative submodule URLs work in a `file:` repository. Nix fails on them.
 - In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev`
   fails.
 

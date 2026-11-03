@@ -490,7 +490,6 @@ fn fetch_git() {
         ],
     );
     commit("two", "1700000100 +0000");
-    let more = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["checkout", "-q", "main"]);
 
     let show_expr = |arg: &str| {
@@ -504,10 +503,8 @@ fn fetch_git() {
         repo.display().to_string().replace(' ', "%20")
     );
     let one = |c: &mut Checks, label: &str, arg: &str, mode: &str| {
-        c.same(
-            &format!("fetchGit {label}"),
-            &f.both("nix", &["eval", mode, "--json", "--expr", &show_expr(arg)]),
-        );
+        let args = ["eval", mode, "--json", "--expr", &show_expr(arg)];
+        c.same(&format!("fetchGit {label}"), &native(&f, &s, &args));
     };
     for (label, arg, mode) in [
         ("of a clean working tree", path.clone(), "--impure"),
@@ -569,7 +566,11 @@ fn fetch_git() {
     // repository is no part of the run, so iets refuses where nix reads it
     // (docs/reference/divergences.md)
     let pinned = show_expr(&format!(r#"{{ url = {path}; rev = "{rev}"; }}"#));
-    let b = f.both("nix", &["eval", "--pure-eval", "--json", "--expr", &pinned]);
+    let b = native(
+        &f,
+        &s,
+        &["eval", "--pure-eval", "--json", "--expr", &pinned],
+    );
     c.check(
         "fetchGit of a rev in pure mode is a read outside the run",
         b.ours.status.code() == Some(1)
@@ -578,30 +579,6 @@ fn fetch_git() {
             && stderr(&b.ours).contains("is forbidden in pure evaluation mode"),
         show(&b),
     );
-    // a rev and a ref of a local repository are read without the real nix
-    let nonix = s.failing_nix();
-    for arg in [
-        format!(r#"{{ url = {path}; rev = "{more}"; }}"#),
-        format!(r#"{{ url = {path}; ref = "ann"; }}"#),
-    ] {
-        let o = f
-            .ours("nix")
-            .env("IETS_NIX_BIN_DIR", &nonix)
-            .args([
-                "eval",
-                "--impure",
-                "--raw",
-                "--expr",
-                &format!("(builtins.fetchGit {arg}).narHash"),
-            ])
-            .output()
-            .unwrap();
-        c.check(
-            &format!("fetchGit {arg} runs no nix"),
-            o.status.success() && stdout(&o).starts_with("sha256-"),
-            stderr(&o),
-        );
-    }
     fs::write(repo.join("a"), "changed\n").unwrap();
     fs::write(repo.join("untracked"), "new\n").unwrap();
     fs::write(repo.join(".gitattributes"), "sub/b export-ignore\n").unwrap();
@@ -711,29 +688,182 @@ fn fetch_git_submodules() {
     let expr = format!(
         r#"let r = builtins.fetchGit {arg}; in builtins.removeAttrs r [ "outPath" ] // {{ out = r.outPath; c = builtins.readFile (r + "/mid/leaf/c"); }}"#
     );
-    let hash = format!("(builtins.fetchGit {arg}).narHash");
-    // iets must match Nix's hash without falling back to nix
-    let native = |c: &mut Checks, label: &str| {
-        c.same(
-            label,
-            &f.both("nix", &["eval", "--impure", "--json", "--expr", &expr]),
-        );
-        let real = f
-            .both("nix", &["eval", "--impure", "--raw", "--expr", &hash])
-            .real;
-        let ours = f
-            .ours("nix")
-            .env("IETS_NIX_BIN_DIR", s.failing_nix())
-            .args(["eval", "--impure", "--raw", "--expr", &hash])
-            .output()
-            .unwrap();
-        c.check(
-            &format!("{label} runs no nix"),
-            ours.status.success() && ours.stdout == real.stdout,
-            stderr(&ours),
-        );
-    };
-    native(&mut c, "fetchGit with submodules");
+    let args = ["eval", "--impure", "--json", "--expr", &expr];
+    c.same("fetchGit with submodules", &native(&f, &s, &args));
     fs::write(repo.join("mid/leaf/c"), "changed\n").unwrap();
-    native(&mut c, "fetchGit with a dirty nested submodule");
+    c.same(
+        "fetchGit with a dirty nested submodule",
+        &native(&f, &s, &args),
+    );
+}
+
+/// fetchGit of a repository that is not a working tree, which iets clones
+/// itself as Nix does: by `rev`, by `ref`, the default branch, `allRefs`,
+/// `shallow`, submodules, and a `narHash` that is wrong.
+#[test]
+fn fetch_git_remote() {
+    let s = store!();
+    let f = Farm::new(&s);
+    let mut c = Checks::default();
+    let leaf = s.dir().join("leaf");
+    fs::create_dir_all(&leaf).unwrap();
+    git(&leaf, &["init", "-q", "-b", "trunk"]);
+    fs::write(leaf.join("c"), "c\n").unwrap();
+    git(&leaf, &["add", "-A"]);
+    e2e::git_commit(&leaf, "leaf", "1700000000 +0000");
+    let work = s.dir().join("work");
+    fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "trunk"]);
+    fs::write(work.join("a"), "a\n").unwrap();
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "one", "1700000100 +0000");
+    let leaf_url = leaf.to_str().unwrap();
+    git(
+        &work,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            leaf_url,
+            "leaf",
+        ],
+    );
+    // Nix resolves a relative URL against `file:///tmp/…` to `file://tmp/…`,
+    // which it then refuses
+    let leaf_bare = format!("file://{}", s.dir().join("leaf.git").display());
+    let set_url = [
+        "config",
+        "-f",
+        ".gitmodules",
+        "submodule.leaf.url",
+        &leaf_bare,
+    ];
+    git(&work, &set_url);
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "two", "1700000200 +0000");
+    let main = git(&work, &["rev-parse", "HEAD"]);
+    git(&work, &["checkout", "-q", "-b", "feature"]);
+    fs::write(work.join("b"), "b\n").unwrap();
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "three", "1700000300 +0000");
+    let feature = git(&work, &["rev-parse", "HEAD"]);
+    for (from, to) in [(&leaf, "leaf.git"), (&work, "super.git")] {
+        let to = s.dir().join(to);
+        git(
+            s.dir(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                from.to_str().unwrap(),
+                to.to_str().unwrap(),
+            ],
+        );
+    }
+    let url = format!("file://{}", s.dir().join("super.git").display());
+    let show = r#"r: builtins.removeAttrs r [ "outPath" ] // { out = r.outPath; n = r.revCount or null; }"#;
+    for (label, arg) in [
+        ("rev", format!(r#"{{ url = "{url}"; rev = "{main}"; }}"#)),
+        ("default branch", format!(r#"{{ url = "{url}"; }}"#)),
+        ("ref", format!(r#"{{ url = "{url}"; ref = "feature"; }}"#)),
+        (
+            "allRefs",
+            format!(r#"{{ url = "{url}"; rev = "{feature}"; allRefs = true; }}"#),
+        ),
+        (
+            "shallow",
+            format!(r#"{{ url = "{url}"; rev = "{main}"; shallow = true; }}"#),
+        ),
+        (
+            "submodules",
+            format!(r#"{{ url = "{url}"; rev = "{main}"; submodules = true; }}"#),
+        ),
+    ] {
+        let expr = format!("({show}) (builtins.fetchGit {arg})");
+        let args = ["eval", "--impure", "--json", "--expr", &expr];
+        c.same(&format!("fetchGit {label}"), &native(&f, &s, &args));
+    }
+    // offline, a cached clone still answers, and a new download is an error
+    let offline = |expr: &str| {
+        let mut o = f.ours("nix");
+        o.env("IETS_OFFLINE", "1").env("IETS_CACHE", "0");
+        o.args(["eval", "--impure", "--raw", "--expr", expr])
+            .output()
+            .unwrap()
+    };
+    let at = format!(r#"builtins.fetchGit {{ url = "{url}"; rev = "{main}"; }}"#);
+    let o = offline(&format!("({at}).narHash"));
+    c.check(
+        "offline, a cached rev is read",
+        o.status.success(),
+        stderr(&o),
+    );
+    fs::write(work.join("c"), "c\n").unwrap();
+    git(&work, &["add", "-A"]);
+    e2e::git_commit(&work, "four", "1700000500 +0000");
+    let new = git(&work, &["rev-parse", "HEAD"]);
+    let bare = s.dir().join("super.git");
+    git(&work, &["push", "-q", bare.to_str().unwrap(), "feature"]);
+    let at = format!(r#"builtins.fetchGit {{ url = "{url}"; rev = "{new}"; allRefs = true; }}"#);
+    let o = offline(&format!("({at}).narHash"));
+    let refused = stderr(&o).contains("IETS_OFFLINE is set");
+    c.check("offline, an uncached rev is refused", refused, stderr(&o));
+    // `ext::` runs a command, and a submodule's URL skips fetchGit's URL
+    // checks. iets refuses it even when the user's git config allows it.
+    let marker = s.dir().join("pwned");
+    let evil = s.dir().join("evil");
+    fs::create_dir_all(&evil).unwrap();
+    git(&evil, &["init", "-q", "-b", "trunk"]);
+    let ext = format!("ext::sh -c touch% {}", marker.display());
+    let modules = format!("[submodule \"x\"]\n\tpath = x\n\turl = {ext}\n");
+    fs::write(evil.join(".gitmodules"), modules).unwrap();
+    git(&evil, &["add", "-A"]);
+    let gitlink = format!("160000,{main},x");
+    git(&evil, &["update-index", "--add", "--cacheinfo", &gitlink]);
+    e2e::git_commit(&evil, "evil", "1700000400 +0000");
+    let evil_rev = git(&evil, &["rev-parse", "HEAD"]);
+    let config = s.dir().join("gitconfig");
+    fs::write(&config, "[protocol \"ext\"]\n\tallow = always\n").unwrap();
+    let expr = format!(
+        r#"(builtins.fetchGit {{ url = "file://{}"; rev = "{evil_rev}"; submodules = true; }}).narHash"#,
+        evil.display()
+    );
+    let o = f
+        .ours("nix")
+        .env("IETS_NIX_BIN_DIR", s.failing_nix())
+        .env("GIT_CONFIG_GLOBAL", &config)
+        .args(["eval", "--impure", "--raw", "--expr", &expr])
+        .output()
+        .unwrap();
+    c.check(
+        "a submodule with an ext:: URL runs no command",
+        !o.status.success() && !marker.exists(),
+        stderr(&o),
+    );
+    let wrong = "sha256-aWV0cy1naXQtbWlzbWF0Y2gtbmV2ZXItc3RvcmVkISE=";
+    let expr = format!(
+        r#"(builtins.fetchGit {{ url = "{url}"; rev = "{main}"; narHash = "{wrong}"; }}).rev"#
+    );
+    let ours = f
+        .ours("nix")
+        .env("IETS_NIX_BIN_DIR", s.failing_nix())
+        .args(["eval", "--impure", "--raw", "--expr", &expr])
+        .output()
+        .unwrap();
+    c.check(
+        "fetchGit with a wrong narHash",
+        !ours.status.success() && stderr(&ours).contains("NAR hash mismatch in input"),
+        stderr(&ours),
+    );
+}
+
+/// Both runs, with a failing `nix` for iets, so a match shows iets fetched
+/// on its own.
+fn native(f: &Farm, s: &Store, args: &[&str]) -> Both {
+    let nonix = s.failing_nix();
+    f.both_with("nix", args, |c| {
+        c.env("IETS_NIX_BIN_DIR", &nonix);
+    })
 }

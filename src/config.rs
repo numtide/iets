@@ -206,7 +206,6 @@ const UNIMPLEMENTED: &[(&str, &str, &str)] = &[
     ),
     ("plugin-files", "", "iets loads no plugins"),
     ("restrict-eval", "false", NO_RESTRICTED_MODE),
-    ("tarball-ttl", "3600", "iets's fetcher has no such switch"),
     (
         "trace-function-calls",
         "false",
@@ -235,6 +234,7 @@ const WARN_ONLY: &[&str] = &["accept-flake-config", "log-lines"];
 /// and goes to the daemon (`Config::forwarded`).
 const CLIENT: &[&str] = &[
     "access-tokens",
+    "tarball-ttl",
     "allow-dirty-locks",
     "allow-import-from-derivation",
     "bash-prompt",

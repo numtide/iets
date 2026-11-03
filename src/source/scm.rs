@@ -5,7 +5,7 @@
 //! functions below it, never by name. A remote input (`git+https:`, `hg+`)
 //! is a fetcher and is not here.
 
-mod git;
+pub mod git;
 #[cfg(test)]
 mod ledger;
 

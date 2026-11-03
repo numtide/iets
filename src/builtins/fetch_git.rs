@@ -1,9 +1,9 @@
 //! `builtins.fetchGit` (fetchTree.cc with `isFetchGit`, git.cc). A local
 //! working tree without a `ref` or a `rev` is copied the way the flake's own
 //! tree is (git.cc:getAccessorFromWorkdir), so the tracing cache follows its
-//! files. A commit of a local repository, by `rev` or by `ref`, is read
-//! from the repository (git.cc:getAccessorFromCommit). Any other fetch goes
-//! to Nix's own `fetchGit`, as a git flake input does.
+//! files. Any other fetch reads a commit (git.cc:getAccessorFromCommit), of
+//! a local repository where it is, else of a clone (`crate::fetch::git`).
+//! Only `lfs` and `verifyCommit` still go to Nix's own `fetchGit`.
 
 use crate::sys::OsStrExt;
 use std::path::Path;
@@ -12,12 +12,12 @@ use super::fetch::{emit_tree_attrs, input_attrs};
 use super::store_hooks;
 use crate::error;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::fetch;
 use crate::flake::{eval_error, flakeref};
 use crate::lint::purity;
 use crate::log;
 use crate::runtime::Word;
 use crate::source::{self, AttrVal, Attrs, Tree, bool_attr, scm, str_attr};
-use crate::trace::Kind;
 
 const NULL_REV: &str = "0000000000000000000000000000000000000000";
 
@@ -52,20 +52,6 @@ const FLAGS: &[&str] = &[
     "verifyCommit",
 ];
 
-/// The attributes the copy of a working tree reads; any other goes to Nix.
-const FROM_WORKDIR: &[&str] = &[
-    "url",
-    "name",
-    "shallow",
-    "submodules",
-    "lfs",
-    "exportIgnore",
-    "allRefs",
-];
-
-/// The attributes the read of a commit takes; any other goes to Nix.
-const FROM_COMMIT: &[&str] = &["url", "name", "rev", "ref", "submodules", "exportIgnore"];
-
 pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     purity::unhashed_fetch(ev, "fetchGit", args[0], pos)?;
     let mut args = call_attrs(ev, args[0], pos)?;
@@ -97,17 +83,63 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         }
         root => root,
     };
-    let only = |keys: &[&str]| args.keys().all(|k| keys.contains(&k.as_str()));
-    let tree = match root.as_deref().map(Path::new) {
-        Some(root) if only(FROM_WORKDIR) => from_workdir(ev, &args, root, pos)?,
-        Some(root) if only(FROM_COMMIT) => from_commit(ev, &args, root, pos)?,
-        _ => None,
-    };
-    if let Some(tree) = tree {
-        return emit_tree_attrs(ev, &tree, None, pos);
+    let shown = input_string(&args, fixed.as_deref().unwrap_or(&url)).unwrap_or(url.clone());
+    if submodules && bool_attr(&args, "exportIgnore") == Some(true) {
+        bail!(
+            ErrorKind::Unsupported,
+            pos,
+            "exportIgnore and submodules are not supported together yet"
+        );
     }
-    let shown = input_string(&args, fixed.as_deref().unwrap_or(&url)).unwrap_or(url);
-    from_nix(ev, &args, &shown, pos)
+    let Some(url) = fixed.filter(|_| !needs_nix(&args)) else {
+        return from_nix(ev, &args, &shown, pos);
+    };
+    let unpinned = !args.contains_key("rev") && !args.contains_key("ref");
+    let workdir = root
+        .as_deref()
+        .map(Path::new)
+        .filter(|r| r.join(".git").exists());
+    let mut tree = match workdir {
+        Some(root) if unpinned => from_workdir(ev, &args, root, pos)?,
+        _ => from_commit(ev, &args, &url, workdir, pos)?,
+    };
+    // fetchTree.cc:emitTreeAttrs with `emptyRevFallback`
+    if tree.counter.is_none() {
+        tree.attrs
+            .entry("revCount".into())
+            .or_insert(AttrVal::Int(0));
+    }
+    check_nar_hash(&args, &tree, &shown, pos)?;
+    emit_tree_attrs(ev, &tree, None, pos)
+}
+
+/// What only Nix fetches yet: Git LFS files and signed commits.
+pub(crate) fn needs_nix(args: &Attrs) -> bool {
+    let set = |k| bool_attr(args, k).unwrap_or(false);
+    set("lfs")
+        || set("verifyCommit")
+        || ["publicKey", "publicKeys", "keytype"]
+            .iter()
+            .any(|k| args.contains_key(*k))
+}
+
+/// fetchers.cc:Input::checkLocks for a `narHash` the call gives.
+fn check_nar_hash(args: &Attrs, tree: &Tree, shown: &str, pos: Pos) -> EvalResult<()> {
+    let (Some(want), Some(got)) = (str_attr(args, "narHash"), str_attr(&tree.attrs, "narHash"))
+    else {
+        return Ok(());
+    };
+    let want = source::parse_nar_hash(want)
+        .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
+    if want.to_sri() != got {
+        bail!(
+            ErrorKind::HashMismatch,
+            pos,
+            "NAR hash mismatch in input '{shown}', expected '{}' but got '{got}'",
+            want.to_sri()
+        );
+    }
+    Ok(())
 }
 
 /// fetchTree.cc:fetchTree with `isFetchGit`: a string is the URL, and an
@@ -190,31 +222,19 @@ fn workdir_root(url: &str) -> Option<String> {
 }
 
 /// git.cc:getAccessorFromWorkdir, with fetchTree.cc:emitTreeAttrs'
-/// `emptyRevFallback`. Returns `None`, leaving it to Nix, when the path is
-/// not a working tree, when `submodules` and `exportIgnore` are both set, or
-/// when a shallow clone lacks the history for `revCount`.
-fn from_workdir(
-    ev: &mut Evaluator,
-    args: &Attrs,
-    root: &Path,
-    pos: Pos,
-) -> EvalResult<Option<Tree>> {
+/// `emptyRevFallback`.
+fn from_workdir(ev: &mut Evaluator, args: &Attrs, root: &Path, pos: Pos) -> EvalResult<Tree> {
     let git = scm::named("git").expect("iets knows git");
     let marker = git.root_marker(root);
-    if ev.trace().stat_now(marker.as_os_str().as_bytes(), true) == Kind::Missing {
-        return Ok(None);
-    }
+    ev.trace().stat_now(marker.as_os_str().as_bytes(), true);
     let submodules = bool_attr(args, "submodules").unwrap_or(false);
     let export = bool_attr(args, "exportIgnore").unwrap_or(false);
-    // Nix applies exportIgnore inside each submodule. iets does not yet.
-    if submodules && export {
-        return Ok(None);
-    }
     let name = str_attr(args, "name").unwrap_or("source");
     let (mut tree, dirty) = source::workdir(ev, git, root, name, export, submodules, pos)?;
     let shallow = bool_attr(args, "shallow").unwrap_or(false);
+    // a shallow clone has no count, which Nix reports when it is read
     if !dirty && !shallow && tree.counter.is_none() {
-        return Ok(None);
+        tree.counter = Some((git, root.to_path_buf()));
     }
     if dirty {
         log::line(&format!("warning: Git tree '{}' is dirty", root.display()));
@@ -226,57 +246,97 @@ fn from_workdir(
     a.insert("submodules".into(), AttrVal::Bool(submodules));
     a.entry("rev".into())
         .or_insert_with(|| AttrVal::Str(NULL_REV.into()));
-    if tree.counter.is_none() {
-        a.insert("revCount".into(), AttrVal::Int(0));
-    }
-    Ok(Some(tree))
+    Ok(tree)
 }
 
-/// git.cc:getAccessorFromCommit on a local repository: the tree of `rev`, or
-/// of the commit that `ref` names, which iets reads itself. `None` when Nix
-/// must answer: the repository has no working tree or is shallow, it has
-/// submodules to copy, it lacks the revision, or `ref` names none.
-fn from_commit(
+/// git.cc:getAccessorFromCommit: the tree of `rev`, or of the commit `ref`
+/// names, else of the default branch. A local working tree is read where it
+/// is, its refs observed. Any other repository is fetched into its clone
+/// (`fetch::git`), and without a `rev` the run cannot be cached.
+pub(crate) fn from_commit(
     ev: &mut Evaluator,
     args: &Attrs,
-    root: &Path,
+    url: &str,
+    workdir: Option<&Path>,
     pos: Pos,
-) -> EvalResult<Option<Tree>> {
-    if bool_attr(args, "submodules").unwrap_or(false) {
-        return Ok(None);
-    }
+) -> EvalResult<Tree> {
     let git = scm::named("git").expect("iets knows git");
-    let marker = git.root_marker(root);
-    let shallow = marker.join("shallow");
-    for (p, want) in [(&marker, false), (&shallow, true)] {
-        let missing = ev.trace().stat_now(p.as_os_str().as_bytes(), true) == Kind::Missing;
-        if missing != want {
-            return Ok(None);
-        }
-    }
     let io = |e: String| Error::boxed(ErrorKind::Io, e, pos);
-    let rev = match (str_attr(args, "rev"), str_attr(args, "ref")) {
-        (Some(r), _) if is_rev(r) => r.to_string(),
-        (None, Some(name)) if is_ref_name(name) => {
-            match git.resolve(ev.trace(), root, name).map_err(io)? {
-                Some(r) => r,
-                None => return Ok(None),
-            }
+    let rev = str_attr(args, "rev");
+    let r#ref = str_attr(args, "ref");
+    if let Some(r) = rev.filter(|r| !is_rev(r)) {
+        bail!(ErrorKind::Eval, pos, "invalid Git revision '{r}'");
+    }
+    if let Some(r) = r#ref.filter(|r| !is_ref_name(r)) {
+        bail!(ErrorKind::Eval, pos, "invalid Git branch/tag name '{r}'");
+    }
+    let (repo, rev, r#ref) = match workdir {
+        Some(root) => {
+            let r#ref = r#ref.unwrap_or("HEAD");
+            let rev = match rev {
+                Some(rev) => rev.to_string(),
+                None => git
+                    .resolve(ev.trace(), root, r#ref)
+                    .map_err(io)?
+                    .ok_or_else(|| {
+                        io(format!(
+                            "resolving Git reference '{ref}' in '{}'",
+                            root.display()
+                        ))
+                    })?,
+            };
+            (root.to_path_buf(), rev, r#ref.to_string())
         }
-        _ => return Ok(None),
+        None => {
+            if rev.is_none() {
+                ev.trace().mark_uncacheable();
+            }
+            let want = fetch::git::Want {
+                url,
+                rev,
+                r#ref,
+                all_refs: bool_attr(args, "allRefs").unwrap_or(false),
+                local_ok: true,
+            };
+            let got = fetch::git::open(&want).map_err(io)?;
+            (got.repo, got.rev, got.r#ref)
+        }
     };
     let export = bool_attr(args, "exportIgnore").unwrap_or(false);
+    let submodules = bool_attr(args, "submodules").unwrap_or(false);
     let name = str_attr(args, "name").unwrap_or("source");
-    source::commit_tree(ev, git, root, &rev, name, export, pos)
+    let r = submodules.then_some(r#ref.as_str());
+    // a pure evaluation reads a local repository only where `local_dir`
+    // allows, which a submodule's URL would get around
+    let local_ok = fetch::git::is_local(url) && !ev.pure();
+    let tree = source::commit_tree(ev, git, &repo, &rev, name, export, r, local_ok, pos)?;
+    let Some(mut tree) = tree else {
+        bail!(
+            ErrorKind::Io,
+            pos,
+            "Cannot find Git revision '{rev}' in ref '{ref}' of repository '{url}'!"
+        );
+    };
+    tree.attrs.insert("url".into(), AttrVal::Str(url.into()));
+    if bool_attr(args, "shallow").unwrap_or(false) {
+        tree.counter = None;
+    }
+    for k in ["lastModified", "revCount"] {
+        if let Some(v) = args.get(k) {
+            tree.attrs.insert(k.into(), v.clone());
+            tree.counter = tree.counter.filter(|_| k != "revCount");
+        }
+    }
+    Ok(tree)
 }
 
-/// A full revision that is not the null one; any other spelling goes to Nix,
-/// which checks it.
+/// A full revision that is not the null one.
 fn is_rev(r: &str) -> bool {
     r.len() == 40 && r != NULL_REV && r.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A plain branch or tag name; any other goes to Nix, which checks it.
+/// A plain branch or tag name. It cannot start with `-`, so git never reads
+/// it as an option.
 fn is_ref_name(r: &str) -> bool {
     let plain = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'+');
     !r.is_empty()

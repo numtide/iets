@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 use std::{fs, iter, str, thread};
 
 use super::{Commit, Entry, Scm, Snapshot};
+use crate::fetch::git as clone;
 use crate::trace::{Kind, Obs, Query, Trace};
 
 const NULL_REV: &str = "0000000000000000000000000000000000000000";
@@ -234,6 +235,156 @@ fn same_attributes(
     Ok(true)
 }
 
+fn is_bare(root: &Path) -> bool {
+    !root.join(".git").exists() && root.join("HEAD").is_file()
+}
+
+/// The bytes of each blob in `oids`, in order, read by several `git cat-file
+/// --batch` at once: inflating them is the cost, and it is per blob.
+fn cat_blobs(root: &Path, oids: &[&[u8]]) -> Result<Option<Vec<Vec<u8>>>, String> {
+    let jobs = thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    let jobs = jobs.min(oids.len() / 256).max(1);
+    let per = oids.len().div_ceil(jobs).max(1);
+    let read = |chunk: &[&[u8]]| -> Result<Option<Vec<Vec<u8>>>, String> {
+        let mut stdin = Vec::new();
+        for oid in chunk {
+            stdin.extend_from_slice(oid);
+            stdin.push(b'\n');
+        }
+        let (status, out) = piped(root, &["cat-file", "--batch"], stdin)?;
+        if status != 0 {
+            return Ok(None);
+        }
+        let mut out = &out[..];
+        let mut blobs = Vec::with_capacity(chunk.len());
+        for _ in chunk {
+            let Some(nl) = out.iter().position(|&b| b == b'\n') else {
+                return Ok(None);
+            };
+            let size = out[..nl].rsplit(|&b| b == b' ').next();
+            let size = size.and_then(|s| str::from_utf8(s).ok()?.parse::<usize>().ok());
+            let Some(size) = size.filter(|s| nl + 1 + s < out.len()) else {
+                return Ok(None);
+            };
+            blobs.push(out[nl + 1..nl + 1 + size].to_vec());
+            out = &out[nl + 2 + size..];
+        }
+        Ok(Some(blobs))
+    };
+    let parts: Vec<_> = thread::scope(|s| {
+        let handles: Vec<_> = oids.chunks(per).map(|c| s.spawn(move || read(c))).collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("cat-file reader"))
+            .collect()
+    });
+    let mut all = Vec::with_capacity(oids.len());
+    for part in parts {
+        match part? {
+            Some(p) => all.extend(p),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(all))
+}
+
+/// A submodule at a revision (git-utils.cc:GitRepoImpl::getSubmodules).
+pub struct Submodule {
+    pub path: Vec<u8>,
+    pub url: String,
+    pub branch: String,
+    pub rev: String,
+}
+
+/// The submodules `.gitmodules` at `rev` names that are gitlinks there.
+pub fn submodules_at(root: &Path, rev: &str) -> Result<Vec<Submodule>, String> {
+    let quiet = Trace::default();
+    let blob = format!("{rev}:.gitmodules");
+    if run(&quiet, root, &["rev-parse", "-q", "--verify", &blob])?.0 != 0 {
+        return Ok(Vec::new());
+    }
+    let args = [
+        "config",
+        "-z",
+        "--blob",
+        &blob,
+        "--get-regexp",
+        r"^submodule\..*\.(path|url|branch)$",
+    ];
+    let (_, out) = run(&quiet, root, &args)?;
+    let mut entries: HashMap<Vec<u8>, String> = HashMap::new();
+    for entry in out.split(|&b| b == 0) {
+        let Some(nl) = entry.iter().position(|&b| b == b'\n') else {
+            continue;
+        };
+        if let Some(key) = entry[..nl].strip_prefix(b"submodule.") {
+            let value = String::from_utf8_lossy(&entry[nl + 1..]).into_owned();
+            entries.insert(key.to_vec(), value);
+        }
+    }
+    let paths: Vec<(&[u8], &String)> = entries
+        .iter()
+        .filter_map(|(k, v)| Some((k.strip_suffix(b".path")?, v)))
+        .collect();
+    let mut args = vec!["ls-tree", "-z", rev, "--"];
+    args.extend(paths.iter().map(|(_, p)| p.as_str()));
+    let ls = git(&quiet, root, &args)?;
+    let gitlinks: HashMap<&[u8], &[u8]> = ls
+        .split(|&b| b == 0)
+        .filter_map(|e| {
+            let tab = e.iter().position(|&b| b == b'\t')?;
+            let mut fields = e[..tab].split(|&b| b == b' ');
+            let (mode, _, oid) = (fields.next()?, fields.next()?, fields.next()?);
+            (mode == b"160000").then_some((&e[tab + 1..], oid))
+        })
+        .collect();
+    let field = |name: &[u8], f: &[u8]| {
+        entries
+            .get(&[name, f].concat())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut found: Vec<Submodule> = paths
+        .iter()
+        .filter_map(|(name, path)| {
+            Some(Submodule {
+                rev: String::from_utf8_lossy(gitlinks.get(path.as_bytes())?).into_owned(),
+                path: path.as_bytes().to_vec(),
+                url: field(name, b".url"),
+                branch: field(name, b".branch"),
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(found)
+}
+
+/// libgit2's git_submodule_resolve_url: a URL starting with `./` or `../` is
+/// relative to `base`, the URL of the superproject's `origin`.
+pub fn resolve_submodule_url(base: &str, url: &str) -> String {
+    if !url.starts_with("./") && !url.starts_with("../") {
+        return url.to_string();
+    }
+    let mut base = base.trim_end_matches('/').to_string();
+    let mut rest = url;
+    loop {
+        if let Some(r) = rest.strip_prefix("./") {
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("../") {
+            rest = r;
+            match base.rfind(['/', ':']) {
+                Some(i) if base.as_bytes()[i] == b':' => base.truncate(i + 1),
+                Some(i) => base.truncate(i),
+                None => base.clear(),
+            }
+        } else {
+            break;
+        }
+    }
+    let sep = if base.ends_with(':') { "" } else { "/" };
+    format!("{base}{sep}{rest}")
+}
+
 /// The tree of `rev`, as git.cc:getAccessorFromCommit reads a local
 /// repository: every blob as it is stored, a submodule as an empty
 /// directory, and with `export`, no entry that `export-ignore` drops.
@@ -256,18 +407,15 @@ fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool) -> Result<Option
         };
         listed.push((entry[tab + 1..].to_vec(), mode.to_vec(), oid.to_vec()));
     }
-    let mut stdin = Vec::new();
-    for (_, mode, oid) in &listed {
-        if mode != b"160000" {
-            stdin.extend_from_slice(oid);
-            stdin.push(b'\n');
-        }
-    }
-    let (status, out) = piped(root, &["cat-file", "--batch"], stdin)?;
-    if status != 0 {
+    let wanted: Vec<&[u8]> = listed
+        .iter()
+        .filter(|(_, mode, _)| mode != b"160000")
+        .map(|(_, _, oid)| &oid[..])
+        .collect();
+    let Some(read) = cat_blobs(root, &wanted)? else {
         return Ok(None);
-    }
-    let mut out = &out[..];
+    };
+    let mut read = read.into_iter();
     let mut entries = Vec::with_capacity(listed.len());
     let mut oids = HashMap::new();
     let mut blobs = HashMap::new();
@@ -276,16 +424,7 @@ fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool) -> Result<Option
             entries.push((path, Entry::Empty));
             continue;
         }
-        let Some(nl) = out.iter().position(|&b| b == b'\n') else {
-            return Ok(None);
-        };
-        let size = out[..nl].rsplit(|&b| b == b' ').next();
-        let size = size.and_then(|s| str::from_utf8(s).ok()?.parse::<usize>().ok());
-        let Some(size) = size.filter(|s| nl + 1 + s < out.len()) else {
-            return Ok(None);
-        };
-        let bytes = out[nl + 1..nl + 1 + size].to_vec();
-        out = &out[nl + 2 + size..];
+        let bytes = read.next().expect("one blob per entry");
         if path.ends_with(b".gitattributes") {
             oids.insert(path.clone(), oid);
             blobs.insert(path.clone(), bytes.clone());
@@ -303,8 +442,9 @@ fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool) -> Result<Option
         .flat_map(|(p, _)| parents(p))
         .map(<[u8]>::to_vec)
         .collect();
+    // a bare repository has no working tree or index with more attributes
     if export {
-        if !same_attributes(trace, root, &dirs, &oids, &blobs)? {
+        if !is_bare(root) && !same_attributes(trace, root, &dirs, &oids, &blobs)? {
             return Ok(None);
         }
         let asked = entries.iter().map(|(p, _)| p.clone());
@@ -466,10 +606,23 @@ impl Scm for Git {
 
     fn rev_count(&self, root: &Path, rev: &str) -> Result<u64, String> {
         // git.cc gives the null revision the count 0
-        match rev {
-            NULL_REV => Ok(0),
-            _ => of_rev(root, &["rev-list", "--count", rev]),
+        if rev == NULL_REV {
+            return Ok(0);
         }
+        let shallow = match is_bare(root) {
+            true => root.join("shallow"),
+            false => root.join(".git/shallow"),
+        };
+        if !shallow.exists() {
+            return of_rev(root, &["rev-list", "--count", rev]);
+        }
+        if !clone::is_cached(root) {
+            return Err(format!(
+                "'{}' is a shallow Git repository, so 'revCount' is not available",
+                root.display()
+            ));
+        }
+        clone::rev_count(root, rev)
     }
 
     fn untracked(&self, root: &Path, rel: &OsStr) -> Option<String> {
@@ -524,6 +677,21 @@ mod tests {
     use rstest::rstest;
 
     use std::fs;
+
+    #[rstest]
+    #[case("https://h/o/r.git", "../x.git", "https://h/o/x.git")]
+    #[case("https://h/o/r.git/", "./x", "https://h/o/r.git/x")]
+    #[case("git@h:o/r", "../x", "git@h:o/x")]
+    #[case("git@h:r", "../x", "git@h:x")]
+    #[case("file:///srv/r.git", "../x.git", "file:///srv/x.git")]
+    #[case("https://h/o/r", "https://other/x", "https://other/x")]
+    fn a_relative_submodule_url_follows_origin(
+        #[case] base: &str,
+        #[case] url: &str,
+        #[case] want: &str,
+    ) {
+        assert_eq!(super::resolve_submodule_url(base, url), want);
+    }
 
     #[rstest]
     fn a_directory_in_a_repository_is_found(#[from(tree)] d: Tree) {

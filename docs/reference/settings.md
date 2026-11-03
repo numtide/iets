@@ -328,6 +328,7 @@ Each Nix setting falls in a class for iets. Other pages refer to the numbers.
 | `show-trace` | the same as `--show-trace` |
 | `json-log-path` | `docs/reference/errors.md` |
 | `access-tokens`, `connect-timeout`, `stalled-download-timeout` | the flake input fetcher. The timeouts default to 15 s and 300 s; 0 is no limit, as in `filetransfer.hh`. `--option` reaches the fetcher too: the session keeps the settings of the first load |
+| `tarball-ttl` | how long iets reuses a fetched Git branch before asking the remote again; 3600 s, as in Nix |
 | `bash-prompt`, `bash-prompt-prefix`, `bash-prompt-suffix` | `nix develop` |
 | `experimental-features` | in classic mode, whether `builtins` has `fetchTree`, `fetchClosure` and `outputOf`, as in Nix; iets's own commands have every feature (`docs/reference/divergences.md`). `parse-toml-timestamps` needs the flag everywhere |
 
@@ -409,7 +410,7 @@ warning: setting 'restrict-eval' is ignored: iets has no restricted mode, so eve
 | `plugin-files` | empty | iets loads no plugins |
 | `lint-absolute-path-literals`, `lint-short-path-literals`, `lint-url-literals`, `warn-short-path-literals` | `ignore`, `false` | iets does not read it; `iets eval` has the `--lint` flags |
 | `log-lines` | 25 | iets prints the last 200 lines of a failed build |
-| `tarball-ttl`, `trust-tarballs-from-git-forges` | 3600, `true` | iets's fetcher has no such switch |
+| `trust-tarballs-from-git-forges` | `true` | iets's fetcher has no such switch |
 
 The record has the code `ignored-setting` (`docs/reference/errors.md`).
 Nix prints nothing for these, so the warning is a difference on stderr

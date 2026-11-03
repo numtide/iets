@@ -19,6 +19,7 @@ use ir::{
 };
 
 use std::cell::Cell;
+use std::slice;
 use std::{env, mem};
 
 /// Names visible at the root of every file.
@@ -697,14 +698,23 @@ impl<'a> Compiler<'a> {
         self.alloc(ir)
     }
 
+    /// Filled in place in the arena, the length known: a `Vec` per
+    /// select path was a heap allocation to copy from. Nested expressions
+    /// allocate after the slice; a failed compile leaves it unreachable.
     fn attr_path(&mut self, path: &[AttrElem]) -> CResult<&'static [AttrElemIr]> {
-        let mut v = Vec::with_capacity(path.len());
-        for e in path {
-            v.push(match e {
+        if path.is_empty() {
+            return Ok(&[]);
+        }
+        let p = self.arena.alloc_raw(
+            path.len() * size_of::<AttrElemIr>(),
+            align_of::<AttrElemIr>(),
+        ) as *mut AttrElemIr;
+        let ast: &'a Ast = self.ast;
+        for (i, e) in path.iter().enumerate() {
+            let x = match e {
                 AttrElem::Static(s) => AttrElemIr::Static(*s),
                 AttrElem::Dynamic(id) => {
                     // A dynamic element that is a constant string is static.
-                    let ast: &'a Ast = self.ast;
                     if let Expr::Str(parts) = ast.expr(*id)
                         && let Some(lit) = ast.single_lit(*parts)
                     {
@@ -713,11 +723,13 @@ impl<'a> Compiler<'a> {
                         AttrElemIr::Dynamic(self.expr(*id)?)
                     }
                 }
-            });
+            };
+            // SAFETY: `p` holds `path.len()` elements; each is written once,
+            // and the slice is read only once all are.
+            unsafe { p.add(i).write(x) };
         }
-        let refs: Vec<&'static AttrElemIr> = Vec::new();
-        drop(refs);
-        Ok(self.alloc_elems(v))
+        // SAFETY: as above, every element is written.
+        Ok(unsafe { slice::from_raw_parts(p, path.len()) })
     }
 
     fn alloc_elems(&mut self, v: Vec<AttrElemIr>) -> &'static [AttrElemIr] {
@@ -729,10 +741,6 @@ impl<'a> Compiler<'a> {
     }
 
     fn alloc_dyn(&mut self, v: Vec<DynBindIr>) -> &'static [DynBindIr] {
-        self.arena.alloc_vec(v)
-    }
-
-    fn alloc_formals(&mut self, v: Vec<FormalIr>) -> &'static [FormalIr] {
         self.arena.alloc_vec(v)
     }
 
@@ -1361,22 +1369,36 @@ impl<'a> Compiler<'a> {
                     at,
                     base.is_some(),
                 );
-                let mut firs = Vec::with_capacity(sorted.len());
-                for f in &sorted {
+                // filled in place in the arena, as `attr_path`
+                let firs = self
+                    .arena
+                    .alloc_raw(sorted.len() * size_of::<FormalIr>(), align_of::<FormalIr>())
+                    as *mut FormalIr;
+                for (i, f) in sorted.iter().enumerate() {
                     let default = match f.default {
                         Some(d) => Some(self.expr(d)?),
                         None => None,
                     };
-                    firs.push(FormalIr {
-                        sym: f.name,
-                        default,
-                        pos: Pos(self.base + f.span.start),
-                    });
+                    // SAFETY: `firs` holds `sorted.len()` formals, each
+                    // written once before the slice is made below.
+                    unsafe {
+                        firs.add(i).write(FormalIr {
+                            sym: f.name,
+                            default,
+                            pos: Pos(self.base + f.span.start),
+                        })
+                    };
                 }
+                // SAFETY: every formal is written.
+                let firs: &'static [FormalIr] = if sorted.is_empty() {
+                    &[]
+                } else {
+                    unsafe { slice::from_raw_parts(firs, sorted.len()) }
+                };
                 let body = self.lambda_body(body, idx)?;
                 self.pop_scope();
                 let closed = !self.lambdas.pop().unwrap().1.get();
-                let formals = self.alloc_formals(firs);
+                let formals = firs;
                 Ok(self.alloc(LambdaIr {
                     param: ParamIr::Formals {
                         has_bind: bind.is_some(),

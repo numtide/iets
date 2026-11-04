@@ -26,7 +26,7 @@ comes from Mic92's nix-tarmac.
 **Stage and rename.** An entry is one file. iets writes it in full under a
 temporary name, then renames it into place. A rename is atomic, so one
 rename publishes the whole entry. A reader sees either the whole old entry
-or the whole new one, never a torn file and never two generations mixed.
+or the whole new one.
 
 **Readers never lock.** A reader opens the entry once and reads every part
 it needs through that one descriptor, so the bytes it uses are the
@@ -34,25 +34,24 @@ generation it validated, whatever a sibling publishes in the meantime. The
 old file stays alive for as long as the descriptor does.
 
 **A writer holds the store's `flock` for exactly one entry, and gives up
-after 50 ms.** A skipped write is a miss on a later run, never a
-stall and never an error. The lock only stops two writers of one key from
-crossing inside one temporary file. A killed writer leaves a temporary file
-that no reader looks at and that the sweep removes after a day; the entry it
-was replacing stays whole.
+after 50 ms.** A skipped write only costs a miss on a later run. The lock
+only stops two writers of one key from crossing inside one temporary file. A
+killed writer leaves a temporary file that no reader looks at and that the
+sweep removes after a day; the entry it was replacing stays whole.
 
 Nothing is fsynced, so a power loss can leave the name pointing at a file
 whose bytes were never written. Those bytes are read like any other bad
 bytes, and the entry goes. Atomicity is per entry, and no reader joins two
 entries.
 
-**Poison and wipe; never repair.** An entry that does not decode is
-deleted and the run continues as a miss. Only bytes a reader read, or a
-name that is not a regular file, are poison. A regular file that does not
-open is a miss and stays: Windows refuses an open while a sibling renames a
-new entry over the name. The wipe of a tracing entry takes the writer lock
-and removes the entry only if it is still the generation the reader
-rejected, so a good entry that a sibling published meanwhile stays. A store whose version file is of
-another format, or whose garbage-collection stamp cannot be parsed, or
+**Poison and wipe.** An entry that does not decode is deleted and the run
+continues as a miss. Only bytes a reader read, or a name that is not a
+regular file, are poison. A regular file that does not open is a miss and
+stays: Windows refuses an open while a sibling renames a new entry over the
+name. The wipe of a tracing entry takes the writer lock and removes the
+entry only if it is still the generation the reader rejected, so a good
+entry that a sibling published meanwhile stays. A store whose version file
+is of another format, or whose garbage-collection stamp cannot be parsed, or
 whose lock is not a file, is emptied and starts again.
 
 **An entry carries a checksum over its own key.** Every entry of the IR
@@ -76,8 +75,9 @@ path of the store directory.
 variable is stored as a hash keyed with the cache's own secret. Directories
 are 0700 and files 0600 whatever the umask.
 
-All of this holds for any bytes, not only bytes iets wrote: a crafted entry must be a miss. The IR decoder checks every constant, index
-and invariant the evaluator would otherwise trust.
+All of this holds for any bytes, so a crafted entry is a miss. The IR
+decoder checks every constant, index and invariant the evaluator would
+otherwise trust.
 
 **iets removes only what iets put there.** A wipe touches only the names
 that store's own layout makes: the version file, the lock, the stamp, the
@@ -90,8 +90,8 @@ from that layout is not iets's: iets names it in an error and runs without
 that cache.
 
 The sweep removes entries not read for 30 days. It runs on a write path, at
-most once a day per store, and never on the read path. The walk runs
-unlocked, so a sweep of a large store never holds a sibling's write back.
+most once a day per store. The walk runs unlocked, so a sweep of a large
+store never holds a sibling's write back.
 
 A warm hit writes almost nothing. The tracing cache rewrites its read set
 only when validation refreshed a stat field, and touches the entry's mtime
@@ -229,16 +229,16 @@ search path, `builtins.currentSystem`, and the working directory only when a
 relative path literal can reach it. `--workers`, `--builder`, `--timings`
 and `--dry-run` are not in the key: they do not change the answer.
 
-The key names the file by path, never by content, and the same goes for a
-flake's `flake.nix` and `flake.lock`. They are in the read set like any
-other file, so one command keeps one entry however often you edit the file,
-and an edit is an invalidation that names the file. With content in the key,
-an edit would be a different question: the run would miss with no entry, say
-nothing about why, and leave an entry for every earlier version of the file
-until the sweep.
+The key names the file by its path, and the same goes for a flake's
+`flake.nix` and `flake.lock`. They are in the read set like any other file,
+so one command keeps one entry however often you edit the file, and an edit
+is an invalidation that names the file. With content in the key, an edit
+would be a different question: the run would miss with no entry, say nothing
+about why, and leave an entry for every earlier version of the file until
+the sweep.
 
-Some things make a run uncacheable rather than wrong: `builtins.currentTime`
-(only if the program forces it) and every network fetcher without a hash.
+Some things make a run uncacheable: `builtins.currentTime` (only if the
+program forces it) and every network fetcher without a hash.
 
 An entry is one file in a directory named by the key: a header with a
 checksum, then parts. `readset` holds the observations. `result` holds what a
@@ -302,8 +302,7 @@ printed without error, and `nix eval`'s `«error: …»` in place of a value it
 could not force counts as an error.
 
 The read set errs on the side of too much. A cancelled helper fiber still
-leaves its observations in it, which costs a rare extra miss and never a
-wrong hit.
+leaves its observations in it, which at worst costs an extra miss.
 
 `builtins.trace` and `builtins.warn` write to stderr *during evaluation*,
 and a hit does not evaluate, so a hit prints none of them. Lint warnings
@@ -321,8 +320,7 @@ named by the hash its content must have, and that hash is known before the
 fetch begins.** The lock file states the input's `narHash`, and iets derives
 the store path from it before it opens a socket. It streams the archive into
 a staged directory and hashes the NAR, and the staged directory becomes an
-entry **only if that hash is the one the lock named**. A wrong tree is never
-named, never read and never uploaded.
+entry **only if that hash is the one the lock named**.
 
 The content verifies itself, which removes a lot:
 
@@ -432,12 +430,11 @@ Stock `nix fmt` does both every time, which is why flake-fmt exists.
 
 iets skips the evaluation through the tracing cache. `nix fmt` is keyed on
 the flake and the system, so a second run with nothing changed revalidates
-its read set and evaluates nothing. The read set holds content hashes, not
-mtimes, so a file the formatter rewrote to the same bytes is still a hit.
-Only a run that changed a file the evaluation read costs an evaluation. The
-exception is a `path:` flake, a directory outside any git repository: its
-`lastModified` is the newest mtime in the tree, so a rewrite to the same
-bytes is a new date.
+its read set and evaluates nothing. The read set holds content hashes, so a
+file the formatter rewrote to the same bytes is still a hit. Only a run that
+changed a file the evaluation read costs an evaluation. The exception is a
+`path:` flake, a directory outside any git repository: its `lastModified` is
+the newest mtime in the tree, so a rewrite to the same bytes is a new date.
 
 ## Limits
 

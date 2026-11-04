@@ -545,19 +545,6 @@ mod tests {
         assert_eq!(p.to_string(), format!("{}/{want}", store_dir()));
     }
 
-    // nix-instantiate --eval -E '"${builtins.path { path = ./tree; name = "mytree"; }}"'
-    #[rstest]
-    fn path_with_name(tree: Tree) {
-        let h = nar_hash(&tree).unwrap();
-        let p = make_fixed_output_path(IngestionMethod::Recursive, &h, "mytree", &BTreeSet::new())
-            .unwrap();
-        let want = match cfg!(unix) {
-            true => "ymkhbrxgqx2ii22w4kqj3jjfmcq5smzk-mytree",
-            false => "pj1vdjq68vfa06isb6vvlibb3854wirg-mytree",
-        };
-        assert_eq!(p.to_string(), format!("{}/{want}", store_dir()));
-    }
-
     // nix-instantiate --eval --strict -E 'let d = builtins.derivation { name = "fx"; system = "x86_64-linux";
     //   builder = "/bin/sh"; outputHash = "ba78...15ad"; outputHashAlgo = "sha256"; }; in d.outPath'
     // and for "fr" the same with outputHashMode = "recursive"

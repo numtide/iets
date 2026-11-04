@@ -154,6 +154,7 @@ impl Run {
 mod tests {
     use super::*;
     use crate::api::{self, EvalArgs, Input};
+    use crate::settings::Settings;
     use crate::sys;
     use tempfile::tempdir;
 
@@ -281,5 +282,51 @@ mod tests {
         let four = derivations(args(&expr, d.path(), 4), one);
         assert_eq!(one, n as u64, "one derivation per list element");
         assert_eq!(four, one, "the helper fibers' derivations are counted too");
+    }
+
+    /// A host's `cache_dir` holds the input store at any worker count.
+    #[test]
+    fn a_host_cache_dir_holds_the_input_store() {
+        let d = tempdir().unwrap();
+        let root = sys::fs::canonicalize(d.path()).unwrap();
+        let file = root.join("hello.txt");
+        fs::write(&file, b"hello fetchurl\n").unwrap();
+        let url = String::from_utf8(sys::path_to_internal(&file)).unwrap();
+        let expr = format!(
+            r#"builtins.fetchurl {{ url = "file://{url}"; sha256 = "113a52l57f2jv9fh9igj2xh2mi0is40flxbkqi69wbh7nlybkcbm"; name = "iets-test-cache-dir"; }}"#
+        );
+        for workers in [1, 4] {
+            let cache = root.join(format!("cache-w{workers}"));
+            let a = args(&expr, &cache, workers);
+            thread::spawn(move || {
+                let session = Session::new();
+                session.use_settings(Settings {
+                    offline: false,
+                    ..Settings::default()
+                });
+                let cfg = EvalConfig::new().pure(false).session(session);
+                Run::over(cfg, &a)
+                    .expect("the arguments configure")
+                    .go(move |ev, _| api::evaluate(ev, a).map(|_| ()))
+                    .expect("the fiber stacks")
+                    .expect("the fetch evaluates")
+            })
+            .join()
+            .unwrap();
+            // a name /nix/store does not hold, or the fetch would stop there
+            let held = fs::read_dir(cache.join("inputs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .ends_with("-iets-test-cache-dir")
+                });
+            assert!(
+                held,
+                "no input-store entry under cache_dir, {workers} workers"
+            );
+        }
     }
 }

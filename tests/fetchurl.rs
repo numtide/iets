@@ -79,19 +79,23 @@ impl Scratch {
 fn a_hashed_fetch_has_the_store_path_nix_gives(scratch: Scratch) {
     let url = &scratch.url;
     let call = format!(r#"builtins.fetchurl {{ url = "{url}"; sha256 = "{SHA256}"; }}"#);
+    let flag = scratch.root.join("flag-cache");
+    let cd = ["--cache-dir", flag.to_str().unwrap()];
 
-    let o = scratch.eval(false, &[], &call);
+    let o = scratch.eval(false, &cd, &call);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
         "/nix/store/3ay25cl2lpykmx07i7m22qxz7zwzqmvy-hello.txt"
     );
 
-    // the input store holds it now: no download, and the bytes read back
+    // the input store under --cache-dir holds it now: no download, and the
+    // bytes read back
     fs::remove_file(scratch.hello()).unwrap();
-    let o = scratch.eval(true, &[], &format!("builtins.readFile ({call})"));
+    let o = scratch.eval(true, &cd, &format!("builtins.readFile ({call})"));
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(o.stdout, BYTES);
+    assert!(!scratch.root.join("cache/inputs").exists());
 
     let named =
         format!(r#"builtins.fetchurl {{ url = "{url}"; sha256 = "{SHA256}"; name = "x"; }}"#);

@@ -10,7 +10,9 @@
 
 use std::cell::RefCell;
 use std::panic;
+use std::path::PathBuf;
 use std::process;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -38,6 +40,8 @@ pub struct Session {
     /// Where this run's instrumentation events go (`crate::events`).
     pub events: Events,
     settings: OnceLock<Settings>,
+    /// `--cache-dir`, which comes after the settings are read.
+    cache_dir: OnceLock<PathBuf>,
     /// What this run was asked for and does not do (`crate::ignored`).
     pub ignored: Ignored,
     /// The local tree store this run reads fetched trees from
@@ -115,6 +119,18 @@ impl Session {
         let s = Settings::load(options)?;
         let _ = self.settings.set(s);
         Ok(())
+    }
+
+    /// Moves this session's stores under `dir`, once. A no-op on the
+    /// fallback session, which every thread shares.
+    pub fn set_cache_dir(&self, dir: &str) {
+        if !ptr::eq(self, &*fallback()) {
+            let _ = self.cache_dir.set(PathBuf::from(dir));
+        }
+    }
+
+    pub fn cache_dir(&self) -> Option<&PathBuf> {
+        self.cache_dir.get()
     }
 
     /// Settings made elsewhere, for a run whose file did not load.

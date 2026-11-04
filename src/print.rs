@@ -152,7 +152,7 @@ pub fn print_ambiguous(
         } else if w.thunk_unforced(st) || w.thunk_speculated(st) {
             out.extend_from_slice(b"<CODE>");
         } else {
-            return print_ambiguous(ev, w.thunk_value(st), cell, out, seen, depth);
+            return print_ambiguous(ev, w.thunk_value(), cell, out, seen, depth);
         }
         return Ok(());
     }

@@ -122,7 +122,6 @@ pub unsafe fn init_ctx(ev: &mut Evaluator, slot: *mut Slot) {
         slot,
     };
     ev.call_depth = 0;
-    ev.try_level = 0;
 }
 
 /// Exclusive borrow of the slot this evaluator's fiber runs on.
@@ -218,7 +217,7 @@ pub fn force_thunk(ev: &mut Evaluator, w: Word) -> EvalResult<Word> {
         if w.thunk_speculated(st) {
             read_speculated(ev, cell, st);
         }
-        return Ok(w.thunk_value(st));
+        return Ok(w.thunk_value());
     }
     claim_and_run(ev, w, cell)
 }
@@ -264,7 +263,7 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
                 if w.thunk_speculated(st) {
                     read_speculated(ev, cell, st);
                 }
-                return Ok(w.thunk_value(st));
+                return Ok(w.thunk_value());
             }
             Claim::Mine => {
                 return Err(Error::boxed(
@@ -366,7 +365,7 @@ fn park(ev: &mut Evaluator, key: u64, mark: usize) {
 /// demand path re-evaluates and prints. Returns false when the caller
 /// should print.
 #[inline]
-pub fn journal(ev: &mut Evaluator, _msg: String) -> bool {
+pub fn journal(ev: &mut Evaluator) -> bool {
     if ev.par.on && !ev.par.is_main {
         ev.par.cancelled = true;
         EFFECT_BAILS.fetch_add(1, Ordering::Relaxed);
@@ -464,7 +463,7 @@ pub fn take_cell(ev: &mut Evaluator, c: &Cell) -> CellState {
     if w.thunk_unforced(s) {
         return CellState::Unclaimed;
     }
-    let v = w.thunk_value(s);
+    let v = w.thunk_value();
     if w.thunk_speculated(s) {
         read_speculated(ev, st, s);
     }
@@ -486,7 +485,7 @@ fn cell_state(cell: &Cell) -> CellState {
     } else if w.thunk_unforced(st) {
         CellState::Unclaimed
     } else {
-        CellState::Ready(w.thunk_value(st))
+        CellState::Ready(w.thunk_value())
     }
 }
 

@@ -286,7 +286,6 @@ pub struct Evaluator {
     /// `MAX_CALL_DEPTH`, or 0 in a profiled run: the call path's one
     /// compare picks the profiled copy.
     call_limit: u32,
-    pub try_level: u32,
     pub s: WellKnown,
     pub builtins_word: Word,
     /// Store path prefix, for `builtins.storeDir` and store path checks.
@@ -727,7 +726,6 @@ impl EvalConfig {
             } else {
                 MAX_CALL_DEPTH
             },
-            try_level: 0,
             s,
             builtins_word: Word::NULL,
             store_dir: store_dir().as_bytes().to_vec(),
@@ -1247,7 +1245,7 @@ impl Evaluator {
             );
         }
         if !w.thunk_unforced(st) {
-            return Ok(w.thunk_value(st));
+            return Ok(w.thunk_value());
         }
         state.set(Word::BLACKHOLE);
         #[cfg(feature = "stats2")]
@@ -2176,8 +2174,6 @@ impl Evaluator {
             Ir::Eq(..) => self.eval_k_eq(env, ir),
             Ir::Ne(..) => self.eval_k_ne(env, ir),
             Ir::Lt(..) => self.eval_k_lt(env, ir),
-            Ir::Gt(..) => self.eval_k_gt(env, ir),
-            Ir::Le(..) => self.eval_k_le(env, ir),
             Ir::Ge(..) => self.eval_k_ge(env, ir),
             Ir::And(..) => self.eval_k_and(env, ir),
             Ir::Or(..) => self.eval_k_or(env, ir),
@@ -2397,22 +2393,6 @@ impl Evaluator {
         let a = self.eval_fast(env, l)?;
         let b = self.eval_fast(env, r)?;
         Ok(Word::from_bool(self.less_than(a, b, *pos)?))
-    }
-
-    #[inline(never)]
-    fn eval_k_gt(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
-        node!(Ir::Gt(l, r, pos) = ir);
-        let a = self.eval_fast(env, l)?;
-        let b = self.eval_fast(env, r)?;
-        Ok(Word::from_bool(self.less_than(b, a, *pos)?))
-    }
-
-    #[inline(never)]
-    fn eval_k_le(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
-        node!(Ir::Le(l, r, pos) = ir);
-        let a = self.eval_fast(env, l)?;
-        let b = self.eval_fast(env, r)?;
-        Ok(Word::from_bool(!self.less_than(b, a, *pos)?))
     }
 
     #[inline(never)]
@@ -2995,8 +2975,6 @@ impl Evaluator {
     ) -> EvalResult<Word> {
         let mut first = !force_string;
         let mut first_type = ValueType::String;
-        let mut n: i64 = 0;
-        let mut nf: f64 = 0.0;
         // Interpolations have few parts and coerce to borrowed slices: keep
         // them on the stack and spill to a Vec only past the buffer.
         let mut buf: [&'static [u8]; 16] = [&[]; 16];
@@ -3014,62 +2992,26 @@ impl Evaluator {
             if first {
                 first_type = v.value_type();
             }
-            match first_type {
-                ValueType::Int => match v.view() {
-                    Value::Int(i) => match n.checked_add(i) {
-                        Some(x) => n = x,
-                        None => bail!(
-                            ErrorKind::Eval,
-                            ppos,
-                            "integer overflow in adding {} + {}",
-                            n,
-                            i
-                        ),
-                    },
-                    Value::Float(f) => {
-                        first_type = ValueType::Float;
-                        nf = n as f64 + f;
+            let s = self.coerce_to_string(
+                v,
+                &mut ctx,
+                ppos,
+                "while evaluating a path segment",
+                false,
+                first_type == ValueType::String,
+                !first,
+            )?;
+            match s {
+                Cow::Borrowed(b) if spill.is_empty() && nbuf < buf.len() => {
+                    buf[nbuf] = b;
+                    nbuf += 1;
+                }
+                s => {
+                    if spill.is_empty() {
+                        spill.extend(buf[..nbuf].iter().map(|b| Cow::Borrowed(*b)));
+                        nbuf = 0;
                     }
-                    _ => bail!(
-                        ErrorKind::Eval,
-                        ppos,
-                        "cannot add {} to an integer",
-                        v.value_type().name()
-                    ),
-                },
-                ValueType::Float => match v.view() {
-                    Value::Int(i) => nf += i as f64,
-                    Value::Float(f) => nf += f,
-                    _ => bail!(
-                        ErrorKind::Eval,
-                        ppos,
-                        "cannot add {} to a float",
-                        v.value_type().name()
-                    ),
-                },
-                _ => {
-                    let s = self.coerce_to_string(
-                        v,
-                        &mut ctx,
-                        ppos,
-                        "while evaluating a path segment",
-                        false,
-                        first_type == ValueType::String,
-                        !first,
-                    )?;
-                    match s {
-                        Cow::Borrowed(b) if spill.is_empty() && nbuf < buf.len() => {
-                            buf[nbuf] = b;
-                            nbuf += 1;
-                        }
-                        s => {
-                            if spill.is_empty() {
-                                spill.extend(buf[..nbuf].iter().map(|b| Cow::Borrowed(*b)));
-                                nbuf = 0;
-                            }
-                            spill.push(s);
-                        }
-                    }
+                    spill.push(s);
                 }
             }
             first = false;
@@ -3080,26 +3022,20 @@ impl Evaluator {
         } else {
             &spilled
         };
-        match first_type {
-            ValueType::Int => Ok(self.mk_int(n)),
-            ValueType::Float => Ok(self.mk_float(nf)),
-            ValueType::Path => {
-                if ctx.iter().any(Ctx::is_store) {
-                    bail!(
-                        ErrorKind::Eval,
-                        pos,
-                        "a string that refers to a store path cannot be appended to a path"
-                    );
-                }
-                let joined = pieces.concat();
-                Ok(self.arena.mk_path(&compile::canon_path(&joined)))
+        if first_type == ValueType::Path {
+            if ctx.iter().any(Ctx::is_store) {
+                bail!(
+                    ErrorKind::Eval,
+                    pos,
+                    "a string that refers to a store path cannot be appended to a path"
+                );
             }
-            _ => {
-                let i = self.arena.intern_concat(pieces);
-                let ctx = ctx_to_arena(&mut self.arena, ctx);
-                Ok(self.arena.mk_string_over(i, ctx))
-            }
+            let joined = pieces.concat();
+            return Ok(self.arena.mk_path(&compile::canon_path(&joined)));
         }
+        let i = self.arena.intern_concat(pieces);
+        let ctx = ctx_to_arena(&mut self.arena, ctx);
+        Ok(self.arena.mk_string_over(i, ctx))
     }
 
     /// `a // b`. A large left side is not copied: the result is a union
@@ -3320,8 +3256,6 @@ pub fn ir_pos(ir: &Ir) -> Pos {
         | Ir::Eq(_, _, pos)
         | Ir::Ne(_, _, pos)
         | Ir::Lt(_, _, pos)
-        | Ir::Gt(_, _, pos)
-        | Ir::Le(_, _, pos)
         | Ir::Ge(_, _, pos)
         | Ir::And(_, _, pos)
         | Ir::Or(_, _, pos)

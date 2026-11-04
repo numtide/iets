@@ -4,14 +4,14 @@
 //! addressed the way `inputAddressed` says. It downloads no NAR.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use super::paths::{coerce_to_path, store_path_string, to_store_path};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::runtime::{Value, Word};
+use crate::session::Session;
 use crate::source::nix_conf;
 use crate::store::narinfo::NarInfo;
 use crate::store::path::StorePath;
@@ -148,9 +148,8 @@ fn store_path_arg(ev: &mut Evaluator, v: Word, pos: Pos, hint: &str) -> EvalResu
     }
 }
 
-/// The narinfos of `root`'s closure, read level by level with [`JOBS`]
-/// requests at a time. A path missing from disk must be trusted, as
-/// local-store.cc:addToStore requires of a copy.
+/// The narinfos of `root`'s closure. A path missing from disk must be
+/// trusted, as local-store.cc:addToStore requires of a copy.
 fn walk(
     ev: &mut Evaluator,
     store: &str,
@@ -166,58 +165,115 @@ fn walk(
         .bool("require-sigs")
         .map_err(|e| fail(e.to_string()))?
         .unwrap_or(true);
-    let mut seen = BTreeSet::from([root.clone()]);
-    let mut frontier = vec![root.clone()];
+    let infos = fetch_all(store, root, limits, &session).map_err(fail)?;
     let mut closure = BTreeMap::new();
-    while !frontier.is_empty() {
-        let next = AtomicUsize::new(0);
-        let got = Mutex::new(Vec::with_capacity(frontier.len()));
-        thread::scope(|s| {
-            for _ in 0..JOBS.min(frontier.len()) {
-                s.spawn(|| {
-                    let _entered = session.enter();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(p) = frontier.get(i) else { break };
-                        let r = narinfo(store, p, limits);
-                        got.lock().unwrap_or_else(|e| e.into_inner()).push(r);
-                    }
-                });
-            }
-        });
-        frontier.clear();
-        for r in got.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            let ni = r.map_err(fail)?;
-            let present = ev
-                .trace()
-                .stat_now(ni.path.to_full_string().as_bytes(), true)
-                != trace::Kind::Missing;
-            if !present && !ni.trusted(&keys, require_sigs) {
-                return Err(fail(format!(
-                    "cannot add path '{}' because it lacks a signature by a trusted key",
-                    ni.path.to_full_string()
-                )));
-            }
-            for r in &ni.references {
-                if seen.insert(r.clone()) {
-                    frontier.push(r.clone());
-                }
-            }
-            closure.insert(ni.path.clone(), ni);
+    for ni in infos {
+        let present = ev
+            .trace()
+            .stat_now(ni.path.to_full_string().as_bytes(), true)
+            != trace::Kind::Missing;
+        if !present && !ni.trusted(&keys, require_sigs) {
+            return Err(fail(format!(
+                "cannot add path '{}' because it lacks a signature by a trusted key",
+                ni.path.to_full_string()
+            )));
         }
+        closure.insert(ni.path.clone(), ni);
     }
     Ok(closure)
 }
 
-fn narinfo(store: &str, p: &StorePath, limits: Limits) -> Result<NarInfo, String> {
+/// The work the walk's threads share.
+struct Walk {
+    todo: Vec<StorePath>,
+    seen: BTreeSet<StorePath>,
+    busy: usize,
+    done: Vec<NarInfo>,
+    failed: Option<String>,
+}
+
+/// The narinfos of `root`'s closure. Each of [`JOBS`] threads keeps one
+/// connection to the cache for the whole walk.
+fn fetch_all(
+    store: &str,
+    root: &StorePath,
+    limits: Limits,
+    session: &Arc<Session>,
+) -> Result<Vec<NarInfo>, String> {
+    let walk = Mutex::new(Walk {
+        todo: vec![root.clone()],
+        seen: BTreeSet::from([root.clone()]),
+        busy: 0,
+        done: Vec::new(),
+        failed: None,
+    });
+    let changed = Condvar::new();
+    thread::scope(|s| {
+        for _ in 0..JOBS {
+            s.spawn(|| {
+                let _entered = session.enter();
+                let mut kept = match http::Kept::new() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        let mut w = walk.lock().unwrap_or_else(|e| e.into_inner());
+                        w.failed.get_or_insert(e.to_string());
+                        changed.notify_all();
+                        return;
+                    }
+                };
+                let mut w = walk.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if w.failed.is_some() || (w.todo.is_empty() && w.busy == 0) {
+                        changed.notify_all();
+                        return;
+                    }
+                    let Some(p) = w.todo.pop() else {
+                        w = changed.wait(w).unwrap_or_else(|e| e.into_inner());
+                        continue;
+                    };
+                    w.busy += 1;
+                    drop(w);
+                    let r = narinfo(&mut kept, store, &p, limits);
+                    w = walk.lock().unwrap_or_else(|e| e.into_inner());
+                    w.busy -= 1;
+                    match r {
+                        Ok(ni) => {
+                            for r in &ni.references {
+                                if w.seen.insert(r.clone()) {
+                                    w.todo.push(r.clone());
+                                }
+                            }
+                            w.done.push(ni);
+                        }
+                        Err(e) => {
+                            w.failed.get_or_insert(e);
+                        }
+                    }
+                    changed.notify_all();
+                }
+            });
+        }
+    });
+    let w = walk.into_inner().unwrap_or_else(|e| e.into_inner());
+    match w.failed {
+        Some(e) => Err(e),
+        None => Ok(w.done),
+    }
+}
+
+fn narinfo(
+    kept: &mut http::Kept,
+    store: &str,
+    p: &StorePath,
+    limits: Limits,
+) -> Result<NarInfo, String> {
     let url = format!("{store}/{}.narinfo", p.hash_part());
-    let mut body = Vec::new();
-    http::get(&url, &[], limits, false, &mut body)
-        .map_err(|e| format!("cannot fetch '{url}': {e}"))?;
-    let ni = NarInfo::parse(&String::from_utf8_lossy(&body), &url).map_err(|e| e.0)?;
+    let body = kept.get(&url, limits).map_err(|e| e.to_string())?;
+    let shown = http::shown(&url);
+    let ni = NarInfo::parse(&String::from_utf8_lossy(&body), &shown).map_err(|e| e.0)?;
     if ni.path != *p {
         return Err(format!(
-            "'{url}' describes '{}', not '{}'",
+            "'{shown}' describes '{}', not '{}'",
             ni.path.to_full_string(),
             p.to_full_string()
         ));

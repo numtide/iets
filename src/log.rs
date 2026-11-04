@@ -57,10 +57,8 @@ struct Out {
     status: String,
     /// Lines under the output, redrawn in place: the build renderer's view.
     region: Vec<String>,
-    /// Drawn while a terminal answers and nothing has paused it.
+    /// Drawn while a terminal answers.
     display: Option<Display>,
-    /// A child may prompt on the terminal while this is above zero.
-    paused: usize,
     /// What was written without its newline, until it has one.
     partial: Vec<u8>,
     /// The cursor after what went out since the display went down, for a
@@ -129,7 +127,7 @@ impl Out {
     /// Brings the display in line with what is to be shown: starts it, ends it
     /// or redraws it. A new size redraws it too.
     fn sync(&mut self) {
-        let wanted = self.paused == 0 && !self.live().is_empty() && self.w.is_some();
+        let wanted = !self.live().is_empty() && self.w.is_some();
         let size = self.term().size().filter(|_| wanted);
         let landed = self.landed.take();
         match (size, self.display.is_some()) {
@@ -216,16 +214,6 @@ impl Log {
         }
         o.sync();
         r
-    }
-
-    /// Takes the live view down while a child may prompt on the terminal.
-    pub fn pause(&self, on: bool) {
-        let mut o = self.writer();
-        o.paused = match on {
-            true => o.paused + 1,
-            false => o.paused.saturating_sub(1),
-        };
-        o.sync();
     }
 
     /// What `iets` itself does, and what a host that wants Nix's own
@@ -522,31 +510,6 @@ pub fn result(id: u64, ty: u64, f: Vec<Value>) {
     }
     if records(&s) {
         s.log.out(&result_record(id, ty, f), None);
-    }
-}
-
-/// Status line only: Nix has no record for it.
-pub fn detail(id: u64, text: &str) {
-    let s = cur();
-    if drawn(&s) {
-        s.log.progress.detail(id, text);
-    }
-}
-
-/// No status line until it drops: a child may prompt on the terminal.
-pub struct Suspended(Arc<Session>);
-
-pub fn suspend() -> Suspended {
-    let s = cur();
-    s.log.progress.suspend();
-    s.log.pause(true);
-    Suspended(s)
-}
-
-impl Drop for Suspended {
-    fn drop(&mut self) {
-        self.0.log.progress.resume();
-        self.0.log.pause(false);
     }
 }
 
@@ -1298,19 +1261,6 @@ mod tests {
         );
         assert_eq!(rows[4..], ["HEADER", "run"]);
         assert_eq!(rows[3], "out 5");
-    }
-
-    /// A child that prompts owns the terminal, and gets it back after.
-    #[test]
-    fn a_pause_takes_the_view_down_for_a_prompt() {
-        let (log, s) = Screen::log(40, 8);
-        log.set_region(vec!["region".into()]);
-        log.pause(true);
-        assert!(s.rows().iter().all(|r| r != "region"));
-        log.err(b"Password: ");
-        assert_eq!(s.rows()[0], "Password:");
-        log.pause(false);
-        assert!(s.rows().contains(&"region".to_string()));
     }
 
     #[test]

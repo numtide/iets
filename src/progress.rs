@@ -42,8 +42,6 @@ struct Task {
     /// Only a task that reports progress can be called stalled.
     measured: bool,
     moved: Instant,
-    /// What the task's own tool prints, such as git's `Receiving objects`.
-    detail: String,
     told: bool,
 }
 
@@ -52,8 +50,6 @@ struct Tasks {
     /// By id, which is start order: ids only grow.
     all: BTreeMap<u64, Task>,
     ticking: bool,
-    /// A child that may prompt on the terminal runs (processes.cc:338).
-    suspended: usize,
     beat: Option<Instant>,
 }
 
@@ -114,7 +110,6 @@ impl Board {
                 expected: 0,
                 moved: now,
                 measured: false,
-                detail: String::new(),
                 told: false,
             },
         );
@@ -143,24 +138,6 @@ impl Board {
         }
     }
 
-    pub fn detail(&self, id: u64, text: &str) {
-        if let Some(task) = self.lock().all.get_mut(&id)
-            && task.detail != text
-        {
-            task.moved = Instant::now();
-            task.detail = text.to_string();
-        }
-    }
-
-    pub fn suspend(&self) {
-        self.lock().suspended += 1;
-    }
-
-    pub fn resume(&self) {
-        let mut t = self.lock();
-        t.suspended = t.suspended.saturating_sub(1);
-    }
-
     /// Whether that was the last task: the status line must come down now,
     /// not a tick later, or the next output puts it back.
     pub fn stop(&self, id: u64) -> bool {
@@ -180,7 +157,6 @@ impl Board {
             return Some(Tick::Quiet);
         }
         match self.mode() {
-            Mode::Bar if t.suspended > 0 => Some(Tick::Bar(String::new())),
             Mode::Bar => {
                 let builds = !self.live.load(Ordering::Relaxed);
                 let line = summary(&t.all, now, builds).unwrap_or_default();
@@ -328,13 +304,9 @@ fn one(k: &Task, now: Instant) -> String {
     } else if k.expected > 0 {
         s.push_str(&format!(", {}/{}", k.done, k.expected));
     }
-    if !k.detail.is_empty() {
-        s.push_str(&format!(", {}", k.detail));
-    }
     let age = now - k.started;
     let quiet = now - k.moved;
-    let watched = k.measured || !k.detail.is_empty();
-    match (age >= Duration::from_secs(1), watched && quiet >= STALL) {
+    match (age >= Duration::from_secs(1), k.measured && quiet >= STALL) {
         (_, true) => s.push_str(&format!(
             " ({}, no data for {})",
             fmt_duration(age),
@@ -406,7 +378,6 @@ mod tests {
             expected: 0,
             moved: at,
             measured: false,
-            detail: String::new(),
             told: false,
         }
     }

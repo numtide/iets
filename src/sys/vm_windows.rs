@@ -189,6 +189,16 @@ pub fn map_stack(len: usize) -> io::Result<*mut u8> {
     Ok(p)
 }
 
+/// The TEB stack limit of a fresh fiber on a `map_stack` stack: the byte
+/// above its guard page. `__chkstk` only probes below the limit, so a lower
+/// one let a big frame skip the guard and fault in reserved memory.
+pub fn stack_limit(base: *mut u8, len: usize) -> *mut u8 {
+    if len < 2 * (STACK_INIT + STACK_ZONE) {
+        return base.wrapping_add(STACK_ZONE);
+    }
+    base.wrapping_add(len - STACK_INIT + STACK_HEAD + page_size())
+}
+
 /// Returns the pages of an idle stack except the top `keep` bytes.
 ///
 /// # Safety

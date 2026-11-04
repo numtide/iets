@@ -27,7 +27,10 @@ pub fn closure(
 ) -> Result<usize> {
     let infos = remote_closure(from, paths, on_event)?;
     let all: Vec<String> = infos.keys().map(StorePath::to_string).collect();
-    let valid: HashSet<String> = to.query_valid_paths(&all, on_event)?.into_iter().collect();
+    let valid: HashSet<String> = to
+        .query_valid_paths_rooted(&all, on_event)?
+        .into_iter()
+        .collect();
     let order: Vec<StorePath> = topo_sort(&infos)
         .into_iter()
         .filter(|p| !valid.contains(&p.to_string()))

@@ -343,7 +343,7 @@ impl Backend for Worker {
         let full: Vec<String> = paths.iter().map(ToString::to_string).collect();
         self.t.query_paths += full.len();
         let t0 = Instant::now();
-        let valid = self.conn.query_valid_paths(&full, on_event)?;
+        let valid = self.conn.query_valid_paths_rooted(&full, on_event)?;
         self.t.query += t0.elapsed();
         Ok(valid.into_iter().map(base_name).collect())
     }

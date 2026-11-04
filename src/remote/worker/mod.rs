@@ -958,6 +958,20 @@ impl Connection {
         self.valid_paths(paths, false, on_event)
     }
 
+    /// `query_valid_paths` after an `AddTempRoot` for each of `paths`, so a path
+    /// reported valid stays valid until this connection closes. Without the
+    /// roots, a garbage collection between the answer and a later
+    /// `AddMultipleToStore` of a path that refers to it fails that upload with
+    /// "path ... is not valid". Nix's own client sends no roots here.
+    pub fn query_valid_paths_rooted(
+        &mut self,
+        paths: &[String],
+        on_event: &mut dyn FnMut(Event),
+    ) -> Result<Vec<String>> {
+        self.add_temp_roots(paths, on_event)?;
+        self.query_valid_paths(paths, on_event)
+    }
+
     /// `QueryValidPaths` with the substitute flag set (protocol >= 1.27), which
     /// runs `Store::substitutePaths` on the daemon before it answers
     /// (daemon.cc:performOp): the valid subset is what the substituters gave us.
@@ -970,18 +984,12 @@ impl Connection {
         self.valid_paths(paths, true, on_event)
     }
 
-    /// The daemon roots each of `paths` before it answers, so a path reported
-    /// valid stays valid until this connection closes. Without the roots, a
-    /// garbage collection between the answer and a later `AddMultipleToStore`
-    /// of a path that refers to it fails that upload with "path ... is not
-    /// valid".
     fn valid_paths(
         &mut self,
         paths: &[String],
         substitute: bool,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<Vec<String>> {
-        self.add_temp_roots(paths, on_event)?;
         self.op(Op::QueryValidPaths)?;
         write_strs(self.w(), paths)?;
         write_u64(self.w(), u64::from(substitute))?;

@@ -6,12 +6,17 @@
 mod e2e;
 mod hermetic;
 
+use std::env;
 use std::fs;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use e2e::{Store, ok, stderr, stdout};
+use iets::remote::worker::{Connection, Transport};
 use serde_json::Value;
 
 /// The shared case, with an executable and a symlink in the tree too.
@@ -352,20 +357,17 @@ fn a_path_on_stdout_or_a_failure() {
     assert!(!wrong.status.success() && stdout(&wrong).is_empty());
 }
 
-/// A path that `QueryValidPaths` reports valid stays valid until the
+/// A path that `query_valid_paths_rooted` reports valid stays valid until the
 /// connection closes: the garbage collector cannot delete it between the
 /// answer and an upload that refers to it.
 #[test]
 fn a_path_reported_valid_is_rooted_until_the_connection_closes() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
-
     let s = store!();
     let f = s.write("gc/a", "a\n");
     let p = s.nix_store(&["--add", f.to_str().unwrap()]);
     let p = p.trim();
 
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut child = Command::new(env::current_exe().unwrap())
         .args(["temp_roots_child", "--exact", "--nocapture"])
         .env("NIX_STORE_DIR", s.store_dir())
         .env("IETS_TEMP_ROOT_SOCKET", s.socket())
@@ -378,19 +380,37 @@ fn a_path_reported_valid_is_rooted_until_the_connection_closes() {
     writeln!(child.stdin.as_mut().unwrap(), "{p}").unwrap();
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
-    while !line.starts_with("valid: ") {
+    // the harness can write `test temp_roots_child ... ` on the same line first
+    let valid = loop {
         line.clear();
         assert_ne!(out.read_line(&mut line).unwrap(), 0, "the child exited");
-    }
-    assert_eq!(line.trim(), format!("valid: {p}"));
+        if let Some(i) = line.find("valid: ") {
+            break line[i..].trim();
+        }
+    };
+    assert_eq!(valid, format!("valid: {p}"));
 
     let o = s.nix("nix-store").args(["--delete", p]).output().unwrap();
     assert!(!o.status.success(), "deleted while rooted");
     assert!(stderr(&o).contains("still alive"), "{}", stderr(&o));
 
+    // the daemon can release the roots of the closed connection a short time
+    // after the child exits
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
-    s.nix_store(&["--delete", p]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let o = s.nix("nix-store").args(["--delete", p]).output().unwrap();
+        if o.status.success() {
+            break;
+        }
+        assert!(stderr(&o).contains("still alive"), "{}", stderr(&o));
+        assert!(
+            Instant::now() < deadline,
+            "still rooted after the connection closed"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The child of `a_path_reported_valid_is_rooted_until_the_connection_closes`:
@@ -399,22 +419,21 @@ fn a_path_reported_valid_is_rooted_until_the_connection_closes() {
 /// keeps the connection open until its stdin closes.
 #[test]
 fn temp_roots_child() {
-    use iets::remote::worker::{Connection, Transport};
-    use std::io::{BufRead, Read};
-
-    let Some(socket) = std::env::var_os("IETS_TEMP_ROOT_SOCKET") else {
+    let Some(socket) = env::var_os("IETS_TEMP_ROOT_SOCKET") else {
         return;
     };
-    let mut stdin = std::io::stdin().lock();
+    let mut stdin = io::stdin().lock();
     let mut path = String::new();
     stdin.read_line(&mut path).unwrap();
     let path = path.trim().to_string();
     let gone = format!(
         "{}/00000000000000000000000000000000-gone",
-        std::env::var("NIX_STORE_DIR").unwrap()
+        env::var("NIX_STORE_DIR").unwrap()
     );
     let mut conn = Connection::open(&Transport::Unix(socket.into()), &mut |_| {}).unwrap();
-    let valid = conn.query_valid_paths(&[path, gone], &mut |_| {}).unwrap();
+    let valid = conn
+        .query_valid_paths_rooted(&[path, gone], &mut |_| {})
+        .unwrap();
     println!("valid: {}", valid.join(" "));
     stdin.read_to_end(&mut Vec::new()).unwrap();
 }

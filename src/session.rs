@@ -84,6 +84,10 @@ impl Session {
     }
 
     /// The session this thread entered, else the fallback one.
+    // Never inlined: a fiber that parks between two inlined reads would
+    // reuse the first thread's TLS address and race on its RefCell
+    // (ARCHITECTURE.md, "Changing the evaluator").
+    #[inline(never)]
     pub fn current() -> Arc<Session> {
         CURRENT
             .with(|c| c.borrow().clone())
@@ -91,6 +95,7 @@ impl Session {
     }
 
     /// Makes `self` this thread's session until the guard drops.
+    #[inline(never)]
     pub fn enter(self: &Arc<Session>) -> Entered {
         let prev = CURRENT.with(|c| c.borrow_mut().replace(self.clone()));
         Entered(prev)
@@ -153,6 +158,7 @@ pub fn exit(code: i32) -> ! {
 pub struct Entered(Option<Arc<Session>>);
 
 impl Drop for Entered {
+    #[inline(never)]
     fn drop(&mut self) {
         CURRENT.with(|c| *c.borrow_mut() = self.0.take());
     }

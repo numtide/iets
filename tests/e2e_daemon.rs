@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
@@ -417,4 +418,25 @@ fn rooting_child() {
     assert!(conn.query_path_info(info, &mut |_| {}).unwrap().is_some());
     println!("rooted");
     stdin.read_to_end(&mut Vec::new()).unwrap();
+}
+
+/// Unread temp-root replies fill the daemon's send buffer while the query
+/// fills ours.
+#[test]
+fn a_large_query_does_not_stall() {
+    let s = store!();
+    let dir = s.store_dir();
+    let dir = dir.to_str().unwrap();
+    let paths: Vec<String> = (0..4096)
+        .map(|i| format!("{dir}/{i:032}-{}", "x".repeat(100)))
+        .collect();
+    let socket = s.socket();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut conn = Connection::open(&Transport::Unix(socket), &mut |_| {}).unwrap();
+        tx.send(conn.query_valid_paths(&paths, &mut |_| {}).unwrap())
+            .unwrap();
+    });
+    let valid = rx.recv_timeout(Duration::from_secs(60)).expect("stalled");
+    assert!(valid.is_empty());
 }

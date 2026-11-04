@@ -96,8 +96,14 @@ pub const LATEST_MINOR: u64 = 38;
 /// Below this the handshake and `BuildPathsWithResults` differ; not worth supporting.
 pub const MIN_MINOR: u64 = 35;
 
-/// Replies of a chunk (16 bytes each) fit the socket buffer, so pipelining cannot deadlock.
+/// Roots per round trip. The daemon writes each reply separately and a Unix
+/// socket charges ~768 bytes per write, so it blocks after ~270 unread replies;
+/// the unsent rest of a chunk still fits our send buffer.
 const TEMP_ROOT_CHUNK: usize = 512;
+
+/// Unread replies allowed behind the caller's query. More could block the
+/// daemon while a large query blocks us.
+const TEMP_ROOT_PIPELINED: usize = 64;
 
 /// worker-protocol.hh:WorkerProto::Op, the subset used here.
 #[derive(Clone, Copy)]
@@ -984,8 +990,8 @@ impl Connection {
     }
 
     /// Roots `paths` until the connection closes, so a path reported valid
-    /// cannot be collected before it is used. The last chunk's replies are
-    /// left for `read_temp_roots`, behind the caller's query.
+    /// cannot be collected before it is used. A small last chunk's replies
+    /// are left for `read_temp_roots`, behind the caller's query.
     fn write_temp_roots(
         &mut self,
         paths: &[impl AsRef<str>],
@@ -998,7 +1004,7 @@ impl Connection {
                 write_u64(self.w(), Op::AddTempRoot as u64)?;
                 write_str(self.w(), path.as_ref().as_bytes())?;
             }
-            if chunks.peek().is_none() {
+            if chunks.peek().is_none() && chunk.len() <= TEMP_ROOT_PIPELINED {
                 return Ok(chunk.len());
             }
             self.stats.round_trips += 1;

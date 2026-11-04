@@ -165,11 +165,9 @@ fn numbers() {
     assert_eq!(dump_src(".5"), "0.5");
     assert_eq!(dump_src("1.5e3"), "1500.0");
     assert_eq!(dump_src("0.5e-1"), "0.05");
-    assert_eq!(dump_src("-1"), "-1");
-    assert_eq!(dump_src("- 1"), "-1");
-    assert_eq!(dump_src("- - 1"), "1");
-    assert_eq!(dump_src("-1.5"), "-1.5");
-    assert_eq!(dump_src("-0.0"), "0.0");
+    // `-1` is `__sub 0 1` (parser.y), which a `let` can rebind
+    assert_eq!(dump_src("-1"), "(neg 1)");
+    assert_eq!(dump_src("- - 1"), "(neg (neg 1))");
     assert_eq!(dump_src("-x"), "(neg x)");
     assert_eq!(dump_src("x.5"), "(apply x 0.5)");
     assert_eq!(dump_src("1e3"), "(apply 1 e3)");

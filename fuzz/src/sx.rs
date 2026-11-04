@@ -166,8 +166,8 @@ fn write_sx(out: &mut String, sx: &Sx) {
 
 /// Rewrites that remove what the two trees may differ in without the
 /// programs differing: the order Nix keeps bindings and formals in, where
-/// the lexers split a string into tokens, and iets folding `-1` into a
-/// literal where Nix keeps `__sub 0 1`.
+/// the lexers split a string into tokens, and `__sub 0 N`, which SPEC.md
+/// shows as the literal `-N`.
 pub fn normalise(sx: Sx) -> Sx {
     let Sx::List(v) = sx else { return sx };
     let mut v: Vec<Sx> = v.into_iter().map(normalise).collect();

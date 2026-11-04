@@ -63,6 +63,16 @@ fn intersect_attrs_matches_a_filter(#[case] l: &str, #[case] r: &str) {
 #[case::inherit("(x: { inherit x; }) 1", "{ x = 1; }")]
 #[case::interpolation(r#"(x: "${x}") "s""#, r#""s""#)]
 #[case::find_file(r#"(__findFile: <p>) (_: _: "found")"#, r#""found""#)]
+#[case::neg_literals("[ (-1) (- - 1) (-1.5) (-0.0) ]", "[ -1 1 -1.5 0 ]")]
+#[case::sub(r#"(__sub: [ (-1) (3 - 2) ]) (a: b: [ a b ])"#, "[ [ 0 1 ] [ 3 2 ] ]")]
+#[case::mul_div(
+    r#"(f: let __mul = f; __div = f; in [ (2 * 3) (6 / 2) ]) (a: b: a)"#,
+    "[ 2 6 ]"
+)]
+#[case::less_than(
+    r#"(__lessThan: [ (1 < 2) (1 > 2) (1 <= 2) (1 >= 2) ]) (a: b: a == 1)"#,
+    "[ true false true false ]"
+)]
 #[case::curried_full("(a: b: c: [ a b c ]) 1 2 3", "[ 1 2 3 ]")]
 #[case::curried_partial(
     "let f = a: b: c: [ a b c ]; g = f 1; h = g 2; in [ (h 3) (h 4) (g 5 6) ]",

@@ -167,8 +167,8 @@ your account. A project file is not. It arrives with whatever repository
 you cloned, and running `iets` in a clone must never run its author's code
 or send your data to its author. So a project file may hold one thing, the
 `[lint]` table, which only selects diagnostics. Any other key is an
-**error** that names the key and the two files where you may set it. It is
-not a warning, because a repository that tries to set `nix-bin-dir` is
+**error** that names the key and, for a setting, your user file, where you
+may set it. It is not a warning, because a repository that tries to set `nix-bin-dir` is
 worth stopping for.
 
 | Key | What a repository could do with it |
@@ -185,8 +185,8 @@ worth stopping for.
 | `workers`, `fiber-stack-mb` | take every core, or reserve address space until the run fails |
 | `cache`, `provenance` | nothing worse than a slow run or plainer output, and nothing a project needs: the default is no |
 
-A project file that is also one of the two settings files (an evaluation
-started below `~/.config/iets`) is read as the settings file it is.
+A project file that is also your user file (an evaluation started below
+`~/.config/iets`) is read as the user file it is.
 
 ### Keys
 

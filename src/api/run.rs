@@ -111,9 +111,15 @@ impl Run {
     /// is a miss, so the evaluation reports it.
     pub fn hit_plan(&self) -> Option<(Roots, Plan)> {
         self.hit(|c| {
-            let (roots, drvs, sources) = c.read_build()?;
-            let paths: Vec<StorePath> = roots.iter().map(|(p, _)| p.clone()).collect();
-            let plan = build::plan_with(&paths, &drvs, &sources).ok()?;
+            let t = c.read_build()?;
+            let paths: Vec<StorePath> = t.roots.iter().map(|(p, _)| p.clone()).collect();
+            let inputs = build::Inputs {
+                drvs: &t.drvs,
+                sources: &t.sources,
+                fetched: &t.fetched,
+            };
+            let plan = build::plan_with(&paths, inputs).ok()?;
+            let roots = t.roots;
             c.replay_warnings();
             Some((roots, plan))
         })

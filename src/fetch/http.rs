@@ -415,6 +415,107 @@ pub fn get(
     request(url, headers, None, limits, decompress, sink)
 }
 
+/// GETs to one origin over one connection that stays open between them, for
+/// many small bodies such as a binary cache's narinfos, where a new
+/// connection per request costs more than the request. Anything but a 200 on
+/// the kept connection is left to [`get`], which follows redirects, retries
+/// and reads `file:` URLs.
+pub struct Kept {
+    rt: tokio::runtime::Runtime,
+    conn: Option<(String, Sender, Driver)>,
+}
+
+impl Kept {
+    pub fn new() -> Result<Kept> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
+        Ok(Kept { rt, conn: None })
+    }
+
+    /// The body of `url`.
+    pub fn get(&mut self, url: &str, limits: Limits) -> Result<Vec<u8>> {
+        if local_path(url).is_none() && !Session::current().settings().offline {
+            let rt = &self.rt;
+            match rt.block_on(Self::kept(&mut self.conn, url, limits)) {
+                Ok(Some(body)) => return Ok(body),
+                Ok(None) | Err(_) => self.conn = None,
+            }
+        }
+        let mut body = Vec::new();
+        get(url, &[], limits, false, &mut body)?;
+        Ok(body)
+    }
+
+    /// `None` for a status other than 200.
+    async fn kept(
+        conn: &mut Option<(String, Sender, Driver)>,
+        url: &str,
+        limits: Limits,
+    ) -> Result<Option<Vec<u8>>> {
+        let u = Url::parse(url)?;
+        let origin = format!(
+            "{}://{}",
+            if u.https { "https" } else { "http" },
+            u.authority()
+        );
+        if conn
+            .as_ref()
+            .is_none_or(|(o, s, _)| *o != origin || s.is_closed())
+        {
+            if let Some((_, _, d)) = conn.take() {
+                d.abort();
+            }
+            let (s, d) = connect(&u, url, limits).await?;
+            *conn = Some((origin, s, d));
+        }
+        let (_, sender, _) = conn.as_mut().expect("connected above");
+        sender
+            .ready()
+            .await
+            .map_err(|e| bad(url, &format!("request failed: {e}")))?;
+        let mut req = hyper::Request::builder()
+            .uri(&u.target)
+            .header("host", u.authority())
+            .header("user-agent", concat!("iets/", env!("CARGO_PKG_VERSION")));
+        if let Some((name, value)) = u.basic() {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        let req = req
+            .body(http_body_util::Full::new(hyper::body::Bytes::new()))
+            .map_err(|e| bad(url, &format!("bad request: {e}")))?;
+        let mut res = sender
+            .send_request(req)
+            .await
+            .map_err(|e| bad(url, &format!("request failed: {e}")))?;
+        if res.status().as_u16() != 200 {
+            return Ok(None);
+        }
+        let mut body = Vec::new();
+        while let Some(frame) = res.frame().await {
+            let frame =
+                frame.map_err(|e| bad(url, &format!("reading the response failed: {e}")))?;
+            if let Ok(data) = frame.into_data() {
+                body.extend_from_slice(&data);
+                if body.len() as u64 > limits.max_size {
+                    let why = format!("over the fetch-max-size of {} bytes", limits.max_size);
+                    return Err(bad(url, &why));
+                }
+            }
+        }
+        Ok(Some(body))
+    }
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        if let Some((_, _, d)) = self.conn.take() {
+            d.abort();
+        }
+    }
+}
+
 /// [`get`] with a POST of `body`, for an API such as Git LFS's batch API.
 pub fn post(
     url: &str,
@@ -659,16 +760,10 @@ fn transient(status: u16) -> Option<u64> {
     }
 }
 
-type Started = (
-    u16,
-    Option<String>,
-    hyper::body::Incoming,
-    tokio::task::JoinHandle<result::Result<(), hyper::Error>>,
-);
+type Started = (u16, Option<String>, hyper::body::Incoming, Driver);
 
 /// One request: the status, the `Location` header, the body not yet read, and
-/// the connection task that must live as long as the body. `connect-timeout`
-/// covers TCP and TLS, as `CURLOPT_CONNECTTIMEOUT` does; the wait for the
+/// the connection task that must live as long as the body. The wait for the
 /// status line counts as a stall.
 async fn once(
     url: &str,
@@ -677,34 +772,7 @@ async fn once(
     limits: Limits,
 ) -> Result<Started> {
     let u = Url::parse(url)?;
-    let timed_out = || bad(url, "the connection timed out (connect-timeout)");
-    let io = within(limits.connect, timed_out, async {
-        let stream = tokio::net::TcpStream::connect((u.host.as_str(), u.port))
-            .await
-            .map_err(|e| Error::io(format!("cannot connect to '{}'", u.authority()), e))?;
-        let stream = Watched {
-            tcp: stream,
-            limit: limits.stall,
-            wait: None,
-        };
-        if !u.https {
-            return Ok(Box::new(stream) as Box<dyn Stream>);
-        }
-        let name = rustls::pki_types::ServerName::try_from(u.host.clone())
-            .map_err(|_| bad(url, "the host is not a valid TLS name"))?;
-        let tls = tokio_rustls::TlsConnector::from(tls()?);
-        let tls = tls
-            .connect(name, stream)
-            .await
-            .map_err(|e| Error::io(format!("TLS handshake with '{}'", u.host), e))?;
-        Ok(Box::new(tls) as Box<dyn Stream>)
-    })
-    .await?;
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(io))
-            .await
-            .map_err(|e| bad(url, &format!("HTTP handshake failed: {e}")))?;
-    let driver = tokio::spawn(conn);
+    let (mut sender, driver) = connect(&u, url, limits).await?;
 
     let mut req = hyper::Request::builder()
         .method(if body.is_some() { "POST" } else { "GET" })
@@ -733,6 +801,41 @@ async fn once(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     Ok((status, location, res.into_body(), driver))
+}
+
+type Sender = hyper::client::conn::http1::SendRequest<http_body_util::Full<hyper::body::Bytes>>;
+type Driver = tokio::task::JoinHandle<result::Result<(), hyper::Error>>;
+
+/// A connection to `u`'s origin and the task that drives it. `connect-timeout`
+/// covers TCP and TLS, as `CURLOPT_CONNECTTIMEOUT` does.
+async fn connect(u: &Url, url: &str, limits: Limits) -> Result<(Sender, Driver)> {
+    let timed_out = || bad(url, "the connection timed out (connect-timeout)");
+    let io = within(limits.connect, timed_out, async {
+        let stream = tokio::net::TcpStream::connect((u.host.as_str(), u.port))
+            .await
+            .map_err(|e| Error::io(format!("cannot connect to '{}'", u.authority()), e))?;
+        let stream = Watched {
+            tcp: stream,
+            limit: limits.stall,
+            wait: None,
+        };
+        if !u.https {
+            return Ok(Box::new(stream) as Box<dyn Stream>);
+        }
+        let name = rustls::pki_types::ServerName::try_from(u.host.clone())
+            .map_err(|_| bad(url, "the host is not a valid TLS name"))?;
+        let tls = tokio_rustls::TlsConnector::from(tls()?);
+        let tls = tls
+            .connect(name, stream)
+            .await
+            .map_err(|e| Error::io(format!("TLS handshake with '{}'", u.host), e))?;
+        Ok(Box::new(tls) as Box<dyn Stream>)
+    })
+    .await?;
+    let (sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(io))
+        .await
+        .map_err(|e| bad(url, &format!("HTTP handshake failed: {e}")))?;
+    Ok((sender, tokio::spawn(conn)))
 }
 
 trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}

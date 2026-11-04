@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -13,12 +13,21 @@ use crate::eval::Evaluator;
 use crate::ignored;
 use crate::log;
 use crate::session::Session;
+use crate::store::narinfo::Fetched;
 use crate::store::path::StorePath;
 use crate::store::source::SourceOrigin;
 use crate::syntax::symbol::FxHashMap;
 use crate::trace::key::Key;
 use crate::trace::store::{self, Entry, Opened, Part};
 use crate::trace::{validate, wire};
+
+/// What a `build` entry holds besides its read set.
+pub struct BuildTables {
+    pub roots: Vec<(StorePath, Option<String>)>,
+    pub drvs: FxHashMap<StorePath, DrvInfo>,
+    pub sources: HashMap<StorePath, SourceOrigin>,
+    pub fetched: HashMap<StorePath, Arc<Fetched>>,
+}
 
 /// The tracing cache for one run: where the entry lives and its key. See docs/explanation/caching.md.
 pub struct Cache {
@@ -180,6 +189,8 @@ impl Cache {
         } else {
             (Vec::new(), Vec::new())
         };
+        let fetched = ev.known.all_fetched();
+        let fetched = (tables && !fetched.is_empty()).then(|| wire::encode_fetched(&fetched));
         let mut parts: Vec<(Part, &[u8])> = Vec::with_capacity(5);
         if !warnings.is_empty() {
             parts.push((Part::Warnings, &warnings));
@@ -190,6 +201,9 @@ impl Cache {
         if tables {
             parts.push((Part::Drvs, &drvs));
             parts.push((Part::Sources, &sources));
+        }
+        if let Some(f) = &fetched {
+            parts.push((Part::Fetched, f));
         }
         parts.push((Part::Result, result));
         parts.push((Part::Readset, &readset));
@@ -237,20 +251,23 @@ impl Cache {
         }
     }
 
-    /// The roots, drv table and source table of a `build` entry.
-    #[allow(clippy::type_complexity)]
-    pub fn read_build(
-        &self,
-    ) -> Option<(
-        Vec<(StorePath, Option<String>)>,
-        FxHashMap<StorePath, DrvInfo>,
-        HashMap<StorePath, SourceOrigin>,
-    )> {
+    /// The roots, drv table, source table and fetched closures of a `build`
+    /// entry.
+    pub fn read_build(&self) -> Option<BuildTables> {
         let tables = (|| {
             let roots = wire::decode_roots(&self.part(Part::Result)?)?;
             let drvs = wire::decode_drvs(&self.part(Part::Drvs)?)?;
             let sources = wire::decode_sources(&self.part(Part::Sources)?)?;
-            Some((roots, drvs, sources))
+            let fetched = match self.part(Part::Fetched) {
+                Some(b) => wire::decode_fetched(&b)?,
+                None => HashMap::new(),
+            };
+            Some(BuildTables {
+                roots,
+                drvs,
+                sources,
+                fetched,
+            })
         })();
         if tables.is_none() {
             self.store.discard(&self.key, self.opened());

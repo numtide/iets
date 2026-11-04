@@ -2,8 +2,8 @@
 //! pathExists, toPath, storePath, filterSource, path, toFile. The network
 //! fetchers and flake primops are registered, so `builtins ? fetchMercurial`
 //! holds, but a call fails. Only these work: `fetchurl`, `fetchTree` on a
-//! locked input, `fetchTarball` with a `sha256`, `fetchGit`, `getFlake`,
-//! `parseFlakeRef` and `flakeRefToString` (`flake`).
+//! locked input, `fetchTarball` with a `sha256`, `fetchGit`, `fetchClosure`,
+//! `getFlake`, `parseFlakeRef` and `flakeRefToString` (`flake`).
 
 use crate::sys::errno;
 use crate::sys::{self, OsStrExt};
@@ -16,7 +16,7 @@ use std::{fs, io};
 
 use super::Registry;
 use super::store_hooks::{self, At, Follow};
-use super::{fetch, fetch_git};
+use super::{fetch, fetch_closure, fetch_git};
 use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::flake::{self, flakeref};
@@ -50,7 +50,7 @@ pub fn register(r: &mut Registry) {
     r.op("fetchGit", 1, fetch_git::fetch_git);
     r.op("fetchTree", 1, fetch::fetch_tree);
     r.op("fetchMercurial", 1, fetch_mercurial);
-    r.op("__fetchClosure", 1, fetch_closure);
+    r.op("__fetchClosure", 1, fetch_closure::fetch_closure);
     r.op("__getFlake", 1, flake::get_flake);
     r.op("__parseFlakeRef", 1, flakeref::parse_flake_ref);
     r.op("__flakeRefToString", 1, flakeref::flake_ref_to_string);
@@ -84,10 +84,6 @@ unsupported!(
     fetch_mercurial,
     "builtins.fetchMercurial is not supported",
     hint: "run it as nix-instantiate, nix-build or nix-shell, which fall back to Nix"
-);
-unsupported!(
-    fetch_closure,
-    "iets: network fetchers are not supported (builtins.fetchClosure)"
 );
 
 fn lossy(b: &[u8]) -> Cow<'_, str> {
@@ -468,7 +464,7 @@ fn is_store_path(p: &[u8]) -> bool {
 }
 
 /// Split `/nix/store/<base>/rest` into the store path and the rest.
-fn to_store_path(p: &[u8]) -> Option<(Result<StorePath, ()>, &[u8])> {
+pub(super) fn to_store_path(p: &[u8]) -> Option<(Result<StorePath, ()>, &[u8])> {
     let rest = strip_store_dir(p)?;
     let end = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
     let base = from_utf8(&rest[..end]).ok()?;
@@ -528,7 +524,7 @@ fn base_name(p: &[u8]) -> &[u8] {
 }
 
 /// A store path as a string whose context is that path.
-fn store_path_string(ev: &mut Evaluator, sp: &StorePath) -> Word {
+pub(super) fn store_path_string(ev: &mut Evaluator, sp: &StorePath) -> Word {
     let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
     let ctx = ev.arena.alloc_slice(&[Ctx::Opaque(full)]);
     ev.arena.mk_string_static(full, ctx)

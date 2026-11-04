@@ -620,6 +620,20 @@ impl Config {
             .collect()
     }
 
+    /// `trusted-public-keys`, with Nix's default when no file set it and an
+    /// `extra-` setting adds to the default.
+    pub fn trusted_public_keys(&self) -> Vec<String> {
+        const NAME: &str = "trusted-public-keys";
+        let mut keys = self.list(NAME);
+        if !self.settings.contains_key(NAME) || self.extra_only.contains(NAME) {
+            keys.insert(
+                0,
+                "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=".into(),
+            );
+        }
+        keys
+    }
+
     /// The `nix-path` entries, and whether they replace `NIX_PATH`: a file
     /// never sets them beside it, so `--option nix-path` did, and that wins
     /// in Nix; `--option extra-nix-path` adds to it.
@@ -838,6 +852,16 @@ mod tests {
         for name in NARROW.split_ascii_whitespace() {
             assert!(in_list(INTS, name) || name == "max-jobs", "{name}");
         }
+    }
+
+    #[test]
+    fn trusted_public_keys_start_from_the_default() {
+        let default = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
+        assert_eq!(from_str("", "t").unwrap().trusted_public_keys(), [default]);
+        let extra = from_str("extra-trusted-public-keys = k:1\n", "t").unwrap();
+        assert_eq!(extra.trusted_public_keys(), [default, "k:1"]);
+        let set = from_str("trusted-public-keys = k:1\n", "t").unwrap();
+        assert_eq!(set.trusted_public_keys(), ["k:1"]);
     }
 
     #[test]

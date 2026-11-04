@@ -1,11 +1,14 @@
 //! Framing of the Nix worker protocol (libutil/serialise.hh): every integer is a u64 in
 //! little-endian; a string is its length, its bytes, and zero padding to a multiple of 8.
 
+use std::fs::File;
 use std::io::{self, Read, Write};
 
+use crate::fetch::http::decompress_reader;
 use crate::remote::plan::{DrvHashes, Object};
 use crate::store::hash::{Hash, HashAlgo, base64_decode, base64_encode, hash_bytes};
 use crate::store::nar::{dump_string, flat_hash};
+use crate::store::narinfo::Fetched;
 use crate::store::path::{StorePath, check_name};
 use crate::store::source::{SourceKind, Src};
 
@@ -350,11 +353,15 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
             };
             write_info(
                 w,
-                &path.to_string(),
-                &nar_hash.to_base16(),
-                &references,
-                *nar_size,
-                &ca,
+                Info {
+                    path: &path.to_string(),
+                    deriver: "",
+                    nar_hash_base16: &nar_hash.to_base16(),
+                    references: &references,
+                    nar_size: *nar_size,
+                    sigs: &[],
+                    ca: &ca,
+                },
             )?;
             // The framed body declares `nar_size` before the bytes, so a tree that changed
             // after evaluation must fail here rather than desynchronise the stream.
@@ -378,34 +385,91 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
             let references: Vec<String> = references.iter().map(|r| r.to_string()).collect();
             write_info(
                 w,
-                &path.to_string(),
-                &h.nar_hash.to_base16(),
-                &references,
-                h.nar_size,
-                &format!("text:sha256:{}", h.text.to_nix32()),
+                Info {
+                    path: &path.to_string(),
+                    deriver: "",
+                    nar_hash_base16: &h.nar_hash.to_base16(),
+                    references: &references,
+                    nar_size: h.nar_size,
+                    sigs: &[],
+                    ca: &format!("text:sha256:{}", h.text.to_nix32()),
+                },
             )?;
             dump_string(aterm, w)
+        }
+        Object::Closure { fetched, nar } => {
+            let file = File::open(&**nar)?;
+            let mut nar = decompress_reader(Box::new(file), u64::MAX).map_err(io::Error::other)?;
+            write_fetched(w, fetched, &mut nar, &mut || Ok(()))
         }
     }
 }
 
-fn write_info(
+/// A fetched path as `AddMultipleToStore` takes it, its NAR read from `nar`.
+/// `before_end` runs before the NAR's last byte, which makes the store
+/// register the path.
+pub fn write_fetched(
     w: &mut dyn Write,
-    path: &str,
-    nar_hash_base16: &str,
-    references: &[String],
-    nar_size: u64,
-    ca: &str,
+    fetched: &Fetched,
+    nar: &mut dyn Read,
+    before_end: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
-    write_str(w, path.as_bytes())?;
-    write_str(w, b"")?;
-    write_str(w, nar_hash_base16.as_bytes())?;
-    write_strs(w, references)?;
+    let i = &fetched.info;
+    let references: Vec<String> = i.all_references().iter().map(|r| r.to_string()).collect();
+    let deriver = i
+        .deriver
+        .as_ref()
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+    write_info(
+        w,
+        Info {
+            path: &i.path.to_string(),
+            deriver: &deriver,
+            nar_hash_base16: &i.nar_hash.to_base16(),
+            references: &references,
+            nar_size: i.nar_size,
+            sigs: &i.sigs,
+            ca: i.ca.as_deref().unwrap_or(""),
+        },
+    )?;
+    // the framed body declares `nar_size` before the bytes
+    let mut counted = Counting { inner: w, bytes: 0 };
+    let head = i.nar_size.saturating_sub(1);
+    io::copy(&mut Read::take(&mut *nar, head), &mut counted)?;
+    counted.flush()?;
+    before_end()?;
+    io::copy(&mut nar.take(i.nar_size + 1 - counted.bytes), &mut counted)?;
+    if counted.bytes != i.nar_size {
+        return Err(io::Error::other(format!(
+            "the NAR of '{}' from '{}' is not {} bytes",
+            i.path, fetched.store, i.nar_size
+        )));
+    }
+    Ok(())
+}
+
+/// A `ValidPathInfo` with its path first. `deriver` may be empty.
+struct Info<'a> {
+    path: &'a str,
+    deriver: &'a str,
+    nar_hash_base16: &'a str,
+    references: &'a [String],
+    nar_size: u64,
+    sigs: &'a [String],
+    ca: &'a str,
+}
+
+fn write_info(w: &mut dyn Write, i: Info<'_>) -> io::Result<()> {
+    write_str(w, i.path.as_bytes())?;
+    write_str(w, i.deriver.as_bytes())?;
+    write_str(w, i.nar_hash_base16.as_bytes())?;
+    write_strs(w, i.references)?;
     write_u64(w, 0)?;
-    write_u64(w, nar_size)?;
+    write_u64(w, i.nar_size)?;
     write_u64(w, 0)?;
-    write_strs::<&str>(w, &[])?;
-    write_str(w, ca.as_bytes())
+    write_strs(w, i.sigs)?;
+    write_str(w, i.ca.as_bytes())
 }
 
 #[cfg(test)]

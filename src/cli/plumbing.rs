@@ -365,7 +365,12 @@ fn plan_of(r: &Roots) -> error::Result<Plan> {
         Some(d) => apibuild::drvs_in_dir(d)?,
         None => HashMap::default(),
     };
-    apibuild::plan_with(&paths_of(&r.targets), &drvs, &HashMap::new())
+    let inputs = apibuild::Inputs {
+        drvs: &drvs,
+        sources: &HashMap::new(),
+        fetched: &HashMap::new(),
+    };
+    apibuild::plan_with(&paths_of(&r.targets), inputs)
 }
 
 /// `--roots -`, `--drvs DIR` plus the flags `f` accepts; what is left are the

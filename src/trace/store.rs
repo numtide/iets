@@ -39,6 +39,8 @@ pub enum Part {
     /// Empty, and there when the run's top-level flake had a `nixConfig`:
     /// a hit gives the warnings that wait for one (`ignored`).
     NixConfig,
+    /// The paths `builtins.fetchClosure` checked, there when it ran.
+    Fetched,
 }
 
 impl Part {
@@ -50,6 +52,7 @@ impl Part {
             Part::Sources => 3,
             Part::Warnings => 4,
             Part::NixConfig => 5,
+            Part::Fetched => 6,
         }
     }
 }

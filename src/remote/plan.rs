@@ -7,12 +7,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs, io, thread};
 
+use tempfile::TempPath;
+
 use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
 use crate::session;
 use crate::store::drv::Derivation;
 use crate::store::hash::{self, Hash, HashAlgo, Hasher};
 use crate::store::nar::dump_string;
+use crate::store::narinfo::Fetched;
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path, store_dir};
 use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
 use crate::syntax::symbol::FxHashMap;
@@ -36,6 +39,12 @@ pub enum Object {
         aterm: Arc<Vec<u8>>,
         references: BTreeSet<StorePath>,
         hashes: OnceLock<DrvHashes>,
+    },
+    /// A path `builtins.fetchClosure` checked, with its NAR as the cache
+    /// served it, compressed (`remote::closure`).
+    Closure {
+        fetched: Arc<Fetched>,
+        nar: Arc<TempPath>,
     },
 }
 
@@ -128,6 +137,7 @@ impl Object {
     pub fn store_path(&self) -> &StorePath {
         match self {
             Object::Source { path, .. } | Object::Drv { path, .. } => path,
+            Object::Closure { fetched, .. } => &fetched.info.path,
         }
     }
 }
@@ -144,6 +154,8 @@ pub struct Plan {
     pub drvs: Vec<Object>,
     /// Input drvs that were not created by this evaluation and were read from `/nix/store`.
     pub store_drvs: usize,
+    /// Every path `builtins.fetchClosure` checked.
+    pub fetched: HashMap<StorePath, Arc<Fetched>>,
 }
 
 /// The missing sources after `Plan::resolve`: what the client uploads and what it leaves to
@@ -254,7 +266,7 @@ impl Plan {
                         .filter_map(|r| planned.get(r).copied())
                         .collect(),
                 )),
-                Object::Source { .. } => None,
+                Object::Source { .. } | Object::Closure { .. } => None,
             })
             .collect();
         let roots = roots.iter().filter_map(|r| planned.get(r).copied());
@@ -353,6 +365,7 @@ pub type Locator<'a> = dyn Fn(&[StorePath]) -> Result<Vec<Option<SourceOrigin>>>
 pub struct Inputs<'a> {
     pub drvs: &'a FxHashMap<StorePath, DrvInfo>,
     pub sources: &'a HashMap<StorePath, SourceOrigin>,
+    pub fetched: &'a HashMap<StorePath, Arc<Fetched>>,
 }
 
 /// The NAR hash and size of a source, one pass over the bytes.
@@ -468,6 +481,7 @@ pub fn plan(roots: &[StorePath], inputs: Inputs<'_>) -> Result<Plan> {
             .map(|(p, aterm, refs)| Object::drv(p, aterm, refs))
             .collect(),
         store_drvs,
+        fetched: inputs.fetched.clone(),
     })
 }
 
@@ -555,6 +569,7 @@ mod tests {
             origins: HashMap::new(),
             drvs: vec![b, a, root],
             store_drvs: 0,
+            fetched: HashMap::new(),
         }
     }
 

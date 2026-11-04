@@ -9,6 +9,7 @@ use std::sync::Arc;
 use super::{Digest32, Filtered, Kind, Obs, Query};
 use crate::builtins::derivation::DrvInfo;
 use crate::store::hash::{Hash, HashAlgo};
+use crate::store::narinfo::{Fetched, NarInfo};
 use crate::store::path::StorePath;
 use crate::store::source::{Accepted, SourceKind, SourceOrigin, Src, SrcPath};
 use crate::syntax::symbol::FxHashMap;
@@ -417,6 +418,32 @@ pub fn decode_drvs(b: &[u8]) -> Option<FxHashMap<StorePath, DrvInfo>> {
                 attr,
             },
         );
+    }
+    d.done().then_some(m)
+}
+
+/// Each path `builtins.fetchClosure` checked, as its cache and narinfo text.
+pub fn encode_fetched(fetched: &HashMap<StorePath, Arc<Fetched>>) -> Vec<u8> {
+    let mut e = Enc::new();
+    let mut items: Vec<&Arc<Fetched>> = fetched.values().collect();
+    items.sort_by(|a, b| a.info.path.cmp(&b.info.path));
+    e.u64(items.len() as u64);
+    for f in items {
+        e.bytes(f.store.as_bytes());
+        e.bytes(f.info.to_text().as_bytes());
+    }
+    e.0
+}
+
+pub fn decode_fetched(b: &[u8]) -> Option<HashMap<StorePath, Arc<Fetched>>> {
+    let mut d = Dec::new(b).ok()?;
+    let n = d.u64().ok()? as usize;
+    let mut m = HashMap::with_capacity(n.min(1 << 20));
+    for _ in 0..n {
+        let store = String::from_utf8(d.vec().ok()?).ok()?;
+        let text = String::from_utf8(d.vec().ok()?).ok()?;
+        let info = NarInfo::parse(&text, &store).ok()?;
+        m.insert(info.path.clone(), Arc::new(Fetched { store, info }));
     }
     d.done().then_some(m)
 }

@@ -496,6 +496,7 @@ dependencies = [
  "mimalloc",
  "prost",
  "protox",
+ "ring",
  "rstest",
  "rustix",
  "rustls",

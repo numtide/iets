@@ -41,6 +41,7 @@ use crate::runtime::{
 use crate::session::Session;
 use crate::source::LazyStore;
 use crate::store::locate;
+use crate::store::narinfo::Fetched;
 use crate::store::path::{StorePath, store_dir, strip_store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
@@ -391,6 +392,8 @@ pub struct Known {
     /// file system reads below its directory through this copy
     /// (`builtins::store_hooks::local_source`).
     pub root: bool,
+    /// From `builtins.fetchClosure`: a build sends it to a store that lacks it.
+    pub fetched: Option<Arc<Fetched>>,
 }
 
 impl SharedMap<StorePath, Known> {
@@ -406,6 +409,20 @@ impl SharedMap<StorePath, Known> {
     /// pure evaluation may read it (primops.cc:realiseContext's `allowPath`).
     pub fn add_on_disk(&self, p: StorePath) {
         self.lock().entry(p).or_default();
+    }
+
+    pub fn add_fetched(&self, p: StorePath, f: Arc<Fetched>) {
+        self.lock().entry(p).or_default().fetched = Some(f);
+    }
+
+    pub fn all_fetched(&self) -> HashMap<StorePath, Arc<Fetched>> {
+        (self.lock().iter())
+            .filter_map(|(p, k)| Some((p.clone(), k.fetched.clone()?)))
+            .collect()
+    }
+
+    pub fn fetched(&self, p: &StorePath) -> Option<Arc<Fetched>> {
+        self.lock().get(p)?.fetched.clone()
     }
 
     pub fn add_copy(&self, p: StorePath, o: SourceOrigin) {

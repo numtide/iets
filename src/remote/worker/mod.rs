@@ -96,6 +96,11 @@ pub const LATEST_MINOR: u64 = 38;
 /// Below this the handshake and `BuildPathsWithResults` differ; not worth supporting.
 pub const MIN_MINOR: u64 = 35;
 
+/// The `AddTempRoot` ops sent before their replies are read. The replies of a
+/// chunk (16 bytes each) fit in the socket buffer, so the daemon never blocks on
+/// a write while this side still writes.
+const TEMP_ROOT_CHUNK: usize = 512;
+
 /// worker-protocol.hh:WorkerProto::Op, the subset used here.
 #[derive(Clone, Copy)]
 #[repr(u64)]
@@ -103,6 +108,7 @@ enum Op {
     SetOptions = 19,
     QueryPathInfo = 26,
     QueryValidPaths = 31,
+    AddTempRoot = 11,
     AddIndirectRoot = 12,
     QuerySubstitutablePathInfos = 30,
     NarFromPath = 38,
@@ -964,12 +970,18 @@ impl Connection {
         self.valid_paths(paths, true, on_event)
     }
 
+    /// The daemon roots each of `paths` before it answers, so a path reported
+    /// valid stays valid until this connection closes. Without the roots, a
+    /// garbage collection between the answer and a later `AddMultipleToStore`
+    /// of a path that refers to it fails that upload with "path ... is not
+    /// valid".
     fn valid_paths(
         &mut self,
         paths: &[String],
         substitute: bool,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<Vec<String>> {
+        self.add_temp_roots(paths, on_event)?;
         self.op(Op::QueryValidPaths)?;
         write_strs(self.w(), paths)?;
         write_u64(self.w(), u64::from(substitute))?;
@@ -1135,6 +1147,32 @@ impl Connection {
             map.insert(name, Some(path));
         }
         Ok(map)
+    }
+
+    /// `AddTempRoot` for each of `paths` (remote-store.cc:addTempRoot): the daemon
+    /// keeps each path from the garbage collector until this connection closes
+    /// (gc.cc:LocalStore::addTempRoot). A path need not be valid to be rooted.
+    /// The ops of a chunk go out in one write, and their replies are read after
+    /// it, so a chunk costs one round trip.
+    pub fn add_temp_roots(
+        &mut self,
+        paths: &[String],
+        on_event: &mut dyn FnMut(Event),
+    ) -> Result<()> {
+        for chunk in paths.chunks(TEMP_ROOT_CHUNK) {
+            for path in chunk {
+                self.stats.ops += 1;
+                write_u64(self.w(), Op::AddTempRoot as u64)?;
+                write_str(self.w(), path.as_bytes())?;
+            }
+            self.stats.round_trips += 1;
+            for _ in chunk {
+                self.process_stderr(on_event)?;
+                // remote-store.cc:addTempRoot: readInt
+                wire::read_num(self.r(), u32::MAX.into()).map_err(conn)?;
+            }
+        }
+        Ok(())
     }
 
     /// `AddIndirectRoot` (uds-remote-store.cc:addIndirectRoot): registers `path`, an

@@ -351,3 +351,70 @@ fn a_path_on_stdout_or_a_failure() {
     let wrong = run(&["--out", "bogus", &case]);
     assert!(!wrong.status.success() && stdout(&wrong).is_empty());
 }
+
+/// A path that `QueryValidPaths` reports valid stays valid until the
+/// connection closes: the garbage collector cannot delete it between the
+/// answer and an upload that refers to it.
+#[test]
+fn a_path_reported_valid_is_rooted_until_the_connection_closes() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let s = store!();
+    let f = s.write("gc/a", "a\n");
+    let p = s.nix_store(&["--add", f.to_str().unwrap()]);
+    let p = p.trim();
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["temp_roots_child", "--exact", "--nocapture"])
+        .env("NIX_STORE_DIR", s.store_dir())
+        .env("IETS_TEMP_ROOT_SOCKET", s.socket())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // on stdin: the collector takes a store path in the environment of a
+    // process as a root (gc.cc:findRuntimeRoots)
+    writeln!(child.stdin.as_mut().unwrap(), "{p}").unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    while !line.starts_with("valid: ") {
+        line.clear();
+        assert_ne!(out.read_line(&mut line).unwrap(), 0, "the child exited");
+    }
+    assert_eq!(line.trim(), format!("valid: {p}"));
+
+    let o = s.nix("nix-store").args(["--delete", p]).output().unwrap();
+    assert!(!o.status.success(), "deleted while rooted");
+    assert!(stderr(&o).contains("still alive"), "{}", stderr(&o));
+
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    s.nix_store(&["--delete", p]);
+}
+
+/// The child of `a_path_reported_valid_is_rooted_until_the_connection_closes`:
+/// the client reads the store dir from `NIX_STORE_DIR` once, so this runs in a
+/// process of its own. It reads the path from the first line of its stdin, and
+/// keeps the connection open until its stdin closes.
+#[test]
+fn temp_roots_child() {
+    use iets::remote::worker::{Connection, Transport};
+    use std::io::{BufRead, Read};
+
+    let Some(socket) = std::env::var_os("IETS_TEMP_ROOT_SOCKET") else {
+        return;
+    };
+    let mut stdin = std::io::stdin().lock();
+    let mut path = String::new();
+    stdin.read_line(&mut path).unwrap();
+    let path = path.trim().to_string();
+    let gone = format!(
+        "{}/00000000000000000000000000000000-gone",
+        std::env::var("NIX_STORE_DIR").unwrap()
+    );
+    let mut conn = Connection::open(&Transport::Unix(socket.into()), &mut |_| {}).unwrap();
+    let valid = conn.query_valid_paths(&[path, gone], &mut |_| {}).unwrap();
+    println!("valid: {}", valid.join(" "));
+    stdin.read_to_end(&mut Vec::new()).unwrap();
+}

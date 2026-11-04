@@ -6,10 +6,9 @@
 //! anything (`iets build`, `nix-build`, `nix build`). `StreamUpload` is
 //! incremental, for the eval-jobs walk that hands over jobs while it runs:
 //! per batch it walks only the part of the closure it has not registered
-//! yet, one `QueryValidPaths` and one `AddMultipleToStore`. The walk
-//! duplicates `remote::plan::plan` on purpose: `plan` has no way to prune
-//! at a drv already known valid, and re-planning a whole closure per batch
-//! is quadratic on a big `checks` set.
+//! yet, one `QueryValidPaths` and one `AddMultipleToStore`. The walk is
+//! `remote::plan::walk`, stopped at the paths already known valid:
+//! re-planning a whole closure per batch is quadratic on a big `checks` set.
 //!
 //! Neither shape knows the transport: both speak `build::backend::Backend`,
 //! so the same upload runs over the worker protocol and over `grpc://`.

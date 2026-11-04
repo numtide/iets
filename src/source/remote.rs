@@ -2,8 +2,7 @@
 //! from the user-level input store (`crate::treestore`), else substituted by
 //! a daemon if one is reachable, else downloaded into the input store by
 //! iets itself (`github`, `gitlab`, `sourcehut`, `tarball`, and `git` as a
-//! clone), else fetched by running `nix` once (`hg`). Only that last step
-//! needs a daemon.
+//! clone). Any other type is unsupported.
 //!
 //! The `narHash` is known before the fetch, so the tree names itself and the
 //! input store refuses anything that does not hash to it.
@@ -266,8 +265,8 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
 /// user-level input store; a tarball-shaped input in neither is downloaded into
 /// that, and reads come out of the spool by offset (`crate::treestore`). A
 /// reachable daemon is asked to substitute first, since a local copy beats a
-/// download. An `hg` input still goes through Nix's `fetchTree`, which
-/// writes `/nix/store`. Never called for the root tree or a `path` input.
+/// download. A `git` input is cloned, and any other type is unsupported.
+/// Never called for the root tree or a `path` input.
 pub fn ensure_readable(
     ev: &mut Evaluator,
     sp: &StorePath,
@@ -567,8 +566,8 @@ pub fn nix_conf(s: &Session) -> &config::Config {
 }
 
 /// The types whose fetch is "download one archive and unpack it"
-/// (github.cc:GitArchiveInputScheme, tarball.cc:TarballInputScheme). `git` and
-/// `hg` are not here: they need a repository, so they still go through nix.
+/// (github.cc:GitArchiveInputScheme, tarball.cc:TarballInputScheme). `git` is
+/// not here: it needs a repository (`fetch_git_input`).
 /// `file` is not either: its store path is the flat hash of the bytes under the
 /// input's name, which the lock's `narHash` does not give, so iets cannot say
 /// where the file belongs before it has it.

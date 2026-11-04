@@ -6,7 +6,7 @@ use std::time::Duration;
 /// A state change of one attribute's build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    /// The builder started. `phase` is `None` until the build says otherwise.
+    /// The builder started. A `Phase` follows when the build names one.
     Started,
     Phase(String),
     /// One line of build output, already attributed to this build.

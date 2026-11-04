@@ -1,4 +1,4 @@
-//! `iets cache gc`: sweep both cache stores by entry age.
+//! `iets cache gc`: sweep every store of `cachefs::stores` by entry age.
 
 use std::time::Duration;
 

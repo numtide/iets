@@ -1,9 +1,9 @@
-//! On-disk hygiene shared by the two caches, the compiled-IR cache
-//! (`src/compile/cache.rs`) and the tracing run cache (`src/trace/`): a format
-//! version file, a single-writer lock, mtime touches, and TTL sweeps. The
-//! roots store (`roots/`, `docs/explanation/caching.md`) takes the TTL sweep
-//! and nothing else: a symlink has no format to version and no torn state to
-//! wipe.
+//! On-disk hygiene shared by the compiled-IR cache (`src/compile/cache.rs`),
+//! the tracing run cache (`src/trace/`) and the input store
+//! (`crate::treestore`): a format version file, a single-writer lock, mtime
+//! touches, and TTL sweeps. The roots store (`roots/`,
+//! `docs/explanation/caching.md`) takes the TTL sweep and nothing else: a
+//! symlink has no format to version and no torn state to wipe.
 //!
 //! Many `iets` processes share one cache directory (eval-jobs workers,
 //! direnv, the classic command names). The invariant they hold together:
@@ -156,8 +156,8 @@ pub enum Shape {
     /// One file per entry, named by its key past the two-character shard
     /// directory the key's first two characters make (IR cache).
     ShardedFiles,
-    /// One directory per entry, named by a store path's base name (the input
-    /// store, `crate::treestore`).
+    /// One file per entry, named by a store path's base name, and the packs
+    /// in `packs/` (the input store, `crate::treestore`).
     StoreEntries,
     /// One symlink per entry, named by a 64-hex key (the roots store). The
     /// link points into `/nix/store` and is what the daemon's

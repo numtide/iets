@@ -695,14 +695,11 @@ fn cpus() -> u64 {
     thread::available_parallelism().map_or(1, |n| n.get() as u64)
 }
 
-/// One `name = value` line, with the file and line it came from so a reader
-/// that rejects unknown names can say where the name is.
+/// One `name = value` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
     pub value: String,
-    pub file: PathBuf,
-    pub line: usize,
 }
 
 /// configuration.cc:parseConfigFiles. Returns the entries in file order,
@@ -722,7 +719,7 @@ fn parse_into(text: &str, origin: &Path, out: &mut Vec<Entry>, depth: usize) -> 
             origin.display()
         )));
     }
-    for (nr, raw) in text.split('\n').enumerate() {
+    for raw in text.split('\n') {
         let line = match raw.find('#') {
             Some(i) => &raw[..i],
             None => raw,
@@ -774,8 +771,6 @@ fn parse_into(text: &str, origin: &Path, out: &mut Vec<Entry>, depth: usize) -> 
         out.push(Entry {
             name: tokens[0].to_string(),
             value: tokens[2..].join(" "),
-            file: origin.to_path_buf(),
-            line: nr + 1,
         });
     }
     Ok(())

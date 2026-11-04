@@ -23,7 +23,6 @@ pub struct Resolver {
     wanted_valid: BTreeSet<StorePath>,
     wanted: BTreeSet<StorePath>,
     attempt_complete: bool,
-    pub round_trips: usize,
 }
 
 #[derive(Default)]
@@ -63,7 +62,6 @@ impl Resolver {
             wanted_valid: BTreeSet::new(),
             wanted: BTreeSet::new(),
             attempt_complete: true,
-            round_trips: 0,
         }
     }
 
@@ -110,7 +108,6 @@ impl Resolver {
                 .query_valid_paths(&paths, &mut |_| {})?
                 .into_iter()
                 .collect();
-            self.round_trips += 1;
             for p in batch {
                 let is = valid.contains(&p.to_string());
                 self.valid.insert(p, is);
@@ -128,7 +125,6 @@ impl Resolver {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        self.round_trips += 1;
         for p in batch {
             let has = infos.contains(&p.to_string());
             self.probe.insert(p, has);

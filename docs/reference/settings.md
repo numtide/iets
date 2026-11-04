@@ -51,7 +51,6 @@ prints cover every worker.
 | `IETS_PROVENANCE` | `provenance` | Boolean | on | Rewrites store paths and positions back to local trees (`docs/explanation/provenance.md`). |
 | `IETS_NIX_BIN_DIR` | `nix-bin-dir` | path | unset | Where the real Nix binaries live. Unset: the first one on `PATH` that is not iets, where an iets classic mode command stands for the Nix it was built with (`docs/reference/classic.md`, **Fallback rules**). |
 | `IETS_NIX_FALLBACK` | `nix-fallback` | `auto`, `always` or `never` | `auto` | When a classic command runs the real Nix: for what iets does not handle, for every command, or not at all (`docs/reference/classic.md`). `always` from the environment is read before this file, so it works when a setting is broken. |
-| `IETS_FETCHING` | | set = on | off | Set on the Nix subprocess that fetches a flake input, so a recursive fetch is an error. |
 | `IETS_OFFLINE` | | set = on | off | Any download is an error. A flake whose inputs the input store already holds still evaluates. |
 | `IETS_COMPLETE_MS` | | u64 (ms) | 5000 | How long a completion that evaluates (`FLAKEREF#fragment`, `-A`) may take before it gives no candidates. `0` waits. A value that is not a number keeps the default. |
 | `IETS_PROGRESS` | | Boolean | on | The status line on a terminal and the `⏵` lines on a pipe (`docs/reference/commands.md`). Off draws neither, so stderr does not depend on how long a run takes. The log lines and the `internal-json` records stay. |

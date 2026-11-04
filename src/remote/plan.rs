@@ -164,54 +164,62 @@ pub struct Resolved {
 /// before it asks about the closure of what is left in one call.
 const TOP_DOWN_LEVELS: usize = 2;
 
-/// The nodes reachable from `roots` through nodes lacking any of their
-/// `keys`. A store holds the closure of every path it holds, so nothing below
-/// a held node is asked about; a warm store answers in one or two small calls.
-/// `answered`: what the store holds of the roots' keys, if already asked.
+/// A node and the paths it is wanted for.
+pub type Want<N> = (N, Vec<StorePath>);
+
+/// The nodes reachable from `roots` whose wanted paths the store lacks. A
+/// missing node wants what `children` names; a held one answers for its
+/// closure, so a warm store answers in one or two small calls.
+/// `answered`: what the store holds of the roots' paths, if already asked.
 pub fn missing_top_down<N: Copy + Eq + Hashable>(
-    roots: Vec<N>,
-    keys: &dyn Fn(N) -> Result<Vec<StorePath>>,
-    children: &dyn Fn(N) -> Vec<N>,
+    roots: Vec<Want<N>>,
+    children: &dyn Fn(N) -> Result<Vec<Want<N>>>,
     answered: Option<&HashSet<String>>,
     query: &mut dyn FnMut(&[StorePath]) -> Result<HashSet<String>>,
 ) -> Result<HashSet<N>> {
     let mut valid: HashSet<String> = answered.cloned().unwrap_or_default();
-    let mut asked: HashSet<N> = HashSet::new();
+    let mut asked: HashSet<StorePath> = HashSet::new();
     if answered.is_some() {
-        asked.extend(&roots);
+        asked.extend(roots.iter().flat_map(|(_, k)| k.iter().cloned()));
     }
-    let mut seen: HashSet<N> = HashSet::new();
+    let mut wanted: HashMap<N, HashSet<StorePath>> = HashMap::new();
+    let mut walked: HashSet<N> = HashSet::new();
     let mut missing: HashSet<N> = HashSet::new();
     let mut level = roots;
     for depth in 0.. {
-        level.retain(|n| seen.insert(*n));
+        level.retain_mut(|(n, keys)| {
+            let w = wanted.entry(*n).or_default();
+            keys.retain(|k| w.insert(k.clone()));
+            !keys.is_empty() && !missing.contains(n)
+        });
         if level.is_empty() {
             break;
         }
-        let mut ask: Vec<N> = level.iter().copied().filter(|n| asked.insert(*n)).collect();
+        let mut ask: Vec<StorePath> = level
+            .iter()
+            .flat_map(|(_, k)| k)
+            .filter(|k| asked.insert((*k).clone()))
+            .cloned()
+            .collect();
         if depth >= TOP_DOWN_LEVELS {
-            let mut stack = level.clone();
+            let mut stack: Vec<N> = level.iter().map(|(n, _)| *n).collect();
             while let Some(n) = stack.pop() {
-                for c in children(n) {
-                    if asked.insert(c) {
-                        ask.push(c);
-                        stack.push(c);
-                    }
+                if !walked.insert(n) {
+                    continue;
+                }
+                for (c, keys) in children(n)? {
+                    ask.extend(keys.into_iter().filter(|k| asked.insert(k.clone())));
+                    stack.push(c);
                 }
             }
         }
         if !ask.is_empty() {
-            let mut paths = Vec::new();
-            for n in ask {
-                paths.extend(keys(n)?);
-            }
-            valid.extend(query(&paths)?);
+            valid.extend(query(&ask)?);
         }
         let mut next = Vec::new();
-        for n in level {
-            if keys(n)?.iter().any(|k| !valid.contains(k.base_name())) {
-                missing.insert(n);
-                next.extend(children(n));
+        for (n, keys) in level {
+            if keys.iter().any(|k| !valid.contains(k.base_name())) && missing.insert(n) {
+                next.extend(children(n)?);
             }
         }
         level = next;
@@ -222,12 +230,12 @@ pub fn missing_top_down<N: Copy + Eq + Hashable>(
 impl Plan {
     /// The plan's paths in the closure of `roots` that the store lacks
     /// (`missing_top_down`). A valid drv answers for all it references.
-    pub fn query_missing(
-        &self,
+    pub fn query_missing<'a>(
+        &'a self,
         roots: &[StorePath],
         answered: Option<&HashSet<String>>,
         query: &mut dyn FnMut(&[StorePath]) -> Result<HashSet<String>>,
-    ) -> Result<HashSet<&StorePath>> {
+    ) -> Result<HashSet<&'a StorePath>> {
         let planned: HashSet<&StorePath> = self
             .sources
             .iter()
@@ -249,14 +257,18 @@ impl Plan {
                 Object::Source { .. } => None,
             })
             .collect();
-        let roots = roots
-            .iter()
-            .filter_map(|r| planned.get(r).copied())
-            .collect();
+        let roots = roots.iter().filter_map(|r| planned.get(r).copied());
+        let want = |p: &'a StorePath| (p, vec![p.clone()]);
         missing_top_down(
-            roots,
-            &|p| Ok(vec![p.clone()]),
-            &|p| refs.get(p).cloned().unwrap_or_default(),
+            roots.map(want).collect(),
+            &|p| {
+                Ok(refs
+                    .get(p)
+                    .into_iter()
+                    .flatten()
+                    .map(|&r| want(r))
+                    .collect())
+            },
             answered,
             query,
         )

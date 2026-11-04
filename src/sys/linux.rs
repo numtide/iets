@@ -111,6 +111,9 @@ fn unadvise_allocator() {
 /// The pages fault in on first touch: populating the range up front
 /// (`MADV_POPULATE_WRITE`) made the workers take turns in the kernel.
 ///
+/// Past the gate a chunk gets no advice rather than `MADV_NOHUGEPAGE`, so
+/// `enabled=always` still backs it with free huge pages.
+///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.
 pub unsafe fn advise_huge(p: *mut u8, len: usize) {

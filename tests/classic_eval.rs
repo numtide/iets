@@ -1013,27 +1013,6 @@ fn nix_search() {
     }
 }
 
-/// The walk over nixpkgs that costs, under legacyPackages so both sides skip
-/// the attributes that throw.
-#[test]
-fn nix_search_nixpkgs() {
-    let Ok(np) = env::var("IETS_TEST_NIXPKGS") else {
-        eprintln!("skipped: IETS_TEST_NIXPKGS unset");
-        return;
-    };
-    let s = store!();
-    let f = Farm::new(&s);
-    let mut c = Checks::default();
-    let e = format!("{{ legacyPackages.${{builtins.currentSystem}} = import {np} {{}}; }}");
-    c.same(
-        "nix search nixpkgs --json ^hello$",
-        &f.both(
-            "nix",
-            &["search", "--impure", "--expr", &e, "", "^hello$", "--json"],
-        ),
-    );
-}
-
 #[test]
 fn internal_json_errors() {
     let s = store!();

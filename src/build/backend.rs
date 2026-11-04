@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::log::{self, Activity};
+use crate::remote::closure;
 use crate::remote::copy::{self, Copying};
 use crate::remote::event::Event;
 use crate::remote::grpc::backend::Grpc;
@@ -26,6 +27,7 @@ use crate::remote::plan::{self, Object, Plan};
 use crate::remote::worker::wire::{self, write_object};
 use crate::remote::worker::{Connection, Missing, Options, Stats, Transport, default_socket};
 use crate::store::nar;
+use crate::store::narinfo::Fetched;
 use crate::store::path::StorePath;
 
 /// One derivation of a ready set, and the outputs the caller wants.
@@ -121,6 +123,17 @@ pub trait Backend {
 
     /// Registers `objects` on the store; returns the bytes it cost.
     fn add_objects(&mut self, objects: &[&Object], on_event: &mut dyn FnMut(Event)) -> Result<u64>;
+
+    /// Registers the paths `builtins.fetchClosure` found, references first,
+    /// copied from their cache.
+    fn add_fetched(
+        &mut self,
+        missing: &[Arc<Fetched>],
+        on_event: &mut dyn FnMut(Event),
+    ) -> Result<u64> {
+        let objects = closure::objects(missing)?;
+        self.add_objects(&objects.iter().collect::<Vec<_>>(), on_event)
+    }
 
     /// Builds a ready set. Every job gets a verdict, keyed by its derivation
     /// path; a job the store never reached is absent from the map.
@@ -310,6 +323,7 @@ impl Timings {
 pub struct Worker {
     pub conn: Connection,
     transport: Transport,
+    options: Options,
     t: Timings,
 }
 
@@ -327,6 +341,7 @@ impl Worker {
             },
             conn,
             transport: transport.clone(),
+            options: options.clone(),
         })
     }
 }
@@ -389,6 +404,39 @@ impl Backend for Worker {
         let bytes = self.conn.bytes_sent() - before;
         self.t.add += t0.elapsed();
         self.t.add_paths += objects.len();
+        self.t.add_bytes += bytes;
+        Ok(bytes)
+    }
+
+    fn add_fetched(
+        &mut self,
+        missing: &[Arc<Fetched>],
+        _on_event: &mut dyn FnMut(Event),
+    ) -> Result<u64> {
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        let t0 = Instant::now();
+        let (transport, options) = (&self.transport, &self.options);
+        // a fresh daemon process opens its store on the first query
+        let probe = [missing[0].info.path.to_string()];
+        let open = || {
+            let mut c = Connection::open_with(transport, options, &mut |_| {})?;
+            c.query_valid_paths(&probe, &mut |_| {})?;
+            Ok(c)
+        };
+        let bytes = closure::send(missing, &open, &|c: &mut Connection, f, nar, wait| {
+            let before = c.bytes_sent();
+            let mut body = |w: &mut dyn Write| -> io::Result<()> {
+                wire::write_u64(w, 1)?;
+                wire::write_fetched(w, f, nar, wait)
+            };
+            // the daemon checks the signatures against its own trusted keys
+            c.add_multiple_to_store(false, &mut body, &mut |_| {})?;
+            Ok(c.bytes_sent() - before)
+        })?;
+        self.t.add += t0.elapsed();
+        self.t.add_paths += missing.len();
         self.t.add_bytes += bytes;
         Ok(bytes)
     }

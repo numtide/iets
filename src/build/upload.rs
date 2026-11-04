@@ -22,6 +22,7 @@ use crate::builtins::derivation::DrvInfo;
 use crate::error::{Error, Result};
 use crate::eval::Known;
 use crate::parallel::shared::SharedMap;
+use crate::remote::closure;
 use crate::remote::event::Event;
 use crate::remote::plan::{self, Locator, Node, Object, Plan};
 use crate::store::locate;
@@ -107,12 +108,12 @@ impl Uploader for PlanUpload<'_> {
             queried += paths.len();
             b.query_valid(&paths.iter().collect::<Vec<_>>(), on_event)
         })?;
-        let missing_sources: Vec<StorePath> = plan
+        let (fetched, missing_sources): (Vec<StorePath>, Vec<StorePath>) = plan
             .sources
             .iter()
             .filter(|p| missing.contains(p))
             .cloned()
-            .collect();
+            .partition(|p| plan.fetched.contains_key(p));
         let missing_drvs: Vec<&Object> = plan
             .drvs
             .iter()
@@ -129,13 +130,17 @@ impl Uploader for PlanUpload<'_> {
         });
 
         b.substitute(&resolved.substitute, on_event)?;
+        let fetched = closure::missing(&fetched, &|p| plan.fetched.get(p).cloned(), &mut |ps| {
+            b.query_valid(ps, on_event)
+        })?;
+        let mut bytes = b.add_fetched(&fetched, on_event)?;
 
         let missing: Vec<&Object> = resolved.objects.iter().chain(missing_drvs).collect();
-        let bytes = b.add_objects(&missing, on_event)?;
+        bytes += b.add_objects(&missing, on_event)?;
         Ok(Stats {
             batches: 1,
             queried,
-            added: missing.len(),
+            added: fetched.len() + missing.len(),
             bytes,
             substituted: resolved.substitute.len(),
             time: t0.elapsed(),
@@ -232,8 +237,13 @@ impl Uploader for StreamUpload {
         let t1 = Instant::now();
         let mut objects: Vec<Object> = Vec::new();
         let mut substitute: Vec<StorePath> = Vec::new();
+        let mut fetched: Vec<StorePath> = Vec::new();
         for p in &srcs {
             if valid.contains(p.base_name()) {
+                continue;
+            }
+            if self.sources.fetched(p).is_some() {
+                fetched.push(p.clone());
                 continue;
             }
             match self.source_info(p)? {
@@ -260,6 +270,10 @@ impl Uploader for StreamUpload {
         // substituted sources must land before the drvs that name them.
         st.substituted = substitute.len();
         b.substitute(&substitute, on_event)?;
+        let fetched = closure::missing(&fetched, &|p| self.sources.fetched(p), &mut |ps| {
+            b.query_valid(ps, on_event)
+        })?;
+        st.bytes = b.add_fetched(&fetched, on_event)?;
 
         for (path, aterm, references) in &drvs {
             if valid.contains(path.base_name()) {
@@ -268,8 +282,8 @@ impl Uploader for StreamUpload {
             objects.push(Object::drv(path.clone(), aterm.clone(), references.clone()));
         }
         let refs: Vec<&Object> = objects.iter().collect();
-        st.bytes = b.add_objects(&refs, on_event)?;
-        st.added = objects.len();
+        st.bytes += b.add_objects(&refs, on_event)?;
+        st.added = fetched.len() + objects.len();
         self.valid.extend(srcs);
         self.valid.extend(drvs.into_iter().map(|d| d.0));
         st.time = t0.elapsed();

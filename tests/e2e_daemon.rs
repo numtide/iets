@@ -316,6 +316,101 @@ fn an_output_as_an_input_source() {
 
 /// The stdout contract (docs/reference/commands.md): exit 0 put a path on
 /// stdout, and a run that puts none exits non-zero with an error.
+/// A `fetchClosure` path a builder lacks goes there with the cache's
+/// signature, and a builder that does not trust the key refuses it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fetched_closure_goes_to_the_builder() {
+    let Some(s) = Store::start_with(&[]) else {
+        return;
+    };
+    // a chain whose large middle starts before its references, and before
+    // the root that waits on it alone
+    let dep_case = s.write(
+        "fc-dep/default.nix",
+        r#"let
+  mk = name: script: derivation { inherit name; system = "@SYSTEM@"; builder = "@SHELL@"; args = [ "-c" script ]; };
+  a = mk "fc-a" "echo a > $out";
+  b = mk "fc-b" "echo ${a} > $out";
+  big = mk "fc-big" "{ echo ${b}; i=0; while [ $i -lt 20000 ]; do echo $i; i=$((i+1)); done; } > $out";
+in
+mk "fc-dep" "echo ${big} > $out"
+"#,
+    );
+    let dep = stdout(&ok(s
+        .nix("nix-build")
+        .args(["--no-out-link".as_ref(), dep_case.as_os_str()])));
+    let (sk, pk) = (s.dir().join("sk"), s.dir().join("pk"));
+    ok(s.nix("nix-store").arg("--generate-binary-cache-key").args([
+        "test-1".as_ref(),
+        sk.as_os_str(),
+        pk.as_os_str(),
+    ]));
+    let pk = fs::read_to_string(&pk).unwrap();
+    let cache = format!("file://{}/fc-cache", s.dir().display());
+    let to = format!("{cache}?compression=zstd&secret-key={}", sk.display());
+    ok(s.nix("nix").args(["copy", "--to", &to, &dep]));
+    let case = s.write(
+        "fc/case.nix",
+        &r#"let
+  dep = builtins.fetchClosure { fromStore = "@CACHE@"; fromPath = @DEP@; inputAddressed = true; };
+in
+derivation {
+  name = "fc-use";
+  system = "@SYSTEM@";
+  builder = "@SHELL@";
+  args = [ "-c" "while read -r l; do echo \"$l\"; done < ${dep} > $out" ];
+}
+"#
+        .replace("@CACHE@", &cache)
+        .replace("@DEP@", &dep),
+    );
+    let case = case.to_str().unwrap();
+    let run_with = |url: &str, flags: &[&str]| {
+        s.iets()
+            .env("_NIX_IN_TEST", "1")
+            .args(["build", "--timings", "--builder", url])
+            .args(flags)
+            .args(["--option", "trusted-public-keys", &pk, case])
+            .output()
+            .unwrap()
+    };
+    let run = |url: &str| run_with(url, &["--no-tracing-cache"]);
+
+    let b = s.builder("b-trusts", &[("trusted-public-keys", &pk)]);
+    let o = run(&b.url());
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert_eq!(
+        fs::read_to_string(b.real(&out)).unwrap(),
+        fs::read_to_string(&dep).unwrap()
+    );
+    assert_eq!(
+        path_info(&s, &dep, Some(&b.store())),
+        path_info(&s, &dep, None)
+    );
+
+    // a cache hit knows the closure without evaluating
+    for name in ["b-miss", "b-hit"] {
+        let b = s.builder(name, &[("trusted-public-keys", &pk)]);
+        let o = run_with(&b.url(), &[]);
+        assert!(o.status.success(), "{name}: {}", stderr(&o));
+        assert_eq!(stdout(&o), out);
+        if name == "b-hit" {
+            assert!(stderr(&o).contains("eval: skipped"), "{}", stderr(&o));
+        }
+    }
+
+    let b = s.builder("b-distrusts", &[]);
+    let o = run(&b.url());
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("lacks a signature by a trusted key"),
+        "{}",
+        stderr(&o)
+    );
+}
+
 #[test]
 fn a_path_on_stdout_or_a_failure() {
     let s = store!();

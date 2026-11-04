@@ -100,7 +100,13 @@ fn build(
     let cfg = apibuild::config();
     let transport = apibuild::transport(None, &cfg)?;
     let sources = ev.known.origins();
-    let plan = apibuild::plan_with(slice::from_ref(root), drvs, &sources)?;
+    let fetched = ev.known.all_fetched();
+    let inputs = apibuild::Inputs {
+        drvs,
+        sources: &sources,
+        fetched: &fetched,
+    };
+    let plan = apibuild::plan_with(slice::from_ref(root), inputs)?;
     let opts = worker::Options::default();
     let backend = backend::open(&transport, &opts, &mut |_| {})?;
     // nothing to watch: the build is meant to fail, and this command's only

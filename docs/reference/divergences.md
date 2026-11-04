@@ -424,8 +424,10 @@ ways:
 - Evaluation reads only the narinfos. It checks the signatures and the
   content addresses as the store would, and downloads no NAR. Nix copies
   the closure into the store during evaluation.
-- A path that is not in the store yet cannot be read during evaluation,
-  and a build does not fetch it.
+- A build copies the paths the builder lacks from the cache, with the
+  cache's signatures. A NAR that does not match its narinfo fails the
+  build, where Nix fails evaluation.
+- A path that is not in the store yet cannot be read during evaluation.
 - `toPath` is not supported. In classic mode the call falls back to the
   real nix.
 - A narinfo is fetched again on every evaluation that the tracing cache

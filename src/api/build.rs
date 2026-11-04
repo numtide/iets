@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::provenance::Provenance;
-use crate::remote::plan::{self, Inputs};
+use crate::remote::plan;
 use crate::remote::worker::Missing;
 use crate::settings;
 use crate::store::locate::locate_in_store;
@@ -27,7 +27,7 @@ use crate::syntax::symbol::FxHashMap;
 // What `Dispatch::open` takes, so a caller above this line can name it all
 // without reaching past the api (tests/layering.rs).
 pub use crate::build::render::Style;
-pub use crate::remote::plan::Plan;
+pub use crate::remote::plan::{Inputs, Plan};
 pub use crate::remote::worker::{Options, Transport};
 use crate::store::drv::Derivation;
 
@@ -68,18 +68,22 @@ pub fn transport(url: Option<&str>, cfg: &Config) -> Result<Transport> {
 pub fn plan(ev: &Evaluator, roots: &[StorePath]) -> Result<Plan> {
     let drvs = ev.drv.drvs.lock();
     let sources = ev.known.origins();
-    plan_with(roots, &drvs, &sources)
+    let fetched = ev.known.all_fetched();
+    plan_with(
+        roots,
+        Inputs {
+            drvs: &drvs,
+            sources: &sources,
+            fetched: &fetched,
+        },
+    )
 }
 
 /// [`plan()`] over a derivation table the caller holds: a cache hit, a rewritten
 /// fixed-output derivation, or nothing at all, in which case every input drv
 /// is read from `/nix/store`.
-pub fn plan_with(
-    roots: &[StorePath],
-    drvs: &FxHashMap<StorePath, DrvInfo>,
-    sources: &HashMap<StorePath, SourceOrigin>,
-) -> Result<Plan> {
-    plan::plan(roots, Inputs { drvs, sources })
+pub fn plan_with(roots: &[StorePath], inputs: Inputs<'_>) -> Result<Plan> {
+    plan::plan(roots, inputs)
 }
 
 /// One derivation read back from its ATerm text, as the table [`plan_with`]

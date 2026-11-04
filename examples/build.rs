@@ -73,9 +73,11 @@ fn eval_and_build(ev: &mut Evaluator, a: EvalArgs, url: String) -> u8 {
     // memory: the plan reads `/nix/store` only for what it did not create.
     let drvs = ev.drv.drvs.lock();
     let sources = ev.known.origins();
+    let fetched = ev.known.all_fetched();
     let inputs = plan::Inputs {
         drvs: &drvs,
         sources: &sources,
+        fetched: &fetched,
     };
     let no_overrides = HashMap::new();
     let locate = |paths: &[StorePath]| locate_in_store(paths, &no_overrides);

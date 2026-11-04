@@ -1,7 +1,8 @@
 //! `builtins.fetchClosure` (primops/fetchClosure.cc). Evaluation checks what
 //! Nix checks from the narinfos alone: every path the store lacks must be
 //! content-addressed or signed by a trusted key, and `fromPath` must be
-//! addressed the way `inputAddressed` says. It downloads no NAR.
+//! addressed the way `inputAddressed` says. It downloads no NAR: a build
+//! sends the closure to a store that lacks it (`remote::closure`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,7 +14,7 @@ use crate::fetch::http::{self, Limits};
 use crate::runtime::{Value, Word};
 use crate::session::Session;
 use crate::source::nix_conf;
-use crate::store::narinfo::NarInfo;
+use crate::store::narinfo::{Fetched, NarInfo};
 use crate::store::path::StorePath;
 use crate::trace;
 
@@ -121,8 +122,9 @@ pub fn fetch_closure(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<
         ),
         _ => {}
     }
-    for p in closure.into_keys() {
-        ev.known.add_on_disk(p);
+    for (p, info) in closure {
+        let store = from_store.trim_end_matches('/').to_string();
+        ev.known.add_fetched(p, Arc::new(Fetched { store, info }));
     }
     Ok(store_path_string(ev, &from_path))
 }

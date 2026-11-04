@@ -29,7 +29,7 @@ use crate::session::Session;
 use crate::settings::FixHashes;
 use crate::store::path::StorePath;
 use crate::syntax::symbol::FxHashMap;
-use crate::trace::run::Cache;
+use crate::trace::run::{BuildTables, Cache};
 use crate::trace::wire;
 
 struct BuildArgs {
@@ -230,7 +230,12 @@ fn build_once(argv: &[String]) -> i32 {
         run
     };
     if let Some(code) = run.hit(|c| {
-        let (roots, drvs, sources) = c.read_build()?;
+        let BuildTables {
+            roots,
+            drvs,
+            sources,
+            fetched,
+        } = c.read_build()?;
         c.replay_warnings();
         if b.timings {
             eprintln!(
@@ -245,6 +250,7 @@ fn build_once(argv: &[String]) -> i32 {
         let inputs = Inputs {
             drvs: &drvs,
             sources: &sources,
+            fetched: &fetched,
         };
         Some(build_roots(&b, &root_paths, &outputs, inputs, &prov))
     }) {
@@ -321,9 +327,11 @@ fn build_eval(
     let prov = Provenance::snapshot(ev);
     let drvs = ev.drv.drvs.lock();
     let sources = ev.known.origins();
+    let fetched = ev.known.all_fetched();
     let inputs = Inputs {
         drvs: &drvs,
         sources: &sources,
+        fetched: &fetched,
     };
     build_roots(b, &root_paths, &outputs, inputs, &prov)
 }
@@ -363,6 +371,7 @@ fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
         Inputs {
             drvs: &drvs,
             sources: &sources,
+            fetched: &HashMap::new(),
         },
         &prov,
     )
@@ -384,7 +393,7 @@ fn build_roots(
         Err(e) => return e.report(),
     };
     let t0 = Instant::now();
-    let plan = match apibuild::plan_with(roots, inputs.drvs, inputs.sources) {
+    let plan = match apibuild::plan_with(roots, inputs) {
         Ok(p) => p,
         Err(e) => return e.report(),
     };

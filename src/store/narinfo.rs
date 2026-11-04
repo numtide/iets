@@ -25,6 +25,13 @@ pub struct NarInfo {
     pub ca: Option<String>,
 }
 
+/// A path `builtins.fetchClosure` checked, and the cache that has its NAR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetched {
+    pub store: String,
+    pub info: NarInfo,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarInfoError(pub String);
 
@@ -110,6 +117,33 @@ impl NarInfo {
             ca,
             path,
         })
+    }
+
+    /// The text [`NarInfo::parse`] reads back to `self`.
+    pub fn to_text(&self) -> String {
+        let all = self.all_references();
+        let refs: Vec<&str> = all.iter().map(|r| r.base_name()).collect();
+        let mut s = format!(
+            "StorePath: {}/{}\nURL: {}\nCompression: {}\nFileSize: {}\nNarHash: {}\nNarSize: {}\nReferences: {}\n",
+            store_dir(),
+            self.path.base_name(),
+            self.url,
+            self.compression,
+            self.file_size,
+            self.nar_hash.to_string_with(HashFormat::Nix32, true),
+            self.nar_size,
+            refs.join(" ")
+        );
+        if let Some(d) = &self.deriver {
+            s.push_str(&format!("Deriver: {}\n", d.base_name()));
+        }
+        for sig in &self.sigs {
+            s.push_str(&format!("Sig: {sig}\n"));
+        }
+        if let Some(ca) = &self.ca {
+            s.push_str(&format!("CA: {ca}\n"));
+        }
+        s
     }
 
     /// Every reference, the path itself included when it refers to itself.
@@ -241,6 +275,7 @@ Sig: cache.nixos.org-1:JniGFZ0Ht8g2IeWKG3nf0tWw53rxjGBe1l0ukIGTBjSuncED6hM7mD1WV
             true
         ));
         assert!(ni.trusted(&[], false));
+        assert_eq!(NarInfo::parse(&ni.to_text(), "again").unwrap(), ni);
     }
 
     #[test]

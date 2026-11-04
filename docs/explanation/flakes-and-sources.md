@@ -258,8 +258,7 @@ The download works, but these are missing:
    local directory, and both the cache key and the `iets.toml` walk read
    the directory. A root in the input store needs a third kind of source.
 4. **An unlocked reference must first resolve to a revision**, which needs
-   the forge API per scheme, `tarball-ttl`, and the flake registries. A
-   `git` reference needs a git fetcher, which iets has not got.
+   the forge API per scheme, `tarball-ttl`, and the flake registries.
 
 The first three would make a locked `github:`, `gitlab:` or tarball root
 work. The last is what most command lines need, and it's the hard one.

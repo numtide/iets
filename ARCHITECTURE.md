@@ -45,9 +45,8 @@ abstraction is wrong or the feature belongs elsewhere.
 ## Non-goals
 
 Local store writes, local builds, a builder daemon of our own, unlocked
-flakes (registries, `nix flake lock`), a git or Mercurial fetcher of our own
-(`fetchGit` of anything but a local working tree runs the real nix), a REPL,
-a debugger, a bytecode VM.
+flakes (registries, `nix flake lock`), a Mercurial fetcher, a REPL, a
+debugger, a bytecode VM.
 
 nix-grpc-store (github.com/Mic92/nix-grpc-store) is the supported gRPC
 transport, spoken natively from its vendored `proto/nix_remote.proto`. Its
@@ -112,7 +111,8 @@ Around it:
   and `nix flake prefetch-inputs` share. Parsing a flake reference stays
   in `flake/`, reading one `flake.lock` is `api::flake::info`, and reading
   bytes out of a tree goes through `treestore::StoredTree`.
-- `fetch/`: the HTTP client, the tarball spool and the unpack rules.
+- `fetch/`: the HTTP client, the tarball spool, the unpack rules, and the
+  Git and Git LFS fetchers.
 - `treestore/`: the input store, where a fetched input lives.
 - `trace/`: the tracing evaluation cache.
 - `events.rs`: the `IETS_EVENTS` stream. A group that is off costs one

@@ -101,11 +101,9 @@ back to the real `nix`, so you mostly won't notice.
 * Flakes have to be local and locked. No registry refs like `nixpkgs#hello`,
   no remote roots like `github:NixOS/nixpkgs#hello`, and no `nix flake
   lock`. Remote *inputs* in a `flake.lock` are fine.
-* `fetchGit` copies a local working tree, or a local repo at a `rev` or `ref`,
-  by itself. Remote git fetches and git flake inputs run the real `nix`.
 * No import-from-derivation (IFD).
-* `fetchurl` and `fetchTarball` need a `sha256`. No `fetchClosure` or `hg`
-  fetching.
+* `fetchurl` and `fetchTarball` need a `sha256`. No `hg` fetching, and no
+  `fetchClosure` with `toPath`.
 * Only a handful of `nix` subcommands are native. The rest run the real
   `nix`.
 * The library never frees memory, so don't embed it in a long-running

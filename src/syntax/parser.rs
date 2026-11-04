@@ -617,26 +617,14 @@ impl<'a> Parser<'a> {
                 self.deeper()?;
                 let e = self.parse_op(BP_NEG + 1)?;
                 self.depth -= 1;
-                match self.ast.exprs[e.0 as usize] {
-                    Expr::Int(i) => {
-                        self.ast.exprs[e.0 as usize] = Expr::Int(0i64.wrapping_sub(i));
-                        self.ast.spans[e.0 as usize].start = t.start;
-                        e
-                    }
-                    Expr::Float(f) => {
-                        self.ast.exprs[e.0 as usize] = Expr::Float(0.0 - f);
-                        self.ast.spans[e.0 as usize].start = t.start;
-                        e
-                    }
-                    _ => self.add(
-                        Expr::Unary {
-                            op: UnOp::Neg,
-                            expr: e,
-                        },
-                        t.start,
-                        self.last_end,
-                    ),
-                }
+                self.add(
+                    Expr::Unary {
+                        op: UnOp::Neg,
+                        expr: e,
+                    },
+                    t.start,
+                    self.last_end,
+                )
             }
             _ => self.parse_app()?,
         };

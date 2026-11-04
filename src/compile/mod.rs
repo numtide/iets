@@ -475,12 +475,40 @@ impl<'a> Compiler<'a> {
                 let e = self.expr(*expr)?;
                 match op {
                     UnOp::Not => Ir::Not(e, pos),
-                    UnOp::Neg => Ir::Neg(e, pos),
+                    UnOp::Neg => {
+                        let zero = Ir::Const(self.arena.mk_int(0));
+                        let zero = self.alloc(zero);
+                        match (self.rebound(b"__sub", [zero, e], pos)?, ast.expr(*expr)) {
+                            (Some(call), _) => call,
+                            (None, Expr::Int(i)) => {
+                                Ir::Const(self.arena.mk_int(0i64.wrapping_sub(*i)))
+                            }
+                            (None, Expr::Float(f)) => Ir::Const(self.arena.mk_float(0.0 - f)),
+                            (None, _) => Ir::Neg(e, pos),
+                        }
+                    }
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
                 let l = self.expr(*lhs)?;
                 let r = self.expr(*rhs)?;
+                let rebound = match op {
+                    BinOp::Sub => self.rebound(b"__sub", [l, r], pos)?,
+                    BinOp::Mul => self.rebound(b"__mul", [l, r], pos)?,
+                    BinOp::Div => self.rebound(b"__div", [l, r], pos)?,
+                    BinOp::Lt => self.rebound(b"__lessThan", [l, r], pos)?,
+                    BinOp::Gt => self.rebound(b"__lessThan", [r, l], pos)?,
+                    BinOp::Le => self
+                        .rebound(b"__lessThan", [r, l], pos)?
+                        .map(|c| Ir::Not(self.alloc(c), pos)),
+                    BinOp::Ge => self
+                        .rebound(b"__lessThan", [l, r], pos)?
+                        .map(|c| Ir::Not(self.alloc(c), pos)),
+                    _ => None,
+                };
+                if let Some(call) = rebound {
+                    return Ok(call);
+                }
                 match op {
                     BinOp::Eq => Ir::Eq(l, r, pos),
                     BinOp::Ne => Ir::Ne(l, r, pos),
@@ -507,6 +535,21 @@ impl<'a> Compiler<'a> {
                 }
             }
         })
+    }
+
+    /// parser.y desugars `-`, `*`, `/` and the comparisons to calls of
+    /// `__sub` and co., which a `let` or a lambda can rebind.
+    fn rebound(&mut self, name: &[u8], args: [IrRef; 2], pos: Pos) -> CResult<Option<Ir>> {
+        let sym = self.interner.intern(name);
+        if self.lexical_lookup(sym).is_none() {
+            return Ok(None);
+        }
+        let func = self.var_ir(sym, pos)?;
+        Ok(Some(Ir::Apply {
+            func,
+            args: self.alloc_refs(args.to_vec()),
+            pos,
+        }))
     }
 
     fn lexical_lookup(&self, sym: Sym) -> Option<(u32, u32)> {

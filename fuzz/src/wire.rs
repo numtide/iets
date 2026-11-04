@@ -50,6 +50,9 @@ const ERROR: u64 = 0x6378_7470;
 const START: u64 = 0x5354_5254;
 const STOP: u64 = 0x5354_4f50;
 const RESULT: u64 = 0x5253_4c54;
+const ADD_TEMP_ROOT: u64 = 11;
+const SET_OPTIONS: u64 = 19;
+const ADD_MULTIPLE: u64 = 44;
 
 /// Valid store paths for the arguments and the replies.
 const PATHS: [&str; 4] = [
@@ -171,14 +174,6 @@ impl Drop for Wire {
     }
 }
 
-/// The end of the one upload both clients make: a frame of the count 0 of
-/// AddMultipleToStore, then the empty frame.
-const UPLOAD_END: [u8; 24] = {
-    let mut b = [0; 24];
-    b[0] = 8;
-    b
-};
-
 /// Set in the environment of the scripted daemon: this fuzzer, run again.
 /// In a thread of the fuzzer, the daemon's code would add to the coverage
 /// of each input, more or less with timing, and libFuzzer would keep other
@@ -227,26 +222,89 @@ fn daemon() {
     }
 }
 
-/// Serves `script` to one connection: write it, close the write side, read
-/// until the client goes. Bytes from `split` on wait for the end of an
-/// upload, as a daemon reads it all before it answers; Nix's client asserts
-/// when the answer comes first (nix-conformance nix-bugs/).
+/// Serves `script` to one connection. The bytes from `split` on, the
+/// operation's reply, wait until the operation has arrived: Nix's client
+/// asserts when a reply comes early (nix-conformance nix-bugs/).
 fn serve(mut s: UnixStream, script: &[u8], split: usize) {
     let split = split.min(script.len());
     let _ = s.write_all(&script[..split]);
-    let mut got = Vec::new();
-    let mut sink = [0u8; 4096];
     if split < script.len() {
-        while !got.ends_with(&UPLOAD_END) {
-            match s.read(&mut sink) {
-                Ok(n) if n > 0 => got.extend_from_slice(&sink[..n]),
-                _ => break,
-            }
+        let minor = script.get(8).copied().unwrap_or(0).into();
+        if await_op(&mut s, minor).is_ok() {
+            let _ = s.write_all(&script[split..]);
         }
-        let _ = s.write_all(&script[split..]);
     }
     let _ = s.shutdown(Shutdown::Write);
+    let mut sink = [0u8; 4096];
     while matches!(s.read(&mut sink), Ok(n) if n > 0) {}
+}
+
+/// Reads the client up to its operation, answering each `AddTempRoot`.
+fn await_op(s: &mut UnixStream, minor: u64) -> io::Result<()> {
+    let mut r = Req(io::BufReader::new(s.try_clone()?));
+    r.u64()?;
+    let minor = minor.min(r.u64()? & 0xff);
+    if minor >= 38 {
+        r.strs(1)?;
+    }
+    for since in [14, 11] {
+        if minor >= since {
+            r.u64()?;
+        }
+    }
+    loop {
+        match r.u64()? {
+            SET_OPTIONS => {
+                r.skip(12 * 8)?;
+                r.strs(2)?;
+            }
+            ADD_TEMP_ROOT => {
+                r.str()?;
+                s.write_all(&[LAST.to_le_bytes(), 1u64.to_le_bytes()].concat())?;
+            }
+            // two flags, then frames up to the empty one
+            ADD_MULTIPLE => {
+                r.skip(16)?;
+                while let n @ 1.. = r.u64()? {
+                    r.skip(n)?;
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
+struct Req(io::BufReader<UnixStream>);
+
+impl Req {
+    fn u64(&mut self) -> io::Result<u64> {
+        let mut b = [0u8; 8];
+        self.0.read_exact(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    fn skip(&mut self, n: u64) -> io::Result<()> {
+        io::copy(&mut (&mut self.0).take(n), &mut io::sink()).and_then(|got| {
+            if got == n {
+                Ok(())
+            } else {
+                Err(io::ErrorKind::UnexpectedEof.into())
+            }
+        })
+    }
+
+    fn str(&mut self) -> io::Result<()> {
+        let n = self.u64()?;
+        self.skip(n.div_ceil(8) * 8)
+    }
+
+    fn strs(&mut self, per: u64) -> io::Result<()> {
+        for _ in 0..self.u64()? * per {
+            self.str()?;
+        }
+        Ok(())
+    }
 }
 
 fn read_frame(input: &mut impl Read) -> Option<Vec<u8>> {
@@ -267,8 +325,6 @@ pub fn run_iets(sock: &Path, name: &str, args: &[String]) -> Result<String, Stri
             &Options::default(),
             &mut quiet,
         )?;
-        // the scripts answer what Nix's client sends, which roots nothing
-        c.temp_roots = false;
         Ok(match name {
             "connect" => format!(
                 "ok minor={} version={} trusted={}",
@@ -397,7 +453,7 @@ fn r<T>(x: Result<T, libfuzzer_sys::arbitrary::Error>, d: T) -> T {
 }
 
 /// The operation, the daemon's whole side of the conversation, and where
-/// the daemon waits for an upload (`serve`).
+/// the daemon waits for the operation (`serve`).
 fn generate(u: &mut Unstructured) -> (Op, Vec<u8>, usize) {
     let pick = |u: &mut Unstructured| PATHS[r(u.choose_index(PATHS.len()), 0)].to_string();
     let drv = |u: &mut Unstructured| {
@@ -487,12 +543,9 @@ fn generate(u: &mut Unstructured) -> (Op, Vec<u8>, usize) {
     // then after the operation
     stderr(u, &mut w, proto);
     stderr(u, &mut w, proto);
-    let split = if op.name == "add-multiple" {
-        w.0.len()
-    } else {
-        usize::MAX
-    };
+    let mut split = usize::MAX;
     if op.name != "connect" {
+        split = w.0.len();
         stderr(u, &mut w, proto);
         reply(u, &mut w, &op, proto);
     }

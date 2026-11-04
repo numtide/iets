@@ -497,8 +497,6 @@ pub struct Connection {
     /// `Some(true)` when the daemon trusts us (protocol >= 1.35).
     pub trusted: Option<bool>,
     pub stats: Stats,
-    /// Off only against a scripted daemon that replays Nix's own client.
-    pub temp_roots: bool,
     /// Running builds by activity id, to attribute log lines.
     activities: HashMap<u64, String>,
     /// Follows a nested activity back to the build it belongs to.
@@ -664,7 +662,6 @@ impl Connection {
             daemon_nix_version: String::new(),
             trusted: None,
             stats: Stats::default(),
-            temp_roots: true,
             activities: HashMap::new(),
             parents: HashMap::new(),
             ids: HashMap::new(),
@@ -994,9 +991,6 @@ impl Connection {
         paths: &[impl AsRef<str>],
         on_event: &mut dyn FnMut(Event),
     ) -> Result<usize> {
-        if !self.temp_roots {
-            return Ok(0);
-        }
         let mut chunks = paths.chunks(TEMP_ROOT_CHUNK).peekable();
         while let Some(chunk) = chunks.next() {
             for path in chunk {

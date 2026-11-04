@@ -1,6 +1,8 @@
 //! File modes, inodes, symlinks and open flags, which `std::fs` only
 //! exposes per platform.
 
+#[cfg(target_vendor = "apple")]
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 pub use std::os::unix::fs::symlink;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -19,6 +21,28 @@ use rustix::process::geteuid;
 /// Whether `name`, which holds no `/`, names one entry of its directory.
 pub fn one_component(_name: &[u8]) -> bool {
     true
+}
+
+/// Puts `f`'s writes on the disk ahead of any later ones.
+#[cfg(not(target_vendor = "apple"))]
+pub fn sync_ordered(f: &File) -> io::Result<()> {
+    f.sync_all()
+}
+
+/// `sync_all` is `F_FULLFSYNC` here, which also flushes the drive's cache.
+/// A file system without barriers treats `F_BARRIERFSYNC` as `fsync`.
+#[cfg(target_vendor = "apple")]
+pub fn sync_ordered(f: &File) -> io::Result<()> {
+    loop {
+        // SAFETY: an fcntl on an open descriptor, with no memory argument.
+        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
 }
 
 /// Removes a symbolic link, whatever it points at.

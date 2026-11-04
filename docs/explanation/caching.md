@@ -39,10 +39,10 @@ only stops two writers of one key from crossing inside one temporary file. A
 killed writer leaves a temporary file that no reader looks at and that the
 sweep removes after a day; the entry it was replacing stays whole.
 
-Nothing is fsynced, so a power loss can leave the name pointing at a file
-whose bytes were never written. Those bytes are read like any other bad
-bytes, and the entry goes. Atomicity is per entry, and no reader joins two
-entries.
+Only the input store's packs are synced. Otherwise a power loss can leave the
+name pointing at a file whose bytes were never written. Those bytes are read
+like any other bad bytes, and the entry goes. Atomicity is per entry, and no
+reader joins two entries.
 
 **Poison and wipe.** An entry that does not decode is deleted and the run
 continues as a miss. Only bytes a reader read, or a name that is not a

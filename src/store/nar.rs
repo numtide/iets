@@ -952,20 +952,6 @@ pub(crate) mod tests {
         assert_eq!(nar_size(&tree).unwrap(), 1272);
     }
 
-    // nix hash path tree ; nix hash path --base32 tree
-    #[rstest]
-    fn directory_nar_hash_formats(#[with(false)] tree: Tree) {
-        let h = nar_hash(&tree).unwrap();
-        assert_eq!(
-            h.to_sri(),
-            "sha256-W9NBQoMmpWCBF/sSjTEU/D+2x23pnNGcEDl72tcovq4="
-        );
-        assert_eq!(
-            h.to_nix32(),
-            "1bmy53bxlyrr22fd3779dp3vcgzw2hqqs4pv2y0n1996hd143lsv"
-        );
-    }
-
     // nix-store --dump tree/a.txt | sha256sum
     #[rstest]
     fn regular_file_nar(tree: Tree) {

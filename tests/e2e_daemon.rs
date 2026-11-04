@@ -6,12 +6,15 @@
 mod e2e;
 mod hermetic;
 
-use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+use std::{env, fs, io, thread};
 
 use e2e::{Store, ok, stderr, stdout};
+use iets::remote::worker::{Connection, Transport};
 use serde_json::Value;
 
 /// The shared case, with an executable and a symlink in the tree too.
@@ -350,4 +353,68 @@ fn a_path_on_stdout_or_a_failure() {
     assert_eq!(run(&["--no-build", "-E", "[]"]).status.code(), Some(1));
     let wrong = run(&["--out", "bogus", &case]);
     assert!(!wrong.status.success() && stdout(&wrong).is_empty());
+}
+
+/// What a connection was told is valid stays valid until it closes.
+#[test]
+fn a_queried_path_is_rooted_until_the_connection_closes() {
+    let s = store!();
+    let add = |name: &str| {
+        let f = s.write(&format!("gc/{name}"), name);
+        s.nix_store(&["--add", f.to_str().unwrap()])
+            .trim()
+            .to_string()
+    };
+    let (valid, info) = (add("valid"), add("info"));
+    let mut child = Command::new(env::current_exe().unwrap())
+        .args(["rooting_child", "--exact", "--nocapture"])
+        .env("NIX_STORE_DIR", s.store_dir())
+        .env("IETS_ROOTING_SOCKET", s.socket())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // on stdin, as gc.cc:findRuntimeRoots would root a path in the environment
+    writeln!(child.stdin.as_mut().unwrap(), "{valid} {info}").unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("rooted") {
+        line.clear();
+        assert_ne!(out.read_line(&mut line).unwrap(), 0, "the child exited");
+    }
+    let delete = |p: &str| s.nix("nix-store").args(["--delete", p]).output().unwrap();
+    for p in [&valid, &info] {
+        let o = delete(p);
+        assert!(stderr(&o).contains("still alive"), "{}", stderr(&o));
+    }
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !delete(&valid).status.success() {
+        assert!(Instant::now() < deadline, "still rooted after the close");
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn rooting_child() {
+    let Some(socket) = env::var_os("IETS_ROOTING_SOCKET") else {
+        return;
+    };
+    let mut stdin = io::stdin().lock();
+    let mut line = String::new();
+    stdin.read_line(&mut line).unwrap();
+    let (valid, info) = line.trim().split_once(' ').unwrap();
+    let dir = env::var("NIX_STORE_DIR").unwrap();
+    // more than one chunk of roots
+    let mut paths: Vec<String> = (0..600).map(|i| format!("{dir}/{i:032}-gone")).collect();
+    paths.push(valid.to_string());
+    let mut conn = Connection::open(&Transport::Unix(socket.into()), &mut |_| {}).unwrap();
+    assert_eq!(
+        conn.query_valid_paths(&paths, &mut |_| {}).unwrap(),
+        [valid]
+    );
+    assert!(conn.query_path_info(info, &mut |_| {}).unwrap().is_some());
+    println!("rooted");
+    stdin.read_to_end(&mut Vec::new()).unwrap();
 }

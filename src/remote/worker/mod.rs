@@ -96,6 +96,9 @@ pub const LATEST_MINOR: u64 = 38;
 /// Below this the handshake and `BuildPathsWithResults` differ; not worth supporting.
 pub const MIN_MINOR: u64 = 35;
 
+/// Replies of a chunk (16 bytes each) fit the socket buffer, so pipelining cannot deadlock.
+const TEMP_ROOT_CHUNK: usize = 512;
+
 /// worker-protocol.hh:WorkerProto::Op, the subset used here.
 #[derive(Clone, Copy)]
 #[repr(u64)]
@@ -103,6 +106,7 @@ enum Op {
     SetOptions = 19,
     QueryPathInfo = 26,
     QueryValidPaths = 31,
+    AddTempRoot = 11,
     AddIndirectRoot = 12,
     QuerySubstitutablePathInfos = 30,
     NarFromPath = 38,
@@ -493,6 +497,8 @@ pub struct Connection {
     /// `Some(true)` when the daemon trusts us (protocol >= 1.35).
     pub trusted: Option<bool>,
     pub stats: Stats,
+    /// Off only against a scripted daemon that replays Nix's own client.
+    pub temp_roots: bool,
     /// Running builds by activity id, to attribute log lines.
     activities: HashMap<u64, String>,
     /// Follows a nested activity back to the build it belongs to.
@@ -658,6 +664,7 @@ impl Connection {
             daemon_nix_version: String::new(),
             trusted: None,
             stats: Stats::default(),
+            temp_roots: true,
             activities: HashMap::new(),
             parents: HashMap::new(),
             ids: HashMap::new(),
@@ -970,11 +977,49 @@ impl Connection {
         substitute: bool,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<Vec<String>> {
+        let rooted = self.write_temp_roots(paths, on_event)?;
         self.op(Op::QueryValidPaths)?;
         write_strs(self.w(), paths)?;
         write_u64(self.w(), u64::from(substitute))?;
+        self.read_temp_roots(rooted, on_event)?;
         self.process_stderr(on_event)?;
         read_paths(self.r())
+    }
+
+    /// Roots `paths` until the connection closes, so a path reported valid
+    /// cannot be collected before it is used. The last chunk's replies are
+    /// left for `read_temp_roots`, behind the caller's query.
+    fn write_temp_roots(
+        &mut self,
+        paths: &[impl AsRef<str>],
+        on_event: &mut dyn FnMut(Event),
+    ) -> Result<usize> {
+        if !self.temp_roots {
+            return Ok(0);
+        }
+        let mut chunks = paths.chunks(TEMP_ROOT_CHUNK).peekable();
+        while let Some(chunk) = chunks.next() {
+            for path in chunk {
+                self.stats.ops += 1;
+                write_u64(self.w(), Op::AddTempRoot as u64)?;
+                write_str(self.w(), path.as_ref().as_bytes())?;
+            }
+            if chunks.peek().is_none() {
+                return Ok(chunk.len());
+            }
+            self.stats.round_trips += 1;
+            self.read_temp_roots(chunk.len(), on_event)?;
+        }
+        Ok(0)
+    }
+
+    fn read_temp_roots(&mut self, n: usize, on_event: &mut dyn FnMut(Event)) -> Result<()> {
+        for _ in 0..n {
+            self.process_stderr(on_event)?;
+            // remote-store.cc:addTempRoot: readInt
+            wire::read_num(self.r(), u32::MAX.into()).map_err(conn)?;
+        }
+        Ok(())
     }
 
     /// `QueryPathInfo`: the path's `UnkeyedValidPathInfo`, `None` when the store
@@ -984,8 +1029,10 @@ impl Connection {
         path: &str,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<Option<PathInfo>> {
+        let rooted = self.write_temp_roots(&[path], on_event)?;
         self.op(Op::QueryPathInfo)?;
         write_str(self.w(), path.as_bytes())?;
+        self.read_temp_roots(rooted, on_event)?;
         match self.process_stderr(on_event) {
             // worker-protocol-connection.cc:queryPathInfo: an old daemon says so
             // with an error, and Nix's client still reads it that way

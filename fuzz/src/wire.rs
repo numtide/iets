@@ -267,6 +267,8 @@ pub fn run_iets(sock: &Path, name: &str, args: &[String]) -> Result<String, Stri
             &Options::default(),
             &mut quiet,
         )?;
+        // the scripts answer what Nix's client sends, which roots nothing
+        c.temp_roots = false;
         Ok(match name {
             "connect" => format!(
                 "ok minor={} version={} trusted={}",

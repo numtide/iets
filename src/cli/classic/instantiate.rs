@@ -138,6 +138,7 @@ fn run(ev: &mut Evaluator, i: &Inst) -> error::Result<Made> {
     let args = auto_args(ev, &i.c.flags.args, &cwd)?;
     let has_args = !i.c.flags.args.is_empty();
     let mut warned = false;
+    let mut seen = HashSet::new();
     for file in &i.c.files {
         let root = eval_input(ev, &i.c, file, &cwd)?;
         for attr in &i.c.flags.attrs {
@@ -152,7 +153,7 @@ fn run(ev: &mut Evaluator, i: &Inst) -> error::Result<Made> {
             } else {
                 // nix-instantiate.cc: one `getDerivations` per attribute path,
                 // so two of them that name one derivation give two roots
-                let mut seen = HashSet::new();
+                seen.clear();
                 installable::get_drvs_at(ev, v, args, &mut roots, &mut seen, attr)?;
                 if !warned && !roots.is_empty() && i.add_root.is_none() && i.gc_warning {
                     warned = true;

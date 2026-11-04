@@ -37,7 +37,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `derivation` | works | See `derivationStrict`. |
 | `derivationStrict` | works | An `env` name, `builder` and `system` must be UTF-8. Nix accepts any bytes. |
 | `div` | works | A `let` binding of `__div` does not change `/`. In Nix it does. |
-| `fetchClosure` | fails | In classic mode it needs the `fetch-closure` feature, as in Nix. |
+| `fetchClosure` | partly | Evaluation works. A build does not fetch a path that is missing from the store yet. `toPath` fails. |
 | `fetchGit` | works | iets does the fetch itself, Git LFS files included. In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev` fails. |
 | `fetchMercurial` | fails | |
 | `fetchTarball` | partial | Needs a `sha256`. |

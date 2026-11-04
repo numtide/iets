@@ -386,10 +386,10 @@ building the producer, and evaluation does not build.
 
 ## Network fetchers
 
-`builtins.fetchurl` and `builtins.fetchGit` work, with the differences in
-this section. `builtins.fetchClosure` and `builtins.fetchMercurial` always
-fail in iets's own commands. They are still in `builtins`, so
-`builtins ? fetchMercurial` is true, and code that checks for one before it
+`builtins.fetchurl`, `builtins.fetchGit` and `builtins.fetchClosure` work,
+with the differences in this section. `builtins.fetchMercurial` always
+fails in iets's own commands. It is still in `builtins`, so
+`builtins ? fetchMercurial` is true, and code that checks for it before it
 calls it gets the error. In classic mode the call falls back to the real
 nix. `fetchTarball` and `fetchTree` work for some inputs;
 `docs/reference/builtins.md` lists which.
@@ -419,8 +419,17 @@ ways:
 - In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev`
   fails.
 
-`builtins.fetchClosure` is not supported. In classic mode with the
-`fetch-closure` feature, the call falls back to the real nix.
+`builtins.fetchClosure` differs from Nix in these ways:
+
+- Evaluation reads only the narinfos. It checks the signatures and the
+  content addresses as the store would, and downloads no NAR. Nix copies
+  the closure into the store during evaluation.
+- A path that is not in the store yet cannot be read during evaluation,
+  and a build does not fetch it.
+- `toPath` is not supported. In classic mode the call falls back to the
+  real nix.
+- A narinfo is fetched again on every evaluation that the tracing cache
+  does not answer.
 
 Observe it: `iets eval -E 'builtins.fetchMercurial ./.'` fails, and
 `iets eval -E '(builtins.fetchGit ./.).rev'` in a clean git checkout prints

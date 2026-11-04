@@ -28,6 +28,7 @@ use crate::lint::{self, Level, Scope};
 use crate::provenance::{describe_pos, rewrite_msg};
 use crate::runtime::Word;
 use crate::session::Session;
+use crate::source::nix_conf;
 use crate::store::path::StorePath;
 use crate::sys::{self, OsStringExt};
 use crate::trace::key::{Key, has_relative_path};
@@ -552,6 +553,16 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.flag("raw", a.raw);
     k.field("lints", lint_config(a).ok()?.key().as_bytes());
     k.field("system", cfg.current_system().as_bytes());
+    // what builtins.fetchClosure trusts
+    let conf = nix_conf(cfg.configured_session());
+    k.field(
+        "trusted-public-keys",
+        conf.trusted_public_keys().join(" ").as_bytes(),
+    );
+    k.field(
+        "require-sigs",
+        conf.str("require-sigs").unwrap_or("").as_bytes(),
+    );
     if !config::reads_built_outputs(&Session::current()) {
         k.field("built-outputs", b"0");
     }

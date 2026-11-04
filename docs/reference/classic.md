@@ -448,7 +448,7 @@ A name falls back in these cases:
    (`docs/reference/settings.md`, class 4). So does
    `nix-instantiate --store` with a store other than the local daemon.
 2. **An evaluation that calls something iets does not support:**
-   - `fetchMercurial` and `fetchClosure`;
+   - `fetchMercurial`, and `fetchClosure` with `toPath`;
    - `fetchGit` of an SCP-like URL (`user@host:path`) without a `rev` in
      pure evaluation;
    - `fetchTarball` and `fetchurl` without a `sha256`;

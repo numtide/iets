@@ -233,6 +233,8 @@ fn prepare(ev: &mut Evaluator, s: &Shell) -> error::Result<Box<Ready>> {
     let cwd = cwd();
     let mut roots: Vec<Root> = Vec::new();
     let args = auto_args(ev, &s.c.flags.args, &cwd)?;
+    // Created before evaluating, so `RandomState::new` never runs on a
+    // migrated fiber (#358).
     let mut seen = HashSet::new();
     let mut key: Vec<Vec<u8>> = vec![b"nix-shell".to_vec()];
     for file in &s.c.files {
@@ -260,6 +262,8 @@ fn prepare(ev: &mut Evaluator, s: &Shell) -> error::Result<Box<Ready>> {
             } else {
                 args
             };
+            // nix-build.cc calls getDerivations once per attribute path.
+            seen.clear();
             installable::get_drvs_at(ev, v, args, &mut roots, &mut seen, attr)?;
         }
     }

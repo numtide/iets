@@ -76,7 +76,6 @@ pub struct Compiler<'a> {
     sym_rev_count: Sym,
     sym_cur_pos: Sym,
     sym_overrides: Sym,
-    sym_body: Sym,
 }
 
 type CResult<T> = Result<T, Box<Error>>;
@@ -167,7 +166,6 @@ impl<'a> Compiler<'a> {
         let sym_rev_count = interner.intern(b"revCount");
         let sym_cur_pos = interner.intern(b"__curPos");
         let sym_overrides = interner.intern(b"__overrides");
-        let sym_body = interner.intern(b"body");
         Compiler {
             ast,
             arena,
@@ -186,7 +184,6 @@ impl<'a> Compiler<'a> {
             sym_rev_count,
             sym_cur_pos,
             sym_overrides,
-            sym_body,
         }
     }
 
@@ -636,7 +633,7 @@ impl<'a> Compiler<'a> {
     /// `inherit (subject) sym`.
     fn inherit_from(&mut self, subject: IrRef, sym: Sym, pos: Pos) -> IrRef {
         let ir = if sym == self.sym_rev_count {
-            let path = self.alloc_elems(vec![AttrElemIr::Static(sym)]);
+            let path = self.arena.alloc_vec(vec![AttrElemIr::Static(sym)]);
             self.mk_select(subject, path, None, pos)
         } else {
             Ir::Select1 {
@@ -667,25 +664,7 @@ impl<'a> Compiler<'a> {
                 }
             });
         }
-        let refs: Vec<&'static AttrElemIr> = Vec::new();
-        drop(refs);
-        Ok(self.alloc_elems(v))
-    }
-
-    fn alloc_elems(&mut self, v: Vec<AttrElemIr>) -> &'static [AttrElemIr] {
-        self.arena.alloc_vec(v)
-    }
-
-    fn alloc_binds(&mut self, v: Vec<BindIr>) -> &'static [BindIr] {
-        self.arena.alloc_vec(v)
-    }
-
-    fn alloc_dyn(&mut self, v: Vec<DynBindIr>) -> &'static [DynBindIr] {
-        self.arena.alloc_vec(v)
-    }
-
-    fn alloc_formals(&mut self, v: Vec<FormalIr>) -> &'static [FormalIr] {
-        self.arena.alloc_vec(v)
+        Ok(self.arena.alloc_vec(v))
     }
 
     fn str_part(&mut self, p: &StrPart) -> CResult<&'static Ir> {
@@ -964,7 +943,7 @@ impl<'a> Compiler<'a> {
             if let Def::Nested(src) = def {
                 let src = *src;
                 for (s, d, p) in src.statics {
-                    Self::add_static_def(self, target, s, d, p)?;
+                    self.add_static(target, s, d, p)?;
                 }
                 target.dynamics.extend(src.dynamics);
             } else {
@@ -978,16 +957,6 @@ impl<'a> Compiler<'a> {
         m.statics.push((sym, def, pos));
         m.index.insert(sym, i);
         Ok(())
-    }
-
-    fn add_static_def(
-        this: &mut Self,
-        m: &mut Merged,
-        sym: Sym,
-        def: Def,
-        pos: Pos,
-    ) -> CResult<()> {
-        this.add_static(m, sym, def, pos)
     }
 
     /// Plain (non-rec) attrs and nested attrpath sets.
@@ -1083,7 +1052,7 @@ impl<'a> Compiler<'a> {
         }
         let dynamic = self.lower_dynamics(dynamics)?;
         binds.sort_by_key(|b| b.sym);
-        let binds = self.alloc_binds(binds);
+        let binds = self.arena.alloc_vec(binds);
         let from = self.alloc_refs(from);
         Ok(self.alloc(AttrsIr {
             rec: false,
@@ -1116,7 +1085,7 @@ impl<'a> Compiler<'a> {
                 pos: dpos,
             });
         }
-        Ok(self.alloc_dyn(dyns))
+        Ok(self.arena.alloc_vec(dyns))
     }
 
     /// Recursive bindings (`rec { }` and `let`). Pushes the new scope and
@@ -1203,7 +1172,7 @@ impl<'a> Compiler<'a> {
         for e in from_exprs {
             from.push(self.expr(e)?);
         }
-        Ok((self.alloc_binds(binds), self.alloc_refs(from)))
+        Ok((self.arena.alloc_vec(binds), self.alloc_refs(from)))
     }
 
     fn var_ir(&mut self, var: Sym, pos: Pos) -> CResult<IrRef> {
@@ -1261,7 +1230,6 @@ impl<'a> Compiler<'a> {
         name: Option<Sym>,
         base: Option<u32>,
     ) -> CResult<&'static LambdaIr> {
-        let _ = self.sym_body;
         let ast: &'a Ast = self.ast;
         let at = base.unwrap_or(0);
         match param {
@@ -1353,7 +1321,7 @@ impl<'a> Compiler<'a> {
                 let body = self.lambda_body(body, idx)?;
                 self.scopes.pop();
                 let closed = !self.lambdas.pop().unwrap().1.get();
-                let formals = self.alloc_formals(firs);
+                let formals = self.arena.alloc_vec(firs);
                 Ok(self.alloc(LambdaIr {
                     param: ParamIr::Formals {
                         has_bind: bind.is_some(),

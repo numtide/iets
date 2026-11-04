@@ -56,35 +56,17 @@ pub fn register(r: &mut Registry) {
     r.op("__flakeRefToString", 1, flakeref::flake_ref_to_string);
 }
 
-macro_rules! unsupported {
-    ($fn:ident, $msg:expr, hint: $hint:expr) => {
-        fn $fn(ev: &mut Evaluator, _args: &[Word], pos: Pos) -> EvalResult<Word> {
-            ev.trace().mark_uncacheable();
-            let mut e = Error::new(ErrorKind::Unsupported, $msg.into(), pos);
-            e.hint = Some($hint.into());
-            Err(Box::new(e))
-        }
-    };
-    ($fn:ident, $msg:expr) => {
-        fn $fn(ev: &mut Evaluator, _args: &[Word], pos: Pos) -> EvalResult<Word> {
-            ev.trace().mark_uncacheable();
-            bail!(ErrorKind::Unsupported, pos, "{}", $msg)
-        }
-    };
-    ($fn:ident, $name:literal, $msg:expr) => {
-        fn $fn(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
-            ev.trace().mark_uncacheable();
-            crate::lint::purity::unhashed_fetch(ev, $name, args[0], pos)?;
-            bail!(ErrorKind::Unsupported, pos, "{}", $msg)
-        }
-    };
+fn fetch_mercurial(ev: &mut Evaluator, _args: &[Word], pos: Pos) -> EvalResult<Word> {
+    ev.trace().mark_uncacheable();
+    let mut e = Error::new(
+        ErrorKind::Unsupported,
+        "builtins.fetchMercurial is not supported".into(),
+        pos,
+    );
+    e.hint =
+        Some("run it as nix-instantiate, nix-build or nix-shell, which fall back to Nix".into());
+    Err(Box::new(e))
 }
-
-unsupported!(
-    fetch_mercurial,
-    "builtins.fetchMercurial is not supported",
-    hint: "run it as nix-instantiate, nix-build or nix-shell, which fall back to Nix"
-);
 
 fn lossy(b: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(b)

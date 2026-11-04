@@ -119,19 +119,12 @@ const MAX_PARSE_DEPTH: u32 = 50_000;
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], interner: &'a mut Interner) -> Self {
-        Self::with_ast(src, interner, Ast::default())
-    }
-
-    /// Reuse the buffers of a previous file's `Ast` (contents discarded).
-    pub fn with_ast(src: &'a [u8], interner: &'a mut Interner, mut ast: Ast) -> Self {
         let sym_or = interner.intern(b"or");
         let sym_body = interner.intern(b"body");
-        ast.clear();
+        let mut ast = Ast::default();
         let cap = src.len() / 12 + 8;
-        if ast.exprs.capacity() < cap {
-            ast.exprs.reserve(cap);
-            ast.spans.reserve(cap);
-        }
+        ast.exprs.reserve(cap);
+        ast.spans.reserve(cap);
         Parser {
             src,
             lx: Lexer::new(src),

@@ -132,22 +132,6 @@ impl Ast {
             _ => None,
         }
     }
-
-    /// Forget the contents but keep the buffers for the next file.
-    pub fn clear(&mut self) {
-        self.exprs.clear();
-        self.spans.clear();
-        self.ids.clear();
-        self.elems.clear();
-        self.parts.clear();
-        self.bytes.clear();
-        self.binds.clear();
-        self.names.clear();
-        self.formals.clear();
-        self.notes.clear();
-        self.allows.clear();
-        self.root = ExprId(0);
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

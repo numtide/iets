@@ -91,11 +91,11 @@ fn build_batch(
         .iter()
         .map(|j| {
             drvs.get_key_value(&j.drv)
-                .map(|(k, _)| k)
+                .map(|(k, _)| (k, j.outputs.as_slice()))
                 .ok_or_else(|| Error::Plan(format!("'{}' is not in the batch's closure", j.drv)))
         })
         .collect::<Result<Vec<_>>>()?;
-    let needs = missing_drvs(drvs, roots, &mut |names| {
+    let needs = missing_drvs(drvs, &roots, &mut |names| {
         build::query_valid_paths(c, names, t)
     })?;
 
@@ -213,35 +213,49 @@ fn build_batch(
     Ok(out)
 }
 
-/// The derivations of the roots' closure whose outputs the store lacks
-/// (`plan::missing_top_down`): nothing below a derivation the store has
-/// built is asked about or built.
+/// The derivations of the roots' closure the store must build: a root for
+/// its `outputs` (empty: all), an input for the outputs a missing referrer
+/// uses (nix's `missingForBuild`).
 fn missing_drvs<'a>(
     drvs: &'a BTreeMap<StorePath, Derivation>,
-    roots: Vec<&'a StorePath>,
+    roots: &[(&'a StorePath, &[String])],
     query: &mut dyn FnMut(&[String]) -> Result<HashSet<String>>,
 ) -> Result<HashSet<&'a StorePath>> {
+    let want = |p: &'a StorePath, names: &mut dyn Iterator<Item = &String>| {
+        let drv = &drvs[p];
+        let paths = names
+            .map(|name| match drv.outputs.get(name) {
+                Some(o) => o.path(&drv.name, name)?.ok_or_else(|| {
+                    Error::Plan(format!(
+                        "'{p}': output '{name}' has no statically known path; the build \
+                         farm needs statically known input and output paths"
+                    ))
+                }),
+                None => Err(Error::Plan(format!("'{p}' has no output '{name}'"))),
+            })
+            .collect::<Result<_>>()?;
+        Ok((p, paths))
+    };
+    let roots = roots
+        .iter()
+        .map(|&(p, outputs)| match outputs {
+            [] => want(p, &mut drvs[p].outputs.keys()),
+            _ => want(p, &mut outputs.iter()),
+        })
+        .collect::<Result<_>>()?;
     plan::missing_top_down(
         roots,
         &|p| {
-            let drv = &drvs[p];
-            let mut outs = Vec::new();
-            for (name, o) in &drv.outputs {
-                let Some(out) = o.path(&drv.name, name)? else {
-                    return Err(Error::Plan(format!(
-                        "'{p}': output '{name}' has no statically known path; the build \
-                         farm needs statically known input and output paths"
-                    )));
-                };
-                outs.push(out);
-            }
-            Ok(outs)
-        },
-        &|p| {
             drvs[p]
                 .input_drvs
-                .keys()
-                .filter_map(|d| drvs.get_key_value(d).map(|(k, _)| k))
+                .iter()
+                .filter_map(|(d, node)| {
+                    let (d, _) = drvs.get_key_value(d)?;
+                    Some(want(
+                        d,
+                        &mut node.outputs.iter().chain(node.children.keys()),
+                    ))
+                })
                 .collect()
         },
         None,
@@ -412,45 +426,43 @@ mod tests {
         StorePath::parse(&format!("/nix/store/{hash}-{name}")).unwrap()
     }
 
-    /// Each `(name, inputs)` is `name.drv` with one output `name-out`.
-    fn graph(edges: &[(&str, &[&str])]) -> BTreeMap<StorePath, Derivation> {
-        edges
-            .iter()
-            .map(|(name, inputs)| {
-                let drv = Derivation {
-                    name: name.to_string(),
-                    outputs: [(
-                        "out".to_string(),
-                        DerivationOutput::InputAddressed(sp(&format!("{name}-out"))),
-                    )]
-                    .into(),
-                    input_drvs: inputs
-                        .iter()
-                        .map(|i| (sp(&format!("{i}.drv")), InputNode::default()))
-                        .collect(),
-                    ..Derivation::default()
-                };
-                (sp(&format!("{name}.drv")), drv)
-            })
-            .collect()
+    /// `name.drv` with outputs `name-<output>`, using `inputs` as `(drv, outputs)`.
+    fn drv(name: &str, outputs: &[&str], inputs: &[(&str, &[&str])]) -> (StorePath, Derivation) {
+        let drv = Derivation {
+            name: name.to_string(),
+            outputs: outputs
+                .iter()
+                .map(|o| {
+                    let path = sp(&format!("{name}-{o}"));
+                    (o.to_string(), DerivationOutput::InputAddressed(path))
+                })
+                .collect(),
+            input_drvs: inputs
+                .iter()
+                .map(|(i, outs)| {
+                    let outs = outs.iter().map(ToString::to_string).collect();
+                    (sp(&format!("{i}.drv")), InputNode::of(outs))
+                })
+                .collect(),
+            ..Derivation::default()
+        };
+        (sp(&format!("{name}.drv")), drv)
     }
 
+    /// The derivations to build and the output names asked, sorted per call.
     fn run(
         drvs: &BTreeMap<StorePath, Derivation>,
-        roots: &[&str],
+        root: &[String],
         valid: &[&str],
     ) -> (Vec<String>, Vec<Vec<String>>) {
-        let roots: Vec<StorePath> = roots.iter().map(|r| sp(&format!("{r}.drv"))).collect();
+        let root_path = sp("root.drv");
         let valid: HashSet<String> = valid
             .iter()
-            .map(|v| sp(&format!("{v}-out")).base_name().to_string())
+            .map(|v| sp(v).base_name().to_string())
             .collect();
         let mut calls = Vec::new();
-        let needs = missing_drvs(drvs, roots.iter().collect(), &mut |names| {
-            let mut asked: Vec<String> = names
-                .iter()
-                .map(|n| n[33..n.len() - 4].to_string())
-                .collect();
+        let needs = missing_drvs(drvs, &[(&root_path, root)], &mut |names| {
+            let mut asked: Vec<String> = names.iter().map(|n| n[33..].to_string()).collect();
             asked.sort();
             calls.push(asked);
             Ok(names
@@ -465,39 +477,122 @@ mod tests {
         (needs, calls)
     }
 
-    const CHAIN: &[(&str, &[&str])] = &[
-        ("root", &["a"]),
-        ("a", &["b"]),
-        ("b", &["c"]),
-        ("c", &["d"]),
-        ("d", &[]),
-    ];
+    fn chain() -> BTreeMap<StorePath, Derivation> {
+        [
+            drv("root", &["out"], &[("a", &["out"])]),
+            drv("a", &["out"], &[("b", &["out"])]),
+            drv("b", &["out"], &[("c", &["out"])]),
+            drv("c", &["out"], &[("d", &["out"])]),
+            drv("d", &["out"], &[]),
+        ]
+        .into()
+    }
+
+    /// `root` uses `dep^out` only.
+    fn split() -> BTreeMap<StorePath, Derivation> {
+        [
+            drv("root", &["out", "dev"], &[("dep", &["out"])]),
+            drv("dep", &["out", "dev"], &[]),
+        ]
+        .into()
+    }
 
     #[test]
     fn a_built_root_asks_nothing_below_it() {
-        let (needs, calls) = run(&graph(CHAIN), &["root"], &["root", "a", "b", "c", "d"]);
+        let held = ["root-out", "a-out", "b-out", "c-out", "d-out"];
+        let (needs, calls) = run(&chain(), &[], &held);
         assert!(needs.is_empty());
-        assert_eq!(calls, vec![vec!["root"]]);
+        assert_eq!(calls, [["root-out"]]);
     }
 
     #[test]
     fn a_built_input_stops_the_walk() {
-        let (needs, calls) = run(&graph(CHAIN), &["root"], &["a", "b", "c", "d"]);
-        assert_eq!(needs, vec!["root"]);
-        assert_eq!(calls, vec![vec!["root"], vec!["a"]]);
+        let (needs, calls) = run(&chain(), &[], &["a-out", "b-out", "c-out", "d-out"]);
+        assert_eq!(needs, ["root"]);
+        assert_eq!(calls, [["root-out"], ["a-out"]]);
     }
 
     #[test]
     fn a_cold_store_is_asked_the_rest_in_one_call() {
-        let (needs, calls) = run(&graph(CHAIN), &["root"], &[]);
-        assert_eq!(needs, vec!["a", "b", "c", "d", "root"]);
-        assert_eq!(calls, vec![vec!["root"], vec!["a"], vec!["b", "c", "d"]]);
+        let (needs, calls) = run(&chain(), &[], &[]);
+        assert_eq!(needs, ["a", "b", "c", "d", "root"]);
+        assert_eq!(
+            calls,
+            vec![
+                vec!["root-out"],
+                vec!["a-out"],
+                vec!["b-out", "c-out", "d-out"]
+            ]
+        );
     }
 
     #[test]
     fn an_input_below_a_built_one_is_not_built() {
-        let (needs, calls) = run(&graph(CHAIN), &["root"], &["c"]);
-        assert_eq!(needs, vec!["a", "b", "root"]);
-        assert_eq!(calls, vec![vec!["root"], vec!["a"], vec!["b", "c", "d"]]);
+        let (needs, calls) = run(&chain(), &[], &["c-out"]);
+        assert_eq!(needs, ["a", "b", "root"]);
+        assert_eq!(
+            calls,
+            vec![
+                vec!["root-out"],
+                vec!["a-out"],
+                vec!["b-out", "c-out", "d-out"]
+            ]
+        );
+    }
+
+    #[test]
+    fn an_input_output_nobody_uses_is_not_wanted() {
+        let (needs, calls) = run(&split(), &[], &["dep-out"]);
+        assert_eq!(needs, ["root"]);
+        assert_eq!(calls, [vec!["root-dev", "root-out"], vec!["dep-out"]]);
+    }
+
+    #[test]
+    fn a_root_is_wanted_for_the_requested_outputs_only() {
+        let (needs, calls) = run(&split(), &["out".into()], &["root-out"]);
+        assert!(needs.is_empty());
+        assert_eq!(calls, [["root-out"]]);
+    }
+
+    /// `dep^dev` is wanted only through `mid`.
+    fn diamond() -> BTreeMap<StorePath, Derivation> {
+        [
+            drv("root", &["out"], &[("mid", &["out"]), ("dep", &["out"])]),
+            drv("mid", &["out"], &[("dep", &["dev"])]),
+            drv("dep", &["out", "dev"], &[]),
+        ]
+        .into()
+    }
+
+    #[test]
+    fn a_held_drv_wants_nothing_of_its_inputs() {
+        let (needs, calls) = run(&diamond(), &[], &["mid-out", "dep-out"]);
+        assert_eq!(needs, ["root"]);
+        assert_eq!(calls, [vec!["root-out"], vec!["dep-out", "mid-out"]]);
+    }
+
+    #[test]
+    fn a_later_want_can_make_a_held_input_missing() {
+        let (needs, calls) = run(&diamond(), &[], &["dep-out"]);
+        assert_eq!(needs, ["dep", "mid", "root"]);
+        assert_eq!(
+            calls,
+            [
+                vec!["root-out"],
+                vec!["dep-out", "mid-out"],
+                vec!["dep-dev"]
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_output_is_an_error() {
+        let drvs = [drv("root", &["out"], &[])].into();
+        let root = sp("root.drv");
+        let e = missing_drvs(&drvs, &[(&root, &["bin".into()])], &mut |_| {
+            Ok(HashSet::new())
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("has no output 'bin'"), "{e}");
     }
 }

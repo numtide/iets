@@ -578,6 +578,12 @@ fn search_uses_the_cache(work: Work) {
     let idir = work.s("searchcache-noir");
     assert_eq!(search(&idir, &["--no-ir-cache"]).rc, 0);
     assert!(!work.path("searchcache-noir/ir").exists());
+    let env_dir = work.path("searchcache-env");
+    let mut c = work.iets();
+    c.env("IETS_CACHE_DIR", &env_dir)
+        .args(["search", "-f", &pkgs, "--no-ir-cache", "hello"]);
+    assert_eq!(run(c).rc, 0);
+    assert!(!env_dir.join("ir").exists());
     let s5 = search(&sdir, &["--workers", "2"]);
     assert!(s5.rc == 0 && s5.out == s1.out);
     let o = work

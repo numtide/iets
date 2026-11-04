@@ -211,6 +211,12 @@ pub fn local() -> Transport {
 /// The evaluator configuration: the search path, the `system` setting and
 /// `pure-eval`.
 pub fn eval_config(c: &Common, cfg: &Config) -> EvalConfig {
+    eval_config_with(c, cfg, &EvalArgs::new())
+}
+
+/// `eval_config` with the IR cache of a command's own cache flags: the
+/// default one is not opened, which would make its directory.
+pub fn eval_config_with(c: &Common, cfg: &Config, cache: &EvalArgs) -> EvalConfig {
     let pure = c
         .flags
         .pure
@@ -225,7 +231,7 @@ pub fn eval_config(c: &Common, cfg: &Config) -> EvalConfig {
         .system(&cfg.system())
         .pure(pure)
         .search_path(full_includes(&c.flags.includes))
-        .ir_cache(EvalArgs::new().ir_cache())
+        .ir_cache(cache.ir_cache())
         .lints(lint::Config::off())
         .lint_root(&entry)
 }

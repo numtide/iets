@@ -3349,9 +3349,22 @@ pub fn dir_of(path: &[u8]) -> &[u8] {
 
 impl Evaluator {
     /// `--arg`/`--argstr` handling: call a formals lambda with the matching
-    /// subset of `args`; anything else is returned unchanged.
+    /// subset of `args`, unwrapping `__functor` sets first. Anything else
+    /// is returned unchanged.
     pub fn auto_call(&mut self, fun: Word, args: Word) -> EvalResult<Word> {
-        let fun = self.force(fun)?;
+        let mut fun = self.force(fun)?;
+        // As eval.cc:autoCallFunction. Bounded like `apply`.
+        let mut functors = 0u32;
+        while let Some(a) = fun.as_attrs()
+            && let Some(functor) = a.get(self.s.functor)
+        {
+            functors += 1;
+            if functors > MAX_CALL_DEPTH {
+                return Err(Error::stack_overflow(Pos::NONE));
+            }
+            let f = self.force_cell(&functor.cell)?;
+            fun = self.apply(f, &[fun], Pos::NONE)?;
+        }
         let Value::Lambda(l) = fun.view() else {
             return Ok(fun);
         };

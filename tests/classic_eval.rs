@@ -900,7 +900,12 @@ fn auto_call_a_function_file() {
         "ellipsis.nix",
         "{ a ? 1, ... }@args: { sum = a; name = builtins.toJSON (builtins.attrNames args); }",
     );
+    let functor = s.write(
+        "functor.nix",
+        r#"{ __functor = self: { a ? 1, b ? 2 }: { sum = a + b; name = "n-${toString a}"; }; }"#,
+    );
     let (fun, ell) = (fun.to_str().unwrap(), ell.to_str().unwrap());
+    let functor = functor.to_str().unwrap();
     let both = |ours: Output, real: Output| e2e::classic::Both { ours, real };
     for (label, args, attr) in [
         ("defaults", &[][..], "sum"),
@@ -910,6 +915,7 @@ fn auto_call_a_function_file() {
         for (file, extra, what) in [
             (fun, &[][..], "a function"),
             (ell, &["--arg", "extra", "9"][..], "a '...' function"),
+            (functor, &[][..], "a functor set"),
         ] {
             let a = [args, extra, &[file, "-A", attr]].concat();
             c.same(

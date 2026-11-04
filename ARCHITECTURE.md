@@ -83,12 +83,13 @@ The evaluator:
   store path the evaluator reads to its bytes.
 - `parallel/`: worker threads, fibers, work-stealing deques, the thunk
   claim protocol.
-- `store/`: pure functions. Nix base32, the four hash algorithms, NAR
-  serialization and hashing, store paths, ATerm derivations,
-  `hashDerivationModulo`, `drvdiff.rs`; `locate.rs` finds derivation roots
-  and local-store sources, `source.rs` holds where the bytes of a path are
-  and the origin each source came from. `nar.rs` is the whole NAR
-  codec. Its reader follows nix-community/go-nix PR #123: one buffered
+- `store/`: the store's formats, as pure functions. Nix base32, the four
+  hash algorithms, NAR serialization and hashing, store paths, ATerm
+  derivations, `hashDerivationModulo`, `drvdiff.rs`. `locate.rs` is the
+  exception: it asks the local daemon how a source was content-addressed
+  and what a store path references. `source.rs` holds where the bytes of
+  a path are and the origin each source came from. `nar.rs` is the whole
+  NAR codec. Its reader follows nix-community/go-nix PR #123: one buffered
   window per side, token groups matched as fixed byte strings, and no
   allocation per entry. `hash_derivation_modulo` drops the `children` of
   each input, as derivations.cc does, so a dependency on a dynamic
@@ -170,8 +171,8 @@ What each command is written against. The operation layer is
 
 | Command | Operations | The command's own part |
 |:---|:---|:---|
-| `iets eval` | `eval` | the human value printer, `--timings` |
-| `iets build` | `resolve` (the get-drvs walk for a set), `plan`, `missing`, `build`, through `api::build::Dispatch` | the closing line, the `--dry-run` text, `render_size`, the `fix-hashes` prompts, the `.drv` legacy input |
+| `iets eval` | `eval` | the `nix-instantiate --eval` printer, `--timings` |
+| `iets build` | `api::installable::roots_of` (a derivation's context, or the get-drvs walk of a set from its current-system member), `plan`, `missing`, `build`, through `api::build::Dispatch` | the closing line, the `--dry-run` text, `render_size`, the `fix-hashes` prompts, the `.drv` legacy input |
 | `iets search` | `index` | regex compile and match, `--exclude`, colour, `--pretty`, the no-results hint |
 | `iets diff` | `resolve`, `drv-diff`, `closure-diff` | the text rendering, the `diff(1)` exit codes |
 | `iets eval-jobs` | `jobs` | the worker/collector process model, `--max-memory-size`, the summary line |
@@ -181,7 +182,7 @@ What each command is written against. The operation layer is
 | `nix-instantiate` | `resolve` (get-drvs walk), `plan` | Nix argv parsing, `--add-root`, out-links, the exec fallback |
 | `nix-build` | `resolve`, `plan`, `build` | `result` symlinks, `--add-root`, Nix's exit codes, the fallback |
 | `nix-shell` | `resolve`, `plan`, `build` | the env, `execve` of the shell, `--run`, `--pure` |
-| `nix-eval-jobs` | `jobs` | argv compatibility |
+| `nix-eval-jobs` | `jobs` | none: it is `iets eval-jobs`, without the summary line |
 | `nix eval` | `eval` | Nix's printer and argv |
 | `nix build` | `resolve`, `plan`, `build` | `result` symlinks, the `--json` Nix shape, the fallback |
 | `nix derivation show` | `resolve`, `drv-show` | Nix's argv, `--pretty`, the fallback |

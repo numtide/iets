@@ -323,11 +323,10 @@ Cancel is sticky for the same reason. Once set, every publish the fiber
 would still do becomes a reset, so a swallowed error cannot leak a value
 built from a bailed sub-computation into a shared thunk.
 
-Trace lines on stderr can come in another order than in a sequential run,
-because the demand walk does every unclaimed cell first and parks on busy
-ones afterwards. A helper starts at call depth zero, so a program that
-fails only by exceeding the maximum call depth sequentially may succeed in
-parallel. Both are listed in
+Trace lines on stderr come in the order of a sequential run, because only
+the demand path prints them. A helper starts at call depth zero, so a
+program that fails only by exceeding the maximum call depth sequentially
+may succeed in parallel. This is listed in
 [Known divergences from Nix 2.34](../reference/divergences.md#parallel-evaluation).
 
 ### Deadlocks

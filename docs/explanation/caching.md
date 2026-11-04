@@ -1,6 +1,6 @@
 # How caching works
 
-iets writes three things under `~/.cache/iets`. The compiled IR and the
+iets keeps three stores under `~/.cache/iets`. The compiled IR and the
 tracing runs are caches: they hold the result of work iets can do again.
 Fetched inputs aren't a cache. They're where a fetched flake input *lives*.
 All three work the same way, and the input store is safe in your home
@@ -10,16 +10,20 @@ directory with no daemon and no signature.
 |---|---|---|---|
 | compiled IR | `~/.cache/iets/ir` | one file | build id, path, system, store directory, `pure-eval`, lint levels, source |
 | tracing runs | `~/.cache/iets/trace` | one file in a directory | the whole command; for the count of a revision, the SCM and the revision |
-| fetched inputs | `~/.cache/iets/inputs` | one directory | the store path the lock implies |
+| fetched inputs | `~/.cache/iets/inputs` | one file | the store path the lock implies |
 
 `--no-tracing-cache` and `--no-ir-cache` turn off one cache each, and
 `--no-cache`, `IETS_CACHE=0` and the `cache` setting turn off both. Nothing
 turns off the input store, because a run needs the input's bytes.
-`--cache-dir DIR` moves the three stores and the roots directory.
+`--cache-dir DIR` moves everything iets keeps there.
 
 `~/.cache/iets/roots` holds the GC roots iets owns
 ([The roots store](#the-roots-store-gc-roots-iets-owns)). The design
 comes from Mic92's nix-tarmac.
+
+`~/.cache/iets/git` holds a shallow clone of each remote Git repository
+iets fetched, and `~/.cache/iets/lfs` each Git LFS object by its sha256.
+No sweep touches those two.
 
 ## Store safety
 
@@ -55,9 +59,9 @@ is of another format, or whose garbage-collection stamp cannot be parsed, or
 whose lock is not a file, is emptied and starts again.
 
 **An entry carries a checksum over its own key.** Every entry of the IR
-cache and of the tracing cache holds 16 bytes of blake3 over the key it
-answers and the whole of its content. A reader checks it before it decodes
-anything. A changed byte, a truncated entry and an entry copied to another
+cache and of the tracing cache holds 8 bytes: a CRC-32 over the key it
+answers and the whole of its content, and the content's length. A reader
+checks it before it decodes anything. A changed byte, a truncated entry and an entry copied to another
 key are all a mismatch, and a mismatch is a miss that poisons the entry.
 
 A reader opens an entry with `O_NOFOLLOW` and `O_NONBLOCK`, accepts only a

@@ -183,9 +183,7 @@ impl Events {
 /// `s` as a JSON string. Invalid UTF-8 is replaced, because a path is bytes
 /// and a record is never worth failing a run over.
 fn push_str(out: &mut Vec<u8>, s: &[u8]) {
-    let lossy = String::from_utf8_lossy(s);
-    // the only error is invalid UTF-8, which `lossy` has already replaced
-    let _ = print::json_escape(out, lossy.as_bytes());
+    print::json_escape_str(out, &String::from_utf8_lossy(s));
 }
 
 /// How one value appears in a record: it writes a whole JSON value, and

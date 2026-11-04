@@ -370,6 +370,23 @@ pub fn make_fixed_output_path(
     name: &str,
     references: &BTreeSet<StorePath>,
 ) -> Result<StorePath, StorePathError> {
+    make_fixed_output_path_self(method, hash, name, references, false)
+}
+
+/// [`make_fixed_output_path`] where the path may also refer to itself, which
+/// only recursive sha256 allows.
+pub fn make_fixed_output_path_self(
+    method: IngestionMethod,
+    hash: &Hash,
+    name: &str,
+    references: &BTreeSet<StorePath>,
+    self_ref: bool,
+) -> Result<StorePath, StorePathError> {
+    if self_ref && (method != IngestionMethod::Recursive || hash.algo != HashAlgo::Sha256) {
+        return Err(StorePathError(format!(
+            "'{name}' cannot refer to itself with this content address"
+        )));
+    }
     if method == IngestionMethod::Text {
         if hash.algo != HashAlgo::Sha256 {
             return Err(StorePathError(format!(
@@ -380,7 +397,11 @@ pub fn make_fixed_output_path(
         return make_text_path(name, hash, references);
     }
     if hash.algo == HashAlgo::Sha256 && method == IngestionMethod::Recursive {
-        return make_store_path(&make_type("source".into(), references, false), hash, name);
+        return make_store_path(
+            &make_type("source".into(), references, self_ref),
+            hash,
+            name,
+        );
     }
     if !references.is_empty() {
         return Err(StorePathError(format!(

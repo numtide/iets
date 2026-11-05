@@ -22,8 +22,8 @@ pub fn run_eval(a: EvalArgs) -> i32 {
     // only the cache and --dump-drvs read the ATerm text after evaluation
     let keep = run.cache.is_some() || a.dump_drvs.is_some();
     run.cfg = run.cfg.keep_aterm(keep).keep_site(false);
-    // parallel: the rest runs as the main fiber
-    cli::run_parallel(run, move |ev, cache| eval_and_print(ev, a, cache))
+    // parallel: the rest runs as the main fiber; the process exits after it
+    cli::run_parallel(run.last(), move |ev, cache| eval_and_print(ev, a, cache))
 }
 
 fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 {

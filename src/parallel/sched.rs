@@ -129,6 +129,9 @@ pub trait Driver: Sync {
     /// Called on the worker's stack right before switching into `slot`
     /// and right after it switched out (arena swap).
     fn on_switch(&self, slot: &mut Slot, worker: &mut Worker);
+    /// Called once the teardown is over, before the driver is dropped or
+    /// left to the exit: what its drop would write goes out now.
+    fn finish(&self) {}
 }
 
 pub type MainEntry = Box<dyn FnOnce(&mut Slot)>;
@@ -875,9 +878,15 @@ impl Deref for Handle {
 
 impl Handle {
     /// Runs the main fiber, then the teardown: when this returns, every
-    /// helper thread has exited and the runtime, its fibers and their
-    /// payloads are freed.
-    pub fn run_main(self, user: *mut (), entry: MainEntry) -> Result<(), fiber::StackError> {
+    /// helper thread has exited and the fibers and their payloads are
+    /// freed. So is the runtime with its driver, unless `free` is false,
+    /// for a process that exits next.
+    pub fn run_main(
+        self,
+        free: bool,
+        user: *mut (),
+        entry: MainEntry,
+    ) -> Result<(), fiber::StackError> {
         let rt = self.0;
         let r = rt.run_main(user, entry);
         // SAFETY: the main fiber returned or never started; `Handle` was the
@@ -886,9 +895,12 @@ impl Handle {
         if Session::current().settings().par_stats >= 1 && parked > 0 {
             errln!("parallel: teardown dropped {parked} parked fibers");
         }
-        // SAFETY: from `Box::leak` in `start`; the teardown joined every
-        // thread that held `rt` and freed every slot that pointed at it.
-        drop(unsafe { Box::from_raw(rt as *const Runtime as *mut Runtime) });
+        rt.driver.finish();
+        if free {
+            // SAFETY: from `Box::leak` in `start`; the teardown joined every
+            // thread that held `rt` and freed every slot that pointed at it.
+            drop(unsafe { Box::from_raw(rt as *const Runtime as *mut Runtime) });
+        }
         r
     }
 }
@@ -1084,6 +1096,7 @@ mod tests {
         let rt = Runtime::start(4, Box::new(TestDriver(c)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
+            true,
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
@@ -1113,6 +1126,7 @@ mod tests {
         let rt = Runtime::start(3, Box::new(TestDriver(c)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
+            true,
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
@@ -1143,6 +1157,7 @@ mod tests {
         let rt = Runtime::start(2, Box::new(TestDriver(c)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
+            true,
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();

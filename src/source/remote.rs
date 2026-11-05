@@ -98,6 +98,12 @@ impl Clone for LazyStore {
 }
 
 impl LazyStore {
+    /// Closes the connection, as dropping it would: for an evaluator that
+    /// is left to the exit instead of dropped.
+    pub fn close(&mut self) {
+        self.conn = None;
+    }
+
     fn get(&mut self) -> Option<&mut Connection> {
         if !self.tried {
             self.tried = true;

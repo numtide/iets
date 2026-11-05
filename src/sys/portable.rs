@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::Path;
+use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 
@@ -54,4 +55,17 @@ pub unsafe fn discard(p: *mut u8, len: usize) {
 /// Never proven here, so callers walk the path themselves.
 pub fn beneath(_root: &File, _rel: &Path, _follow: bool) -> Option<bool> {
     None
+}
+
+/// No fork here: the exit stays in the foreground (`linux.rs`).
+pub struct ExitNote;
+
+pub fn detach_exit() -> Option<ExitNote> {
+    None
+}
+
+impl ExitNote {
+    pub fn exit(self, code: i32) -> ! {
+        process::exit(code)
+    }
 }

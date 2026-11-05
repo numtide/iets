@@ -29,6 +29,7 @@ use std::{env, fs, io, thread};
 
 use crate::compile::cache::IrCache;
 use crate::session::Session;
+use crate::store::hash::is_nix32_char;
 use crate::store::path::StorePath;
 use crate::sys;
 use crate::trace::{self, store};
@@ -44,6 +45,7 @@ fn format(shape: Shape) -> &'static [u8] {
     match shape {
         Shape::StoreEntries => b"2",
         Shape::Dirs | Shape::ShardedFiles | Shape::Links => FORMAT,
+        Shape::Clones | Shape::Objects => b"1",
     }
 }
 
@@ -163,6 +165,13 @@ pub enum Shape {
     /// link points into `/nix/store` and is what the daemon's
     /// `gcroots/auto/<hash>` entry names, so removing it releases the root.
     Links,
+    /// One bare Git repository per entry, named by the nix32 sha256 of its
+    /// URL, with an optional `-history` twin (`crate::fetch::git`). Each has
+    /// a `<name>.lock` that every fetch takes and touches, so the lock's
+    /// mtime is when the clone was last used.
+    Clones,
+    /// One file per entry, named by its 64-hex sha256 (Git LFS objects).
+    Objects,
 }
 
 /// A sweep only ever removes something named like a key, so the store-level
@@ -172,7 +181,13 @@ fn is_key(name: &OsStr, shape: Shape) -> bool {
     let b = name.as_bytes();
     match shape {
         Shape::StoreEntries => from_utf8(b).is_ok_and(|n| StorePath::from_base_name(n).is_ok()),
-        Shape::Dirs | Shape::Links => b.len() == 64 && b.iter().all(u8::is_ascii_hexdigit),
+        Shape::Dirs | Shape::Links | Shape::Objects => {
+            b.len() == 64 && b.iter().all(u8::is_ascii_hexdigit)
+        }
+        Shape::Clones => {
+            let b = b.strip_suffix(b"-history").unwrap_or(b);
+            b.len() == 52 && b.iter().all(|&c| is_nix32_char(c))
+        }
         Shape::ShardedFiles => b.len() == 62 && b.iter().all(u8::is_ascii_hexdigit),
     }
 }
@@ -210,6 +225,7 @@ fn entry_age(path: &Path, shape: Shape) -> Option<Duration> {
             .ok()?
             .elapsed()
             .ok(),
+        Shape::Clones => age(&clone_lock(path)).or_else(|| age(path)),
         _ => age(path),
     }
 }
@@ -331,6 +347,11 @@ fn belongs(name: &OsStr, shape: Shape) -> bool {
         || is_key(name, shape)
         || (matches!(shape, Shape::ShardedFiles) && is_shard(name))
         || (matches!(shape, Shape::StoreEntries) && name.as_bytes() == PACKS.as_bytes())
+        || (matches!(shape, Shape::Clones)
+            && name
+                .as_bytes()
+                .strip_suffix(b".lock")
+                .is_some_and(|k| is_key(OsStr::from_bytes(k), shape)))
 }
 
 /// True when every name in `root` is one this store's own layout makes. An
@@ -603,7 +624,10 @@ pub struct Swept {
 
 fn entry_size(path: &Path, shape: Shape) -> u64 {
     match shape {
-        Shape::ShardedFiles | Shape::StoreEntries => fs::metadata(path).map_or(0, |m| m.len()),
+        Shape::ShardedFiles | Shape::StoreEntries | Shape::Objects => {
+            fs::metadata(path).map_or(0, |m| m.len())
+        }
+        Shape::Clones => tree_size(path),
         // a root holds no bytes of its own; what it frees is the daemon's to say
         Shape::Links => 0,
         Shape::Dirs => fs::read_dir(path).map_or(0, |d| {
@@ -615,12 +639,44 @@ fn entry_size(path: &Path, shape: Shape) -> u64 {
     }
 }
 
-fn drop_entry(path: &Path, shape: Shape) -> bool {
+fn drop_entry(path: &Path, shape: Shape, ttl: Duration) -> bool {
     match shape {
         Shape::Links => sysfs::remove_link(path).is_ok(),
-        Shape::ShardedFiles | Shape::StoreEntries => fs::remove_file(path).is_ok(),
+        Shape::ShardedFiles | Shape::StoreEntries | Shape::Objects => fs::remove_file(path).is_ok(),
         Shape::Dirs => fs::remove_dir_all(path).is_ok(),
+        Shape::Clones => drop_clone(path, ttl),
     }
+}
+
+fn clone_lock(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// A fetch returns the clone and reads it after the lock is gone, so the
+/// age is checked again under the lock.
+fn drop_clone(path: &Path, ttl: Duration) -> bool {
+    let lock = clone_lock(path);
+    let Ok(f) = open_lock(&lock) else {
+        return false;
+    };
+    if !sysfs::try_lock(&f) || entry_age(path, Shape::Clones).is_some_and(|a| a < ttl) {
+        return false;
+    }
+    let gone = fs::remove_dir_all(path).is_ok();
+    let _ = fs::remove_file(&lock);
+    gone
+}
+
+fn tree_size(path: &Path) -> u64 {
+    let Ok(m) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !m.is_dir() {
+        return m.len();
+    }
+    fs::read_dir(path).map_or(0, |d| d.flatten().map(|e| tree_size(&e.path())).sum())
 }
 
 fn sweep_dir(dir: &Path, shape: Shape, ttl: Duration, dry_run: bool, out: &mut Swept) {
@@ -649,7 +705,7 @@ fn sweep_dir(dir: &Path, shape: Shape, ttl: Duration, dry_run: bool, out: &mut S
             continue;
         }
         let bytes = entry_size(&path, shape);
-        if dry_run || drop_entry(&path, shape) {
+        if dry_run || drop_entry(&path, shape, ttl) {
             out.removed += 1;
             out.bytes += bytes;
         }
@@ -661,7 +717,7 @@ fn sweep_dir(dir: &Path, shape: Shape, ttl: Duration, dry_run: bool, out: &mut S
 pub fn sweep(root: &Path, shape: Shape, ttl: Duration, dry_run: bool) -> Swept {
     let mut out = Swept::default();
     match shape {
-        Shape::Dirs | Shape::Links => {
+        Shape::Dirs | Shape::Links | Shape::Clones | Shape::Objects => {
             sweep_dir(root, shape, ttl, dry_run, &mut out);
         }
         Shape::StoreEntries => {
@@ -726,8 +782,7 @@ pub fn maybe_sweep(root: &Path, shape: Shape, timings: bool) {
     }
 }
 
-/// The stores a `cache gc` run walks: the tracing cache, the IR cache,
-/// the input store and the roots store.
+/// The stores a `cache gc` run walks.
 pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
     let mut v = Vec::new();
     if let Some(s) = store::Store::locate(cache_dir) {
@@ -741,6 +796,10 @@ pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
     }
     if let Some(r) = roots(cache_dir) {
         v.push((r, Shape::Links));
+    }
+    if let Some(r) = root(cache_dir) {
+        v.push((r.join("git"), Shape::Clones));
+        v.push((r.join("lfs"), Shape::Objects));
     }
     v
 }
@@ -767,6 +826,57 @@ mod tests {
 
     fn ready(d: &Path) {
         assert!(prepare(d, Shape::Dirs, false), "the store is iets's");
+    }
+
+    /// A clone is aged by its lock, and one a fetch holds stays.
+    #[test]
+    fn a_sweep_drops_clones_unused_for_the_ttl() {
+        let d = tempdir().unwrap();
+        assert!(prepare(d.path(), Shape::Clones, false));
+        let name = "0".repeat(52);
+        let [old, held, fresh] =
+            [&name, &format!("{name}-history"), &"1".repeat(52)].map(|n| d.path().join(n));
+        for c in [&old, &held, &fresh] {
+            fs::create_dir_all(c.join("objects")).unwrap();
+            fs::write(c.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+            fs::write(clone_lock(c), b"").unwrap();
+        }
+        back_date(&clone_lock(&old), 40 * DAY);
+        back_date(&clone_lock(&held), 40 * DAY);
+        let _fetch = wait_lock(&clone_lock(&held), || {}).unwrap();
+        back_date(&clone_lock(&held), 40 * DAY);
+        let s = sweep(
+            d.path(),
+            Shape::Clones,
+            Duration::from_secs(30 * DAY),
+            false,
+        );
+        assert_eq!((s.scanned, s.removed), (3, 1));
+        assert!(!old.exists() && !clone_lock(&old).exists());
+        assert!(held.exists() && fresh.exists());
+        assert!(
+            prepare(d.path(), Shape::Clones, false),
+            "the store is still iets's"
+        );
+    }
+
+    #[test]
+    fn a_sweep_drops_lfs_objects_unread_for_the_ttl() {
+        let d = tempdir().unwrap();
+        assert!(prepare(d.path(), Shape::Objects, false));
+        let [old, new] = ["a", "b"].map(|c| d.path().join(c.repeat(64)));
+        for o in [&old, &new] {
+            fs::write(o, b"x").unwrap();
+        }
+        back_date(&old, 40 * DAY);
+        let s = sweep(
+            d.path(),
+            Shape::Objects,
+            Duration::from_secs(30 * DAY),
+            false,
+        );
+        assert_eq!((s.scanned, s.removed), (2, 1));
+        assert!(!old.exists() && new.exists());
     }
 
     #[test]

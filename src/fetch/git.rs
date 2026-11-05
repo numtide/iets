@@ -206,8 +206,10 @@ pub fn open(want: &Want) -> Result<Fetched, String> {
 fn fetch(want: &Want) -> Result<Fetched, String> {
     let offline = Session::current().settings().offline;
     let root = cache_root().ok_or("iets: no cache directory for Git clones (set HOME)")?;
-    fs::create_dir_all(&root)
-        .map_err(|e| format!("iets: cannot create '{}': {e}", root.display()))?;
+    if !cachefs::prepare(&root, cachefs::Shape::Clones, false) {
+        return Err(format!("iets: cannot use '{}'", root.display()));
+    }
+    cachefs::maybe_sweep(&root, cachefs::Shape::Clones, false);
     let dir = root.join(hash_bytes(HashAlgo::Sha256, want.url.as_bytes()).to_nix32());
     let _lock = lock(&dir)?;
     if !dir.join("HEAD").exists()

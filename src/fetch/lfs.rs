@@ -277,10 +277,7 @@ fn download(cache: &Path, d: &Download, limits: Limits) -> Result<(), String> {
             p.oid
         ));
     }
-    let tmp = tempfile::NamedTempFile::new_in(cache).map_err(|e| e.to_string())?;
-    fs::write(tmp.path(), &bytes).map_err(|e| e.to_string())?;
-    tmp.persist(cache.join(&p.oid)).map_err(|e| e.to_string())?;
-    Ok(())
+    cachefs::write_atomic(cache, &p.oid, &[&bytes]).map_err(|e| e.to_string())
 }
 
 /// Replaces the pointer in each LFS file of `rev`'s `entries` by the
@@ -319,9 +316,13 @@ pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Resul
         ));
     }
     let cache = cache_dir()?;
+    let have: HashMap<&str, Vec<u8>> = wanted
+        .values()
+        .filter_map(|p| Some((p.oid.as_str(), cached(&cache, p)?)))
+        .collect();
     let mut missing: Vec<Pointer> = wanted
         .values()
-        .filter(|p| !cache.join(&p.oid).exists())
+        .filter(|p| !have.contains_key(p.oid.as_str()))
         .cloned()
         .collect();
     missing.sort_by(|a, b| a.oid.cmp(&b.oid));
@@ -354,18 +355,37 @@ pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Resul
         let (Some(p), Entry::File { bytes, .. }) = (wanted.get(path), entry) else {
             continue;
         };
-        *bytes = fs::read(cache.join(&p.oid))
-            .map_err(|e| format!("iets: cannot read the LFS object {}: {e}", p.oid))?;
+        let got = match have.get(p.oid.as_str()) {
+            Some(b) => b.clone(),
+            None => cached(&cache, p)
+                .ok_or_else(|| format!("iets: cannot read the LFS object {}", p.oid))?,
+        };
+        *bytes = got;
     }
     Ok(())
+}
+
+/// The object, when the cache holds it intact. A damaged one is removed, so
+/// it is downloaded again.
+fn cached(cache: &Path, p: &Pointer) -> Option<Vec<u8>> {
+    let path = cache.join(&p.oid);
+    let bytes = fs::read(&path).ok()?;
+    if hash_bytes(HashAlgo::Sha256, &bytes).to_base16() != p.oid {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    cachefs::touch(&path);
+    Some(bytes)
 }
 
 fn cache_dir() -> Result<PathBuf, String> {
     let dir = cachefs::root(None)
         .ok_or("iets: no cache directory for Git LFS objects (set HOME)")?
         .join("lfs");
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("iets: cannot create '{}': {e}", dir.display()))?;
+    if !cachefs::prepare(&dir, cachefs::Shape::Objects, false) {
+        return Err(format!("iets: cannot use '{}'", dir.display()));
+    }
+    cachefs::maybe_sweep(&dir, cachefs::Shape::Objects, false);
     Ok(dir)
 }
 

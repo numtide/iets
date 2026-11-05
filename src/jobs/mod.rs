@@ -53,7 +53,6 @@ pub struct Opts {
 
 #[derive(Clone, Copy)]
 struct Syms {
-    type_: Sym,
     meta: Sym,
     outputs: Sym,
     recurse: Sym,
@@ -133,7 +132,6 @@ pub struct Stats {
 /// function.
 pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<Word>) {
     let syms = Syms {
-        type_: ev.sym(b"type"),
         meta: ev.sym(b"meta"),
         outputs: ev.sym(b"outputs"),
         recurse: ev.sym(b"recurseForDerivations"),
@@ -281,15 +279,6 @@ fn is_index(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) && name.parse::<u32>().is_ok()
 }
 
-/// eval.cc:isDerivation: an attrset whose `type` is the string "derivation".
-fn is_derivation(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<bool> {
-    let Some(t) = a.get(config().syms.type_) else {
-        return Ok(false);
-    };
-    let v = ev.force_cell(&t.cell)?;
-    Ok(v.as_string().is_some_and(|s| s.bytes == b"derivation"))
-}
-
 /// worker.cc:processJobRequest for one attribute path: what to print or
 /// where to recurse.
 pub fn node(ev: &mut Evaluator, w: Word, path: &[String], hash: u64) -> EvalResult<Node> {
@@ -299,7 +288,7 @@ pub fn node(ev: &mut Evaluator, w: Word, path: &[String], hash: u64) -> EvalResu
     let Some(attrs) = v.as_attrs() else {
         return Ok(Node::Skip);
     };
-    if is_derivation(ev, attrs)? {
+    if ev.is_derivation(v)? {
         if !admit(hash, path.len() as u32, true) {
             return Ok(Node::Skip);
         }
@@ -855,7 +844,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
     let Some(a) = v.as_attrs() else {
         return Ok(());
     };
-    if is_derivation(ev, a)? {
+    if ev.is_derivation(v)? {
         if admit(hash, depth, true) {
             prefetch_job(ev, a)?;
         }

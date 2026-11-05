@@ -399,6 +399,68 @@ fn cache_gc_removes_entries_past_the_ttl(bin: Iets) {
     );
 }
 
+/// `cache gc` walks every store `cachefs::stores` names, whatever its shape.
+#[rstest]
+fn cache_gc_sweeps_every_store(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_str().expect("utf-8 path");
+    let target = dir.path().join("target");
+    fs::write(&target, b"").unwrap();
+    let mut entries = Vec::new();
+    for (root, shape) in cachefs::stores(Some(path)) {
+        assert!(cachefs::prepare(&root, shape, false), "{}", root.display());
+        let entry = match shape {
+            cachefs::Shape::Dirs => {
+                let e = root.join("a".repeat(64));
+                fs::create_dir(&e).unwrap();
+                e
+            }
+            cachefs::Shape::ShardedFiles => {
+                fs::create_dir(root.join("ab")).unwrap();
+                root.join("ab").join("a".repeat(62))
+            }
+            cachefs::Shape::StoreEntries => root.join(format!("{}-source", "0".repeat(32))),
+            cachefs::Shape::Links => {
+                let e = root.join("a".repeat(64));
+                iets::sys::fs::symlink(&target, &e).unwrap();
+                e
+            }
+            cachefs::Shape::Clones => {
+                let e = root.join("0".repeat(52));
+                fs::create_dir(&e).unwrap();
+                fs::write(cachefs::clone_lock(&e), b"").unwrap();
+                e
+            }
+            cachefs::Shape::Objects => root.join("a".repeat(64)),
+        };
+        if !entry.exists() {
+            let nar = iets::store::hash::hash_bytes(iets::store::hash::HashAlgo::Sha256, b"");
+            let node = spool::Node::Symlink(b"x".to_vec());
+            fs::write(&entry, spool::encode_index(&node, (&nar, 1))).unwrap();
+        }
+        entries.push(entry);
+    }
+    let gc = |ttl: &str| {
+        let out = bin
+            .cmd()
+            .args(["cache", "gc", "--cache-dir"])
+            .arg(dir.path())
+            .args(["--ttl", ttl])
+            .output()
+            .expect("run iets cache gc");
+        assert!(out.status.success(), "cache gc exits 0");
+    };
+    gc("30");
+    for e in &entries {
+        assert!(e.exists(), "{}: young", e.display());
+    }
+    gc("0");
+    for e in &entries {
+        assert!(!e.exists(), "{}: swept", e.display());
+    }
+    assert!(target.exists(), "what a root named stays");
+}
+
 // TODO: Windows has no FIFOs and no mode bits, and `restrict_to_owner` does
 // nothing there yet. Port these once the cache sets an ACL.
 #[cfg(unix)]

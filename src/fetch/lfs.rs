@@ -365,13 +365,13 @@ pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Resul
     Ok(())
 }
 
-/// The object, when the cache holds it intact. A damaged one is removed, so
-/// it is downloaded again.
+/// The object, when the cache holds it intact. A damaged one is a miss and
+/// stays: a download replaces it atomically, and removing it here could
+/// remove the object a sibling just put in its place.
 fn cached(cache: &Path, p: &Pointer) -> Option<Vec<u8>> {
     let path = cache.join(&p.oid);
     let bytes = fs::read(&path).ok()?;
     if hash_bytes(HashAlgo::Sha256, &bytes).to_base16() != p.oid {
-        let _ = fs::remove_file(&path);
         return None;
     }
     cachefs::touch(&path);
@@ -392,6 +392,24 @@ fn cache_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sibling may have put the good object at the path since, so a damaged
+    /// read leaves the path to the download that replaces it.
+    #[test]
+    fn a_damaged_object_is_a_miss_and_stays() {
+        let cache = tempfile::tempdir().unwrap();
+        let good = b"object";
+        let p = Pointer {
+            oid: hash_bytes(HashAlgo::Sha256, good).to_base16(),
+            size: good.len() as u64,
+        };
+        let at = cache.path().join(&p.oid);
+        fs::write(&at, b"damaged").unwrap();
+        assert_eq!(cached(cache.path(), &p), None);
+        assert!(at.exists());
+        fs::write(&at, good).unwrap();
+        assert_eq!(cached(cache.path(), &p).as_deref(), Some(&good[..]));
+    }
 
     #[test]
     fn a_host_is_never_an_ssh_option() {

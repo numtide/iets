@@ -123,19 +123,30 @@ pub fn is_socket(_m: &Metadata) -> bool {
 
 /// The volume and the file index, or zeros when the file cannot be opened.
 pub fn file_id(path: &Path, _m: &Metadata) -> (u64, u64) {
-    let Ok(f) = open_for_attributes(path) else {
-        return (0, 0);
-    };
+    open_for_attributes(path)
+        .ok()
+        .and_then(|f| open_id(&f))
+        .unwrap_or((0, 0))
+}
+
+fn open_id(f: &File) -> Option<(u64, u64)> {
     // SAFETY: the handle is open and the struct is the size the call expects.
     let info = unsafe {
         let mut info: BY_HANDLE_FILE_INFORMATION = mem::zeroed();
         if GetFileInformationByHandle(f.as_raw_handle(), &mut info) == 0 {
-            return (0, 0);
+            return None;
         }
         info
     };
     let index = u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow);
-    (u64::from(info.dwVolumeSerialNumber), index)
+    Some((u64::from(info.dwVolumeSerialNumber), index))
+}
+
+/// Whether `path` still names the open file `f`: false once it was deleted,
+/// or replaced by another file.
+pub fn same_file(f: &File, path: &Path) -> bool {
+    let at = open_for_attributes(path).ok().and_then(|p| open_id(&p));
+    at.is_some() && at == open_id(f)
 }
 
 pub fn mtime_secs(m: &Metadata) -> i64 {

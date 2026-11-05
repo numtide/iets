@@ -131,6 +131,14 @@ fn nix_shell() {
         "nix-shell --run 'exit 3' keeps the exit code",
         &both(&["--run", "exit 3"], &here),
     );
+    s.write("shellnix/twice.nix", "{ x = import ./shell.nix; }\n");
+    c.same(
+        "nix-shell -A x -A x needs a single derivation",
+        &both(
+            &["twice.nix", "-A", "x", "-A", "x", "--run", "echo $MARK"],
+            &here,
+        ),
+    );
     let empty = s.dir().join("empty");
     fs::create_dir(&empty).unwrap();
     c.same(

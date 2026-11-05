@@ -89,8 +89,6 @@ pub enum Ir {
     Eq(IrRef, IrRef, Pos),
     Ne(IrRef, IrRef, Pos),
     Lt(IrRef, IrRef, Pos),
-    Gt(IrRef, IrRef, Pos),
-    Le(IrRef, IrRef, Pos),
     Ge(IrRef, IrRef, Pos),
     And(IrRef, IrRef, Pos),
     Or(IrRef, IrRef, Pos),

@@ -89,8 +89,7 @@ tags! {
         Eq = 19,
         Ne = 20,
         Lt = 21,
-        Gt = 22,
-        Le = 23,
+        // 22 and 23 were > and <=, which compile to Lt and Ge.
         Ge = 24,
         And = 25,
         Or = 26,
@@ -666,8 +665,6 @@ impl Ser {
             Ir::Eq(l, r, pos) => self.binary(IrTag::Eq, l, r, *pos),
             Ir::Ne(l, r, pos) => self.binary(IrTag::Ne, l, r, *pos),
             Ir::Lt(l, r, pos) => self.binary(IrTag::Lt, l, r, *pos),
-            Ir::Gt(l, r, pos) => self.binary(IrTag::Gt, l, r, *pos),
-            Ir::Le(l, r, pos) => self.binary(IrTag::Le, l, r, *pos),
             Ir::Ge(l, r, pos) => self.binary(IrTag::Ge, l, r, *pos),
             Ir::And(l, r, pos) => self.binary(IrTag::And, l, r, *pos),
             Ir::Or(l, r, pos) => self.binary(IrTag::Or, l, r, *pos),
@@ -1481,8 +1478,6 @@ impl<'a> De<'a, '_> {
             IrTag::Eq
             | IrTag::Ne
             | IrTag::Lt
-            | IrTag::Gt
-            | IrTag::Le
             | IrTag::Ge
             | IrTag::And
             | IrTag::Or
@@ -1499,8 +1494,6 @@ impl<'a> De<'a, '_> {
                     IrTag::Eq => Ir::Eq,
                     IrTag::Ne => Ir::Ne,
                     IrTag::Lt => Ir::Lt,
-                    IrTag::Gt => Ir::Gt,
-                    IrTag::Le => Ir::Le,
                     IrTag::Ge => Ir::Ge,
                     IrTag::And => Ir::And,
                     IrTag::Or => Ir::Or,

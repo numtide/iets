@@ -157,10 +157,7 @@ pub struct Worker {
     pool: Vec<*mut Slot>,
     spinning: bool,
     rng: u64,
-    pub tasks_run: u64,
-    pub steals: u64,
     pub parks: u64,
-    pub fibers_created: u64,
 }
 
 struct Lanes {
@@ -195,9 +192,8 @@ pub struct Runtime {
     pub shutdown: AtomicBool,
     /// Set once a fiber stack could not be reserved (reported once).
     stack_failed: AtomicBool,
-    pub main_done: AtomicBool,
     /// Set once the main result exists: helpers stop starting new work.
-    pub suppress: AtomicBool,
+    pub main_done: AtomicBool,
     next_id: AtomicU32,
     all: Mutex<Vec<*mut Slot>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -260,7 +256,6 @@ impl Runtime {
             shutdown: AtomicBool::new(false),
             stack_failed: AtomicBool::new(false),
             main_done: AtomicBool::new(false),
-            suppress: AtomicBool::new(false),
             next_id: AtomicU32::new(1),
             all: Mutex::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
@@ -307,7 +302,7 @@ impl Runtime {
         fiber::install_overflow_handler();
         let mut w = Worker::new(0);
         // the demand path keeps the stack it has at one worker
-        let slot = match self.new_slot_sized(&mut w, user, fiber::MAIN_STACK) {
+        let slot = match self.new_slot_sized(user, fiber::MAIN_STACK) {
             Ok(s) => s,
             Err(e) => {
                 self.driver.drop_user(user);
@@ -448,17 +443,11 @@ impl Runtime {
         }
     }
 
-    fn new_slot(&self, w: &mut Worker, user: *mut ()) -> Result<*mut Slot, fiber::StackError> {
-        self.new_slot_sized(w, user, self.stack_size)
+    fn new_slot(&self, user: *mut ()) -> Result<*mut Slot, fiber::StackError> {
+        self.new_slot_sized(user, self.stack_size)
     }
 
-    fn new_slot_sized(
-        &self,
-        w: &mut Worker,
-        user: *mut (),
-        stack: usize,
-    ) -> Result<*mut Slot, fiber::StackError> {
-        w.fibers_created += 1;
+    fn new_slot_sized(&self, user: *mut (), stack: usize) -> Result<*mut Slot, fiber::StackError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let slot = Box::into_raw(Box::new(Slot {
             fiber: Fiber::new(stack, slot_entry, ptr::null_mut())?,
@@ -492,7 +481,7 @@ impl Runtime {
     fn prewarm(&self, w: &mut Worker) {
         for _ in 0..PREWARM {
             let user = self.driver.new_user(self);
-            match self.new_slot(w, user) {
+            match self.new_slot(user) {
                 Ok(s) => w.pool.push(s),
                 Err(e) => return self.report_no_stack(&e),
             }
@@ -507,13 +496,12 @@ impl Runtime {
                     return;
                 }
                 let user = self.driver.new_user(self);
-                match self.new_slot(w, user) {
+                match self.new_slot(user) {
                     Ok(s) => s,
                     Err(e) => return self.report_no_stack(&e),
                 }
             }
         };
-        w.tasks_run += 1;
         self.wstat[w.idx].tasks.fetch_add(1, Ordering::Relaxed);
         // SAFETY: the slot is idle (in the pool) and owned by this thread.
         unsafe {
@@ -637,7 +625,6 @@ impl Runtime {
                 continue;
             }
             if let Some((a, _)) = self.lanes[v].ready.steal() {
-                w.steals += 1;
                 self.stat_steals.fetch_add(1, Ordering::Relaxed);
                 return Some(a as *mut Slot);
             }
@@ -658,7 +645,7 @@ impl Runtime {
     }
 
     fn take_task(&self, w: &mut Worker) -> Option<Task> {
-        if self.suppress.load(Ordering::Relaxed)
+        if self.main_done.load(Ordering::Relaxed)
             || self.pending_tasks.0.load(Ordering::Acquire) == 0
         {
             return None;
@@ -681,7 +668,6 @@ impl Runtime {
                 continue;
             }
             if let Some((a, b)) = self.lanes[v].urgent.steal() {
-                w.steals += 1;
                 return Some(Task::unpack(a, b));
             }
         }
@@ -691,7 +677,7 @@ impl Runtime {
     #[inline]
     fn has_work(&self) -> bool {
         self.pending_ready.0.load(Ordering::Acquire) > 0
-            || (!self.suppress.load(Ordering::Relaxed)
+            || (!self.main_done.load(Ordering::Relaxed)
                 && self.pending_tasks.0.load(Ordering::Acquire) > 0)
     }
 
@@ -715,7 +701,7 @@ impl Runtime {
         if self.pending_ready.0.load(Ordering::Acquire) > 0 {
             return true;
         }
-        if self.suppress.load(Ordering::Relaxed) {
+        if self.main_done.load(Ordering::Relaxed) {
             return false;
         }
         let tasks = self.pending_tasks.0.load(Ordering::Acquire);
@@ -914,7 +900,6 @@ unsafe fn slot_entry(p: *mut ()) {
     if let Some(entry) = slot.main_entry.take() {
         entry(slot);
         rt.main_done.store(true, Ordering::Release);
-        rt.suppress.store(true, Ordering::Release);
         rt.shutdown.store(true, Ordering::Release);
         rt.wake_all();
     } else {
@@ -963,10 +948,7 @@ impl Worker {
             pool: Vec::new(),
             spinning: false,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (idx as u64 + 1),
-            tasks_run: 0,
-            steals: 0,
             parks: 0,
-            fibers_created: 0,
         }
     }
 

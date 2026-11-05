@@ -129,9 +129,6 @@ pub struct Settings {
     /// `--no-out-link`/`--no-link` keeps a root instead of nothing
     /// (docs/reference/divergences.md). `false` is Nix's behaviour back.
     pub build_gc_root: bool,
-    /// `IETS_FETCHING`: set on the Nix that iets calls to fetch a flake input, so
-    /// a recursive fetch is an error instead of a loop.
-    pub fetching: bool,
     /// `IETS_OFFLINE`: any download is an error. A flake whose inputs the
     /// input store already holds evaluates; one that would fetch fails and says
     /// which URL it wanted.
@@ -392,7 +389,6 @@ impl Settings {
             nix_fallback: nix_fallback.unwrap_or(NixFallback::Auto),
             shell_gc_root: c.bool("shell-gc-root")?.unwrap_or(true),
             build_gc_root: c.bool("build-gc-root")?.unwrap_or(true),
-            fetching: env.set("IETS_FETCHING"),
             offline: env.set("IETS_OFFLINE"),
             progress: env.flag("IETS_PROGRESS", None, true)?,
             fetch_max_size: c.int("fetch-max-size")?.unwrap_or(16 << 30),

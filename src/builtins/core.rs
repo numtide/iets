@@ -193,7 +193,7 @@ fn throw(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 
 fn say(ev: &mut Evaluator, line: String) {
     // parallel: helpers journal, the demand path prints
-    if !parallel::journal(ev, line.clone()) {
+    if !parallel::journal(ev) {
         ev.lints.flush();
         log::line(&line);
     }
@@ -243,11 +243,9 @@ fn add_error_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<
 }
 
 fn try_eval(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
-    ev.try_level += 1;
     #[cfg(feature = "stats2")]
     let scope = ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated);
     let r = ev.force(args[0]);
-    ev.try_level -= 1;
     #[cfg(feature = "stats2")]
     if scope {
         let (bytes, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);

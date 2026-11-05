@@ -943,7 +943,7 @@ impl Word {
 
     /// The forced value once the state is EMPTY.
     #[inline]
-    pub(crate) fn thunk_value(self, _state: Word) -> Word {
+    pub(crate) fn thunk_value(self) -> Word {
         self.thunk_code_cell().get()
     }
 
@@ -1748,7 +1748,7 @@ mod alloc_tests {
         let done = t.thunk_finish(Word::imm_int(7), false);
         assert!(!t.thunk_unforced(done));
         assert!(t.thunk_speculated(done));
-        assert_eq!(t.thunk_value(done).imm_int_value(), 7);
+        assert_eq!(t.thunk_value().imm_int_value(), 7);
         let done = t.thunk_finish(Word::imm_int(7), true);
         assert!(!t.thunk_unforced(done));
         assert!(!t.thunk_speculated(done));

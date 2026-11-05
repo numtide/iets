@@ -32,20 +32,4 @@ impl Stdout {
     pub fn is_terminal(&self) -> bool {
         self.lock().is_none() && io::stdout().is_terminal()
     }
-
-    pub fn writer(&self) -> Writer<'_> {
-        Writer(self)
-    }
-}
-
-pub struct Writer<'a>(&'a Stdout);
-
-impl Write for Writer<'_> {
-    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        self.0.write_all(b)?;
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }

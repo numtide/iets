@@ -328,8 +328,6 @@ impl Profile {
                 Ir::Eq(a, b, _)
                 | Ir::Ne(a, b, _)
                 | Ir::Lt(a, b, _)
-                | Ir::Gt(a, b, _)
-                | Ir::Le(a, b, _)
                 | Ir::Ge(a, b, _)
                 | Ir::And(a, b, _)
                 | Ir::Or(a, b, _)

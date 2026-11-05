@@ -206,10 +206,10 @@ pub fn open(want: &Want) -> Result<Fetched, String> {
 fn fetch(want: &Want) -> Result<Fetched, String> {
     let offline = Session::current().settings().offline;
     let root = cache_root().ok_or("iets: no cache directory for Git clones (set HOME)")?;
-    fs::create_dir_all(&root)
-        .map_err(|e| format!("iets: cannot create '{}': {e}", root.display()))?;
-    let dir = root.join(hash_bytes(HashAlgo::Sha256, want.url.as_bytes()).to_nix32());
-    let _lock = lock(&dir)?;
+    if !cachefs::prepare(&root, cachefs::Shape::Clones, false) {
+        return Err(format!("iets: cannot use '{}'", root.display()));
+    }
+    let (dir, _lock) = open_clone(&root, want.url)?;
     if !dir.join("HEAD").exists()
         && !git(&root, &["init", "-q", "--bare", &dir.to_string_lossy()]).0
     {
@@ -294,8 +294,17 @@ fn fetch(want: &Want) -> Result<Fetched, String> {
     })
 }
 
+/// The clone of `url`, locked. The daily sweep runs after the lock is taken,
+/// so it never removes the clone this fetch is about to use.
+fn open_clone(root: &Path, url: &str) -> Result<(PathBuf, cachefs::WriteLock), String> {
+    let dir = root.join(hash_bytes(HashAlgo::Sha256, url.as_bytes()).to_nix32());
+    let lock = lock(&dir)?;
+    cachefs::maybe_sweep(root, cachefs::Shape::Clones, false);
+    Ok((dir, lock))
+}
+
 fn lock(dir: &Path) -> Result<cachefs::WriteLock, String> {
-    let path = dir.with_extension("lock");
+    let path = cachefs::clone_lock(dir);
     cachefs::wait_lock(&path, || {
         log::line(&format!("waiting for the lock on '{}'", dir.display()))
     })
@@ -410,6 +419,38 @@ pub fn verify_commit(repo: &Path, rev: &str, keys: &[String]) -> Result<(), Stri
 mod tests {
     use super::*;
     use rstest::rstest;
+    use std::time::SystemTime;
+
+    /// The daily sweep a fetch triggers keeps the clone that fetch uses, even
+    /// one unused for the TTL, so an offline fetch still finds its revision.
+    #[test]
+    fn a_fetch_keeps_its_clone_from_its_own_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        assert!(cachefs::prepare(root, cachefs::Shape::Clones, false));
+        let months_ago = |p: &Path| {
+            let then = SystemTime::now() - Duration::from_secs(90 * 86400);
+            fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(then)
+                .unwrap();
+        };
+        let clone = |url: &str| {
+            let dir = root.join(hash_bytes(HashAlgo::Sha256, url.as_bytes()).to_nix32());
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+            fs::write(cachefs::clone_lock(&dir), b"").unwrap();
+            months_ago(&cachefs::clone_lock(&dir));
+            dir
+        };
+        let (mine, other) = (clone("https://h/mine"), clone("https://h/other"));
+        let (dir, _lock) = open_clone(root, "https://h/mine").unwrap();
+        assert_eq!(dir, mine);
+        assert!(!other.exists(), "the sweep ran");
+        assert!(mine.join("HEAD").exists(), "and kept the clone in use");
+    }
 
     #[rstest]
     #[case("file:///srv/r.git", true)]

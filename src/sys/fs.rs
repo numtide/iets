@@ -85,6 +85,15 @@ pub fn file_id(_path: &Path, m: &Metadata) -> (u64, u64) {
     (m.dev(), m.ino())
 }
 
+/// Whether `path` still names the open file `f`: false once it was unlinked,
+/// or replaced by another file.
+pub fn same_file(f: &File, path: &Path) -> bool {
+    match (f.metadata(), fs::metadata(path)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
 pub fn mtime_secs(m: &Metadata) -> i64 {
     m.mtime()
 }

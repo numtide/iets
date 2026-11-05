@@ -11,6 +11,8 @@ directory with no daemon and no signature.
 | compiled IR | `~/.cache/iets/ir` | one file | build id, path, system, store directory, `pure-eval`, lint levels, source |
 | tracing runs | `~/.cache/iets/trace` | one file in a directory | the whole command; for the count of a revision, the SCM and the revision |
 | fetched inputs | `~/.cache/iets/inputs` | one file | the store path the lock implies |
+| Git clones | `~/.cache/iets/git` | one bare repository | the URL |
+| Git LFS objects | `~/.cache/iets/lfs` | one file | the object's sha256 |
 
 `--no-tracing-cache` and `--no-ir-cache` turn off one cache each, and
 `--no-cache`, `IETS_CACHE=0` and the `cache` setting turn off both. Nothing
@@ -21,9 +23,10 @@ turns off the input store, because a run needs the input's bytes.
 ([The roots store](#the-roots-store-gc-roots-iets-owns)). The design
 comes from Mic92's nix-tarmac.
 
-`~/.cache/iets/git` holds shallow clones of remote Git repositories, and
-`~/.cache/iets/lfs` holds Git LFS objects by sha256. No sweep touches
-them.
+A clone is used by the fetch that holds its lock, and its lock's mtime
+is when it was last used. A sweep skips a clone whose lock is held. A
+reader checks an LFS object's sha256 and downloads it again on a
+mismatch.
 
 ## Store safety
 

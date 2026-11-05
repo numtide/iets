@@ -277,10 +277,7 @@ fn download(cache: &Path, d: &Download, limits: Limits) -> Result<(), String> {
             p.oid
         ));
     }
-    let tmp = tempfile::NamedTempFile::new_in(cache).map_err(|e| e.to_string())?;
-    fs::write(tmp.path(), &bytes).map_err(|e| e.to_string())?;
-    tmp.persist(cache.join(&p.oid)).map_err(|e| e.to_string())?;
-    Ok(())
+    cachefs::write_atomic(cache, &p.oid, &[&bytes]).map_err(|e| e.to_string())
 }
 
 /// Replaces the pointer in each LFS file of `rev`'s `entries` by the
@@ -319,9 +316,13 @@ pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Resul
         ));
     }
     let cache = cache_dir()?;
+    let have: HashMap<&str, Vec<u8>> = wanted
+        .values()
+        .filter_map(|p| Some((p.oid.as_str(), cached(&cache, p)?)))
+        .collect();
     let mut missing: Vec<Pointer> = wanted
         .values()
-        .filter(|p| !cache.join(&p.oid).exists())
+        .filter(|p| !have.contains_key(p.oid.as_str()))
         .cloned()
         .collect();
     missing.sort_by(|a, b| a.oid.cmp(&b.oid));
@@ -354,24 +355,61 @@ pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Resul
         let (Some(p), Entry::File { bytes, .. }) = (wanted.get(path), entry) else {
             continue;
         };
-        *bytes = fs::read(cache.join(&p.oid))
-            .map_err(|e| format!("iets: cannot read the LFS object {}: {e}", p.oid))?;
+        let got = match have.get(p.oid.as_str()) {
+            Some(b) => b.clone(),
+            None => cached(&cache, p)
+                .ok_or_else(|| format!("iets: cannot read the LFS object {}", p.oid))?,
+        };
+        *bytes = got;
     }
     Ok(())
+}
+
+/// The object, when the cache holds it intact. A damaged one is a miss and
+/// stays: a download replaces it atomically, and removing it here could
+/// remove the object a sibling just put in its place.
+fn cached(cache: &Path, p: &Pointer) -> Option<Vec<u8>> {
+    let path = cache.join(&p.oid);
+    let bytes = fs::read(&path).ok()?;
+    if hash_bytes(HashAlgo::Sha256, &bytes).to_base16() != p.oid {
+        return None;
+    }
+    cachefs::touch(&path);
+    Some(bytes)
 }
 
 fn cache_dir() -> Result<PathBuf, String> {
     let dir = cachefs::root(None)
         .ok_or("iets: no cache directory for Git LFS objects (set HOME)")?
         .join("lfs");
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("iets: cannot create '{}': {e}", dir.display()))?;
+    if !cachefs::prepare(&dir, cachefs::Shape::Objects, false) {
+        return Err(format!("iets: cannot use '{}'", dir.display()));
+    }
+    cachefs::maybe_sweep(&dir, cachefs::Shape::Objects, false);
     Ok(dir)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sibling may have put the good object at the path since, so a damaged
+    /// read leaves the path to the download that replaces it.
+    #[test]
+    fn a_damaged_object_is_a_miss_and_stays() {
+        let cache = tempfile::tempdir().unwrap();
+        let good = b"object";
+        let p = Pointer {
+            oid: hash_bytes(HashAlgo::Sha256, good).to_base16(),
+            size: good.len() as u64,
+        };
+        let at = cache.path().join(&p.oid);
+        fs::write(&at, b"damaged").unwrap();
+        assert_eq!(cached(cache.path(), &p), None);
+        assert!(at.exists());
+        fs::write(&at, good).unwrap();
+        assert_eq!(cached(cache.path(), &p).as_deref(), Some(&good[..]));
+    }
 
     #[test]
     fn a_host_is_never_an_ssh_option() {

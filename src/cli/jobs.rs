@@ -263,11 +263,14 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     let mut run = run_for(&a);
     run.cfg = run.cfg.keep_aterm(!j.opts.no_instantiate);
     run.cfg = run.cfg.keep_site(j.opts.provenance);
+    // either is the process's last run: what it evaluated is left to the exit
     if j.worker {
-        let run = run.workers(1);
+        let run = run.workers(1).last();
         return cli::run_parallel(run, move |ev, _| jobs_worker(ev, a, &j, &transport));
     }
-    cli::run_parallel(run, move |ev, _| jobs_single(ev, a, &j, &transport, t0))
+    cli::run_parallel(run.last(), move |ev, _| {
+        jobs_single(ev, a, &j, &transport, t0)
+    })
 }
 
 /// worker.cc:initializeRootValue: the root, auto-called with the

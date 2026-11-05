@@ -10,7 +10,7 @@ pub mod shared;
 pub mod thunk;
 
 use std::sync::{Arc, Mutex};
-use std::{ptr, thread};
+use std::{mem, ptr, thread};
 
 use crate::eval::Evaluator;
 use crate::runtime::Arena;
@@ -92,8 +92,32 @@ fn stack_size() -> usize {
 /// evaluators are freed. The heap the evaluation built stays.
 pub fn try_run<R: Send + 'static>(
     workers: usize,
+    ev: Evaluator,
+    f: impl FnOnce(&mut Evaluator) -> R + Send + 'static,
+) -> Result<R, fiber::StackError> {
+    run_in(workers, ev, f, true)
+}
+
+/// [`try_run`] for the last run of a process that exits when it returns.
+/// The helper threads have exited and every fiber's evaluator is dropped,
+/// but the evaluator the fibers were cloned from, and with it the tables
+/// they all share, is left to the exit: freeing it entry by entry took
+/// 0.39 s of a 6.6 s whole-nixpkgs run. Its lints are flushed first, and
+/// with one worker its store connection is closed, so nothing it would
+/// have done on drop is lost.
+pub fn try_run_last<R: Send + 'static>(
+    workers: usize,
+    ev: Evaluator,
+    f: impl FnOnce(&mut Evaluator) -> R + Send + 'static,
+) -> Result<R, fiber::StackError> {
+    run_in(workers, ev, f, false)
+}
+
+fn run_in<R: Send + 'static>(
+    workers: usize,
     mut ev: Evaluator,
     f: impl FnOnce(&mut Evaluator) -> R + Send + 'static,
+    free: bool,
 ) -> Result<R, fiber::StackError> {
     // the input store reads the current session, and the workers inherit it
     // so their arenas map into its heap
@@ -101,6 +125,10 @@ pub fn try_run<R: Send + 'static>(
     if workers <= 1 {
         let r = f(&mut ev);
         ev.lints.flush();
+        if !free {
+            ev.store.close();
+            mem::forget(ev);
+        }
         return Ok(r);
     }
     let mut template = ev.clone();
@@ -112,6 +140,7 @@ pub fn try_run<R: Send + 'static>(
     let out = Arc::new(Mutex::new(None));
     let put = out.clone();
     rt.run_main(
+        free,
         user,
         Box::new(move |slot: &mut sched::Slot| {
             // The main fiber reaches its slot through this pointer only, so

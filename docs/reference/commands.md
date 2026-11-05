@@ -119,8 +119,8 @@ $ iets eval --impure $nixpkgs -A hello.name
 - A function whose arguments end in `...` gets every `--arg`, named or not.
 
 Without an attribute path, the top level is called only when you give an
-`--arg`, as `nix eval -f FILE` does. Classic mode, `search` and every
-native command walk the same way.
+`--arg`, as in `nix-instantiate --eval FILE`. `search` and every native
+command work the same way. Classic mode follows each Nix command.
 
 The lint flags are in `docs/reference/lints.md`. Pure evaluation is in
 `docs/explanation/evaluation.md`.

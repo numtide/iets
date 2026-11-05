@@ -485,6 +485,7 @@ impl Profile {
 
 /// This thread's CPU time since its last call, in microseconds. CPU and
 /// not wall time, so a wait (a fetch, a subprocess) does not count.
+#[inline(never)]
 pub fn cpu_us_since_sample() -> u64 {
     thread_local!(static LAST: Cell<u64> = const { Cell::new(0) });
     let now = thread_cpu_time().as_micros() as u64;

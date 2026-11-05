@@ -1,6 +1,8 @@
 use std::fs::{self, File};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::process;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -146,6 +148,102 @@ pub fn beneath(root: &File, rel: &Path, follow: bool) -> Option<bool> {
         Ok(_) => Some(true),
         Err(Errno::NOENT | Errno::NOTDIR) => Some(false),
         Err(_) => None,
+    }
+}
+
+/// The write end of the pipe a forked child sends its exit code through
+/// (`detach_exit`).
+pub struct ExitNote(libc::c_int);
+
+/// Forks so the parent can exit with the child's code before the kernel has
+/// freed the child's heap (about a second for 22 GB). Returns in the child,
+/// or `None` when the fork failed; the parent never returns. The child dies
+/// with the parent, and one that ends without a note (an error exit, a crash,
+/// an exec) is waited for and passed on. Call it while one thread runs.
+pub fn detach_exit() -> Option<ExitNote> {
+    let mut fds = [0; 2];
+    // SAFETY: a plain syscall writing two descriptors into `fds`.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return None;
+    }
+    let parent = process::id() as libc::pid_t;
+    // SAFETY: one thread runs (the caller's contract), so the child's copy of
+    // the process is whole.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        // SAFETY: closing the descriptors pipe2 just made.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        return None;
+    }
+    if pid == 0 {
+        // SAFETY: plain syscalls on the child's own state.
+        unsafe {
+            libc::close(fds[0]);
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            // the parent died before the prctl took
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+        }
+        return Some(ExitNote(fds[1]));
+    }
+    // SAFETY: the parent's end of the pipe, then a blocking read of one byte.
+    unsafe { libc::close(fds[1]) };
+    let mut code = 0u8;
+    let n = loop {
+        // SAFETY: reads at most one byte into `code`.
+        let n = unsafe { libc::read(fds[0], (&raw mut code).cast(), 1) };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        break n;
+    };
+    if n == 1 {
+        // SAFETY: exit without the destructors of a process that did nothing.
+        unsafe { libc::_exit(code as libc::c_int) };
+    }
+    let mut status = 0;
+    // SAFETY: waits for our own child.
+    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            // SAFETY: as above.
+            unsafe { libc::_exit(1) };
+        }
+    }
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        // SAFETY: the default action of the signal the child died of, on us.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    // SAFETY: as above.
+    unsafe { libc::_exit(libc::WEXITSTATUS(status)) }
+}
+
+impl ExitNote {
+    /// Flushes and closes stdout and stderr, so a reader sees the end of the
+    /// output, sends `code` to the parent and exits. The parent exits with
+    /// `code` at once; this process's teardown goes on without it.
+    pub fn exit(self, code: i32) -> ! {
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        // SAFETY: plain syscalls; /dev/null takes the place of the closed
+        // streams for anything the exit still writes.
+        unsafe {
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+            if null >= 0 {
+                libc::dup2(null, 1);
+                libc::dup2(null, 2);
+            }
+            let b = code as u8;
+            libc::write(self.0, (&raw const b).cast(), 1);
+        }
+        process::exit(code)
     }
 }
 

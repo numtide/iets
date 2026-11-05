@@ -2,7 +2,7 @@
 //! The registry lives here, one line per lint; each family file holds
 //! the trigger logic its hooks call (`allow.rs` for `meta`). Levels
 //! resolve from the built-in default, then `[lint]` in each `iets.toml`
-//! (machine, user, project), then `IETS_LINT`, then `--lint`; inside one
+//! (user, project), then `IETS_LINT`, then `--lint`; inside one
 //! source a lint name beats `family:NAME`, which beats `all`. A site is
 //! reported only inside the lint roots unless the scope is `all` or the
 //! site's locked input has its own levels. See docs/reference/lints.md.

@@ -252,7 +252,8 @@ impl Interner {
         w.insert(leaked, Sym(id));
         (leaked, Sym(id))
     }
-    /// A lookup that does not intern. Used by the interner's own tests.
+    /// A lookup that does not intern: a name no source mentioned has no
+    /// symbol (`api::value`).
     pub fn get(&self, name: &[u8]) -> Option<Sym> {
         self.shard(hash_bytes(name))
             .read()

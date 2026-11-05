@@ -1,6 +1,8 @@
-//! Fetching: an HTTP client, a spooled archive read by offset, and an archive
-//! unpacker. None of it knows about flakes; a locked flake input is one caller
-//! (`crate::source`), `iets prefetch` is another (docs/explanation/plumbing-and-porcelain.md).
+//! Fetching: an HTTP client, a spooled archive read by offset, an archive
+//! unpacker, and Git and Git LFS. It knows nothing about flakes beyond the
+//! URL helpers in `crate::flake::flakeref`. Callers include a locked flake
+//! input (`crate::source`) and `iets prefetch`
+//! (docs/explanation/plumbing-and-porcelain.md).
 
 pub mod git;
 pub mod http;

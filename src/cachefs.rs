@@ -1,9 +1,9 @@
-//! On-disk hygiene shared by the two caches, the compiled-IR cache
-//! (`src/compile/cache.rs`) and the tracing run cache (`src/trace/`): a format
-//! version file, a single-writer lock, mtime touches, and TTL sweeps. The
-//! roots store (`roots/`, `docs/explanation/caching.md`) takes the TTL sweep
-//! and nothing else: a symlink has no format to version and no torn state to
-//! wipe.
+//! On-disk hygiene shared by the compiled-IR cache (`src/compile/cache.rs`),
+//! the tracing run cache (`src/trace/`) and the input store
+//! (`crate::treestore`): a format version file, a single-writer lock, mtime
+//! touches, and TTL sweeps. The roots store (`roots/`,
+//! `docs/explanation/caching.md`) takes the TTL sweep and nothing else: a
+//! symlink has no format to version and no torn state to wipe.
 //!
 //! Many `iets` processes share one cache directory (eval-jobs workers,
 //! direnv, the classic command names). The invariant they hold together:
@@ -12,9 +12,9 @@
 //! whole previous entry or the whole new one and never locks; a writer holds
 //! the store's `flock` for exactly one such file, and a writer that cannot
 //! take it within `LOCK_TIMEOUT` drops the write.** A
-//! dropped write costs one cache miss later, which is why no path here waits
-//! on a sibling worker or fails a run. The one exception is `wait_lock`, for a
-//! download a sibling is already doing.
+//! dropped write costs a cache miss later, which is why the caches never wait
+//! on a sibling worker or fail a run. The input store waits instead
+//! (`wait_lock`), because a dropped write there costs a download.
 
 use crate::sys::OsStrExt;
 use crate::sys::fs as sysfs;
@@ -156,8 +156,8 @@ pub enum Shape {
     /// One file per entry, named by its key past the two-character shard
     /// directory the key's first two characters make (IR cache).
     ShardedFiles,
-    /// One directory per entry, named by a store path's base name (the input
-    /// store, `crate::treestore`).
+    /// One file per entry, named by a store path's base name, and the packs
+    /// in `packs/` (the input store, `crate::treestore`).
     StoreEntries,
     /// One symlink per entry, named by a 64-hex key (the roots store). The
     /// link points into `/nix/store` and is what the daemon's
@@ -632,7 +632,7 @@ fn sweep_dir(dir: &Path, shape: Shape, ttl: Duration, dry_run: bool, out: &mut S
         let path = e.path();
         if is_tmp(&name) {
             if !dry_run && age(&path).is_some_and(|a| a >= TMP_TTL) {
-                // A killed writer leaves a file in the two hashed stores and a
+                // A killed writer leaves a file in the hashed stores and a
                 // whole staged directory in the input store.
                 let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
             }
@@ -726,7 +726,7 @@ pub fn maybe_sweep(root: &Path, shape: Shape, timings: bool) {
     }
 }
 
-/// The four stores a `cache gc` run walks: the tracing cache, the IR cache,
+/// The stores a `cache gc` run walks: the tracing cache, the IR cache,
 /// the input store and the roots store.
 pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
     let mut v = Vec::new();

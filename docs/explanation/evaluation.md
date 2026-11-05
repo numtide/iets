@@ -39,8 +39,8 @@ reduction, and it is why a shared subexpression is evaluated only once.
 workload there were 22 million `mapAttrs` thunks and 93 % of them were
 never forced. A `mapAttrs` entry has no thunk object at all: a
 `THUNK_MAP` word carries a descriptor pointer and an entry index, and one
-`MapDesc` per call holds an 8-byte state cell per entry. Sets over 65,536
-entries fall back to an ordinary two-argument thunk. That change alone took
+`MapDesc` per call holds an 8-byte state cell per entry. Large sets fall
+back to an ordinary two-argument thunk. That change alone took
 the arena from 8,936 MB to 7,981 MB, with the run time inside the noise.
 
 ## Values
@@ -212,7 +212,7 @@ objects never grow.
 
 ### Scaling limits
 
-The default is four workers. Past about six, the wall time stops falling.
+Past about six workers, the wall time stops falling.
 nixos-plasma on a 32-core EPYC 9334:
 
 | workers | wall | user | sys |
@@ -323,11 +323,10 @@ Cancel is sticky for the same reason. Once set, every publish the fiber
 would still do becomes a reset, so a swallowed error cannot leak a value
 built from a bailed sub-computation into a shared thunk.
 
-Trace lines on stderr can come in another order than in a sequential run,
-because the demand walk does every unclaimed cell first and parks on busy
-ones afterwards. A helper starts at call depth zero, so a program that
-fails only by exceeding the maximum call depth sequentially may succeed in
-parallel. Both are listed in
+Trace lines on stderr come in the order of a sequential run, because only
+the demand path prints them. A helper starts at call depth zero, so a
+program that fails only by exceeding the maximum call depth sequentially
+may succeed in parallel. This is listed in
 [Known divergences from Nix 2.34](../reference/divergences.md#parallel-evaluation).
 
 ### Deadlocks

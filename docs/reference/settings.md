@@ -3,7 +3,7 @@
 Where iets takes its settings from: `IETS_*` environment variables,
 `iets.toml`, the `--iets-option` flag, and Nix's own `nix.conf`.
 
-iets reads two settings files: `nix.conf` is Nix's, and the real nix behind
+`nix.conf` is Nix's settings file, and the real nix behind
 the classic fallback reads it too. `iets.toml` is iets's own, in TOML, and
 no nix ever sees it. iets reads every `IETS_*` variable, the `iets.toml`
 files and the `--iets-option` flag once, at startup.
@@ -44,7 +44,7 @@ prints cover every worker.
 | `IETS_PROFILE_TO` | | path | `-` | Where the folded lines go. `-` is stderr, any other path is written. It acts only with `IETS_PROFILE`. |
 | `IETS_PROFILE_HZ` | | number | 99 | Samples a second the tick thread asks for. |
 | `IETS_CACHE` | `cache` | Boolean | on | The tracing cache and the IR cache. Same as `--no-cache`. |
-| `IETS_CACHE_DIR` | `cache-dir` | path | `$XDG_CACHE_HOME/iets` | Cache root. The three stores live in its `trace/`, `ir/` and `inputs/` subdirectories, so the directory you name is never itself a removal target. A store subdirectory that already exists, holds something, and is not iets's is refused with an error, not wiped. `--cache-dir DIR` overrides it. |
+| `IETS_CACHE_DIR` | `cache-dir` | path | `$XDG_CACHE_HOME/iets` | Cache root. The stores live in its `trace/`, `ir/` and `inputs/` subdirectories, so the directory you name is never itself a removal target. A store subdirectory that already exists, holds something, and is not iets's is refused with an error, not wiped. `--cache-dir DIR` overrides it. |
 | `NIX_SSL_CERT_FILE`, `SSL_CERT_FILE` | | path | unset | CA bundle for the fetcher and `grpc://`. The first one set wins, even when empty, as in Nix. An unreadable file, or one with no certificate, is an error. Unset: the platform store, else the Mozilla roots compiled into iets. |
 | `IETS_IR_STATS` | | set = on | off | One line per compiled file on stderr. |
 | `IETS_IR_MIN` | | usize (bytes) | 1024 | Sources smaller than this compile faster than their cache entry loads, so they are not cached. |
@@ -167,9 +167,9 @@ your account. A project file is not. It arrives with whatever repository
 you cloned, and running `iets` in a clone must never run its author's code
 or send your data to its author. So a project file may hold one thing, the
 `[lint]` table, which only selects diagnostics. Any other key is an
-**error** that names the key and the two files where you may set it. It is
-not a warning, because a repository that tries to set `nix-bin-dir` is
-worth stopping for.
+**error** that names the key and, for a setting, the user file where you
+may set it. It is not a warning, because a repository that tries to set
+`nix-bin-dir` is worth stopping for.
 
 | Key | What a repository could do with it |
 |:---|:---|
@@ -185,8 +185,8 @@ worth stopping for.
 | `workers`, `fiber-stack-mb` | take every core, or reserve address space until the run fails |
 | `cache`, `provenance` | nothing worse than a slow run or plainer output, and nothing a project needs: the default is no |
 
-A project file that is also one of the two settings files (an evaluation
-started below `~/.config/iets`) is read as the settings file it is.
+A project file that is also your user file (an evaluation started below
+`~/.config/iets`) is read as the user file it is.
 
 ### Keys
 
@@ -212,7 +212,7 @@ project file).
 for themselves. When it is on, a shell links what it realised in
 `~/.cache/iets/roots`, so the next `nix collect-garbage` keeps it
 (`docs/explanation/caching.md`). Turn it off on a small disk: a dev shell's
-closure is large, and the root pins it for the 30 days of the roots TTL.
+closure is large, and the root pins it for the roots TTL.
 
 **`build-gc-root`** is the same switch for build outputs. `iets build` roots
 every path it prints, and `nix-build --no-out-link` and `nix build --no-link`
@@ -430,9 +430,8 @@ Some settings are out of reach:
   setting (`netrc-file`, `ssl-cert-file`, `http2`, the `download-*`
   group) acts in the daemon only. iets's own fetcher does not read it. Use
   `NIX_SSL_CERT_FILE` for the CA bundle. The fetcher retries a
-  transient HTTP status as Nix does, with Nix's defaults: five attempts,
-  from 250 ms, doubled each time, and from a minute for a 429. A 404, a
-  410 and an authorisation failure are final.
+  transient HTTP status with Nix's defaults and backoff. A 404, a 410 and
+  an authorisation failure are final.
 - `extra-platforms`, `system-features` and the other store settings change
   what the *daemon* builds.
 

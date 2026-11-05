@@ -22,12 +22,13 @@ pub fn bytes(b: &[u8]) {
     }
 }
 
-/// [`bytes`] for the legacy command names, which write through `std::cout`
-/// and never look: `nix-instantiate` and `nix-build` exit 0 on a full disk.
+/// [`bytes`] and a newline.
 pub fn line(text: &str) {
     bytes(format!("{text}\n").as_bytes());
 }
 
+/// [`bytes`] for the legacy command names, which write through `std::cout`
+/// and never look: `nix-instantiate` and `nix-build` exit 0 on a full disk.
 pub fn bytes_lossy(b: &[u8]) {
     let _ = write(b);
 }

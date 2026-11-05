@@ -45,9 +45,8 @@ abstraction is wrong or the feature belongs elsewhere.
 ## Non-goals
 
 Local store writes, local builds, a builder daemon of our own, unlocked
-flakes (registries, `nix flake lock`), a git or Mercurial fetcher of our own
-(`fetchGit` of anything but a local working tree runs the real nix), a REPL,
-a debugger, a bytecode VM.
+flakes (registries, `nix flake lock`), a Mercurial fetcher, a REPL, a
+debugger, a bytecode VM.
 
 nix-grpc-store (github.com/Mic92/nix-grpc-store) is the supported gRPC
 transport, spoken natively from its vendored `proto/nix_remote.proto`. Its
@@ -84,12 +83,12 @@ The evaluator:
   store path the evaluator reads to its bytes.
 - `parallel/`: worker threads, fibers, work-stealing deques, the thunk
   claim protocol.
-- `store/`: pure functions. Nix base32, the four hash algorithms, NAR
-  serialization and hashing, store paths, ATerm derivations,
-  `hashDerivationModulo`, `drvdiff.rs`; `locate.rs` finds derivation roots
-  and local-store sources, `source.rs` holds where the bytes of a path are
-  and the origin each source came from. `nar.rs` is the whole NAR
-  codec. Its reader follows nix-community/go-nix PR #123: one buffered
+- `store/`: the store's formats, as pure functions: Nix base32, the hash
+  algorithms, NAR serialization and hashing, store paths, ATerm
+  derivations, `hashDerivationModulo`, `drvdiff.rs`. The exception is
+  `locate.rs`, which asks the local daemon about store paths. `source.rs` holds where the bytes of
+  a path are and the origin each source came from. `nar.rs` is the whole
+  NAR codec. Its reader follows nix-community/go-nix PR #123: one buffered
   window per side, token groups matched as fixed byte strings, and no
   allocation per entry. `hash_derivation_modulo` drops the `children` of
   each input, as derivations.cc does, so a dependency on a dynamic
@@ -112,7 +111,8 @@ Around it:
   and `nix flake prefetch-inputs` share. Parsing a flake reference stays
   in `flake/`, reading one `flake.lock` is `api::flake::info`, and reading
   bytes out of a tree goes through `treestore::StoredTree`.
-- `fetch/`: the HTTP client, the tarball spool and the unpack rules.
+- `fetch/`: the HTTP client, the tarball spool, the unpack rules, and the
+  Git and Git LFS fetchers.
 - `treestore/`: the input store, where a fetched input lives.
 - `trace/`: the tracing evaluation cache.
 - `events.rs`: the `IETS_EVENTS` stream. A group that is off costs one
@@ -120,7 +120,7 @@ Around it:
   buffer the thread keeps and written with one `write`.
 - `pure-eval`: `EvalConfig::pure`, read with `Evaluator::pure()`, checked in
   `builtins::store_hooks`.
-- `cachefs.rs`: the on-disk hygiene all three stores share.
+- `cachefs.rs`: the on-disk hygiene the stores share.
 - `lint/`: the lint registry, level resolution, and one file per family.
   A lint is here only if it needs evaluation to decide
   (`docs/explanation/lint-scope.md`). `site.rs` finds the byte span of a
@@ -128,7 +128,7 @@ Around it:
 - `remote/`: the store transports. `plan.rs` (the upload plan), `worker/`
   (the Nix worker protocol), `grpc/` (nix-grpc-store), `copy.rs`,
   `event.rs`.
-- `build/`: the dispatcher every build goes through, its two backends, the
+- `build/`: the dispatcher every build goes through, its backends, the
   uploaders and the renderer.
 - `jobs/`: the eval-jobs walk.
 - `cli/search.rs`: the package search and its index.
@@ -144,7 +144,7 @@ Around it:
 - `nixbin.rs`: the real Nix binaries behind the classic fallback.
 - `error.rs`: the error type outside the evaluator.
 - `api.rs`: the library facade. Frontends use this and never reach into
-  `cli`; `examples/` holds four of them. When a frontend needs something
+  `cli`; `examples/` holds some. When a frontend needs something
   that lives only in `cli`, move it into `api` or the module it belongs
   to, and let `cli` call it there.
 - `main.rs` and `cli/`: the command line on top of `api`, including the
@@ -162,7 +162,7 @@ allow-list whose length is asserted.
 Porcelain-side libraries for presentation, argv compatibility and interactive flows are fine, however large.
 
 What each command is written against. The operation layer is
-`crate::api`. Five of its operations are also `iets plumbing` commands:
+`crate::api`. Some of its operations are also `iets plumbing` commands:
 `resolve`, `plan`, `missing`, `build` and `fetch`. The other entries
 (`eval`, `index`, `jobs`, `dev-env`, `drv-show`, `drv-diff`,
 `closure-diff`, `flake-info`) are calls the command makes directly:
@@ -170,8 +170,8 @@ What each command is written against. The operation layer is
 
 | Command | Operations | The command's own part |
 |:---|:---|:---|
-| `iets eval` | `eval` | the human value printer, `--timings` |
-| `iets build` | `resolve` (the get-drvs walk for a set), `plan`, `missing`, `build`, through `api::build::Dispatch` | the closing line, the `--dry-run` text, `render_size`, the `fix-hashes` prompts, the `.drv` legacy input |
+| `iets eval` | `eval` | the `nix-instantiate --eval` printer, `--timings` |
+| `iets build` | `api::installable::roots_of`, `plan`, `missing`, `build`, through `api::build::Dispatch` | the closing line, the `--dry-run` text, `render_size`, the `fix-hashes` prompts, the `.drv` legacy input |
 | `iets search` | `index` | regex compile and match, `--exclude`, colour, `--pretty`, the no-results hint |
 | `iets diff` | `resolve`, `drv-diff`, `closure-diff` | the text rendering, the `diff(1)` exit codes |
 | `iets eval-jobs` | `jobs` | the worker/collector process model, `--max-memory-size`, the summary line |
@@ -181,7 +181,7 @@ What each command is written against. The operation layer is
 | `nix-instantiate` | `resolve` (get-drvs walk), `plan` | Nix argv parsing, `--add-root`, out-links, the exec fallback |
 | `nix-build` | `resolve`, `plan`, `build` | `result` symlinks, `--add-root`, Nix's exit codes, the fallback |
 | `nix-shell` | `resolve`, `plan`, `build` | the env, `execve` of the shell, `--run`, `--pure` |
-| `nix-eval-jobs` | `jobs` | argv compatibility |
+| `nix-eval-jobs` | `jobs` | `iets eval-jobs` without the summary line |
 | `nix eval` | `eval` | Nix's printer and argv |
 | `nix build` | `resolve`, `plan`, `build` | `result` symlinks, the `--json` Nix shape, the fallback |
 | `nix derivation show` | `resolve`, `drv-show` | Nix's argv, `--pretty`, the fallback |
@@ -284,7 +284,7 @@ measure against, and defaults to the pinned source in the scripts;
 | `bench/eval-jobs.nu [rounds]` | `iets eval-jobs` against `nix-eval-jobs` on `nixos/release-small.nix`, 4 workers, cold and warm cache runs interleaved; `--no-parity` skips the `--force-recurse` job-set comparison |
 | `bench/cache-growth.nu` | evaluates `bench/workloads/nixos-server.nix` at two nixpkgs revisions and reports what the second adds to each cache |
 
-The two standard workloads:
+The standard workloads:
 
 ```
 iets eval --impure --strict --no-tracing-cache --workers 1 -I nixpkgs=$NIXPKGS bench/workloads/nixos-server.nix

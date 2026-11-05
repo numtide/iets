@@ -29,7 +29,7 @@ prints cover every worker.
 
 | Variable | File | Type | Default | Effect |
 |:---|:---|:---|:---|:---|
-| `IETS_WORKERS` | `workers` | usize ≥ 1 | cores, capped at 4 | Worker threads. `--workers N` overrides it. |
+| `IETS_WORKERS` | `workers` | usize ≥ 1 | the visible CPUs, at most 8; `eval-jobs`: every visible CPU, or at most 4 worker processes with `--max-memory-size` | Worker threads. `--workers N` overrides it. |
 | `IETS_FIBER_STACK_MB` | `fiber-stack-mb` | usize (MiB) | 256 | Stack of every fiber. The reservation is `MAP_NORESERVE`, and workers × stack may not pass 64 GiB. |
 | `NIX_STORE_DIR` | | path | `/nix/store`, or `%PROGRAMDATA%\nix\store` on Windows | The store directory, which is an input of every store path hash. `NIX_STORE` is the older name. It must be absolute, and a relative value is ignored with a warning. On Windows, `/nix/store` gives the same store paths as Linux. |
 | `IETS_SPIN` | | u32 | 2000 | Scans an idle searcher makes before it parks (one scan is 64 polls). |

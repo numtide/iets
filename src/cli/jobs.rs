@@ -2,6 +2,7 @@
 
 use crate::session::exit;
 
+use crate::api;
 use crate::cli::help::{self, arg_error, value};
 use crate::cli::{
     self, EvalArgs, Input, abs_path, auto_args, cwd, evaluate, parse_eval_args, render, report,
@@ -26,10 +27,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::Builder;
 use std::time::Instant;
 
-/// nix-eval-jobs's `MyArgs::DEFAULT_MAX_MEMORY_SIZE` (eval-args.hh:18): an
-/// arena without a GC cannot shed a walked subtree, so the default needs
-/// the same process boundary nix-eval-jobs has.
-const DEFAULT_MAX_MEMORY_MB: u64 = 4096;
+/// One process with no ceiling. Worker processes share nothing they
+/// evaluated, so each builds what its jobs share again: whole nixpkgs took
+/// 25.1 s on 4 of them (nix-eval-jobs's 4096 MB, 15.5 GB in all) against
+/// 13.9 s in one process at 4 workers (21.3 GB), and 8 or more of them
+/// held more memory than one process (29.7 GB at 8).
+const DEFAULT_MAX_MEMORY_MB: u64 = 0;
 
 /// `iets eval-jobs`'s own flags; everything else goes to `parse_eval_args`.
 struct JobsArgs {
@@ -214,9 +217,8 @@ fn check_jobs_args(j: &JobsArgs) -> error::Result<Transport> {
     })
 }
 
-/// `iets eval-jobs`: nix-eval-jobs's JSON lines. Worker processes
-/// restarted above `--max-memory-size` (4096 MB, like nix-eval-jobs);
-/// `--max-memory-size 0` is one process with no ceiling.
+/// `iets eval-jobs`: nix-eval-jobs's JSON lines, from one process by
+/// default; `--max-memory-size MB` runs worker processes restarted above it.
 /// See docs/reference/commands.md.
 pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     let (j, rest) = parse_jobs_args(argv);
@@ -224,6 +226,9 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
         ignored::hush();
     }
     let mut a = parse_eval_args(&rest);
+    if !rest.iter().any(|s| s == "--workers") {
+        a.workers = api::jobs_workers(j.max_memory > 0);
+    }
     a.no_tracing_cache = true;
     a.flake_whole = true;
     // nix-eval-jobs takes the argument as a file unless --flake says otherwise.

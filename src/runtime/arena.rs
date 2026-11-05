@@ -87,6 +87,11 @@ impl Arena {
         a
     }
 
+    /// The session memory this arena's chunks belong to, once it has one.
+    pub(crate) fn heap(&self) -> Option<&Arc<Heap>> {
+        self.heap.as_ref()
+    }
+
     /// `in_heap`, mapping `chunk` bytes at a time (a power of two): for an
     /// arena that holds little, which a full chunk, prefaulted, would
     /// waste.

@@ -19,7 +19,6 @@ use crate::compile::ir::IrRef;
 use crate::eval::Pos;
 use crate::lint;
 use crate::runtime::arena::Arena;
-use crate::session::Session;
 use crate::syntax::symbol::Interner;
 use crate::syntax::symbol::Sym;
 use std::mem;
@@ -75,7 +74,9 @@ impl<'a> Compiler<'a> {
         if self.var_uses.is_none() {
             self.var_uses = Some(Arc::new(var_uses(self.ast)));
         }
-        let heap = Session::current().heap.clone();
+        // the arena's own heap, the session's: this can run on a fiber, which
+        // reads no thread-local session (numtide/iets#360)
+        let heap = self.arena.heap()?.clone();
         let threads = self.threads.min(n);
         let interners: Vec<_> = (0..threads).map(|_| self.interner.clone()).collect();
         let next = AtomicUsize::new(0);

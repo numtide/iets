@@ -66,14 +66,33 @@ impl Clone for Arena {
     }
 }
 
-/// Number of workers from `--workers`, `IETS_WORKERS`, or the machine.
+/// Workers one evaluation gains from at most. A NixOS system is mostly one
+/// chain of dependencies: nixos-plasma was fastest at 8 workers on 8, 16
+/// and 32 CPUs, and 16 workers took 22 % longer than 8 on 16 cores.
+const EVAL_WORKERS_MAX: usize = 8;
+
+/// The CPUs this process may run on: affinity and cgroup limits count.
+pub fn visible_cpus() -> usize {
+    thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Number of workers for one evaluation: `--workers`, `IETS_WORKERS`, or
+/// the visible CPUs, at most `EVAL_WORKERS_MAX`.
 pub fn default_workers() -> usize {
-    if let Some(n) = Session::current().settings().workers {
-        return n;
-    }
-    // the critical chain, not core count, sets the floor; past 4 workers the
-    // idle spin costs more wall time than the extra stealing gains
-    thread::available_parallelism().map_or(1, |n| n.get().min(4))
+    Session::current()
+        .settings()
+        .workers
+        .unwrap_or_else(|| visible_cpus().min(EVAL_WORKERS_MAX))
+}
+
+/// Number of workers for many independent jobs (`eval-jobs` in one
+/// process): every visible CPU, which was fastest on 4, 8 and 16 CPUs with
+/// SMT or without, and level with half of them on 32.
+pub fn default_jobs_workers() -> usize {
+    Session::current()
+        .settings()
+        .workers
+        .unwrap_or_else(visible_cpus)
 }
 
 fn stack_size() -> usize {

@@ -307,9 +307,15 @@ pub fn json_escape(out: &mut Vec<u8>, s: &[u8]) -> EvalResult<()> {
             Pos::NONE,
         )
     })?;
+    json_escape_str(out, st);
+    Ok(())
+}
+
+/// Write `s` as a JSON string, escaped the way nlohmann::json writes it.
+pub fn json_escape_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
     // Every byte that needs escaping is ASCII, so copy runs between them.
-    let s = st.as_bytes();
+    let s = s.as_bytes();
     let mut done = 0;
     Escapes::Json.for_each(s, |i| {
         out.extend_from_slice(&s[done..i]);
@@ -327,7 +333,6 @@ pub fn json_escape(out: &mut Vec<u8>, s: &[u8]) -> EvalResult<()> {
     });
     out.extend_from_slice(&s[done..]);
     out.push(b'"');
-    Ok(())
 }
 
 /// Shortest round-trip float, like nlohmann::json.

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::str;
 
-use crate::print::json_float;
+use crate::print::{json_escape_str, json_float};
 
 use super::drv::DrvError;
 
@@ -186,7 +186,7 @@ impl Parser<'_> {
             Some(b'"') => {
                 let s = self.string()?;
                 let mut out = Vec::with_capacity(s.len() + 2);
-                write_string(&mut out, &s);
+                json_escape_str(&mut out, &s);
                 Ok(String::from_utf8(out).expect("UTF-8"))
             }
             Some(b't') => self.literal("true"),
@@ -365,7 +365,7 @@ impl Parser<'_> {
             match step {
                 Step::Text(t) => out.extend_from_slice(t.as_bytes()),
                 Step::Key(k) => {
-                    write_string(&mut out, k);
+                    json_escape_str(&mut out, k);
                     out.push(b':');
                 }
                 Step::Node(id) => match &self.nodes[id] {
@@ -396,24 +396,6 @@ impl Parser<'_> {
         }
         String::from_utf8(out).expect("the parser checks UTF-8")
     }
-}
-
-fn write_string(out: &mut Vec<u8>, s: &str) {
-    out.push(b'"');
-    for &b in s.as_bytes() {
-        match b {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            8 => out.extend_from_slice(b"\\b"),
-            12 => out.extend_from_slice(b"\\f"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            b'\t' => out.extend_from_slice(b"\\t"),
-            0..=0x1f => out.extend_from_slice(format!("\\u{b:04x}").as_bytes()),
-            _ => out.push(b),
-        }
-    }
-    out.push(b'"');
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use super::{Registry, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::{LintId, coerce, purity};
 use crate::parallel::shared::SharedMap;
-use crate::print::{json_escape, lexicographic_order, print_json};
+use crate::print::{json_escape_str, lexicographic_order, print_json};
 use crate::runtime::{AttrsObj, Ctx, Word, split_built};
 use crate::store::drv::{
     Derivation, DerivationOutput, DrvError, DrvHashCache, InputNode, finalize_with_inputs,
@@ -363,7 +363,7 @@ fn process_attr(
         if json.len() > 1 {
             json.push(b',');
         }
-        json_escape(&mut json, key.as_bytes())?;
+        json_escape_str(&mut json, key);
         json.push(b':');
         let r = print_json(ev, w, &mut json, &mut b.context, true, pos);
         b.json = Some(json);

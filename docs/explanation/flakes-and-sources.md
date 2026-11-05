@@ -218,7 +218,7 @@ The connection goes to the eval store: `nix.conf`'s `store`, never the
 and `tarball` are one download and one index, so iets does them itself.
 The URLs and headers are the ones Nix builds. The access token comes from
 `nix.conf`'s `access-tokens`, matched the way Nix matches it. iets undoes
-the four compressions libarchive would detect: gzip, xz, zstd and bzip2.
+the compressions libarchive would detect: gzip, xz, zstd and bzip2.
 
 The download streams, and no tree is ever unpacked: iets indexes the tar in
 a spool, then writes the NAR straight from that index. Once the NAR hash
@@ -253,7 +253,7 @@ The download works, but these are missing:
    property the input store is built on.
 2. **`lastModified` of an archive comes from the archive**, and the spool
    index keeps no modification times.
-3. **A flake reference is assumed to be a local directory** in three
+3. **A flake reference is assumed to be a local directory** in several
    places: the lock file is read from disk, the root tree is copied from a
    local directory, and both the cache key and the `iets.toml` walk read
    the directory. A root in the input store needs a third kind of source.

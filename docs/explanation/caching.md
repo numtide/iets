@@ -1,9 +1,9 @@
 # How caching works
 
-iets keeps three stores under `~/.cache/iets`. The compiled IR and the
+iets keeps its stores under `~/.cache/iets`. The compiled IR and the
 tracing runs are caches: they hold the result of work iets can do again.
 Fetched inputs aren't a cache. They're where a fetched flake input *lives*.
-All three work the same way, and the input store is safe in your home
+They work the same way, and the input store is safe in your home
 directory with no daemon and no signature.
 
 | store | default root | entry | keyed on |
@@ -21,9 +21,9 @@ turns off the input store, because a run needs the input's bytes.
 ([The roots store](#the-roots-store-gc-roots-iets-owns)). The design
 comes from Mic92's nix-tarmac.
 
-`~/.cache/iets/git` holds a shallow clone of each remote Git repository
-iets fetched, and `~/.cache/iets/lfs` each Git LFS object by its sha256.
-No sweep touches those two.
+`~/.cache/iets/git` holds shallow clones of remote Git repositories, and
+`~/.cache/iets/lfs` holds Git LFS objects by sha256. No sweep touches
+them.
 
 ## Store safety
 
@@ -38,7 +38,7 @@ generation it validated, whatever a sibling publishes in the meantime. The
 old file stays alive for as long as the descriptor does.
 
 **A writer holds the store's `flock` for exactly one entry, and gives up
-after 50 ms.** A skipped write only costs a miss on a later run. The lock
+after a short timeout.** A skipped write only costs a miss on a later run. The lock
 only stops two writers of one key from crossing inside one temporary file. A
 killed writer leaves a temporary file that no reader looks at and that the
 sweep removes after a day; the entry it was replacing stays whole.
@@ -59,13 +59,13 @@ is of another format, or whose garbage-collection stamp cannot be parsed, or
 whose lock is not a file, is emptied and starts again.
 
 **An entry carries a checksum over its own key.** Every entry of the IR
-cache and of the tracing cache holds 8 bytes: a CRC-32 over the key it
-answers and the whole of its content, and the content's length. A reader
-checks it before it decodes anything. A changed byte, a truncated entry and an entry copied to another
+cache and of the tracing cache holds a CRC-32 over the key it answers and
+its content, and the content's length. A reader checks both before it
+decodes anything. A changed byte, a truncated entry and an entry copied to another
 key are all a mismatch, and a mismatch is a miss that poisons the entry.
 
 A reader opens an entry with `O_NOFOLLOW` and `O_NONBLOCK`, accepts only a
-regular file, and refuses a length over 512 MiB before it allocates
+regular file, and refuses an implausible length before it allocates
 anything. A name replaced by a symbolic link, a FIFO or a huge sparse file is a miss.
 
 **Nothing in an entry names a program.** An observation of a working tree
@@ -87,13 +87,13 @@ otherwise trust.
 that store's own layout makes: the version file, the lock, the stamp, the
 temporary files, the entries and, for the IR cache, its shard directories.
 Anything else in the directory survives, and the directory itself is never
-removed. The three stores are subdirectories (`trace/`, `ir/`, `inputs/`)
+removed. The stores are subdirectories (`trace/`, `ir/`, `inputs/`)
 of the cache root, so `--cache-dir DIR` never makes `DIR` itself a removal
 target. A store subdirectory that exists, holds something, and has no name
 from that layout is not iets's: iets names it in an error and runs without
 that cache.
 
-The sweep removes entries not read for 30 days. It runs on a write path, at
+The sweep removes entries not read within the TTL (`cachefs::TTL_DAYS`). It runs on a write path, at
 most once a day per store. The walk runs unlocked, so a sweep of a large
 store never holds a sibling's write back.
 
@@ -111,7 +111,7 @@ files load in 229 ms against 696 ms to compile, and `hackage-packages.nix`
 alone loads in 71-77 ms against 190-218 ms.
 
 Only `import` uses it. `scopedImport`, `-E` and a file with a `~/` path
-literal compile from source, and files under 1 KiB aren't cached, because
+literal compile from source, and small files (`IETS_IR_MIN`) aren't cached, because
 the load costs what the compile costs.
 
 The key holds the build id, so a new binary never reads an old entry. It
@@ -220,7 +220,7 @@ file you named on the command line looks the same as editing anything it
 imports. Under `--log-format internal-json` it is a level-3 record with code
 `cache-invalidated`
 ([Errors, exit codes and log records](../reference/errors.md)). Validation
-runs on four threads, and the lowest-indexed failure wins, so one change
+runs in parallel, and the lowest-indexed failure wins, so one change
 always names the same thing. A run with no entry prints nothing. In
 classic mode the line stays off stderr and the record goes to
 `json-log-path` alone

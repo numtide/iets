@@ -34,7 +34,7 @@ use crate::{config, trace};
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
 /// store path when this returns. The `fetchTree` builtin and `nix flake
-/// prefetch-inputs` are the two callers, and they must agree on the name.
+/// prefetch-inputs` are the callers, and they must agree on the name.
 pub fn locked(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
     let Some(nar_hash) = str_attr(attrs, "narHash") else {
         let msg = format!(

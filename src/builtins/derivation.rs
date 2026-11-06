@@ -69,6 +69,11 @@ pub struct DrvState {
     /// for 252 k derivations on the whole job set, each hashing two or
     /// three 4 KB ATerms with SHA-256.
     done: SharedMap<[u8; 32], Arc<DrvDone>>,
+    /// A fixed-output derivation's path by method, hash and name: two
+    /// SHA-256 payloads before `done` can be asked, and the same fetch is
+    /// declared over and over (697 k calls for 77 k paths on the whole job
+    /// set).
+    fixed_paths: SharedMap<(IngestionMethod, Hash, String), StorePath>,
     dump_dir: Option<PathBuf>,
     pub nr_derivations: u64,
     keep_aterm: bool,
@@ -98,6 +103,7 @@ impl DrvState {
             hash_cache: Default::default(),
             drvs: Default::default(),
             done: Default::default(),
+            fixed_paths: Default::default(),
             dump_dir,
             nr_derivations: 0,
             keep_aterm,
@@ -699,10 +705,7 @@ fn derivation_strict_internal(
             purity::fod(ev, drv_name, mode, algo, site)?;
         }
         let out = DerivationOutput::Fixed { method, hash };
-        let path = out
-            .fixed_path(drv_name, "out")
-            .map_err(|e| drv_err(e, pos))?
-            .expect("fixed output has a path");
+        let path = fixed_path_of(ev, method, hash, drv_name, "out", pos)?;
         if !submits_outputs {
             drv.env_set("out", path.to_full_string().into_bytes());
         }
@@ -878,6 +881,27 @@ fn derivation_strict_internal(
     ev.mk_attrs(&mut entries, pos)
 }
 
+/// `DerivationOutput::fixed_path` through `DrvState::fixed_paths`.
+fn fixed_path_of(
+    ev: &Evaluator,
+    method: IngestionMethod,
+    hash: Hash,
+    drv_name: &str,
+    output: &str,
+    pos: Pos,
+) -> EvalResult<StorePath> {
+    let key = (method, hash, output_path_name(drv_name, output));
+    if let Some(p) = ev.drv.fixed_paths.get(&key) {
+        return Ok(p);
+    }
+    let p = DerivationOutput::Fixed { method, hash }
+        .fixed_path(drv_name, output)
+        .map_err(|e| drv_err(e, pos))?
+        .expect("fixed output has a path");
+    ev.drv.fixed_paths.insert(key, p.clone());
+    Ok(p)
+}
+
 /// Mirrors eval.cc:EvalState::mkOutputString: the output path, or a
 /// downstream placeholder when it is not statically known, with `!out!drv`
 /// context.
@@ -890,7 +914,13 @@ fn output_string(
     out: &DerivationOutput,
     pos: Pos,
 ) -> EvalResult<Word> {
-    let s = match out.path(drv_name, output).map_err(|e| drv_err(e, pos))? {
+    let path = match out {
+        DerivationOutput::Fixed { method, hash } => {
+            Some(fixed_path_of(ev, *method, *hash, drv_name, output, pos)?)
+        }
+        _ => out.path(drv_name, output).map_err(|e| drv_err(e, pos))?,
+    };
+    let s = match path {
         Some(p) => p.to_full_string(),
         None => downstream_placeholder(drv_path, drv_name, output),
     };

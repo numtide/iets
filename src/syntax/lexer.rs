@@ -10,6 +10,7 @@ use super::ast::Span;
 use std::mem;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum Tok {
     Id,
     Int,
@@ -142,6 +143,24 @@ pub struct Token {
 }
 
 impl Token {
+    /// The token in one `u128`, which a call returns in two registers: a
+    /// 12-byte struct went back through memory, and the caller's reload of
+    /// it stalled store forwarding.
+    #[inline(always)]
+    fn pack(self) -> u128 {
+        self.kind as u128 | (self.start as u128) << 32 | (self.end as u128) << 64
+    }
+
+    #[inline(always)]
+    fn unpack(x: u128) -> Token {
+        Token {
+            // SAFETY: `pack` stored a `Tok` discriminant in the low byte.
+            kind: unsafe { mem::transmute::<u8, Tok>(x as u8) },
+            start: (x >> 32) as u32,
+            end: (x >> 64) as u32,
+        }
+    }
+
     pub fn span(&self) -> Span {
         Span {
             start: self.start,
@@ -573,7 +592,18 @@ impl<'a> Lexer<'a> {
     }
 
     /// Next token in normal (expression) mode.
+    #[inline(always)]
     pub fn next_token(&mut self) -> Token {
+        Token::unpack(self.next_token_raw())
+    }
+
+    #[inline(never)]
+    fn next_token_raw(&mut self) -> u128 {
+        self.lex_token().pack()
+    }
+
+    #[inline(always)]
+    fn lex_token(&mut self) -> Token {
         self.skip_trivia();
         let start = self.pos;
         let tok = |kind: Tok, end: usize| Token {

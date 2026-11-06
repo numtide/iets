@@ -253,7 +253,7 @@ impl Plan {
             .iter()
             .chain(self.drvs.iter().map(Object::store_path))
             .collect();
-        let refs: HashMap<&StorePath, Vec<&StorePath>> = self
+        let mut refs: HashMap<&StorePath, Vec<&StorePath>> = self
             .drvs
             .iter()
             .filter_map(|o| match o {
@@ -269,6 +269,17 @@ impl Plan {
                 Object::Source { .. } | Object::Closure { .. } => None,
             })
             .collect();
+        for (path, origin) in &self.origins {
+            if let Some(references) = origin.text_refs() {
+                refs.insert(
+                    path,
+                    references
+                        .iter()
+                        .filter_map(|r| planned.get(r).copied())
+                        .collect(),
+                );
+            }
+        }
         let roots = roots.iter().filter_map(|r| planned.get(r).copied());
         let want = |p: &'a StorePath| (p, vec![p.clone()]);
         missing_top_down(

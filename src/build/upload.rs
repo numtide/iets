@@ -168,7 +168,7 @@ impl Uploader for PlanUpload<'_> {
     }
 }
 
-// Text sources can reference derivations, so neither kind can always go first.
+/// Text sources can reference derivations, so neither kind can always go first.
 fn registration_order<'a>(objects: impl Iterator<Item = &'a Object>) -> Vec<&'a Object> {
     let mut pending: HashMap<&StorePath, &Object> = objects.map(|o| (o.store_path(), o)).collect();
     let roots: Vec<_> = pending.keys().copied().collect();

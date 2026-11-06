@@ -340,6 +340,25 @@ fn load_flake_tree(
     top: bool,
 ) -> EvalResult<Word> {
     let pos = Pos::NONE;
+    if !root.subdir.is_empty() {
+        let base = root.path.to_string();
+        let dir = format!("{base}/{}", root.subdir);
+        let resolved =
+            store_hooks::resolve_links(ev, dir.as_bytes(), store_hooks::Follow::Full, pos)?;
+        if !resolved
+            .strip_prefix(base.as_bytes())
+            .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
+        {
+            return Err(EvalError::boxed(
+                ErrorKind::Eval,
+                format!(
+                    "flake subdirectory '{}' escapes its source tree",
+                    root.subdir
+                ),
+                pos,
+            ));
+        }
+    }
     let lock_path = fr.lock.clone().unwrap_or_else(|| fr.dir.join("flake.lock"));
     let tree_lock = sys::path_from_internal(root.path.to_string().as_bytes())
         .join(&root.subdir)

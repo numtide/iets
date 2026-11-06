@@ -225,27 +225,27 @@ impl StreamUpload {
         &self,
         roots: &[StorePath],
         known: &HashSet<StorePath>,
+        origins: &mut HashMap<StorePath, Option<SourceOrigin>>,
     ) -> Result<(Vec<Node>, Vec<StorePath>)> {
+        let overrides = HashMap::new();
+        let mut locate = locate::store_locator(&overrides);
         let (drvs, srcs, _) = plan::walk(roots, known, &|p| self.drvs.get(p), &mut |p| {
             if self.sources.fetched(p).is_some() {
                 return Ok(Default::default());
             }
-            Ok(self
-                .source_info(p)?
-                .and_then(|origin| origin.text_refs().cloned())
-                .unwrap_or_default())
+            let origin = match self.sources.origin(p) {
+                Some(origin) => Some(origin),
+                None => locate(slice::from_ref(p))?.pop().flatten(),
+            };
+            let refs = origin
+                .as_ref()
+                .and_then(SourceOrigin::text_refs)
+                .cloned()
+                .unwrap_or_default();
+            origins.insert(p.clone(), origin);
+            Ok(refs)
         })?;
         Ok((drvs, srcs))
-    }
-
-    /// Where to read a source and how it was addressed: from the evaluation,
-    /// else from the local store, else `None` and the builder substitutes it.
-    fn source_info(&self, p: &StorePath) -> Result<Option<SourceOrigin>> {
-        if let Some(origin) = self.sources.origin(p) {
-            return Ok(Some(origin));
-        }
-        let found = locate::locate_in_store(slice::from_ref(p), &HashMap::new())?;
-        Ok(found.into_iter().next().flatten())
     }
 }
 
@@ -261,7 +261,8 @@ impl Uploader for StreamUpload {
             batches: 1,
             ..Stats::default()
         };
-        let (drvs, srcs) = self.walk(roots, &self.valid)?;
+        let mut origins = HashMap::new();
+        let (drvs, srcs) = self.walk(roots, &self.valid, &mut origins)?;
         let paths: Vec<&StorePath> = srcs.iter().chain(drvs.iter().map(|d| &d.0)).collect();
         if paths.is_empty() {
             st.time = t0.elapsed();
@@ -282,7 +283,7 @@ impl Uploader for StreamUpload {
                 fetched.push(p.clone());
                 continue;
             }
-            match self.source_info(p)? {
+            match origins.remove(p).flatten() {
                 Some(info) => objects.push(
                     Object::source(p.clone(), info)
                         .map_err(|e| Error::io(format!("cannot dump '{p}'"), e))?,
@@ -346,7 +347,7 @@ impl Uploader for StreamUpload {
         }
         // No pruning: a derivation whose `.drv` the store already has still
         // needs building when its outputs are missing.
-        let (drvs, _) = self.walk(roots, &HashSet::new())?;
+        let (drvs, _) = self.walk(roots, &HashSet::new(), &mut HashMap::new())?;
         Ok(drvs
             .into_iter()
             .map(|(path, aterm, _)| Drv { path, aterm })

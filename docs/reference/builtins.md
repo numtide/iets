@@ -48,7 +48,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `fromTOML` | works | TOML 1.0, as in Nix. A datetime fails when it is used. Error text differs. |
 | `genericClosure` | works | When two keys cannot be compared, the error can name another pair. |
 | `getContext` | works | Fails on the output of a dynamic derivation. Nix builds the producer first. |
-| `getFlake` | partial | Impure evaluation, or pure on `path:DIR?narHash=H` when the tree matches `H`. Needs a local flake with a complete `flake.lock`. |
+| `getFlake` | partial | Local paths and local SCM references. Pure evaluation needs a matching `narHash` or a locked SCM revision. Needs a complete `flake.lock`. |
 | `import` | works | Also imports a `.drv` file. |
 | `langVersion` | works | `6`. |
 | `lessThan` | works | A `let` binding of `__lessThan` does not change `<`. In Nix it does. |

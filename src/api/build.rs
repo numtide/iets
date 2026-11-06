@@ -79,6 +79,46 @@ pub fn plan(ev: &Evaluator, roots: &[StorePath]) -> Result<Plan> {
     )
 }
 
+/// Registers the derivations and sources evaluation produced, without building.
+pub fn register(ev: &Evaluator, transport: &Transport, options: &Options) -> Result<()> {
+    let (roots, plan) = {
+        let drvs = ev.drv.drvs.lock();
+        let sources = ev.known.origins();
+        let fetched = ev.known.all_fetched();
+        let plan = Plan {
+            sources: sources.keys().chain(fetched.keys()).cloned().collect(),
+            origins: sources,
+            drvs: drvs
+                .iter()
+                .filter_map(|(path, info)| {
+                    Some(plan::Object::drv(
+                        path.clone(),
+                        info.aterm.clone()?,
+                        info.references.clone(),
+                    ))
+                })
+                .collect(),
+            fetched,
+            ..Plan::default()
+        };
+        let roots: Vec<_> = plan
+            .sources
+            .iter()
+            .chain(plan.drvs.iter().map(plan::Object::store_path))
+            .cloned()
+            .collect();
+        if roots.is_empty() {
+            return Ok(());
+        }
+        (roots, plan)
+    };
+    let style = Style {
+        quiet: true,
+        ..Style::detect()
+    };
+    Dispatch::open(transport, options, plan, Provenance::off(), style)?.upload_only(&roots)
+}
+
 /// [`plan()`] over a derivation table the caller holds: a cache hit, a rewritten
 /// fixed-output derivation, or nothing at all, in which case every input drv
 /// is read from `/nix/store`.

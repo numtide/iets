@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::session;
 use crate::store::drv::Derivation;
 use crate::store::hash::{self, Hash, HashAlgo, Hasher};
+use crate::store::locate;
 use crate::store::nar::dump_string;
 use crate::store::narinfo::Fetched;
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path, store_dir};
@@ -148,7 +149,7 @@ impl Object {
 pub struct Plan {
     /// Input sources in registration order: a `toFile` text after the sources it references.
     pub sources: Vec<StorePath>,
-    /// The eval-time origin of every source in `sources` that this evaluation added.
+    /// Source locations and addressing recorded by evaluation or the local store.
     pub origins: HashMap<StorePath, SourceOrigin>,
     /// Derivations in post-order: each after its input drvs.
     pub drvs: Vec<Object>,
@@ -253,7 +254,7 @@ impl Plan {
             .iter()
             .chain(self.drvs.iter().map(Object::store_path))
             .collect();
-        let refs: HashMap<&StorePath, Vec<&StorePath>> = self
+        let mut refs: HashMap<&StorePath, Vec<&StorePath>> = self
             .drvs
             .iter()
             .filter_map(|o| match o {
@@ -269,6 +270,17 @@ impl Plan {
                 Object::Source { .. } | Object::Closure { .. } => None,
             })
             .collect();
+        for (path, origin) in &self.origins {
+            if let Some(references) = origin.text_refs() {
+                refs.insert(
+                    path,
+                    references
+                        .iter()
+                        .filter_map(|r| planned.get(r).copied())
+                        .collect(),
+                );
+            }
+        }
         let roots = roots.iter().filter_map(|r| planned.get(r).copied());
         let want = |p: &'a StorePath| (p, vec![p.clone()]);
         missing_top_down(
@@ -317,12 +329,16 @@ impl Plan {
                 }
             }
         }
+        let store_sources = infos
+            .iter()
+            .flatten()
+            .filter(|o| o.nar.is_none() && o.at.local().is_some())
+            .count();
         let (paths, infos): (Vec<&StorePath>, Vec<SourceOrigin>) = missing
             .iter()
             .zip(infos)
             .filter_map(|(p, i)| i.map(|i| (p, i)))
             .unzip();
-        let store_sources = unknown.len() - substitute.len();
         Ok(Resolved {
             objects: hash_sources(&paths, &infos)?,
             substitute,
@@ -408,52 +424,44 @@ pub fn walk(
     roots: &[StorePath],
     known: &HashSet<StorePath>,
     drv: &dyn Fn(&StorePath) -> Option<DrvInfo>,
-    text_refs: &dyn Fn(&StorePath) -> Option<BTreeSet<StorePath>>,
+    text_refs: &mut dyn FnMut(&StorePath) -> Result<BTreeSet<StorePath>>,
 ) -> Result<(Vec<Node>, Vec<StorePath>, usize)> {
-    fn source(
-        p: StorePath,
-        known: &HashSet<StorePath>,
-        text_refs: &dyn Fn(&StorePath) -> Option<BTreeSet<StorePath>>,
-        seen: &mut HashSet<StorePath>,
-        out: &mut Vec<StorePath>,
-    ) {
-        if known.contains(&p) || !seen.insert(p.clone()) {
-            return;
-        }
-        for r in text_refs(&p).unwrap_or_default() {
-            if !r.is_derivation() {
-                source(r, known, text_refs, seen, out);
-            }
-        }
-        out.push(p);
+    enum Pending {
+        Visit(StorePath),
+        Source(StorePath),
+        Drv(Node),
     }
     let mut seen: HashSet<StorePath> = HashSet::new();
     let mut drvs: Vec<Node> = Vec::new();
     let mut srcs: Vec<StorePath> = Vec::new();
     let mut from_store = 0;
-    type Pending = Option<(Arc<Vec<u8>>, BTreeSet<StorePath>)>;
-    let mut stack: Vec<(StorePath, Pending)> =
-        roots.iter().rev().map(|p| (p.clone(), None)).collect();
-    while let Some((p, done)) = stack.pop() {
-        if let Some((aterm, refs)) = done {
-            drvs.push((p, aterm, refs));
-            continue;
-        }
+    let mut stack: Vec<_> = roots.iter().rev().cloned().map(Pending::Visit).collect();
+    while let Some(next) = stack.pop() {
+        let p = match next {
+            Pending::Visit(p) => p,
+            Pending::Source(p) => {
+                srcs.push(p);
+                continue;
+            }
+            Pending::Drv(node) => {
+                drvs.push(node);
+                continue;
+            }
+        };
         if known.contains(&p) || !seen.insert(p.clone()) {
             continue;
         }
-        let (aterm, refs, stored) = load_drv(&p, drv)?;
-        from_store += usize::from(stored);
-        stack.push((p, Some((aterm, refs.clone()))));
-        for r in refs {
-            if r.is_derivation() {
-                if !known.contains(&r) && !seen.contains(&r) {
-                    stack.push((r, None));
-                }
-            } else {
-                source(r, known, text_refs, &mut seen, &mut srcs);
-            }
-        }
+        let refs = if p.is_derivation() {
+            let (aterm, refs, stored) = load_drv(&p, drv)?;
+            from_store += usize::from(stored);
+            stack.push(Pending::Drv((p, aterm, refs.clone())));
+            refs
+        } else {
+            let refs = text_refs(&p)?;
+            stack.push(Pending::Source(p));
+            refs
+        };
+        stack.extend(refs.into_iter().map(Pending::Visit));
     }
     Ok((drvs, srcs, from_store))
 }
@@ -463,16 +471,32 @@ pub fn walk(
 /// `/nix/store` and counted in the plan. Fixed-output drvs are ordinary drvs here; the builder
 /// fetches them.
 pub fn plan(roots: &[StorePath], inputs: Inputs<'_>) -> Result<Plan> {
+    let mut origins = HashMap::new();
+    let overrides = HashMap::new();
+    let mut locate = locate::store_locator(&overrides);
     let (drvs, sources, store_drvs) = walk(
         roots,
         &HashSet::new(),
         &|p| inputs.drvs.get(p).cloned(),
-        &|p| inputs.sources.get(p)?.text_refs().cloned(),
+        &mut |p| {
+            let origin = if let Some(origin) = inputs.sources.get(p) {
+                Some(origin.clone())
+            } else if inputs.fetched.contains_key(p) {
+                None
+            } else {
+                locate(std::slice::from_ref(p))?.pop().flatten()
+            };
+            let refs = origin
+                .as_ref()
+                .and_then(SourceOrigin::text_refs)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(origin) = origin {
+                origins.insert(p.clone(), origin);
+            }
+            Ok(refs)
+        },
     )?;
-    let origins = sources
-        .iter()
-        .filter_map(|p| inputs.sources.get(p).map(|o| (p.clone(), o.clone())))
-        .collect();
     Ok(Plan {
         sources,
         origins,

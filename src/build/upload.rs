@@ -26,7 +26,7 @@ use crate::remote::event::Event;
 use crate::remote::plan::{self, Locator, Node, Object, Plan};
 use crate::store::locate;
 use crate::store::path::StorePath;
-use crate::store::source::SourceOrigin;
+use crate::store::source::{SourceKind, SourceOrigin};
 
 use super::backend::{Backend, Drv, Phase};
 
@@ -134,7 +134,7 @@ impl Uploader for PlanUpload<'_> {
         })?;
         let mut bytes = b.add_fetched(&fetched, on_event)?;
 
-        let missing: Vec<&Object> = resolved.objects.iter().chain(missing_drvs).collect();
+        let missing = registration_order(resolved.objects.iter().chain(missing_drvs));
         bytes += b.add_objects(&missing, on_event)?;
         Ok(Stats {
             batches: 1,
@@ -168,6 +168,37 @@ impl Uploader for PlanUpload<'_> {
     }
 }
 
+/// Text sources can reference derivations, so neither kind can always go first.
+fn registration_order<'a>(objects: impl Iterator<Item = &'a Object>) -> Vec<&'a Object> {
+    let mut pending: HashMap<&StorePath, &Object> = objects.map(|o| (o.store_path(), o)).collect();
+    let roots: Vec<_> = pending.keys().copied().collect();
+    let mut ordered = Vec::with_capacity(pending.len());
+    let mut stack = Vec::new();
+    for root in roots {
+        stack.push((root, None));
+        while let Some((path, done)) = stack.pop() {
+            if let Some(object) = done {
+                ordered.push(object);
+                continue;
+            }
+            let Some(object) = pending.remove(path) else {
+                continue;
+            };
+            stack.push((path, Some(object)));
+            let references = match object {
+                Object::Drv { references, .. }
+                | Object::Source {
+                    kind: SourceKind::Text { references },
+                    ..
+                } => references,
+                _ => continue,
+            };
+            stack.extend(references.iter().map(|p| (p, None)));
+        }
+    }
+    ordered
+}
+
 /// The incremental one: the evaluation's tables plus what the builder is
 /// already known to hold.
 pub struct StreamUpload {
@@ -194,21 +225,27 @@ impl StreamUpload {
         &self,
         roots: &[StorePath],
         known: &HashSet<StorePath>,
+        origins: &mut HashMap<StorePath, Option<SourceOrigin>>,
     ) -> Result<(Vec<Node>, Vec<StorePath>)> {
-        let (drvs, srcs, _) = plan::walk(roots, known, &|p| self.drvs.get(p), &|p| {
-            self.sources.origin(p)?.text_refs().cloned()
+        let overrides = HashMap::new();
+        let mut locate = locate::store_locator(&overrides);
+        let (drvs, srcs, _) = plan::walk(roots, known, &|p| self.drvs.get(p), &mut |p| {
+            if self.sources.fetched(p).is_some() {
+                return Ok(Default::default());
+            }
+            let origin = match self.sources.origin(p) {
+                Some(origin) => Some(origin),
+                None => locate(slice::from_ref(p))?.pop().flatten(),
+            };
+            let refs = origin
+                .as_ref()
+                .and_then(SourceOrigin::text_refs)
+                .cloned()
+                .unwrap_or_default();
+            origins.insert(p.clone(), origin);
+            Ok(refs)
         })?;
         Ok((drvs, srcs))
-    }
-
-    /// Where to read a source and how it was addressed: from the evaluation,
-    /// else from the local store, else `None` and the builder substitutes it.
-    fn source_info(&self, p: &StorePath) -> Result<Option<SourceOrigin>> {
-        if let Some(origin) = self.sources.origin(p) {
-            return Ok(Some(origin));
-        }
-        let found = locate::locate_in_store(slice::from_ref(p), &HashMap::new())?;
-        Ok(found.into_iter().next().flatten())
     }
 }
 
@@ -224,7 +261,8 @@ impl Uploader for StreamUpload {
             batches: 1,
             ..Stats::default()
         };
-        let (drvs, srcs) = self.walk(roots, &self.valid)?;
+        let mut origins = HashMap::new();
+        let (drvs, srcs) = self.walk(roots, &self.valid, &mut origins)?;
         let paths: Vec<&StorePath> = srcs.iter().chain(drvs.iter().map(|d| &d.0)).collect();
         if paths.is_empty() {
             st.time = t0.elapsed();
@@ -245,7 +283,7 @@ impl Uploader for StreamUpload {
                 fetched.push(p.clone());
                 continue;
             }
-            match self.source_info(p)? {
+            match origins.remove(p).flatten() {
                 Some(info) => objects.push(
                     Object::source(p.clone(), info)
                         .map_err(|e| Error::io(format!("cannot dump '{p}'"), e))?,
@@ -280,7 +318,7 @@ impl Uploader for StreamUpload {
             }
             objects.push(Object::drv(path.clone(), aterm.clone(), references.clone()));
         }
-        let refs: Vec<&Object> = objects.iter().collect();
+        let refs = registration_order(objects.iter());
         st.bytes += b.add_objects(&refs, on_event)?;
         st.added = fetched.len() + objects.len();
         self.valid.extend(srcs);
@@ -309,7 +347,7 @@ impl Uploader for StreamUpload {
         }
         // No pruning: a derivation whose `.drv` the store already has still
         // needs building when its outputs are missing.
-        let (drvs, _) = self.walk(roots, &HashSet::new())?;
+        let (drvs, _) = self.walk(roots, &HashSet::new(), &mut HashMap::new())?;
         Ok(drvs
             .into_iter()
             .map(|(path, aterm, _)| Drv { path, aterm })

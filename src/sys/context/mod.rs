@@ -14,6 +14,7 @@ pub type Entry = unsafe extern "C" fn(*mut ()) -> !;
 #[cfg_attr(all(target_arch = "aarch64", not(windows)), path = "aarch64.rs")]
 #[cfg_attr(all(target_arch = "aarch64", windows), path = "aarch64_windows.rs")]
 #[cfg_attr(target_arch = "riscv64", path = "riscv64.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "wasm32.rs")]
 mod imp;
 
 pub use imp::{seed_stack, sp, switch};

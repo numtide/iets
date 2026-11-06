@@ -26,6 +26,8 @@
         ietsRiscv64 = (scopeFor pkgs.pkgsCross.riscv64).iets.override (o: {
           commonArgs = o.commonArgs // { CARGO_PROFILE = "dev"; };
         });
+        # runs in a browser (docs/explanation/webassembly.md)
+        ietsWasi = (scopeFor pkgs.pkgsCross.wasi32).iets;
         classic = final.callPackage ./nix/classic.nix { };
         devShell = final.callPackage
           ({ lib, stdenv, mkShell, cargo, rustc, rustPlatform, clippy, rustfmt, hyperfine, nix, perf, jq, nushell, direnv, ast-grep }:

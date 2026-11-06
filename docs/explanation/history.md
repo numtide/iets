@@ -363,7 +363,9 @@ tracing-cache hit. The first milestone would have been a publisher in
 
 Each was inside the noise or worse:
 
-- An arena prefault thread (+20 % at sixteen workers).
+- An arena prefault thread (+20 % at sixteen workers). A later one that
+  keeps four populated chunks in stock is used up to eight workers only:
+  3–12 % faster there on whole nixpkgs, 9 % slower at 32.
 - No stack trimming, plus prefaulting new stacks.
 - A lock-free interner cache in front of the shards, which doubled the
   interner's own self time.

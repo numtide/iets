@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::{ptr, thread};
 
 use crate::eval::Evaluator;
-use crate::runtime::Arena;
+use crate::runtime::{Arena, arena};
 use crate::session::Session;
 
 pub use force::{
@@ -98,6 +98,7 @@ pub fn try_run<R: Send + 'static>(
     // the input store reads the current session, and the workers inherit it
     // so their arenas map into its heap
     let _entered = ev.session().clone().enter();
+    arena::use_stock_for(workers);
     if workers <= 1 {
         let r = f(&mut ev);
         ev.lints.flush();

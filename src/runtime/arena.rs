@@ -3,6 +3,7 @@
 //! `Heap` of the session drops. Thus it is sound for cells to share any
 //! part of the graph with no further check.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::{process, ptr, slice, thread};
 
@@ -22,13 +23,29 @@ const CHUNK: usize = 32 << 20;
 /// arenas: 128 MB. Depths of 8 and 16 were no faster on whole nixpkgs.
 const STOCK: usize = 4;
 
+/// The most workers the stock serves. One helper behind more workers costs
+/// wall time: eval-jobs on whole nixpkgs at its default of every CPU (32)
+/// took 4.47 s to its result with the stock against 4.10 s without.
+const STOCK_MAX_WORKERS: usize = 8;
+
+/// Whether full chunks come from the stock, set for each run by
+/// `use_stock_for`. Off until a run says otherwise, so the allocations made
+/// before a run with many workers do not start the helper.
+static USE_STOCK: AtomicBool = AtomicBool::new(false);
+
+/// Sets whether the arenas of a run with `workers` workers take their full
+/// chunks from the stock.
+pub(crate) fn use_stock_for(workers: usize) {
+    USE_STOCK.store(workers <= STOCK_MAX_WORKERS, Ordering::Relaxed);
+}
+
 /// Chunks populated off the evaluation threads. A 4 KB fault costs more in entering the kernel,
 /// finding the VMA and charging the cgroup than in zeroing; `MADV_POPULATE_WRITE` pays that once
 /// per chunk. On the worker that needs the chunk, the workers took turns in the kernel and lost
 /// at 8; one helper thread does it ahead of them, and its huge-page faults stall in compaction
 /// instead of a worker's. Whole nixpkgs, about half the heap in huge pages: 7–10% faster at one
-/// worker, 4–5% at eight. Chunks in stock belong to no session until an arena takes one; the
-/// stock is process-wide.
+/// worker, 4–5% at eight, slower at 32 (`STOCK_MAX_WORKERS`). Chunks in stock belong to no
+/// session until an arena takes one; the stock is process-wide.
 struct Stock {
     ready: Mutex<Vec<usize>>,
     low: Condvar,
@@ -261,7 +278,7 @@ impl Arena {
         // A populated chunk from the stock, or an anonymous mmap whose pages
         // fault in as they are touched. The chunk goes with the session's
         // heap.
-        let stocked = if chunk == CHUNK {
+        let stocked = if chunk == CHUNK && USE_STOCK.load(Ordering::Relaxed) {
             Stock::get().and_then(Stock::take)
         } else {
             None

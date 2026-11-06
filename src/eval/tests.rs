@@ -739,3 +739,19 @@ fn newline_starts_matches_line_starts() {
     assert_eq!(super::newline_starts(format!("{x}\r\n").as_bytes()), None);
     assert_eq!(super::newline_starts(format!("a\r{x}").as_bytes()), None);
 }
+
+#[test]
+fn masks64_matches_the_scalar_masks() {
+    // every lane of a block once `\n`, `\r`, a high byte and a plain one
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..20_000 {
+        let mut b = [0u8; 64];
+        for c in &mut b {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *c = [b'\n', b'\r', 0xff, b'x'][(x % 4) as usize];
+        }
+        assert_eq!(super::masks64(&b), super::masks64_scalar(&b), "{b:?}");
+    }
+}

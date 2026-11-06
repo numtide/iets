@@ -450,6 +450,18 @@ pub fn base16_decode(s: &str) -> Result<Vec<u8>, HashError> {
 
 const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// The value of each byte as a Base64 digit, 0xff for none: base-n.cc's
+/// `base64DecodeChars`.
+const BASE64_DIGITS: [u8; 256] = {
+    let mut t = [0xffu8; 256];
+    let mut i = 0;
+    while i < BASE64_CHARS.len() {
+        t[BASE64_CHARS[i] as usize] = i as u8;
+        i += 1;
+    }
+    t
+};
+
 /// Mirrors base-n.hh:base64::encodedLength.
 pub fn base64_encoded_len(n: usize) -> usize {
     n.div_ceil(3) * 4
@@ -486,12 +498,14 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, HashError> {
         if c == b'\n' {
             continue;
         }
-        let digit = BASE64_CHARS.iter().position(|&x| x == c).ok_or_else(|| {
-            HashError(format!(
+        let digit = BASE64_DIGITS[c as usize];
+        if digit == 0xff {
+            return Err(HashError(format!(
                 "invalid character in Base64 string: '{}'",
                 c as char
-            ))
-        })? as u32;
+            )));
+        }
+        let digit = u32::from(digit);
         bits += 6;
         d = d << 6 | digit;
         if bits >= 8 {
@@ -617,6 +631,22 @@ mod tests {
             assert_eq!(base64_decode(&e).unwrap(), data);
         }
         assert!(base64_decode("ab$c").is_err());
+    }
+
+    /// The table is the alphabet inverted, and every other byte is no digit
+    /// and the error names it.
+    #[test]
+    fn base64_digits_invert_the_alphabet() {
+        for b in 0..=255u8 {
+            match BASE64_CHARS.iter().position(|&c| c == b) {
+                Some(i) => assert_eq!(BASE64_DIGITS[b as usize] as usize, i),
+                None => assert_eq!(BASE64_DIGITS[b as usize], 0xff, "{b}"),
+            }
+        }
+        assert_eq!(
+            base64_decode("QUJD*").unwrap_err().0,
+            "invalid character in Base64 string: '*'"
+        );
     }
 
     // compressHash is what makeStorePath applies; checked end-to-end in path.rs.

@@ -49,7 +49,8 @@ nix build github:numtide/iets#static      # one static binary, with no runtime d
 ```
 
 The static binary is described in
-[The static build](../explanation/static-build.md).
+[The static build](../explanation/static-build.md). `.#wasi` is a build for the
+browser, described in [WebAssembly](../explanation/webassembly.md).
 
 ## Evaluate an expression
 

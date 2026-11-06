@@ -66,7 +66,7 @@ pub const fn framed<const N: usize>(toks: &[&[u8]]) -> [u8; N] {
         let s = toks[t];
         let mut i = 0;
         while i < 8 {
-            out[o + i] = (s.len() >> (8 * i)) as u8;
+            out[o + i] = (s.len() as u64 >> (8 * i)) as u8;
             i += 1;
         }
         o += 8;

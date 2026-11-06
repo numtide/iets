@@ -115,7 +115,13 @@ pub struct Parser<'a> {
 /// is a third of the deepest nesting the 4 GiB evaluator stack survived
 /// (150,000 nested attribute sets), so the parse ends before any stage of
 /// the pipeline runs out of stack.
+#[cfg(not(target_os = "wasi"))]
 const MAX_PARSE_DEPTH: u32 = 50_000;
+/// A browser's stack is small, and an `import` can start the parser at the
+/// bottom of a deep evaluation. With `MAX_CALL_DEPTH`, this value holds in the
+/// web workers of Firefox 158 and Chromium 156.
+#[cfg(target_os = "wasi")]
+const MAX_PARSE_DEPTH: u32 = 500;
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], interner: &'a mut Interner) -> Self {
@@ -157,6 +163,18 @@ impl<'a> Parser<'a> {
                 t.end,
                 "stack overflow (possible infinite recursion)".into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// One more link of a chain, such as `a + b + c`. A loop parses it with no
+    /// recursion, but it is a tree as deep as it is long for each stage after
+    /// the parser. Most targets have the stack for that, and do not count it.
+    #[inline]
+    fn chained(&mut self, links: &mut u32) -> R<()> {
+        if cfg!(target_os = "wasi") {
+            self.deeper()?;
+            *links += 1;
         }
         Ok(())
     }
@@ -532,30 +550,35 @@ impl<'a> Parser<'a> {
     /// meets the operator, which is where iets's caller does too.
     fn parse_pipe(&mut self) -> R<ExprId> {
         let lhs = self.parse_op(0)?;
-        match self.peek().kind {
+        let mut links = 0;
+        let r = match self.peek().kind {
             Tok::PipeInto => {
                 let mut acc = lhs;
                 while self.peek().kind == Tok::PipeInto {
                     self.bump();
+                    self.chained(&mut links)?;
                     let f = self.parse_op(0)?;
                     acc = self.make_call(f, acc);
                 }
-                Ok(acc)
+                acc
             }
             Tok::PipeFrom => {
                 let mut chain = vec![lhs];
                 while self.peek().kind == Tok::PipeFrom {
                     self.bump();
+                    self.chained(&mut links)?;
                     chain.push(self.parse_op(0)?);
                 }
                 let mut acc = chain.pop().unwrap();
                 while let Some(f) = chain.pop() {
                     acc = self.make_call(f, acc);
                 }
-                Ok(acc)
+                acc
             }
-            _ => Ok(lhs),
-        }
+            _ => lhs,
+        };
+        self.depth -= links;
+        Ok(r)
     }
 
     /// `f a` becomes one `Apply`; applying an `Apply` again extends it,
@@ -621,6 +644,7 @@ impl<'a> Parser<'a> {
             }
             _ => self.parse_app()?,
         };
+        let mut links = 0;
         loop {
             let op = self.peek();
             let Some((bp, assoc, bin)) = binop(op.kind) else {
@@ -630,6 +654,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.bump();
+            self.chained(&mut links)?;
             let start = self.ast.spans[lhs.0 as usize].start;
             lhs = match bin {
                 None => {
@@ -650,6 +675,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.depth -= links;
         Ok(lhs)
     }
 
@@ -1174,7 +1200,13 @@ impl<'a> Parser<'a> {
             }
             let path = self.parse_attrpath()?;
             self.expect(Tok::Assign, "expecting '.' or '='")?;
+            // `a.b.c = x;` is `a = { b = { c = x; }; };`
+            let mut links = 0;
+            for _ in 1..path.len {
+                self.chained(&mut links)?;
+            }
             let value = self.parse_expr()?;
+            self.depth -= links;
             self.expect(Tok::Semi, "expecting ';'")?;
             self.sc_binds.push(Bind {
                 span: Span {

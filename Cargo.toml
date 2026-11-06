@@ -19,29 +19,33 @@ getrandom = "0.4"
 tempfile = "3"
 toml = "1"
 serde_json = "1"
+zstd = "0.14"
+lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
+# ed25519 for binary cache signatures (src/store/narinfo.rs)
+ring = "0.17"
+# The archive formats of the flake-input fetcher (src/fetch/unpack.rs).
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
+bzip2 = "0.6"
+
+# WASI preview 1 has no sockets or threads, and mimalloc has no use without them.
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
 tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "transport", "tls-ring"] }
 tonic-prost = "0.14"
 prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1"
-zstd = "0.14"
-lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
-# The flake-input fetcher (src/fetch/http.rs, src/fetch/unpack.rs): the HTTP and
-# TLS halves are the ones tonic already brings; only the archive formats are new.
+# The HTTP client (src/fetch/http/client.rs): the HTTP and TLS halves are the
+# ones tonic already brings.
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
-# ed25519 for binary cache signatures (src/store/narinfo.rs)
-ring = "0.17"
 # the CA roots when the machine has none (src/fetch/roots.rs)
 webpki-roots = "1"
-tar = { version = "0.4", default-features = false }
-flate2 = "1"
-lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
-bzip2 = "0.6"
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 

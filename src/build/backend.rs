@@ -22,7 +22,7 @@ use crate::log::{self, Activity};
 use crate::remote::closure;
 use crate::remote::copy::{self, Copying};
 use crate::remote::event::Event;
-use crate::remote::grpc::backend::Grpc;
+use crate::remote::grpc;
 use crate::remote::plan::{self, Object, Plan};
 use crate::remote::worker::wire::{self, write_object};
 use crate::remote::worker::{Connection, Missing, Options, Stats, Transport, default_socket};
@@ -209,7 +209,7 @@ pub fn open(
     on_event: &mut dyn FnMut(Event),
 ) -> Result<Box<dyn Backend>> {
     if let Transport::Grpc(cfg) = transport {
-        return Ok(Box::new(Grpc::open(cfg)?));
+        return grpc::open(cfg);
     }
     Ok(Box::new(Worker::open(transport, options, on_event)?))
 }

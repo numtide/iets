@@ -1,6 +1,9 @@
 //! Paths and names as bytes, the way the store and the wire format see them.
 
+#[cfg(unix)]
 pub use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(target_os = "wasi")]
+pub use std::os::wasi::ffi::{OsStrExt, OsStringExt};
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};

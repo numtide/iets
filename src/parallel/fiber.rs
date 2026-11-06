@@ -19,7 +19,10 @@ pub const DEFAULT_STACK: usize = 256 << 20;
 /// Stack of the demand fiber and of the process main thread. The demand
 /// path must have the same room at every worker count, or a program that
 /// works with one worker crashes with four.
+#[cfg(target_pointer_width = "64")]
 pub const MAIN_STACK: usize = 4 << 30;
+#[cfg(target_pointer_width = "32")]
+pub const MAIN_STACK: usize = 16 << 20;
 /// The inaccessible page at the low end of a stack: one page, whatever the
 /// platform's page size is.
 fn guard() -> usize {
@@ -33,7 +36,10 @@ pub const MARGIN: usize = 1 << 20;
 /// are `MAP_NORESERVE`, so they cost address space and page tables, not
 /// memory; the cap turns an absurd `--workers` or `IETS_FIBER_STACK_MB`
 /// into an error at startup instead of a failed mmap in the middle of a run.
+#[cfg(target_pointer_width = "64")]
 pub const MAX_RESERVE: usize = 64 << 30;
+#[cfg(target_pointer_width = "32")]
+pub const MAX_RESERVE: usize = 1 << 30;
 
 /// A fiber stack that could not be reserved.
 #[derive(Debug)]

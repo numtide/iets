@@ -122,7 +122,14 @@ pub fn main(argv: &[String]) -> i32 {
     let ec = eval_config(&i.c, &cfg);
     let i = Arc::new(i);
     let inst = Arc::clone(&i);
-    match cli::run_reported(Run::on(ec), move |ev, _| run(ev, &inst)) {
+    let eval_options = options.clone();
+    match cli::run_reported(Run::on(ec), move |ev, _| {
+        let made = run(ev, &inst)?;
+        if inst.eval_only && !inst.readonly {
+            apibuild::register(ev, &local(), &eval_options)?;
+        }
+        Ok(made)
+    }) {
         Outcome::Failed(code) => code,
         Outcome::Unsupported(reason) => fallback(NAME, argv, &reason),
         Outcome::Ok(Made::Values) => 0,

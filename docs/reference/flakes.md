@@ -95,17 +95,18 @@ Each scheme keeps the query parameters Nix keeps for it. As in Nix,
 
 ## `builtins.getFlake`
 
-`builtins.getFlake REF` takes an absolute path, `/abs` or `path:/abs`, and
-returns what `callFlake` returns.
+`builtins.getFlake REF` takes an absolute path, `/abs` or `path:/abs`, or a
+local SCM reference such as `git+file:///abs?ref=main&rev=SHA`, and returns
+what `callFlake` returns.
 
 ```nix
 (builtins.getFlake "/home/you/project").outputs
 ```
 
-- It works **only in impure evaluation**. Every reference iets resolves is
-  unlocked, and pure evaluation refuses that
+- Pure evaluation needs a matching `narHash` for a path or a locked SCM
+  revision, and the local source must be allowed by the evaluation
   (`docs/reference/settings.md`, "pure-eval").
-- `REF` is always a `path:` input, even inside a git repository. Nix looks
+- An absolute path is a `path:` input, even inside a git repository. Nix looks
   for `.git` only when it has a base directory, and `getFlake` gives it
   none.
 - A relative `REF` and a `#fragment` are errors, as in Nix.

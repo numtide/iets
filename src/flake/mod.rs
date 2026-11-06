@@ -8,11 +8,11 @@
 
 pub mod flakeref;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::{fs, io, mem};
 
 use crate::builtins::fetch::{self, fetch_tree};
-use crate::builtins::store_hooks::locate;
+use crate::builtins::store_hooks::{self, locate};
 use crate::compile;
 use crate::compile::ir::ParamIr;
 use crate::error::{Error, Result};
@@ -148,8 +148,7 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
 /// tree. With a `rev` the source is that revision, read out of the
 /// repository; without one it is the working tree, as Nix reads it. A `ref`
 /// beside a `rev` is advisory, as it is for Nix: the rev names the tree. The
-/// `flake.lock` is the checked-out one either way
-/// (docs/reference/divergences.md).
+/// lock file comes from the same tree as `flake.nix`.
 fn scm_flake(
     p: &flakeref::Parsed,
     scm: &'static dyn source::scm::Scm,
@@ -157,6 +156,16 @@ fn scm_flake(
     attr: Vec<String>,
 ) -> Result<FlakeRef> {
     const KNOWN: [&str; 4] = ["type", "url", "ref", "rev"];
+    if Path::new(&p.dir).components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(Error::Unsupported(format!(
+            "'dir' in flake reference '{loc}' must stay inside the source tree"
+        )));
+    }
     if let Some(k) = p.input.keys().find(|k| !KNOWN.contains(&k.as_str())) {
         return Err(Error::Unsupported(format!(
             "'{k}' in flake reference '{loc}' is not supported"
@@ -171,29 +180,44 @@ fn scm_flake(
     };
     let root = sys::path_from_internal(root.as_bytes());
     let dir = root.join(&p.dir);
-    let mut fr = local_flake(&sys::path_to_internal(&dir), false, attr)?;
-    let Some(rev) = source::str_attr(&p.input, "rev") else {
+    let source = if let Some(rev) = source::str_attr(&p.input, "rev") {
+        if !flakeref::is_rev(rev) {
+            return Err(Error::Flake(format!(
+                "flake reference '{loc}': 'rev={rev}' is not a revision; name the 40 hex digits of a commit"
+            )));
+        }
+        SourceRef::Commit {
+            scm,
+            root,
+            rev: rev.to_string(),
+            subdir: p.dir.clone(),
+        }
+    } else {
         if p.input.contains_key("ref") {
             return Err(Error::Unsupported(format!(
                 "flake reference '{loc}' names a '{}' but no 'rev'; iets resolves no reference of a root flake, so name the rev or the directory",
                 scm.name()
             )));
         }
-        return Ok(fr);
+        if !scm.root_marker(&root).exists() {
+            return Err(Error::Unsupported(format!(
+                "flake reference '{loc}' does not name a local {} working tree",
+                scm.title()
+            )));
+        }
+        SourceRef::Tracked {
+            scm,
+            root: sys::fs::canonicalize(&root).unwrap_or(root),
+            subdir: p.dir.clone(),
+        }
     };
-    if !flakeref::is_rev(rev) {
-        return Err(Error::Flake(format!(
-            "flake reference '{loc}': 'rev={rev}' is not a revision; name the 40 hex digits of a commit"
-        )));
-    }
-    fr.source = source::SourceRef::Commit {
-        scm,
-        root,
-        rev: rev.to_string(),
-        subdir: p.dir.clone(),
-    };
-    fr.probed = false;
-    Ok(fr)
+    Ok(FlakeRef {
+        dir,
+        source,
+        attr,
+        probed: false,
+        lock: None,
+    })
 }
 
 /// The flake in directory `full`: a `path:` input, or unless `explicit_path`
@@ -290,14 +314,51 @@ pub fn eval_flake_value(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
 /// `builtins.getFlake` loads one that is not.
 fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> {
     let pos = Pos::NONE;
+    if fr.probed {
+        let found = match &fr.source {
+            SourceRef::Tracked { root, .. } | SourceRef::Submodules { root, .. } => {
+                Some(root.as_path())
+            }
+            _ => None,
+        };
+        source::scm::record_detect(ev.trace(), &fr.dir, found);
+    }
+    let root = source::tree(ev, &fr.source, pos)?;
+    load_flake_tree(ev, fr, root, top)
+}
+
+fn load_flake_tree(
+    ev: &mut Evaluator,
+    fr: &FlakeRef,
+    root: source::Tree,
+    top: bool,
+) -> EvalResult<Word> {
+    let pos = Pos::NONE;
     let lock_path = fr.lock.clone().unwrap_or_else(|| fr.dir.join("flake.lock"));
-    let lock_bytes = match read_traced(ev, &lock_path) {
+    let tree_lock = sys::path_from_internal(root.path.to_string().as_bytes())
+        .join(&root.subdir)
+        .join("flake.lock");
+    let tree_lock = sys::path_to_internal(&tree_lock);
+    if fr.lock.is_none() && store_hooks::stat(ev, &tree_lock, false) == crate::trace::Kind::Symlink
+    {
+        return Err(EvalError::boxed(
+            ErrorKind::Unsupported,
+            format!("lock file '{}' is a symlink", lock_path.display()),
+            pos,
+        ));
+    }
+    let read_lock = match &fr.lock {
+        Some(_) => read_traced(ev, &lock_path),
+        None => store_hooks::resolve(ev, &tree_lock)
+            .read(ev, false)
+            .map_err(|(_, e)| e),
+    };
+    let lock_bytes = match read_lock {
         Ok(b) => b,
         // flake.cc locks a flake without inputs to an empty lock and writes
         // no file; one that declares inputs fails check_declared_inputs
         Err(e) if e.kind() == io::ErrorKind::NotFound && fr.lock.is_none() => {
-            ev.trace()
-                .stat_now(lock_path.as_os_str().as_encoded_bytes(), true);
+            store_hooks::stat(ev, &tree_lock, true);
             lock::EMPTY.as_bytes().to_vec()
         }
         Err(_) => {
@@ -317,16 +378,6 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
         ev.input_names.insert(hash.to_string(), name.to_string());
     }
 
-    if fr.probed {
-        let found = match &fr.source {
-            SourceRef::Tracked { root, .. } | SourceRef::Submodules { root, .. } => {
-                Some(root.as_path())
-            }
-            _ => None,
-        };
-        source::scm::record_detect(ev.trace(), &fr.dir, found);
-    }
-    let root = source::tree(ev, &fr.source, pos)?;
     let source_info = fetch::emit_tree_attrs(ev, &root, Some("self"), pos)?;
     let subdir = root.subdir;
     let out_path = {
@@ -387,7 +438,7 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
 
 /// flake-primops.cc:prim_getFlake on a local path, parsed by
 /// `flakeref::parse_absolute`. Impure, or pure on a `path:` reference with a
-/// `narHash` the tree matches; a pure evaluation refuses every other one.
+/// `narHash` the tree matches or a local SCM reference locked by a revision.
 /// Nothing is locked here. A directory is always a `path:` input, even
 /// inside a git repository: flakeref.cc looks for `.git` only when it has a
 /// base directory, and getFlake passes none. A virtual copy stands for its
@@ -404,18 +455,27 @@ pub fn get_flake(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         let msg = format!("builtins.getFlake on '{s}' {why} is not supported");
         EvalError::boxed(ErrorKind::Unsupported, msg, pos)
     };
-    let pinned = pinned_path(&p);
-    if let Some((path, expected)) = pinned {
-        let expected = source::parse_nar_hash(expected).map_err(|e| eval_error(e, pos))?;
-        if let Err(got) = fetch::path_nar_hash(ev, path, Some(&expected), pos)? {
-            let msg = format!(
-                "NAR hash mismatch in input '{s}', expected '{}' but got '{}'",
-                expected.to_sri(),
-                got.to_sri()
-            );
-            return Err(EvalError::boxed(ErrorKind::Eval, msg, pos));
+    if let Some(scm) = source::str_attr(&p.input, "type").and_then(source::scm::named) {
+        if ev.pure() && !p.input.contains_key("rev") {
+            return Err(unsupported(
+                "without a locked revision in pure evaluation mode",
+            ));
         }
-    } else if ev.pure() {
+        let fr = scm_flake(&p, scm, &s, Vec::new()).map_err(|e| eval_error(e, pos))?;
+        if let SourceRef::Commit { root, .. } | SourceRef::Tracked { root, .. } = &fr.source {
+            store_hooks::local_dir(ev, &sys::path_to_internal(root), pos)?;
+        }
+        return load_flake(ev, &fr, false);
+    }
+    const PATH_ATTRS: [&str; 6] = ["type", "path", "narHash", "lastModified", "rev", "revCount"];
+    if !p.dir.is_empty() || p.input.keys().any(|k| !PATH_ATTRS.contains(&k.as_str())) {
+        return Err(unsupported("(only a local path)"));
+    }
+    let expected = source::str_attr(&p.input, "narHash")
+        .map(source::parse_nar_hash)
+        .transpose()
+        .map_err(|e| eval_error(e, pos))?;
+    if expected.is_none() && ev.pure() {
         // a rev may lock it; the real nix decides that
         if p.input.contains_key("rev") || p.input.contains_key("narHash") {
             return Err(unsupported("in pure evaluation mode"));
@@ -429,9 +489,20 @@ pub fn get_flake(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
             pos,
         ));
     }
-    let local = (p.input.len() == 2 || pinned.is_some()) && p.dir.is_empty();
-    let Some(path) = source::str_attr(&p.input, "path").filter(|_| local) else {
+    let Some(path) = source::str_attr(&p.input, "path") else {
         return Err(unsupported("(only a local path)"));
+    };
+    let (hash, mtime) = match fetch::path_nar_hash(ev, path, expected.as_ref(), pos)? {
+        Ok(found) => found,
+        Err(got) => {
+            let expected = expected.expect("only a narHash mismatches");
+            let msg = format!(
+                "NAR hash mismatch in input '{s}', expected '{}' but got '{}'",
+                expected.to_sri(),
+                got.to_sri()
+            );
+            return Err(EvalError::boxed(ErrorKind::Eval, msg, pos));
+        }
     };
     let full = match locate(ev, path.as_bytes()) {
         Some(at) if !at.hidden() => match at.local() {
@@ -441,15 +512,18 @@ pub fn get_flake(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         _ => path.as_bytes().to_vec(),
     };
     let fr = local_flake(&full, true, Vec::new()).map_err(|e| eval_error(e, pos))?;
-    load_flake(ev, &fr, false)
-}
-
-/// `path:DIR?narHash=H` and nothing else: a reference its NAR hash locks, so
-/// a pure evaluation may take it once the tree matches.
-fn pinned_path(p: &flakeref::Parsed) -> Option<(&str, &str)> {
-    let only = p.input.len() == 3 && p.dir.is_empty();
-    let path = source::str_attr(&p.input, "path").filter(|_| only)?;
-    Some((path, source::str_attr(&p.input, "narHash")?))
+    let mut attrs = p.input;
+    attrs.insert("narHash".into(), AttrVal::Str(hash.to_sri()));
+    attrs
+        .entry("lastModified".into())
+        .or_insert(AttrVal::Int(mtime.max(0) as u64));
+    let root = source::Tree {
+        path: crate::treestore::store_path("source", &hash).map_err(|e| eval_error(e, pos))?,
+        attrs,
+        subdir: String::new(),
+        counter: None,
+    };
+    load_flake_tree(ev, &fr, root, false)
 }
 
 /// An error outside the evaluator as an evaluation error at `pos`.

@@ -341,12 +341,12 @@ fn load_flake_tree(
 ) -> EvalResult<Word> {
     let pos = Pos::NONE;
     if !root.subdir.is_empty() {
-        let base = root.path.to_string();
-        let dir = format!("{base}/{}", root.subdir);
-        let resolved =
-            store_hooks::resolve_links(ev, dir.as_bytes(), store_hooks::Follow::Full, pos)?;
+        let store = root.path.to_string();
+        let base = sys::from_native(store.as_bytes());
+        let dir = [base.as_ref(), b"/", root.subdir.as_bytes()].concat();
+        let resolved = store_hooks::resolve_links(ev, &dir, store_hooks::Follow::Full, pos)?;
         if !resolved
-            .strip_prefix(base.as_bytes())
+            .strip_prefix(base.as_ref())
             .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
         {
             return Err(EvalError::boxed(
@@ -368,7 +368,10 @@ fn load_flake_tree(
     {
         return Err(EvalError::boxed(
             ErrorKind::Unsupported,
-            format!("lock file '{}' is a symlink", lock_path.display()),
+            format!(
+                "lock file '{}' is a symlink",
+                sys::path_from_internal(&tree_lock).display()
+            ),
             pos,
         ));
     }

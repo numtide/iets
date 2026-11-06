@@ -4,7 +4,7 @@
 use crate::api::render::{Closure, Fetched, Missing, Outcomes};
 use crate::log;
 use crate::store::drvdiff::Diff;
-use crate::store::path;
+use crate::store::path::drv_name;
 
 use super::{Text, status};
 
@@ -143,13 +143,6 @@ fn node(d: &Diff, ind: usize, s: &mut String) {
 /// Two values that fit on one line together.
 fn short(a: &str, b: &str) -> bool {
     a.len() + b.len() < 100 && !a.contains('\n') && !b.contains('\n')
-}
-
-/// `NAME` of `/nix/store/<hash>-NAME.drv`.
-fn drv_name(path: &str) -> &str {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    let name = base.get(path::HASH_PART_LEN + 1..).unwrap_or(base);
-    name.strip_suffix(".drv").unwrap_or(name)
 }
 
 /// A value on one line of output: newlines shown as `\n`, long values cut.

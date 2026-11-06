@@ -15,10 +15,10 @@ use crate::cli::render;
 use crate::cli::{self, Outcome, Run, abs_path, auto_args, cwd, devenv};
 use crate::error;
 use crate::eval::{EvalConfig, Evaluator};
-use crate::provenance::{self, Provenance, SourceMap};
+use crate::provenance::{Provenance, SourceMap};
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
-use crate::store::path::StorePath;
+use crate::store::path::{StorePath, drv_name};
 
 const NAME: &str = "nix-build";
 
@@ -195,7 +195,7 @@ fn realise(
     // attribute names each one: the dispatcher adds the position, once.
     let name = |p: &StorePath| {
         prov.attr_of(&p.to_string())
-            .unwrap_or_else(|| provenance::drv_name(&p.to_string()))
+            .unwrap_or_else(|| drv_name(&p.to_string()).to_string())
     };
     let built = match d.realise(roots, &name) {
         Ok(b) => b,

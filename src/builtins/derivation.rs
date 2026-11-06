@@ -19,7 +19,7 @@ use crate::parallel::shared::SharedMap;
 use crate::print::{json_escape_str, lexicographic_order, print_json};
 use crate::runtime::{AttrsObj, Ctx, Word, split_built};
 use crate::store::drv::{
-    Derivation, DerivationOutput, DrvError, DrvHashCache, InputNode, finalize_with_inputs,
+    Derivation, DerivationOutput, DrvError, DrvHash, DrvHashCache, InputNode, finalize_with_inputs,
     hash_derivation_modulo, hash_derivation_modulo_with, load_derivation_from_store,
 };
 use crate::store::hash::{Hash, HashAlgo, hash_bytes};
@@ -63,6 +63,12 @@ pub struct DrvInfo {
 pub struct DrvState {
     pub hash_cache: Arc<Mutex<DrvHashCache>>,
     pub drvs: SharedMap<StorePath, DrvInfo>,
+    /// What `derivationStrict` worked out from a derivation's content
+    /// (`Derivation::content_key`). nixpkgs builds most derivations several
+    /// times over, through package-set variants and overrides: 775 k calls
+    /// for 252 k derivations on the whole job set, each hashing two or
+    /// three 4 KB ATerms with SHA-256.
+    done: SharedMap<[u8; 32], Arc<DrvDone>>,
     dump_dir: Option<PathBuf>,
     pub nr_derivations: u64,
     keep_aterm: bool,
@@ -91,6 +97,7 @@ impl DrvState {
         DrvState {
             hash_cache: Default::default(),
             drvs: Default::default(),
+            done: Default::default(),
             dump_dir,
             nr_derivations: 0,
             keep_aterm,
@@ -99,6 +106,15 @@ impl DrvState {
             imported_drv_fn: None,
         }
     }
+}
+
+/// The results of hashing one derivation: its outputs as
+/// `finalize_with_inputs` left them, its `.drv` path and its modulo hash.
+/// A slice, not the derivation's map: a B-tree node per entry held 1.7 KB.
+struct DrvDone {
+    outputs: Box<[(String, DerivationOutput)]>,
+    drv_path: StorePath,
+    hash: Arc<DrvHash>,
 }
 
 #[derive(Clone, Copy)]
@@ -641,6 +657,7 @@ fn derivation_strict_internal(
     let trace = ev.trace().clone();
     let mut loader = move |p: &StorePath| load_drv_traced(&trace, p);
     let mut modulo = None;
+    let mut input_addressed = false;
     if let Some(h) = output_hash {
         if outputs.len() != 1 || !outputs.contains("out") {
             bail!(
@@ -705,19 +722,7 @@ fn derivation_strict_internal(
             drv.env_set(o, Vec::new());
             drv.outputs.insert(o.clone(), DerivationOutput::Deferred);
         }
-        modulo = match input_hashes(ev, &drv) {
-            None => finalize_with_inputs(
-                &mut drv,
-                &mut ev.drv.hash_cache.lock().unwrap(),
-                &mut loader,
-            ),
-            Some((mut local, known)) => {
-                let r = finalize_with_inputs(&mut drv, &mut local, &mut loader);
-                give_back(ev, local, known);
-                r
-            }
-        }
-        .map_err(|e| drv_err(e, pos))?;
+        input_addressed = true;
     }
 
     // A text-addressed output is a `.drv`, so `builtins.outputOf` may read
@@ -729,32 +734,80 @@ fn derivation_strict_internal(
     // the ATerm is only kept when something asks for it; the path it is
     // hashed into is all a plain evaluation wants
     let keep_text = ev.drv.keep_aterm || ev.drv.dump_dir.is_some() || produces_drv;
-    let (drv_path, text) = drv
-        .with_aterm_from(modulo.as_ref(), |t| {
-            (
-                drv.drv_path_for(t),
-                if keep_text { t.to_vec() } else { Vec::new() },
-            )
-        })
-        .map_err(|e| drv_err(e, pos))?;
-    let drv_path = drv_path.map_err(|e| drv_err(e, pos))?;
-    let h = match &modulo {
-        Some(inputs) => hash_derivation_modulo_with(&drv, false, inputs),
-        None => match input_hashes(ev, &drv) {
-            None => hash_derivation_modulo(
-                &drv,
-                false,
-                &mut ev.drv.hash_cache.lock().unwrap(),
-                &mut loader,
-            ),
-            Some((mut local, known)) => {
-                let r = hash_derivation_modulo(&drv, false, &mut local, &mut loader);
-                give_back(ev, local, known);
-                r
+    // the same content gives the same paths and hashes, so a derivation
+    // seen before takes them from `done`; a run that keeps the text builds
+    // it, and a floating CA one has nothing to reuse
+    let key = (!keep_text && !content_addressed).then(|| drv.content_key());
+    let done = key.as_ref().and_then(|k| ev.drv.done.get(k));
+    let (drv_path, text, h): (StorePath, Vec<u8>, Arc<DrvHash>) = if let Some(d) = done {
+        // what `finalize_with_inputs` writes: an input-addressed output's
+        // path into the derivation and its env var
+        for (name, out) in &d.outputs {
+            if let DerivationOutput::InputAddressed(p) = out {
+                drv.env_set(name, p.to_full_string().into_bytes());
             }
-        },
-    }
-    .map_err(|e| drv_err(e, pos))?;
+            drv.outputs.insert(name.clone(), out.clone());
+        }
+        (d.drv_path.clone(), Vec::new(), d.hash.clone())
+    } else {
+        if input_addressed {
+            modulo = match input_hashes(ev, &drv) {
+                None => finalize_with_inputs(
+                    &mut drv,
+                    &mut ev.drv.hash_cache.lock().unwrap(),
+                    &mut loader,
+                ),
+                Some((mut local, known)) => {
+                    let r = finalize_with_inputs(&mut drv, &mut local, &mut loader);
+                    give_back(ev, local, known);
+                    r
+                }
+            }
+            .map_err(|e| drv_err(e, pos))?;
+        }
+        let (drv_path, text) = drv
+            .with_aterm_from(modulo.as_ref(), |t| {
+                (
+                    drv.drv_path_for(t),
+                    if keep_text { t.to_vec() } else { Vec::new() },
+                )
+            })
+            .map_err(|e| drv_err(e, pos))?;
+        let drv_path = drv_path.map_err(|e| drv_err(e, pos))?;
+        let h = match &modulo {
+            Some(inputs) => hash_derivation_modulo_with(&drv, false, inputs),
+            None => match input_hashes(ev, &drv) {
+                None => hash_derivation_modulo(
+                    &drv,
+                    false,
+                    &mut ev.drv.hash_cache.lock().unwrap(),
+                    &mut loader,
+                ),
+                Some((mut local, known)) => {
+                    let r = hash_derivation_modulo(&drv, false, &mut local, &mut loader);
+                    give_back(ev, local, known);
+                    r
+                }
+            },
+        }
+        .map_err(|e| drv_err(e, pos))?;
+        if let Some(k) = key {
+            let outputs = drv
+                .outputs
+                .iter()
+                .map(|(n, o)| (n.clone(), o.clone()))
+                .collect();
+            ev.drv.done.insert(
+                k,
+                Arc::new(DrvDone {
+                    outputs,
+                    drv_path: drv_path.clone(),
+                    hash: h.clone(),
+                }),
+            );
+        }
+        (drv_path, text, h)
+    };
     ev.drv
         .hash_cache
         .lock()
@@ -1157,6 +1210,8 @@ in
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::EvalConfig;
+    use crate::print::print_ambiguous;
 
     /// The reference values come from nix 2.35pre, `--extra-experimental-features
     /// 'ca-derivations dynamic-derivations'`, over
@@ -1196,5 +1251,42 @@ mod tests {
             downstream_placeholder(&p, "p.drv", "out"),
             hash_placeholder("out")
         );
+    }
+
+    /// With no ATerm kept, a derivation seen before is served from `done`
+    /// by its content key: the paths must be the ones made in full, for
+    /// repeats and for near-repeats that differ in one field.
+    #[test]
+    fn a_derivation_served_by_its_content_key_is_the_one_made_in_full() {
+        let src = r#"let
+          d = name: extra: derivation ({
+            inherit name; system = "x86_64-linux"; builder = "/bin/sh"; args = [ "-c" "true" ];
+          } // extra);
+          fod = mode: d "f" {
+            outputHashMode = mode; outputHashAlgo = "sha256";
+            outputHash = "0000000000000000000000000000000000000000000000000000";
+          };
+          a = d "a" { };
+        in map (x: [ x.drvPath x.outPath ]) [
+          a (d "a" { }) (d "b" { }) (d "a" { x = "1"; }) (d "a" { x = ""; })
+          (d "a" { args = [ "-c" "tr" "ue" ]; }) (d "a" { args = [ "-c" "false" ]; })
+          (d "a" { builder = "/bin/bash"; }) (d "a" { x = "2"; })
+          (d "a" { outputs = [ "out" "dev" ]; }) (d "a" { outputs = [ "dev" "out" ]; })
+          (d "c" { dep = a; }) (d "c" { dep = a; }) (d "c" { dep = d "a" { x = "1"; }; })
+          (fod "flat") (fod "recursive") (fod "flat")
+          (d "s" { __structuredAttrs = true; n = { x = [ 1 2 ]; }; })
+          (d "s" { __structuredAttrs = true; n = { x = [ 1 2 ]; }; })
+        ]"#;
+        let paths = |keep: bool| {
+            let mut ev = EvalConfig::new().keep_aterm(keep).build();
+            let w = ev.eval_string(src, b"/").unwrap();
+            let w = ev.force_deep(w).unwrap();
+            let mut out = Vec::new();
+            print_ambiguous(&mut ev, w, 1, &mut out, &mut Default::default(), 0).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let full = paths(true);
+        assert!(full.contains("-a.drv") && full.contains("-f\""), "{full}");
+        assert_eq!(paths(false), full);
     }
 }

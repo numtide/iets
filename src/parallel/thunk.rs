@@ -332,6 +332,7 @@ mod tests {
         let rt = Runtime::start(3, Box::new(PairDriver(p)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
+            true,
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
@@ -441,6 +442,7 @@ mod tests {
         let rt = Runtime::start(8, Box::new(GraphDriver(g)), 1 << 20).expect("runtime");
         rt.set_eager_wakes();
         let r = rt.run_main(
+            true,
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();

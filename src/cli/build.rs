@@ -256,8 +256,10 @@ fn build_once(argv: &[String]) -> i32 {
     }) {
         return code;
     }
-    // parallel: eval and build run as the main fiber
-    cli::run_parallel(run, move |ev, cache| build_eval(ev, &b, all, t0, cache))
+    // parallel: eval and build run as the main fiber; the process exits after it
+    cli::run_parallel(run.last(), move |ev, cache| {
+        build_eval(ev, &b, all, t0, cache)
+    })
 }
 
 type Roots = Vec<(StorePath, Option<String>)>;

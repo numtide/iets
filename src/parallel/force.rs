@@ -51,6 +51,12 @@ impl Driver for SyncEv {
         Box::into_raw(Box::new(self.0.clone())) as *mut ()
     }
 
+    /// The fibers' evaluators share the template's lints; the last clone
+    /// flushes them on drop, which a runtime left to the exit never does.
+    fn finish(&self) {
+        self.0.lints.flush();
+    }
+
     fn drop_user(&self, user: *mut ()) {
         // SAFETY: `user` is a `Box<Evaluator>` from `new_user` or `try_run`,
         // dropped once by the teardown.

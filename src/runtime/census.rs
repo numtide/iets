@@ -1,6 +1,7 @@
-//! Memory census behind the `stats2` cargo feature and `IETS_STATS=2`:
+//! Census behind the `stats2` cargo feature and `IETS_STATS=2`:
 //! histograms by object kind, duplicate strings and contexts, `//` shapes,
-//! and which objects were never read. Every hook is `cfg(feature)` so the
+//! which objects were never read, call frames a stack could hold, and eval
+//! dispatches by parent. Every hook is `cfg(feature)` so the
 //! default build carries none of it (docs/explanation/evaluation.md).
 
 use std::array;
@@ -166,6 +167,67 @@ pub struct Census {
     pub try_scopes: [u64; 5],
     /// eval-jobs job units: units, bytes, units with no escape, their bytes.
     pub job_scopes: [u64; 4],
+    /// The frame env of every lambda call, its slot count, and whether the
+    /// compiled lambda chain provably never captures it (`frame_uncaptured`
+    /// in eval): the share a stack of call frames could hold.
+    pub call_envs: Vec<(*const EnvObj, u32, bool)>,
+    /// That verdict per last lambda of a chain, by address.
+    pub escape_memo: HashMap<usize, bool>,
+    /// `eval` dispatches by (parent, child) kind, `PARENTS` rows of
+    /// `IR_KINDS.len()`; sized on first use.
+    pub pairs: Vec<u64>,
+}
+
+/// The IR node kinds in `Ir` order, for the dispatch histogram.
+pub const IR_KINDS: [&str; 32] = [
+    "Const",
+    "Local",
+    "WithVar",
+    "CurPos",
+    "Concat",
+    "SearchPath",
+    "Select",
+    "SelectCount",
+    "Select1",
+    "HasAttr",
+    "Attrs",
+    "List",
+    "Lambda",
+    "Apply",
+    "Let",
+    "With",
+    "If",
+    "Assert",
+    "Not",
+    "Neg",
+    "Eq",
+    "Ne",
+    "Lt",
+    "Ge",
+    "And",
+    "Or",
+    "Impl",
+    "Update",
+    "ConcatLists",
+    "Sub",
+    "Mul",
+    "Div",
+];
+/// Parents that are no node: a thunk's body, a lambda's body on a call,
+/// and the top level. A builtin's own `eval`s count under the node that
+/// called it.
+pub const PARENT_THUNK: u8 = 32;
+pub const PARENT_LAMBDA: u8 = 33;
+pub const PARENT_OTHER: u8 = 34;
+const PARENTS: usize = 35;
+
+fn parent_name(p: usize) -> &'static str {
+    match p as u8 {
+        PARENT_THUNK => "(thunk body)",
+        PARENT_LAMBDA => "(lambda body)",
+        PARENT_OTHER => "(other)",
+        _ => IR_KINDS[p],
+    }
 }
 
 /// `bucket=count` for every bucket that is not empty.
@@ -218,6 +280,111 @@ impl Census {
         self.env_hist[b].0 += 1;
         self.env_hist[b].1 += (8 + 8 * n) as u64;
         self.envs.push((e, n as u32));
+    }
+
+    /// Call frames by the compile-time verdict, against what the run did:
+    /// a frame the compiler calls uncaptured that the run captured is a bug
+    /// in the analysis.
+    fn report_frames(&self, out: &mut String) {
+        // [verdict uncaptured][captured at run time] -> (count, bytes)
+        let mut t = [[(0u64, 0u64); 2]; 2];
+        let mut by_slots = [[0u64; 11]; 2];
+        for (e, n, unc) in &self.call_envs {
+            // SAFETY: arena pointers live until exit; bit 1 of `up` marks a
+            // capture (`EnvObj::mark_captured`).
+            let captured = (unsafe { (**e).up } as usize) & 2 != 0;
+            let c = &mut t[usize::from(*unc)][usize::from(captured)];
+            c.0 += 1;
+            c.1 += (8 + 8 * *n) as u64;
+            if *unc {
+                by_slots[0][size_bucket(*n as usize)] += 1;
+            } else if !captured {
+                by_slots[1][size_bucket(*n as usize)] += 1;
+            }
+        }
+        let all: u64 = t.iter().flatten().map(|c| c.0).sum();
+        let all_b: u64 = t.iter().flatten().map(|c| c.1).sum();
+        let _ = writeln!(out, "call frames: {all} ({all_b} bytes)");
+        if t[1][1].0 > 0 {
+            let _ = writeln!(
+                out,
+                "  BUG: {} frames the compiler proved uncaptured were captured",
+                t[1][1].0
+            );
+        }
+        let _ = writeln!(
+            out,
+            "  provably uncaptured at compile time: {} ({} bytes); captured at run time anyway: {} (must be 0); by slots: {}",
+            t[1][0].0 + t[1][1].0,
+            t[1][0].1 + t[1][1].1,
+            t[1][1].0,
+            by_bucket(&by_slots[0])
+        );
+        let _ = writeln!(
+            out,
+            "  may be captured: {} ({} bytes); of them never captured at run time: {} ({} bytes); by slots: {}",
+            t[0][0].0 + t[0][1].0,
+            t[0][0].1 + t[0][1].1,
+            t[0][0].0,
+            t[0][0].1,
+            by_bucket(&by_slots[1])
+        );
+    }
+
+    /// `eval` dispatches: the commonest (parent, child) pairs, and totals by
+    /// child kind.
+    fn report_pairs(&self, out: &mut String) {
+        if self.pairs.is_empty() {
+            return;
+        }
+        let k = IR_KINDS.len();
+        let total: u64 = self.pairs.iter().sum();
+        let _ = writeln!(out, "eval dispatches: {total}; by child kind:");
+        let mut by_child: Vec<(u64, usize)> = (0..k)
+            .map(|c| ((0..PARENTS).map(|p| self.pairs[p * k + c]).sum(), c))
+            .collect();
+        by_child.sort_unstable_by_key(|x| Reverse(x.0));
+        for (n, c) in by_child.iter().take(20).filter(|x| x.0 > 0) {
+            let _ = writeln!(
+                out,
+                "  {:>14} {:>12} {:5.1}%",
+                IR_KINDS[*c],
+                n,
+                100.0 * *n as f64 / total as f64
+            );
+        }
+        let mut pairs: Vec<(u64, usize, usize)> = (0..PARENTS)
+            .flat_map(|p| (0..k).map(move |c| (p, c)))
+            .map(|(p, c)| (self.pairs[p * k + c], p, c))
+            .filter(|x| x.0 > 0)
+            .collect();
+        pairs.sort_unstable_by_key(|x| Reverse(x.0));
+        let _ = writeln!(out, "eval dispatches by parent -> child (top 50):");
+        let mut cum = 0u64;
+        for (n, p, c) in pairs.iter().take(50) {
+            cum += n;
+            let _ = writeln!(
+                out,
+                "  {:>14} -> {:<12} {:>12} {:5.1}% (cumulative {:5.1}%)",
+                parent_name(*p),
+                IR_KINDS[*c],
+                n,
+                100.0 * *n as f64 / total as f64,
+                100.0 * cum as f64 / total as f64
+            );
+        }
+    }
+
+    pub(crate) fn note_call_env(&mut self, e: *const EnvObj, n: usize, uncaptured: bool) {
+        self.call_envs.push((e, n as u32, uncaptured));
+    }
+
+    #[inline]
+    pub(crate) fn note_pair(&mut self, parent: u8, kind: u8) {
+        if self.pairs.is_empty() {
+            self.pairs = vec![0; PARENTS * IR_KINDS.len()];
+        }
+        self.pairs[parent as usize * IR_KINDS.len() + kind as usize] += 1;
     }
 
     pub(crate) fn note_attrs(&mut self, a: *const AttrsObj, origin: u8, n: usize) {
@@ -366,6 +533,7 @@ impl Census {
             env_uncaptured_bytes,
             by_bucket(&env_uncaptured_by)
         );
+        self.report_frames(out);
         let _ = writeln!(
             out,
             "envs never read: {} of {} ({} bytes); by slots: {}",
@@ -601,6 +769,47 @@ impl Census {
         );
         for (f, b) in files.iter().take(12) {
             let _ = writeln!(out, "  file{f} {b}");
+        }
+        self.report_pairs(out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::eval::Evaluator;
+
+    /// Frames the compiler called uncaptured, and of those the ones the run
+    /// captured, which must be none.
+    fn uncaptured(expr: &str) -> (usize, usize) {
+        let mut ev = Evaluator::new();
+        let w = ev.eval_string(expr, b"/").unwrap();
+        ev.force_deep(w).unwrap();
+        let envs = &ev.arena.stats.census.call_envs;
+        let unc: Vec<_> = envs.iter().filter(|(_, _, unc)| *unc).collect();
+        // SAFETY: arena pointers live as long as the evaluator; bit 1 of `up`
+        // marks a capture (`EnvObj::mark_captured`).
+        let captured = unc
+            .iter()
+            .filter(|(e, _, _)| unsafe { (**e).up } as usize & 2 != 0);
+        (unc.len(), captured.count())
+    }
+
+    #[test]
+    fn a_frame_called_uncaptured_is_not_captured() {
+        let sum = |body: &str| {
+            format!(
+                "let f = x: {body}; in builtins.foldl' (a: i: a + f i) 0 (builtins.genList (i: i) 10)"
+            )
+        };
+        // a binding that reads one not filled yet is a thunk over the frame
+        for body in [
+            "let a = b; b = x; in a",
+            "let a = a; in 1",
+            "let a = x; b = a; in b",
+        ] {
+            let (unc, captured) = uncaptured(&sum(body));
+            assert!(unc > 0, "{body}: nothing called uncaptured");
+            assert_eq!(captured, 0, "{body}: captured anyway, of {unc}");
         }
     }
 }

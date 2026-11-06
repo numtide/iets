@@ -289,8 +289,9 @@ impl SymWords {
 
 /// Run-wide evaluation counters. Every fiber counts into plain fields on
 /// its own evaluator, which keeps the hot path free of atomics, and adds
-/// them here when it finishes a task. A stats line reads the sum, so what
-/// a helper fiber did is reported too (docs/reference/settings.md).
+/// them here when it finishes a task: the derivations always, the rest
+/// only with `IETS_STATS`. A stats line reads the sum, so what a helper
+/// fiber did is reported too (docs/reference/settings.md).
 #[derive(Default)]
 pub struct Totals {
     thunks: AtomicU64,
@@ -347,6 +348,11 @@ impl Totals {
         self.store_adds.fetch_add(c.store_adds, Ordering::Relaxed);
         self.compile_ns
             .fetch_add(c.compile.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// The one count a run without stats reports (`--timings`).
+    pub fn add_derivations(&self, n: u64) {
+        self.derivations.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn get(&self) -> Counts {

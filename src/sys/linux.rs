@@ -108,8 +108,9 @@ fn unadvise_allocator() {
 }
 
 /// Advises `[p, p + len)` to be huge pages while the kernel can fill them.
-/// The pages fault in on first touch: populating the range up front
-/// (`MADV_POPULATE_WRITE`) made the workers take turns in the kernel.
+/// A worker never populates its own chunk: `MADV_POPULATE_WRITE` there made
+/// the workers take turns in the kernel. Full arena chunks are populated by
+/// a helper thread instead (`runtime::arena`).
 ///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.
@@ -117,6 +118,16 @@ pub unsafe fn advise_huge(p: *mut u8, len: usize) {
     if huge() {
         let _ = unsafe { madvise(p.cast(), len, Advice::LinuxHugepage) };
     }
+}
+
+/// Faults `[p, p + len)` in now, zeroed, in one syscall
+/// (`MADV_POPULATE_WRITE`, Linux 5.14). False when the kernel has no such
+/// advice, and the pages fault in on touch as before.
+///
+/// # Safety
+/// The range is an anonymous mapping of the caller's.
+pub unsafe fn populate(p: *mut u8, len: usize) -> bool {
+    unsafe { madvise(p.cast(), len, Advice::LinuxPopulateWrite) }.is_ok()
 }
 
 /// Gives the pages back. The range stays mapped and reads as zeros.

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::eval::{Evaluator, Pos};
 use crate::session::Session;
-use crate::store::path::{StorePath, store_dir};
+use crate::store::path::{StorePath, drv_name, store_dir};
 use crate::store::source::SourceOrigin;
 
 pub fn enabled() -> bool {
@@ -217,17 +217,6 @@ pub fn real_pos(ev: &Evaluator, pos: Pos) -> Option<Pos> {
     (!is_pseudo(&f.path)).then_some(pos)
 }
 
-/// The derivation name inside a `.drv` store path: no hash, no extension.
-/// What a build line calls a derivation no attribute points at.
-pub fn drv_name(drv_path: &str) -> String {
-    let base = drv_path.rsplit('/').next().unwrap_or(drv_path);
-    let name = base.strip_suffix(".drv").unwrap_or(base);
-    match name.split_once('-') {
-        Some((hash, rest)) if hash.len() == 32 => rest.to_string(),
-        _ => name.to_string(),
-    }
-}
-
 /// Where one derivation was defined.
 #[derive(Clone, Debug, Default)]
 pub struct Site {
@@ -335,7 +324,10 @@ impl Provenance {
     /// known. `None` when nothing is.
     pub fn name_of(&self, drv_path: &str) -> Option<String> {
         let s = self.site(drv_path)?;
-        let what = s.attr.clone().unwrap_or_else(|| drv_name(drv_path));
+        let what = s
+            .attr
+            .clone()
+            .unwrap_or_else(|| drv_name(drv_path).to_string());
         match s.own_pos() {
             Some(p) => Some(format!("{what} ({p})")),
             None => Some(what),
@@ -351,7 +343,10 @@ impl Provenance {
     pub fn failed(&self, drv_path: &str, reason: &str) -> Option<String> {
         let s = self.site(drv_path)?;
         let base = drv_path.rsplit('/').next().unwrap_or(drv_path);
-        let what = s.attr.clone().unwrap_or_else(|| drv_name(drv_path));
+        let what = s
+            .attr
+            .clone()
+            .unwrap_or_else(|| drv_name(drv_path).to_string());
         let mut line = format!("error: build of {what} failed ({base})");
         if let Some(p) = &s.pos {
             line.push_str(&format!(", defined at {p}"));

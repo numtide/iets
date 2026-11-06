@@ -84,6 +84,14 @@ pub fn strip_store_dir(p: &[u8]) -> Option<&[u8]> {
         .find_map(|dir| p.strip_prefix(dir)?.strip_prefix(b"/"))
 }
 
+/// `<store dir>/<base><rest>` as `base` and `rest`, which is empty or starts
+/// with `/`.
+pub fn split_store_path(p: &[u8]) -> Option<(&[u8], &[u8])> {
+    let rest = strip_store_dir(p)?;
+    let end = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
+    Some(rest.split_at(end))
+}
+
 /// The first store directory prefix in `text`, as its start and length.
 /// Daemon messages name the default directory too, so both are matched.
 pub fn find_store_prefix(text: &str) -> Option<(usize, usize)> {
@@ -265,6 +273,17 @@ impl Field for &StorePath {
         out.push(b'/');
         out.extend_from_slice(self.base_name().as_bytes());
         events::quote_in_place(out, start);
+    }
+}
+
+/// `NAME` of `[/nix/store/]<hash>-NAME[.drv]`, the way a build log names a
+/// derivation no attribute points at. Text without a hash part stays as it is.
+pub fn drv_name(path: &str) -> &str {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let name = base.strip_suffix(".drv").unwrap_or(base);
+    match name.split_once('-') {
+        Some((hash, rest)) if hash.len() == HASH_PART_LEN => rest,
+        _ => name,
     }
 }
 
@@ -484,6 +503,18 @@ mod tests {
     use crate::store::nar::nar_hash;
     use crate::store::nar::nar_hash_filtered;
     use crate::store::nar::tests::{Tree, tree};
+
+    #[test]
+    fn a_drv_name_has_no_hash_and_no_extension() {
+        let h = "z4wkdlk69gck09s64a8ghpn6h7bxhkyy";
+        assert_eq!(
+            drv_name(&format!("/nix/store/{h}-hello-2.12.drv")),
+            "hello-2.12"
+        );
+        assert_eq!(drv_name(&format!("{h}-source")), "source");
+        assert_eq!(drv_name("plain"), "plain");
+        assert_eq!(drv_name("short-hash.drv"), "short-hash");
+    }
 
     fn set(paths: &[&str]) -> BTreeSet<StorePath> {
         paths.iter().map(|p| StorePath::parse(p).unwrap()).collect()

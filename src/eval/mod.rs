@@ -42,7 +42,7 @@ use crate::session::Session;
 use crate::source::LazyStore;
 use crate::store::locate;
 use crate::store::narinfo::Fetched;
-use crate::store::path::{StorePath, store_dir, strip_store_dir};
+use crate::store::path::{StorePath, split_store_path, store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
@@ -434,10 +434,9 @@ impl SharedMap<StorePath, Known> {
     /// The length of the `/nix/store/<base>` prefix of `path` and what the
     /// table has for that store path.
     pub fn under(&self, path: &[u8]) -> Option<(usize, Known)> {
-        let rest = strip_store_dir(path)?;
-        let end = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
-        let sp = StorePath::from_base_name(from_utf8(&rest[..end]).ok()?).ok()?;
-        Some((path.len() - rest.len() + end, self.get(&sp)?))
+        let (base, rest) = split_store_path(path)?;
+        let sp = StorePath::from_base_name(from_utf8(base).ok()?).ok()?;
+        Some((path.len() - rest.len(), self.get(&sp)?))
     }
 
     /// The root is named before any input is fetched and keeps its name.
@@ -548,11 +547,8 @@ impl Default for EvalConfig {
 
 fn prefetch_store_entries(entries: &[(Vec<u8>, Vec<u8>)], session: &Arc<Session>) {
     for (_, p) in entries {
-        let Some(rest) = strip_store_dir(p) else {
-            continue;
-        };
-        let base = rest.split(|&b| b == b'/').next().unwrap_or_default();
-        if let Ok(s) = str::from_utf8(base)
+        if let Some((base, _)) = split_store_path(p)
+            && let Ok(s) = str::from_utf8(base)
             && let Ok(sp) = StorePath::from_base_name(s)
         {
             locate::prefetch_references(sp, session.clone());

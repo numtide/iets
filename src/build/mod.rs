@@ -40,7 +40,7 @@ use crate::remote::event::Event;
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Missing, Options, Transport};
 use crate::session::{self, Session};
-use crate::store::path::StorePath;
+use crate::store::path::{StorePath, drv_name};
 
 use crate::store::drv::{Derivation, DerivationOutput};
 use crate::store::hash::{Hash, HashFormat};
@@ -615,7 +615,7 @@ impl Names<'_> {
         }
         self.prov
             .attr_of(drv)
-            .unwrap_or_else(|| strip_hash(drv).to_string())
+            .unwrap_or_else(|| drv_name(drv).to_string())
     }
 
     /// `<attr> (<file>:<line>:<col>)` when the position is known and names
@@ -706,17 +706,6 @@ fn has_output_hash(d: &backend::Drv, specified: &str) -> bool {
         .any(|o| matches!(o, DerivationOutput::Fixed { hash, .. } if *hash == want))
 }
 
-/// `<hash>-<name>.drv` as just `<name>`, the way a build log names a
-/// derivation that no attribute points at.
-fn strip_hash(drv_path: &str) -> &str {
-    let base = drv_path.rsplit('/').next().unwrap_or(drv_path);
-    let base = base.strip_suffix(".drv").unwrap_or(base);
-    match base.split_once('-') {
-        Some((hash, rest)) if hash.len() == 32 => rest,
-        _ => base,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::render::tests::Sink;
@@ -740,12 +729,6 @@ mod tests {
         let j = backend::Job::from(&t);
         assert_eq!(j.drv, t.drv);
         assert_eq!(j.spec(), "dev,out");
-    }
-
-    #[test]
-    fn hash_stripping() {
-        assert_eq!(strip_hash(&drv("hello").to_string()), "hello");
-        assert_eq!(strip_hash("plain"), "plain");
     }
 
     /// A backend that builds every job of a batch concurrently, the way the

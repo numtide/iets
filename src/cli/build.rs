@@ -22,12 +22,12 @@ use crate::cli::{
 use crate::error::Error as CrateError;
 use crate::eval::{self, Evaluator};
 use crate::log;
-use crate::provenance::{self, Provenance, SourceMap};
+use crate::provenance::{Provenance, SourceMap};
 use crate::remote::plan::{Inputs, Plan};
 use crate::remote::worker::{self, Missing};
 use crate::session::Session;
 use crate::settings::FixHashes;
-use crate::store::path::StorePath;
+use crate::store::path::{StorePath, drv_name};
 use crate::syntax::symbol::FxHashMap;
 use crate::trace::run::{BuildTables, Cache};
 use crate::trace::wire;
@@ -429,7 +429,7 @@ fn build_roots(
             // The bare attribute: the dispatcher adds the position, once.
             let name = (inputs.drvs.get(r))
                 .and_then(|i| i.attr.clone())
-                .unwrap_or_else(|| provenance::drv_name(&r.to_string()));
+                .unwrap_or_else(|| drv_name(&r.to_string()).to_string());
             Target::new(&name, r.clone(), outputs.to_vec())
         })
         .collect();

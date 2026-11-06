@@ -29,7 +29,7 @@ use crate::store::locate;
 use crate::store::nar::FileType;
 use crate::store::path::{
     HASH_PART_LEN, IngestionMethod, StorePath, StorePathError, make_fixed_output_path,
-    make_text_path, strip_store_dir,
+    make_text_path, split_store_path,
 };
 use crate::store::source::{SourceOrigin, Src, SrcPath};
 use crate::trace::{self, Kind};
@@ -447,13 +447,9 @@ fn is_store_path(p: &[u8]) -> bool {
 
 /// Split `/nix/store/<base>/rest` into the store path and the rest.
 pub(super) fn to_store_path(p: &[u8]) -> Option<(Result<StorePath, ()>, &[u8])> {
-    let rest = strip_store_dir(p)?;
-    let end = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
-    let base = from_utf8(&rest[..end]).ok()?;
-    Some((
-        StorePath::from_base_name(base).map_err(|_| ()),
-        &rest[end..],
-    ))
+    let (base, rest) = split_store_path(p)?;
+    let base = from_utf8(base).ok()?;
+    Some((StorePath::from_base_name(base).map_err(|_| ()), rest))
 }
 
 fn store_path(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

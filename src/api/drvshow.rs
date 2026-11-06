@@ -135,9 +135,12 @@ fn closure(
         .filter(|p| p.is_derivation())
         .cloned()
         .collect();
-    let (nodes, _, _) = walk(&roots, &HashSet::new(), &|q| table.get(q).cloned(), &|_| {
-        None
-    })?;
+    let (nodes, _, _) = walk(
+        &roots,
+        &HashSet::new(),
+        &|q| table.get(q).cloned(),
+        &mut |_| Ok(Default::default()),
+    )?;
     Ok(nodes.into_iter().map(|(p, aterm, _)| (p, aterm)).collect())
 }
 

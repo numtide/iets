@@ -84,48 +84,60 @@ pub fn locate_in_store(
     paths: &[StorePath],
     overrides: &HashMap<String, PathBuf>,
 ) -> error::Result<Vec<Option<SourceOrigin>>> {
-    let mut daemon = paths
-        .iter()
-        .any(|p| !overrides.contains_key(&p.to_string()))
-        .then(source::local_daemon)
-        .flatten();
-    paths
-        .iter()
-        .map(|p| {
-            let full = p.to_string();
-            let unhashed = |at, kind| SourceOrigin {
-                at,
-                kind,
-                nar: None,
-            };
-            if let Some(local) = overrides.get(&full) {
-                return Ok(Some(unhashed(
-                    SrcPath::fs(local.clone(), None),
-                    SourceKind::Source,
-                )));
-            }
-            let Some(d) = daemon.as_mut() else {
-                return Ok(None);
-            };
-            let Some(info) = d.query_path_info(&full, &mut |_| {})? else {
-                return Ok(None);
-            };
-            let kind = if info.ca.starts_with("fixed:r:sha256:") {
-                SourceKind::Source
-            } else if info.ca.starts_with("text:sha256:") {
-                let references = info
-                    .references
-                    .iter()
-                    .map(|r| StorePath::parse(r).map_err(CrateError::from))
-                    .collect::<error::Result<_>>()?;
-                SourceKind::Text { references }
-            } else {
-                return Ok(None);
-            };
-            Ok(Some(unhashed(
-                SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None),
-                kind,
-            )))
-        })
-        .collect()
+    store_locator(overrides)(paths)
+}
+
+/// Reuses the local connection while discovering source references recursively.
+pub fn store_locator(
+    overrides: &HashMap<String, PathBuf>,
+) -> impl FnMut(&[StorePath]) -> error::Result<Vec<Option<SourceOrigin>>> + '_ {
+    let mut daemon = None;
+    move |paths| {
+        if daemon.is_none()
+            && paths
+                .iter()
+                .any(|p| !overrides.contains_key(&p.to_string()))
+        {
+            daemon = source::local_daemon();
+        }
+        paths
+            .iter()
+            .map(|p| {
+                let full = p.to_string();
+                let unhashed = |at, kind| SourceOrigin {
+                    at,
+                    kind,
+                    nar: None,
+                };
+                if let Some(local) = overrides.get(&full) {
+                    return Ok(Some(unhashed(
+                        SrcPath::fs(local.clone(), None),
+                        SourceKind::Source,
+                    )));
+                }
+                let Some(d) = daemon.as_mut() else {
+                    return Ok(None);
+                };
+                let Some(info) = d.query_path_info(&full, &mut |_| {})? else {
+                    return Ok(None);
+                };
+                let kind = if info.ca.starts_with("fixed:r:sha256:") {
+                    SourceKind::Source
+                } else if info.ca.starts_with("text:sha256:") {
+                    let references = info
+                        .references
+                        .iter()
+                        .map(|r| StorePath::parse(r).map_err(CrateError::from))
+                        .collect::<error::Result<_>>()?;
+                    SourceKind::Text { references }
+                } else {
+                    return Ok(None);
+                };
+                Ok(Some(unhashed(
+                    SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None),
+                    kind,
+                )))
+            })
+            .collect()
+    }
 }

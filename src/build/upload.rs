@@ -226,8 +226,14 @@ impl StreamUpload {
         roots: &[StorePath],
         known: &HashSet<StorePath>,
     ) -> Result<(Vec<Node>, Vec<StorePath>)> {
-        let (drvs, srcs, _) = plan::walk(roots, known, &|p| self.drvs.get(p), &|p| {
-            self.sources.origin(p)?.text_refs().cloned()
+        let (drvs, srcs, _) = plan::walk(roots, known, &|p| self.drvs.get(p), &mut |p| {
+            if self.sources.fetched(p).is_some() {
+                return Ok(Default::default());
+            }
+            Ok(self
+                .source_info(p)?
+                .and_then(|origin| origin.text_refs().cloned())
+                .unwrap_or_default())
         })?;
         Ok((drvs, srcs))
     }
@@ -311,7 +317,7 @@ impl Uploader for StreamUpload {
             }
             objects.push(Object::drv(path.clone(), aterm.clone(), references.clone()));
         }
-        let refs: Vec<&Object> = objects.iter().collect();
+        let refs = registration_order(objects.iter());
         st.bytes += b.add_objects(&refs, on_event)?;
         st.added = fetched.len() + objects.len();
         self.valid.extend(srcs);

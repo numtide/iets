@@ -92,7 +92,8 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
     // `git+file:///path?ref=HEAD&rev=SHA`, which this process reads out of
     // the repository beside it (docs/reference/flakes.md).
     if let Some(scm) = ty.filter(|_| !p.bare).and_then(source::scm::named) {
-        return scm_flake(&p, scm, loc, parse_attr_path(&p.fragment)?);
+        let root = scm_root(&p, scm, loc)?;
+        return scm_flake(&p, scm, loc, parse_attr_path(&p.fragment)?, root);
     }
     let why = match ty {
         Some("path") => None,
@@ -144,6 +145,18 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
     Ok(fr)
 }
 
+/// The local repository path named by an explicit SCM URL.
+fn scm_root(p: &flakeref::Parsed, scm: &dyn source::scm::Scm, loc: &str) -> Result<PathBuf> {
+    let url = source::str_attr(&p.input, "url").unwrap_or("");
+    let Some(root) = flakeref::file_url_path(url).filter(|r| r.starts_with('/')) else {
+        return Err(Error::Unsupported(format!(
+            "flake reference '{loc}' is a '{}' input; only local paths are supported (iets cannot fetch a root flake)",
+            scm.name()
+        )));
+    };
+    Ok(sys::path_from_internal(root.as_bytes()))
+}
+
 /// `git+file:///path[?ref=…&rev=…][&dir=…]`: the flake in `dir` of that
 /// tree. With a `rev` the source is that revision, read out of the
 /// repository; without one it is the working tree, as Nix reads it. A `ref`
@@ -154,6 +167,7 @@ fn scm_flake(
     scm: &'static dyn source::scm::Scm,
     loc: &str,
     attr: Vec<String>,
+    root: PathBuf,
 ) -> Result<FlakeRef> {
     const KNOWN: [&str; 4] = ["type", "url", "ref", "rev"];
     if Path::new(&p.dir).components().any(|c| {
@@ -171,14 +185,6 @@ fn scm_flake(
             "'{k}' in flake reference '{loc}' is not supported"
         )));
     }
-    let url = source::str_attr(&p.input, "url").unwrap_or("");
-    let Some(root) = flakeref::file_url_path(url).filter(|r| r.starts_with('/')) else {
-        return Err(Error::Unsupported(format!(
-            "flake reference '{loc}' is a '{}' input; only local paths are supported (iets cannot fetch a root flake)",
-            scm.name()
-        )));
-    };
-    let root = sys::path_from_internal(root.as_bytes());
     let dir = root.join(&p.dir);
     let source = if let Some(rev) = source::str_attr(&p.input, "rev") {
         if !flakeref::is_rev(rev) {
@@ -461,9 +467,16 @@ pub fn get_flake(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
                 "without a locked revision in pure evaluation mode",
             ));
         }
-        let fr = scm_flake(&p, scm, &s, Vec::new()).map_err(|e| eval_error(e, pos))?;
-        if let SourceRef::Commit { root, .. } | SourceRef::Tracked { root, .. } = &fr.source {
-            store_hooks::local_dir(ev, &sys::path_to_internal(root), pos)?;
+        let root = scm_root(&p, scm, &s).map_err(|e| eval_error(e, pos))?;
+        let root = store_hooks::local_dir(ev, &sys::path_to_internal(&root), pos)?;
+        if !p.input.contains_key("rev") && ev.trace().is_on() {
+            ev.trace()
+                .stat_now(&sys::path_to_internal(&scm.root_marker(&root)), true);
+        }
+        let fr =
+            scm_flake(&p, scm, &s, Vec::new(), root.clone()).map_err(|e| eval_error(e, pos))?;
+        if let SourceRef::Tracked { root: real, .. } = &fr.source {
+            ev.trace().canon(&sys::path_to_internal(&root), Some(real));
         }
         return load_flake(ev, &fr, false);
     }

@@ -10,7 +10,8 @@ use ../scripts/lib.nu [require-real-nix]
 def timed [cache: path, env_vars: record, cmd: list<string>] {
   let out = (mktemp -t iets-bench-XXXXXX)
   let t = ($env.TIME_BIN? | default "/run/current-system/sw/bin/time")
-  let r = (with-env $env_vars { ^$t -f "%e %U %S %M" -o $out ...$cmd | complete })
+  # IETS_WAIT_EXIT: one process, so time sees the evaluation's CPU and memory
+  let r = (with-env ($env_vars | merge {IETS_WAIT_EXIT: "1"}) { ^$t -f "%e %U %S %M" -o $out ...$cmd | complete })
   let f = (open $out | str trim | split row " ")
   rm -f $out
   if $r.exit_code != 0 { print $"warning: ($cmd | first) exited ($r.exit_code)" }

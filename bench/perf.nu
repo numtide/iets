@@ -6,7 +6,8 @@
 # idle box.
 
 def measure [iets: string, args: list<string>]: nothing -> record {
-  let r = (^/usr/bin/env time -f "TIME %e %U %S %M" $iets ...$args | complete)
+  # IETS_WAIT_EXIT: one process, so time sees the evaluation's CPU and memory
+  let r = (with-env {IETS_WAIT_EXIT: "1"} { ^/usr/bin/env time -f "TIME %e %U %S %M" $iets ...$args | complete })
   let line = ($r.stderr | lines | where $it starts-with "TIME " | last)
   let f = ($line | split row " ")
   {

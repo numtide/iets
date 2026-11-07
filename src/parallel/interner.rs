@@ -51,7 +51,10 @@ type MixBuild = BuildHasherDefault<MixHasher>;
 /// Symbols one run may hold. The id table is one `MAP_NORESERVE` mapping
 /// of `MAX_SYMS` words, so a larger cap costs address space and nothing
 /// else until the names exist. `Sym` is a `u32`, which is the real bound.
+#[cfg(target_pointer_width = "64")]
 pub const MAX_SYMS: usize = 1 << 30;
+#[cfg(target_pointer_width = "32")]
+pub const MAX_SYMS: usize = 1 << 22;
 
 /// Hash for the shard and for the per-handle cache, which read the high
 /// bits FxHash fills well. No mix here: it would run on every intern, and

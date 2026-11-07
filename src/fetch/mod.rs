@@ -7,6 +7,7 @@
 pub mod git;
 pub mod http;
 pub mod lfs;
+#[cfg(not(target_os = "wasi"))]
 pub mod roots;
 pub mod spool;
 pub mod unpack;

@@ -1,9 +1,11 @@
-{ iets, ietsStatic, classic, fuzz }:
+{ iets, ietsStatic, ietsWasi, classic, fuzz }:
 {
   default = iets;
   inherit classic;
   # one musl file that needs nothing on the machine (docs/explanation/static-build.md)
   static = ietsStatic;
+  # `bin/iets.wasm` for a browser (docs/explanation/webassembly.md)
+  wasi = ietsWasi;
   fuzz-oracles = fuzz.oracles;
   inherit (fuzz) fuzz-diff fuzzers;
   fuzz-parse-campaign = fuzz.campaign { target = "parse"; };

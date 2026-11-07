@@ -11,7 +11,11 @@ use std::str;
 
 /// A recursive-descent limit iets needs and nlohmann does not: the parser
 /// recurses, and a fiber stack is 256 MiB.
+#[cfg(not(target_os = "wasi"))]
 const MAX_JSON_DEPTH: u32 = 100_000;
+/// What a browser's stack holds after what evaluation may already use of it.
+#[cfg(target_os = "wasi")]
+const MAX_JSON_DEPTH: u32 = 500;
 
 pub fn to_json(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let mut out: Vec<u8> = Vec::new();

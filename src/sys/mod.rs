@@ -1,6 +1,8 @@
 //! What differs between operating systems, behind one interface. Callers
 //! never test the platform. The Linux backend uses the kernel's own
-//! facilities. The portable one gives the same answers more slowly.
+//! facilities. The portable one gives the same answers more slowly. WASI has
+//! one process, one thread, no permissions and no signals, so its backends
+//! answer as that one process would.
 
 use std::env;
 use std::ffi::OsStr;
@@ -25,19 +27,24 @@ pub mod context;
 #[cfg_attr(windows, path = "errno_windows.rs")]
 pub mod errno;
 #[cfg_attr(windows, path = "fault_windows.rs")]
+#[cfg_attr(target_os = "wasi", path = "fault_wasi.rs")]
 pub mod fault;
 #[cfg_attr(windows, path = "ffi_windows.rs")]
 mod ffi;
 #[cfg_attr(windows, path = "fs_windows.rs")]
+#[cfg_attr(target_os = "wasi", path = "fs_wasi.rs")]
 pub mod fs;
-#[cfg_attr(windows, path = "net_windows.rs")]
+#[cfg_attr(any(windows, target_os = "wasi"), path = "net_none.rs")]
 pub mod net;
 #[cfg_attr(windows, path = "process_windows.rs")]
+#[cfg_attr(target_os = "wasi", path = "process_wasi.rs")]
 pub mod process;
 pub mod tmp;
 #[cfg_attr(windows, path = "tty_windows.rs")]
+#[cfg_attr(target_os = "wasi", path = "tty_wasi.rs")]
 pub mod tty;
 #[cfg_attr(windows, path = "vm_windows.rs")]
+#[cfg_attr(target_os = "wasi", path = "vm_wasi.rs")]
 pub mod vm;
 pub mod winpath;
 

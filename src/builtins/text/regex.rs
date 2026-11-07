@@ -28,6 +28,10 @@ type Res<T> = Result<T, Error>;
 type ByteSet = [bool; 256];
 
 const STATE_LIMIT: u64 = 99_995;
+/// Nested groups and stacked quantifiers a browser's stack holds after what
+/// evaluation may already use of it. Each stage that follows the parser
+/// recurses over them too.
+const MAX_GROUP_DEPTH: u32 = 500;
 const NONE: usize = usize::MAX;
 
 /// Portable character set names in code order; letters name themselves.
@@ -66,6 +70,8 @@ struct Parser<'a> {
     i: usize,
     groups: u32,
     depth: u32,
+    /// Quantifiers applied to an already quantified piece.
+    stacked: u32,
     states: u64,
     /// `std::regex::icase`: a letter matches in either case (the C locale's).
     icase: bool,
@@ -135,6 +141,13 @@ impl Parser<'_> {
             if !quantifiable {
                 return Err(Error::Invalid);
             }
+            // `a**` nests as deep as a group does, but no parenthesis closes it
+            if cfg!(target_os = "wasi") && matches!(node, Node::Rep(..)) {
+                self.stacked += 1;
+                if self.depth + self.stacked > MAX_GROUP_DEPTH {
+                    return Err(Error::TooBig);
+                }
+            }
             let s = self.states - before;
             self.states = self.states.saturating_add(match q {
                 Quant::Star | Quant::Plus => 1,
@@ -167,6 +180,9 @@ impl Parser<'_> {
                 let g = self.groups;
                 self.groups += 1;
                 self.depth += 1;
+                if cfg!(target_os = "wasi") && self.depth + self.stacked > MAX_GROUP_DEPTH {
+                    return Err(Error::TooBig);
+                }
                 self.states += 2;
                 let inner = self.alt()?;
                 if self.next()? != b')' {
@@ -561,6 +577,7 @@ pub fn compile_opt(re: &[u8], icase: bool) -> Result<Prog, Error> {
         i: 0,
         groups: 0,
         depth: 0,
+        stacked: 0,
         states: 0,
         icase,
     };

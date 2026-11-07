@@ -98,7 +98,8 @@ pub fn try_run<R: Send + 'static>(
     // the input store reads the current session, and the workers inherit it
     // so their arenas map into its heap
     let _entered = ev.session().clone().enter();
-    if workers <= 1 {
+    // WASI has one thread, whatever `--workers` asks for
+    if workers <= 1 || cfg!(target_os = "wasi") {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);

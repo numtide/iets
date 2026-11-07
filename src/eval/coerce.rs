@@ -226,7 +226,7 @@ impl Evaluator {
         let (a, b) = (x.get(), y.get());
         let fa = self.force_cell(x)?;
         let fb = self.force_cell(y)?;
-        self.eq_values(a, fa, b, fb, pos)
+        self.deeper(pos, |ev| ev.eq_values(a, fa, b, fb, pos))
     }
 
     fn eq_forced(&mut self, a: Word, b: Word, pos: Pos) -> EvalResult<bool> {

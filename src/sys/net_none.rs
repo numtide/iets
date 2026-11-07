@@ -1,5 +1,6 @@
-//! Windows has no local stream sockets in `std`, so connecting fails and
-//! the callers report it like any unreachable daemon.
+//! Windows has no local stream sockets in `std` and WASI has no sockets to
+//! connect at all, so connecting fails and the callers report it like any
+//! unreachable daemon.
 
 use std::io::{self, Read, Write};
 use std::path::Path;

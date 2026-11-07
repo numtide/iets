@@ -302,11 +302,13 @@ impl Derivation {
     /// Two derivations with the same key have the same ATerm, `.drv` path,
     /// output paths and modulo hash.
     pub fn content_key(&self) -> [u8; 32] {
-        fn put(h: &mut blake3::Hasher, b: &[u8]) {
-            h.update(&(b.len() as u64).to_le_bytes());
-            h.update(b);
+        // one buffer hashed at once: BLAKE3 compresses whole chunks in
+        // parallel, where small updates went block by block
+        fn put(h: &mut Vec<u8>, b: &[u8]) {
+            h.extend_from_slice(&(b.len() as u64).to_le_bytes());
+            h.extend_from_slice(b);
         }
-        fn node(h: &mut blake3::Hasher, n: &InputNode) {
+        fn node(h: &mut Vec<u8>, n: &InputNode) {
             put(h, &(n.outputs.len() as u64).to_le_bytes());
             for o in &n.outputs {
                 put(h, o.as_bytes());
@@ -317,7 +319,7 @@ impl Derivation {
                 node(h, c);
             }
         }
-        let mut h = blake3::Hasher::new();
+        let mut h = Vec::with_capacity(8192);
         put(&mut h, self.name.as_bytes());
         put(&mut h, &(self.outputs.len() as u64).to_le_bytes());
         for (name, out) in &self.outputs {
@@ -368,7 +370,7 @@ impl Derivation {
             }
             None => put(&mut h, b"nojson"),
         }
-        h.finalize().into()
+        blake3::hash(&h).into()
     }
 
     /// Mirrors derivations.cc:Derivation::unparse without masking.

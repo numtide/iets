@@ -77,22 +77,30 @@ pub fn visible_cpus() -> usize {
 }
 
 /// Number of workers for one evaluation: `--workers`, `IETS_WORKERS`, or
-/// the visible CPUs, at most `EVAL_WORKERS_MAX`.
+/// the visible CPUs, at most `EVAL_WORKERS_MAX` and as many as the fiber
+/// stacks fit.
 pub fn default_workers() -> usize {
     Session::current()
         .settings()
         .workers
-        .unwrap_or_else(|| visible_cpus().min(EVAL_WORKERS_MAX))
+        .unwrap_or_else(|| fitting(visible_cpus().min(EVAL_WORKERS_MAX)))
 }
 
 /// Number of workers for many independent jobs (`eval-jobs` in one
 /// process): every visible CPU, which was fastest on 4, 8 and 16 CPUs with
-/// SMT or without, and level with half of them on 32.
+/// SMT or without, and level with half of them on 32; as many as the
+/// fiber stacks fit.
 pub fn default_jobs_workers() -> usize {
     Session::current()
         .settings()
         .workers
-        .unwrap_or_else(visible_cpus)
+        .unwrap_or_else(|| fitting(visible_cpus()))
+}
+
+/// `n` workers, or fewer when their stacks would pass the reservation cap:
+/// a default must start where a given `--workers` is refused.
+fn fitting(n: usize) -> usize {
+    n.min(fiber::max_workers(stack_size()))
 }
 
 fn stack_size() -> usize {

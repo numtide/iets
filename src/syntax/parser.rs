@@ -136,7 +136,11 @@ impl<'a> Parser<'a> {
     /// threads.
     pub fn with_threads(src: &'a [u8], interner: &'a mut Interner, threads: usize) -> Self {
         let mut p = Self::new(src, interner);
-        p.threads = threads.max(1);
+        // a set needs more than `CHUNKED_MIN` of source left to be chunked,
+        // so the sets of a smaller source never ask
+        if src.len() > chunks::CHUNKED_MIN {
+            p.threads = threads.max(1);
+        }
         p
     }
 

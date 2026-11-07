@@ -31,7 +31,7 @@ use crate::remote::event::{Event, Started, Stopped};
 use crate::remote::plan::{self, Object, Plan};
 use crate::remote::worker::{Connection, failed_event};
 use crate::store::drv::Derivation;
-use crate::store::path::StorePath;
+use crate::store::path::{StorePath, check_name};
 
 use super::build::{self, Objects, Timings};
 use super::drvwire::{BuildResult, basic_input_srcs};
@@ -98,6 +98,11 @@ fn build_batch(
     let needs = missing_drvs(drvs, &roots, &mut |names| {
         build::query_valid_paths(c, names, t)
     })?;
+    for (p, _) in &roots {
+        if let Some(s) = out.get_mut(&p.to_string()).filter(|_| !needs.contains(p)) {
+            s.outputs = verdict_outputs(p, &drvs[*p], None)?;
+        }
+    }
 
     let mut jobs: Vec<build::Job> = Vec::new();
     let mut index: HashMap<&StorePath, usize> = HashMap::new();
@@ -196,7 +201,12 @@ fn build_batch(
     for (i, res) in results.iter().enumerate() {
         let drv = jobs[i].drv_path.to_string();
         let (reason, exit) = match res {
-            Some(res) if res.success() => continue,
+            Some(res) if res.success() => {
+                if let Some(s) = out.get_mut(&drv) {
+                    s.outputs = verdict_outputs(&jobs[i].drv_path, &jobs[i].drv, Some(res))?;
+                }
+                continue;
+            }
             Some(res) => (
                 format!("status {}: {}", res.status, res.error_msg),
                 log::build_exit(res.status, &res.error_msg),
@@ -209,6 +219,44 @@ fn build_batch(
             // still wants its verdict.
             None => on_event(failed_event(&drv, &reason)),
         }
+    }
+    Ok(out)
+}
+
+/// What a root's verdict holds: the output paths of `drv`, and over them
+/// the `builtOutputs` of `res`. A root the store held was not built, so its
+/// paths are the ones the store was asked about.
+fn verdict_outputs(
+    drv_path: &StorePath,
+    drv: &Derivation,
+    res: Option<&BuildResult>,
+) -> Result<BTreeMap<String, String>> {
+    let mut out = output_paths(drv_path, drv)?;
+    for (name, path) in res.iter().flat_map(|r| &r.built_outputs) {
+        // a name becomes part of an out link's file name
+        check_name(name).map_err(|e| {
+            // escaped: a newline in it would forge a log line
+            Error::Protocol(format!(
+                "the daemon named an output '{}': {}",
+                name.escape_debug(),
+                e.0.escape_debug()
+            ))
+        })?;
+        out.insert(name.clone(), path.clone());
+    }
+    Ok(out)
+}
+
+/// The farm builds only statically known paths, so every output has one.
+fn output_paths(drv_path: &StorePath, drv: &Derivation) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (name, o) in &drv.outputs {
+        let Some(p) = o.path(&drv.name, name)? else {
+            return Err(Error::Plan(format!(
+                "'{drv_path}': output '{name}' has no statically known path"
+            )));
+        };
+        out.insert(name.clone(), p.to_string());
     }
     Ok(out)
 }
@@ -353,17 +401,9 @@ impl Backend for Grpc {
             .drvs
             .get(&path)
             .ok_or_else(|| Error::Plan(format!("'{drv}' is not in the batch's closure")))?;
-        let mut out = BTreeMap::new();
-        for (name, o) in &d.outputs {
-            let Some(p) = o.path(&d.name, name)? else {
-                return Err(Error::Plan(format!(
-                    "'{drv}': output '{name}' has no statically known path"
-                )));
-            };
-            out.insert(name.clone(), Some(p.to_string()));
-        }
+        let out = output_paths(&path, d)?;
         self.t.common.outputs += t0.elapsed();
-        Ok(out)
+        Ok(out.into_iter().map(|(n, p)| (n, Some(p))).collect())
     }
 
     fn fetch(&mut self, store_path: &str, dir: &Path) -> Result<()> {
@@ -583,6 +623,50 @@ mod tests {
                 vec!["dep-dev"]
             ]
         );
+    }
+
+    /// A root the farm built is named by its verdict's `builtOutputs`.
+    #[test]
+    fn a_built_root_is_named_by_its_verdict() {
+        let (p, d) = drv("root", &["out", "dev"], &[]);
+        let built = sp("built-out").to_string();
+        let res = BuildResult {
+            built_outputs: BTreeMap::from([("out".into(), built.clone())]),
+            ..BuildResult::default()
+        };
+        let got = verdict_outputs(&p, &d, Some(&res)).unwrap();
+        assert_eq!(got["out"], built);
+        assert_eq!(got["dev"], sp("root-dev").to_string());
+    }
+
+    /// A root the store held was not built and has no `builtOutputs`: its
+    /// verdict holds the paths the store was asked about.
+    #[test]
+    fn a_held_root_is_named_by_its_output_paths() {
+        let (p, d) = drv("root", &["out", "dev"], &[]);
+        let want = BTreeMap::from([
+            ("dev".to_string(), sp("root-dev").to_string()),
+            ("out".to_string(), sp("root-out").to_string()),
+        ]);
+        assert_eq!(verdict_outputs(&p, &d, None).unwrap(), want);
+        let cached = BuildResult {
+            status: 2,
+            ..BuildResult::default()
+        };
+        assert_eq!(verdict_outputs(&p, &d, Some(&cached)).unwrap(), want);
+    }
+
+    /// An output name becomes part of an out link's file name, as in the
+    /// worker protocol's `read_build_result`.
+    #[test]
+    fn a_verdict_with_a_bad_output_name_is_a_protocol_error() {
+        let (p, d) = drv("root", &["out"], &[]);
+        let res = BuildResult {
+            built_outputs: BTreeMap::from([("../x".into(), sp("x").to_string())]),
+            ..BuildResult::default()
+        };
+        let e = verdict_outputs(&p, &d, Some(&res)).unwrap_err();
+        assert!(matches!(e, Error::Protocol(_)), "{e}");
     }
 
     #[test]

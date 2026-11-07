@@ -3,7 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -236,18 +236,32 @@ pub fn send<C>(
     }
 }
 
+/// The narinfo's `URL` against the cache, as
+/// http-binary-cache-store.cc:makeRequest resolves it.
+fn nar_url(f: &Fetched) -> String {
+    http::resolve(&format!("{}/", f.store), &f.info.url)
+}
+
+/// The NAR into `sink`. Only a local cache may name a local file: a remote
+/// one choosing `file:///etc/passwd` gets an error.
+fn get_nar(f: &Fetched, limits: Limits, sink: &mut dyn Write) -> Result<u64> {
+    let url = nar_url(f);
+    if http::local_path(&f.store).is_some() {
+        http::get_or_read(&url, &[], limits, false, sink)
+    } else {
+        http::get(&url, &[], limits, false, sink)
+    }
+}
+
 /// `f`'s NAR as the cache sends it, decompressed, into `use_`.
 fn streamed(
     f: &Fetched,
     limits: Limits,
     use_: impl FnOnce(&mut dyn Read) -> Result<u64>,
 ) -> Result<u64> {
-    let url = format!("{}/{}", f.store, f.info.url);
     let (r, mut w) = io::pipe().map_err(|e| Error::io("cannot create a pipe", e))?;
     thread::scope(|scope| {
-        let got = scope.spawn(session::bind(move || {
-            http::get_or_read(&url, &[], limits, false, &mut w)
-        }));
+        let got = scope.spawn(session::bind(move || get_nar(f, limits, &mut w)));
         let used = http::decompress_reader(Box::new(r), u64::MAX).and_then(|mut r| use_(&mut r));
         let got = got.join().unwrap_or_else(|p| panic::resume_unwind(p));
         got?;
@@ -327,9 +341,47 @@ fn download(paths: &[Arc<Fetched>]) -> Result<Vec<TempPath>> {
 }
 
 fn one(f: &Fetched, limits: Limits) -> Result<TempPath> {
-    let url = format!("{}/{}", f.store, f.info.url);
     let mut file =
         NamedTempFile::new().map_err(|e| Error::io("cannot create a temporary file", e))?;
-    http::get_or_read(&url, &[], limits, false, file.as_file_mut())?;
+    get_nar(f, limits, file.as_file_mut())?;
     Ok(file.into_temp_path())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::narinfo::NarInfo;
+    use rstest::rstest;
+
+    fn fetched(store: &str, url: &str) -> Fetched {
+        let text = format!(
+            "StorePath: /nix/store/7rjj86a15146cq1d3qy068lml7n8ykzm-a\nURL: {url}\n\
+             NarHash: sha256:18gxlgm87gp2rh37x8gdsrfyq2lnwqj7q8bb6z6rks2yja0wpkx9\nNarSize: 8\nReferences: \n"
+        );
+        Fetched {
+            store: store.to_string(),
+            info: NarInfo::parse(&text, "a.narinfo").unwrap(),
+        }
+    }
+
+    /// `http::redirects_resolve` covers the resolver. This pins that the
+    /// cache counts as a directory.
+    #[rstest]
+    #[case("nar/x.nar", "https://cache.example/sub/nar/x.nar")]
+    #[case("https://nars.example/x.nar", "https://nars.example/x.nar")]
+    fn a_nar_url_resolves_against_the_cache(#[case] url: &str, #[case] want: &str) {
+        assert_eq!(nar_url(&fetched("https://cache.example/sub", url)), want);
+    }
+
+    #[test]
+    fn a_remote_cache_cannot_name_a_local_file() {
+        let limits = Limits {
+            connect: None,
+            stall: None,
+            max_size: 1 << 20,
+        };
+        let f = fetched("https://cache.example", "file:///etc/hostname");
+        let e = get_nar(&f, limits, &mut Vec::new()).unwrap_err();
+        assert!(e.to_string().contains("unsupported scheme 'file'"), "{e}");
+    }
 }

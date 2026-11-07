@@ -57,6 +57,10 @@ pub struct Status {
     pub reason: String,
     /// `log::build_exit` of the failure, 0 for a success.
     pub exit: i32,
+    /// Output name to store path, as the builder reported it with the verdict
+    /// (`builtOutputs`). The dispatcher takes a success's paths from here: a
+    /// floating content-addressed output has no path before the build.
+    pub outputs: BTreeMap<String, String>,
 }
 
 impl Status {
@@ -65,6 +69,7 @@ impl Status {
             ok: true,
             reason: String::new(),
             exit: 0,
+            outputs: BTreeMap::new(),
         }
     }
 
@@ -73,6 +78,7 @@ impl Status {
             ok: false,
             reason,
             exit,
+            outputs: BTreeMap::new(),
         }
     }
 }
@@ -458,7 +464,9 @@ impl Backend for Worker {
         for r in &results {
             let drv = r.path.split('!').next().unwrap_or(&r.path).to_string();
             let e = out.entry(drv).or_insert_with(Status::ok);
-            if !r.success() {
+            if r.success() {
+                e.outputs.extend(r.built_outputs.clone());
+            } else {
                 let exit = log::build_exit(r.status, &r.msg);
                 *e = Status::failed(format!("status {}: {}", r.status, r.msg), exit);
             }

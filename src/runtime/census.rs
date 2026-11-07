@@ -1,7 +1,7 @@
 //! Census behind the `stats2` cargo feature and `IETS_STATS=2`:
 //! histograms by object kind, duplicate strings and contexts, `//` shapes,
 //! which objects were never read, call frames a stack could hold, and eval
-//! dispatches by parent. Every hook is `cfg(feature)` so the
+//! dispatches by parent (hashes by site are `store::hash::census`). Every hook is `cfg(feature)` so the
 //! default build carries none of it (docs/explanation/evaluation.md).
 
 use std::array;
@@ -12,6 +12,7 @@ use super::value::{
     AttrsObj, Ctx, EnvObj, Kind, ListObj, MAX_LEAVES, StringObj, UNION_MIN, leaf_count,
 };
 use super::word::Word;
+use crate::store::hash;
 use crate::syntax::symbol::fx_bytes;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -771,6 +772,7 @@ impl Census {
             let _ = writeln!(out, "  file{f} {b}");
         }
         self.report_pairs(out);
+        hash::census::report(out);
     }
 }
 

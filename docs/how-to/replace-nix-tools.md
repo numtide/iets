@@ -258,8 +258,9 @@ before you swap it in:
   restarted above the limit; `--workers` then counts processes (default:
   the CPU count, capped at 4).
 - Line order is depth-first in name order from one process, and completion
-  order from worker processes, as for nix-eval-jobs. Sort by `attrPath`
-  when you compare two runs.
+  order from worker processes, as for nix-eval-jobs. With `--constituents`
+  an aggregate that names its constituents comes after the walk. Sort by
+  `attrPath` when you compare two runs.
 - The `stats` field comes only from worker processes.
 - `--override-input`, `--override-flake` and `--repair` are errors. iets only
   evaluates a flake from a complete lock file. `--reference-lock-file`

@@ -711,8 +711,9 @@ is what `--max-memory-size` is for.
 iets differs from nix-eval-jobs in these ways:
 
 - **Order** is depth-first in name order from one process, and completion
-  order, as in nix-eval-jobs, from worker processes. Sort by `attrPath` to
-  compare.
+  order, as in nix-eval-jobs, from worker processes. With `--constituents`
+  an aggregate that names its constituents comes after the walk, in either
+  mode. Sort by `attrPath` to compare.
 - **Error text** is iets's own (`error: msg`, `at file:line:col`, `… trace`
   lines). The same attributes fail as in Nix; the text differs.
 - **`system`** comes from the `.drv` in memory, or from `/nix/store` for an

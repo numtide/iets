@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use super::Parser;
+use super::{MAX_PARSE_DEPTH, Parser};
 use crate::syntax::ast::Ast;
 use crate::syntax::ast::{
     AttrElem, Bind, BindKind, Expr, ExprId, Formal, Note, Param, PathExpr, Range, StrPart,
@@ -325,7 +325,8 @@ fn parse_chunk(
 ) -> Option<Parsed> {
     let mut p = Parser::chunk(&src[..end], interner, start, end - start);
     p.depth = depth;
-    p.max_depth = depth + CHUNK_DEPTH;
+    // never past the sequential parse's limit, whose error it must give
+    p.max_depth = (depth + CHUNK_DEPTH).min(MAX_PARSE_DEPTH);
     p.parse_binds_until(Tok::Eof).ok()?;
     Some(Parsed {
         last_end: p.last_end,

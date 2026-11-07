@@ -120,14 +120,18 @@ pub unsafe fn advise_huge(p: *mut u8, len: usize) {
     }
 }
 
-/// Faults `[p, p + len)` in now, zeroed, in one syscall
-/// (`MADV_POPULATE_WRITE`, Linux 5.14). False when the kernel has no such
-/// advice, and the pages fault in on touch as before.
+/// Faults `[p, p + len)` in now, zeroed, in one syscall (`MADV_POPULATE_WRITE`, Linux 5.14):
+/// `Some(true)` when it did, `Some(false)` when it stopped part way (memory pressure, a signal),
+/// `None` when the kernel has no such advice. Pages it did not fault in fault in on touch.
 ///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.
-pub unsafe fn populate(p: *mut u8, len: usize) -> bool {
-    unsafe { madvise(p.cast(), len, Advice::LinuxPopulateWrite) }.is_ok()
+pub unsafe fn populate(p: *mut u8, len: usize) -> Option<bool> {
+    match unsafe { madvise(p.cast(), len, Advice::LinuxPopulateWrite) } {
+        Ok(()) => Some(true),
+        Err(Errno::INVAL) => None,
+        Err(_) => Some(false),
+    }
 }
 
 /// Gives the pages back. The range stays mapped and reads as zeros.

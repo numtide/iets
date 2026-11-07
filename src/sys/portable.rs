@@ -44,8 +44,8 @@ pub unsafe fn advise_huge(_p: *mut u8, _len: usize) {}
 ///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.
-pub unsafe fn populate(_p: *mut u8, _len: usize) -> bool {
-    false
+pub unsafe fn populate(_p: *mut u8, _len: usize) -> Option<bool> {
+    None
 }
 
 /// Linux only: the mapping of the allocator's first arena.

@@ -24,8 +24,8 @@ const CHUNK: usize = 32 << 20;
 const STOCK: usize = 4;
 
 /// The most workers the stock serves. One helper behind more workers costs
-/// wall time: eval-jobs on whole nixpkgs at its default of every CPU (32)
-/// took 4.47 s to its result with the stock against 4.10 s without.
+/// wall time: eval-jobs on whole nixpkgs in one process at 32 workers took
+/// 4.47 s to its result with the stock against 4.10 s without.
 const STOCK_MAX_WORKERS: usize = 8;
 
 /// Whether full chunks come from the stock, set for each run by
@@ -74,7 +74,9 @@ impl Stock {
 
     /// The helper's loop. A kernel before 5.14 refuses the advice: the
     /// chunk goes out unpopulated and the helper stops, so arenas map their
-    /// own chunks as before.
+    /// own chunks as before. A chunk it cannot map ends it too: nobody asked
+    /// for that chunk yet, and the arena that does maps its own and reports
+    /// the failure.
     fn fill(&self) {
         loop {
             let mut g = self.ready.lock().unwrap();
@@ -82,11 +84,16 @@ impl Stock {
                 g = self.low.wait(g).unwrap();
             }
             drop(g);
-            let p = map_chunk(CHUNK);
+            let Ok(p) = vm::map(CHUNK, false) else {
+                return;
+            };
+            // SAFETY: an anonymous mapping of the helper's own; the advice
+            // only changes how its pages are backed.
+            unsafe { sys::advise_huge(p.cast(), CHUNK) };
             // SAFETY: the chunk was just mapped and nothing else knows it.
-            let populated = unsafe { sys::populate(p as *mut u8, CHUNK) };
-            self.ready.lock().unwrap().push(p);
-            if !populated {
+            let populated = unsafe { sys::populate(p.cast(), CHUNK) };
+            self.ready.lock().unwrap().push(p as usize);
+            if populated.is_none() {
                 return;
             }
         }
@@ -277,8 +284,11 @@ impl Arena {
         let chunk = CHUNK.max((size + align + CHUNK - 1) & !(CHUNK - 1));
         // A populated chunk from the stock, or an anonymous mmap whose pages
         // fault in as they are touched. The chunk goes with the session's
-        // heap.
-        let stocked = if chunk == CHUNK && USE_STOCK.load(Ordering::Relaxed) {
+        // heap. An arena's first chunk is its own: most arenas never fill
+        // one, and a small evaluation then neither starts the helper nor
+        // holds 32 MB populated per worker.
+        let stocked = if chunk == CHUNK && !self.ptr.is_null() && USE_STOCK.load(Ordering::Relaxed)
+        {
             Stock::get().and_then(Stock::take)
         } else {
             None

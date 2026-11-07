@@ -21,7 +21,19 @@ fn detaches(argv: &[String], classic: bool) -> bool {
             Some("eval" | "build" | "eval-jobs")
         )
         && !argv.iter().any(|a| a == "--worker")
-        && env::var_os("IETS_WAIT_EXIT").is_none()
+        && !wait_exit()
+}
+
+/// `IETS_WAIT_EXIT`, a Boolean like the other settings. Read before the
+/// session exists, so a value that is not one waits, with a warning.
+fn wait_exit() -> bool {
+    let Ok(v) = env::var("IETS_WAIT_EXIT") else {
+        return false;
+    };
+    iets::config::parse_bool("IETS_WAIT_EXIT", &v).unwrap_or_else(|e| {
+        eprintln!("warning: {e}; waiting for the exit");
+        true
+    })
 }
 
 fn main() {

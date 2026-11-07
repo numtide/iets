@@ -48,6 +48,11 @@ pub unsafe fn populate(_p: *mut u8, _len: usize) -> Option<bool> {
     None
 }
 
+/// Linux only: elsewhere there is no prefault helper to switch on.
+pub fn huge_pages_scarce() -> bool {
+    false
+}
+
 /// Linux only: the mapping of the allocator's first arena.
 pub fn note_allocator_arena(_p: *const u8) {}
 

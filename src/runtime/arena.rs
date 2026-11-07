@@ -39,13 +39,13 @@ pub(crate) fn use_stock_for(workers: usize) {
     USE_STOCK.store(workers <= STOCK_MAX_WORKERS, Ordering::Relaxed);
 }
 
-/// Chunks populated off the evaluation threads. A 4 KB fault costs more in entering the kernel,
-/// finding the VMA and charging the cgroup than in zeroing; `MADV_POPULATE_WRITE` pays that once
-/// per chunk. On the worker that needs the chunk, the workers took turns in the kernel and lost
-/// at 8; one helper thread does it ahead of them, and its huge-page faults stall in compaction
-/// instead of a worker's. Whole nixpkgs, about half the heap in huge pages: 7–10% faster at one
-/// worker, 4–5% at eight, slower at 32 (`STOCK_MAX_WORKERS`). Chunks in stock belong to no
-/// session until an arena takes one; the stock is process-wide.
+/// Chunks populated off the evaluation threads, when huge pages are scarce. A 4 KB fault costs
+/// more in entering the kernel, finding the VMA and charging the cgroup than in zeroing;
+/// `MADV_POPULATE_WRITE` pays that once per chunk. On the worker that needs the chunk, the workers
+/// took turns in the kernel and lost at 8; one helper thread does it ahead of them. Whole nixpkgs
+/// with huge pages off: 15% faster at one worker, 5% at eight; with them it saves nothing, and at
+/// 32 workers it is slower (`STOCK_MAX_WORKERS`). Chunks in stock belong to no session until an
+/// arena takes one; the stock is process-wide.
 struct Stock {
     ready: Mutex<Vec<usize>>,
     low: Condvar,
@@ -286,8 +286,12 @@ impl Arena {
         // fault in as they are touched. The chunk goes with the session's
         // heap. An arena's first chunk is its own: most arenas never fill
         // one, and a small evaluation then neither starts the helper nor
-        // holds 32 MB populated per worker.
-        let stocked = if chunk == CHUNK && !self.ptr.is_null() && USE_STOCK.load(Ordering::Relaxed)
+        // holds 32 MB populated per worker. With huge pages to be had, a
+        // chunk faults in 2 MB at a time and the helper only costs memory.
+        let stocked = if chunk == CHUNK
+            && !self.ptr.is_null()
+            && USE_STOCK.load(Ordering::Relaxed)
+            && sys::huge_pages_scarce()
         {
             Stock::get().and_then(Stock::take)
         } else {

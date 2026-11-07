@@ -64,6 +64,22 @@ fn huge() -> bool {
     false
 }
 
+/// Whether this process gets no huge pages: the gate closed (the kernel
+/// failed to fill them), or transparent huge pages are off for the machine
+/// (`never`) or for this process (`PR_SET_THP_DISABLE`, as some service
+/// managers and containers set). Then every page is a 4 KB fault.
+pub fn huge_pages_scarce() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    HUGE_CLOSED.load(Ordering::Relaxed)
+        || *OFF.get_or_init(|| {
+            // SAFETY: reads this process's flag, nothing else.
+            let process = unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) } == 1;
+            process
+                || fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
+                    .is_ok_and(|s| s.contains("[never]"))
+        })
+}
+
 /// A read older than the base, by a worker that lost the race to set it,
 /// counts as no failures.
 fn gate_closes(base: u64, n: u64) -> bool {

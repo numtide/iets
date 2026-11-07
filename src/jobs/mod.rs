@@ -13,6 +13,7 @@ pub mod line;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::iter;
+use std::ops::ControlFlow;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, OnceLock};
 
@@ -149,10 +150,11 @@ pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<
 }
 
 /// Walk `root` and hand every job or error line to `sink`, in
-/// lexicographic depth-first order.
+/// lexicographic depth-first order. A fatal error line is the last: the
+/// walk stops there, as nix-eval-jobs' does.
 pub fn run(ev: &mut Evaluator, root: Word, sink: &mut dyn FnMut(Line)) {
     let mut path = Vec::new();
-    walk(ev, root, &mut path, FNV_BASIS, sink);
+    let _ = walk(ev, root, &mut path, FNV_BASIS, sink);
 }
 
 pub enum Node {
@@ -167,10 +169,10 @@ fn walk(
     path: &mut Vec<String>,
     hash: u64,
     sink: &mut dyn FnMut(Line),
-) {
+) -> ControlFlow<()> {
     let depth = path.len() as u32;
     if depth == config().opts.chunk_depth && !admit(hash, depth, false) {
-        return;
+        return ControlFlow::Continue(());
     }
     match node(ev, w, path, hash) {
         Ok(Node::Job(job)) => sink(Line::Job(job)),
@@ -201,16 +203,25 @@ fn walk(
                 let name = ev.interner.name_str(attr.sym).to_string();
                 let h = fnv_step(hash, name.as_bytes());
                 path.push(name);
-                walk(ev, attr.cell.get(), path, h, sink);
+                let flow = walk(ev, attr.cell.get(), path, h, sink);
                 path.pop();
+                flow?;
             }
         }
         Ok(Node::Skip) => {}
         // An attr that fails above the chunk depth is a unit of its own,
         // like a derivation there, so one chunk reports it.
         Err(_) if !admit(hash, depth, true) => {}
-        Err(e) => sink(Line::Error(error_line(ev, path, &e))),
+        Err(e) => {
+            let line = error_line(ev, path, &e);
+            let fatal = line.fatal;
+            sink(Line::Error(line));
+            if fatal {
+                return ControlFlow::Break(());
+            }
+        }
     }
+    ControlFlow::Continue(())
 }
 
 /// The error line for `path`, also printed to stderr as nix-eval-jobs does.

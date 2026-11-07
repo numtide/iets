@@ -351,7 +351,9 @@ fn jobs_summary(j: &JobsArgs, stats: jobs::Stats, inst: Option<instantiate::Stat
 }
 
 /// The tail every role shares: the emitter's `finish` when a connection is
-/// there for it, the summary line, and the exit code.
+/// there for it, the summary line, and the exit code. After a fatal error
+/// line there are no aggregates to print, as in nix-eval-jobs, which stops
+/// at that line.
 fn jobs_finish(
     emitter: &Mutex<Emitter>,
     j: &JobsArgs,
@@ -359,7 +361,9 @@ fn jobs_finish(
     inst: Option<instantiate::Stats>,
     t0: Instant,
 ) -> i32 {
+    let fatal = emitter.lock().unwrap().fatal;
     if let Some(conn) = conn
+        && !fatal
         && let Err(e) = emitter
             .lock()
             .unwrap()

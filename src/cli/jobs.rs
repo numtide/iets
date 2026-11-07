@@ -362,7 +362,12 @@ fn jobs_finish(
     {
         return e.report();
     }
-    let em = emitter.lock().unwrap();
+    let mut em = emitter.lock().unwrap();
+    // a full disk: the output is incomplete, which a reader must not take
+    // for the whole job set
+    if let Some(e) = em.failed.take() {
+        return CrateError::io("cannot write to stdout", e).report();
+    }
     // `| head`: the reader is gone, so the summary has nowhere to go either
     if em.closed {
         return 0;

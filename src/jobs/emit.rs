@@ -1,7 +1,7 @@
 //! The last stage: lines to stdout, with `--constituents` withholding the
 //! aggregates until the walk is over (nix-eval-jobs.cc:emitResponse).
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 
 use super::Stats;
@@ -17,18 +17,32 @@ pub struct Emitter {
     pub stats: Stats,
     /// A fatal error line was seen: nix-eval-jobs stops with exit 1.
     pub fatal: bool,
-    /// The reader closed the pipe (`iets eval-jobs | head`). Nothing more
-    /// is written; the frontend stops with exit 0.
+    /// Nothing more is written: the reader closed the pipe
+    /// (`iets eval-jobs | head`), and the frontend stops with exit 0, or a
+    /// write failed (`failed`).
     pub closed: bool,
+    /// A write failed with something other than a closed pipe (a full disk):
+    /// the output is incomplete, so the frontend stops with this error.
+    pub failed: Option<io::Error>,
 }
 
-/// `false` once the reader is gone; that ends the run, it is not an error.
-fn write_line(out: &mut dyn Write, line: &Line) -> bool {
-    let r = out
-        .write_all(&line.render())
-        .and_then(|_| out.write_all(b"\n"))
-        .and_then(|_| out.flush());
-    !matches!(r, Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe)
+fn write_line(out: &mut dyn Write, line: &Line) -> io::Result<()> {
+    out.write_all(&line.render())?;
+    out.write_all(b"\n")?;
+    out.flush()
+}
+
+/// Writes `line` unless writing has stopped, and stops it at the first error.
+fn put(out: &mut dyn Write, closed: &mut bool, failed: &mut Option<io::Error>, line: &Line) {
+    if *closed {
+        return;
+    }
+    if let Err(e) = write_line(out, line) {
+        *closed = true;
+        if e.kind() != io::ErrorKind::BrokenPipe {
+            *failed = Some(e);
+        }
+    }
 }
 
 impl Emitter {
@@ -40,6 +54,7 @@ impl Emitter {
             stats: Stats::default(),
             fatal: false,
             closed: false,
+            failed: None,
         }
     }
 
@@ -55,7 +70,7 @@ impl Emitter {
             }
         }
         if !self.constituents {
-            self.closed = !write_line(&mut self.out, &line);
+            put(self.out.as_mut(), &mut self.closed, &mut self.failed, &line);
             return;
         }
         let entry = match &line {
@@ -82,7 +97,7 @@ impl Emitter {
                 );
             }
             line => {
-                self.closed = !write_line(&mut self.out, &line);
+                put(self.out.as_mut(), &mut self.closed, &mut self.failed, &line);
                 self.jobs.insert(attr, entry);
             }
         }
@@ -93,9 +108,9 @@ impl Emitter {
         if !self.constituents {
             return Ok(());
         }
-        let (out, closed) = (&mut self.out, &mut self.closed);
+        let (out, closed, failed) = (&mut self.out, &mut self.closed, &mut self.failed);
         constituents::rewrite(&mut self.jobs, conn, gc_roots_dir, &mut |l| {
-            *closed |= !write_line(out.as_mut(), &l);
+            put(out.as_mut(), closed, failed, &l);
         })
     }
 }

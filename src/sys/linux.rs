@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
 use rustix::io::Errno;
@@ -197,8 +197,9 @@ pub fn detach_exit() -> Option<ExitNote> {
         }
         return Some(ExitNote(fds[1]));
     }
-    // SAFETY: the parent's end of the pipe, then a blocking read of one byte.
+    // SAFETY: the parent's end of the pipe.
     unsafe { libc::close(fds[1]) };
+    forward_signals(pid);
     let mut code = 0u8;
     let n = loop {
         // SAFETY: reads at most one byte into `code`.
@@ -222,14 +223,42 @@ pub fn detach_exit() -> Option<ExitNote> {
     }
     if libc::WIFSIGNALED(status) {
         let sig = libc::WTERMSIG(status);
-        // SAFETY: the default action of the signal the child died of, on us.
+        // SAFETY: the default action of the signal the child died of, on us;
+        // not dumpable, so a child's crash leaves its core dump alone and
+        // not a second one of this process that did nothing.
         unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0);
             libc::signal(sig, libc::SIG_DFL);
             libc::raise(sig);
         }
     }
     // SAFETY: as above.
     unsafe { libc::_exit(libc::WEXITSTATUS(status)) }
+}
+
+/// The child `detach_exit` waits for.
+static DETACHED_CHILD: AtomicI32 = AtomicI32::new(0);
+
+/// Passes the signals that end a command on to the child, and waits on: the
+/// parent dies of the child's signal only once the child has, so a Ctrl-C
+/// gives the shell its prompt after the child has restored the terminal
+/// (`tty::guard_region`), and a signal sent to the parent alone reaches the
+/// work. A signal ignored at start stays ignored, as in `guard_region`.
+fn forward_signals(child: libc::pid_t) {
+    extern "C" fn forward(sig: libc::c_int) {
+        // SAFETY: kill(2) is async-signal-safe.
+        unsafe { libc::kill(DETACHED_CHILD.load(Ordering::Relaxed), sig) };
+    }
+    DETACHED_CHILD.store(child, Ordering::Relaxed);
+    for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: the handler only calls kill(2).
+        unsafe {
+            let old = libc::signal(sig, forward as *const () as libc::sighandler_t);
+            if old != libc::SIG_DFL {
+                libc::signal(sig, old);
+            }
+        }
+    }
 }
 
 impl ExitNote {

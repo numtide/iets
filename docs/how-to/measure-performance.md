@@ -38,7 +38,12 @@ both.
 Wall time ends when the binary exits, as its caller sees it: a binary that
 exits early and frees its heap in a child (#370, not merged yet) gets the
 credit. The child's CPU time still counts, and the next run starts only
-after it is gone (on Linux the helper adopts it as subreaper). Every
+after it is gone (on Linux the helper adopts it as subreaper). How long
+it went on is the teardown column, and a finding names a candidate that
+leaves noticeably more of it than the baseline, since the next step of a
+CI job shares the machine with it. What still runs ten minutes after the
+exit is killed and the run is FAILED. Profiles set `IETS_WAIT_EXIT=1`,
+so they show the teardown inside the process. Every
 run's output is hashed line by line, in any order; a candidate that
 prints something else, say because it evaluates less, is `OUTPUT
 DIFFERS` instead of a timing verdict, with its times still in the row.
@@ -159,7 +164,10 @@ gone: after Ctrl-C, a cancelled CI job (SIGTERM), a crash, or a runner
 that kills the job's whole cgroup. It runs as a systemd unit of its own
 (else in a new session), outside the suite's session and cgroup. After
 Ctrl-C nushell stops running the suite's own cleanup, so there the guard
-does it.
+does it. The settings to restore are on the guard's command line from
+the start, and it finds the fragmenter in `/proc`: no file in the work
+directory, which anything running as you could rewrite, decides what
+root writes or kills.
 
 **The scarce state takes almost all free memory.** The fragmenter fills
 everything but 2 GiB (or 5 % of memory, if more), page by page, which

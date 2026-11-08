@@ -331,8 +331,19 @@ def run-once [ctx: record, bin: string, args: list<string>, cache: string, state
   let thp = if ($before | is-empty) { {} } else {
     {thp_alloc: ($after.thp_fault_alloc - $before.thp_fault_alloc), thp_fallback: ($after.thp_fault_fallback - $before.thp_fault_fallback)}
   }
-  let failed = $m.exit != 0 or $m.signal != 0
-  let tail = if $failed { open --raw $err | lines | last 5 | str join "\n" } else { "" }
+  # a run that left processes running ten minutes after it exited (the
+  # helper killed them), or whose output pipe some other process kept
+  # open, did not finish its work like the others did
+  let orphans = ($m.orphans_killed? | default 0)
+  let unhashed = ($m.out_hash? == "unknown")
+  let failed = $m.exit != 0 or $m.signal != 0 or $orphans > 0 or $unhashed
+  let tail = if $m.exit != 0 or $m.signal != 0 {
+    open --raw $err | lines | last 5 | str join "\n"
+  } else if $orphans > 0 {
+    $"($orphans) processes still ran (fmt-s $m.teardown_s) after the binary exited, and were killed"
+  } else if $unhashed {
+    "the output pipe stayed open after every process of the run was gone"
+  } else { "" }
   $m | merge $thp | merge {idle: $idle, failed: $failed, stderr_tail: $tail}
 }
 
@@ -509,6 +520,10 @@ def evidence [rs: list]: nothing -> record {
   } else { null }
   {
     wall: $wall, cov: (cov ($rs | get wall_s)), rss: $rss
+    # what a child the binary left did after it exited (#370): not in the
+    # wall time, which ends when the binary exits, but the next CI step
+    # shares the machine with it
+    teardown: (median ($rs | get teardown_s? | default [0]))
     cpu: $cpu
     # from rusage, which counts every thread to its end (the sampled
     # schedstat misses each thread's last 20 ms)
@@ -605,6 +620,8 @@ def summarize [sc: record, state: string, m: record, opts: record]: nothing -> r
     change: $"(pct $m.ci.median) [(pct $m.ci.lo), (pct $m.ci.hi)] ($m.ci.coverage * 100 | math round) %"
     "peak RSS": $"(fmt-gb $eb.rss) → (fmt-gb $ec.rss)"
     "CPU s": $"(fmt-s $eb.cpu) → (fmt-s $ec.cpu)"
+    # what ran on after the binary exited, which the wall time leaves out
+    teardown: (if ($eb.teardown + $ec.teardown) < 0.01 { "none" } else { $"(fmt-s $eb.teardown) → (fmt-s $ec.teardown)" })
     "busy CPUs": $"($eb.busy_cpus | math round --precision 1) → ($ec.busy_cpus | math round --precision 1)"
     # sampled every 20 ms: meaningless for a run shorter than a few samples
     "run-queue": (if $eb.wall < 0.1 { "n/a" } else { $"($eb.runq_share * 100 | math round --precision 1) % → ($ec.runq_share * 100 | math round --precision 1) %" })
@@ -617,8 +634,20 @@ def summarize [sc: record, state: string, m: record, opts: record]: nothing -> r
       (if $out == "differs" { $"the binaries printed different output: baseline ($base | get 0.out_lines) lines, candidate ($cand | get 0.out_lines) lines(if $opts.expect_output_change { ' (expected: --expect-output-change)' } else { '; the times are in the row' })" })
       (if ($base | get 0.cpus? | default "") != "" { $"CPUs ($base | get 0.cpus)" })
     ] | compact | str join "; ")
-    findings: ((checklist $state $eb $opts) ++ (checklist $state $ec $opts) ++ (if $out == "varies" { ["the output differed between the binaries in some rounds only (nondeterministic output?): the outputs were not checked, the times still were"] } else { [] }) | uniq)
+    findings: ((checklist $state $eb $opts) ++ (checklist $state $ec $opts) ++ (teardown-finding $eb $ec) ++ (if $out == "varies" { ["the output differed between the binaries in some rounds only (nondeterministic output?): the outputs were not checked, the times still were"] } else { [] }) | uniq)
   }
+}
+
+# Work moved past the binary's exit: a child that frees the heap, or
+# anything else left running, which the wall time does not see but the
+# next step of a CI job shares the machine with. Named when the candidate
+# leaves 100 ms and 5 % of its wall time more of it than the baseline,
+# with the change the two times together make.
+def teardown-finding [eb: record, ec: record]: nothing -> list<string> {
+  let more = $ec.teardown - $eb.teardown
+  if $more <= 0.1 or $more <= 0.05 * $ec.wall { return [] }
+  let both = ($ec.wall + $ec.teardown) / ($eb.wall + $eb.teardown)
+  [$"the candidate leaves (fmt-s $ec.teardown) of work running after it exits \(baseline (fmt-s $eb.teardown)\), which its wall time leaves out: wall time and that together change by (pct $both)"]
 }
 
 # A finished row, appended to rows.jsonl at once: an interrupted run keeps
@@ -811,7 +840,7 @@ def main [
   {machine: $mach, preflight: $pre, baseline: $baseline, candidate: $candidate, nixpkgs: $np, tier: $tier, aa: $aa,
    privileged: $privileged, saved_settings: $saved, config: $config, rows: $rows, raw: $result.raw, profiles: $result.profiles}
   | to json | save -f ($out | path join results.json)
-  let table_cols = [scenario state rounds baseline candidate change "peak RSS" "CPU s" "busy CPUs" "run-queue" "huge pages" CoV "foreign CPU" verdict]
+  let table_cols = [scenario state rounds baseline candidate change "peak RSS" "CPU s" teardown "busy CPUs" "run-queue" "huge pages" CoV "foreign CPU" verdict]
   let md = ([
     $"# iets CI performance: (date now | format date '%Y-%m-%d %H:%M')"
     ""
@@ -826,6 +855,7 @@ def main [
     $"- before the run: ($pre.busy_cpus) CPUs busy, load ($pre.load)(if $pre.waited_s > 0 { $', after waiting ($pre.waited_s) s' } else { '' }); heaviest processes: ($pre.top | each {|t| $'($t.cmd) ($t.cpu)%' } | str join ', ')"
     "- foreign CPU: CPU seconds other user processes used during a run, per process from /proc plus short-lived ones from the machine total, the largest of all runs; each run also waits until nothing else is runnable before it starts"
     "- output: every run's output is hashed; OUTPUT DIFFERS when the two binaries printed different output"
+    "- teardown: how long what the binary left running went on after it exited (its CPU time is in CPU s); the next run starts after it, and a run whose leftovers still go on after ten minutes is killed and FAILED"
     "- busy CPUs: CPU time / wall; run-queue: time threads waited for a CPU / on-CPU time; huge pages: share of huge-page faults that got one, counted machine-wide (/proc/vmstat), which an idle machine makes this run's"
     ""
   ] | append ($rows | group-by task | items {|task, rs|

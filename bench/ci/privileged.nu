@@ -55,11 +55,12 @@ export def begin [helper: string, work: string]: nothing -> record {
   if (^sudo -n true | complete).exit_code != 0 { ^sudo -v }
   let saved = ($KNOBS | items {|k, p| {k: $k, v: (read-knob $p)} } | reduce -f {} {|r, a| $a | insert $r.k $r.v })
   print $"privileged mode; saved: ($saved | to nuon)"
-  let restore = ($work | path join restore.tsv)
-  # nr_hugepages first, so the pool is gone before compaction settings return
-  ([nr_hugepages] ++ ($saved | columns | where $it != nr_hugepages)) | each {|k| $"($KNOBS | get $k)\t($saved | get $k)" } | str join "\n" | save -f $restore
+  # nr_hugepages first, so the pool is gone before compaction settings
+  # return; on the guard's command line, so nothing in the work directory
+  # can change what root writes later
+  let restore = ([nr_hugepages] ++ ($saved | columns | where $it != nr_hugepages)) | each {|k| [($KNOBS | get $k) ($saved | get $k)] } | flatten
   let me = ($nu.pid | into string)
-  let guard = [$helper guard $me $restore ($work | path join fragmenter.pid)]
+  let guard = [$helper guard $me ...$restore]
   if ("/run/systemd/system" | path exists) and (which systemd-run | is-not-empty) {
     ^sudo -n systemd-run --quiet --collect --unit $"iets-ci-guard-($me)" -- ...$guard
   } else {

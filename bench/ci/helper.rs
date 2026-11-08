@@ -10,20 +10,26 @@
 //!     largest single process's peak RSS, a hash of its output, and the
 //!     exit status. Wall time ends when CMD exits, as its caller sees it;
 //!     on Linux the helper then also waits for what CMD left running (it
-//!     is their subreaper), whose CPU time counts. --env-file replaces the
+//!     is their subreaper), whose CPU time counts, and `teardown_s` says
+//!     how long that took; what still runs after ten minutes is killed
+//!     and counted in `orphans_killed`. --env-file replaces the
 //!     environment with the NUL-separated NAME=VALUE entries of FILE;
 //!     --oom-first makes CMD the OOM killer's first choice (Linux)
 //! helper fragment MIB [PIDFILE]
-//!     writes its pid to PIDFILE, takes MIB page by page in two halves touched in turn, so their
-//!     pages interleave in physical memory, locks one half and frees the
+//!     writes its pid to PIDFILE (a new file, which no symlink can
+//!     redirect: it runs as root in the user's work directory), takes MIB
+//!     page by page in two halves touched in turn, so their pages
+//!     interleave in physical memory, locks one half and frees the
 //!     other, prints `ready`, and holds the memory until killed (Linux).
 //!     Locked pages cannot be compacted once `vm.compact_unevictable_allowed`
 //!     is 0, which ci.nu --privileged sets; it runs this as root
-//! helper guard PID RESTORE PIDFILE
+//! helper guard PID [PATH VALUE]...
 //!     waits until process PID is gone (finished, interrupted or killed),
-//!     then writes each `path<TAB>value` line of RESTORE to its path and
-//!     kills the process in PIDFILE (Linux, as root): settings and the
-//!     fragmenter cannot outlive the suite
+//!     then kills every `fragment` process of this helper binary and
+//!     writes each VALUE to its PATH (Linux, as root): settings and the
+//!     fragmenter cannot outlive the suite. Everything it will do is on
+//!     its command line, fixed when root starts it: no file the user can
+//!     write decides what root writes or kills hours later
 //! helper evict PATH...
 //!     drops the pages of every file under PATH (symlinks to the roots
 //!     followed) from the page cache, and prints the files and their bytes
@@ -44,12 +50,14 @@ use std::io;
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{self, Command, Stdio};
 #[cfg(target_os = "linux")]
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -95,6 +103,7 @@ mod linux {
     pub const MAP_PRIVATE_ANON: c_int = 0x02 | 0x20;
     pub const MADV_NOHUGEPAGE: c_int = 15;
     pub const SC_PAGESIZE: c_int = 30;
+    pub const SIGKILL: c_int = 9;
 
     unsafe extern "C" {
         pub fn prctl(option: c_int, ...) -> c_int;
@@ -105,6 +114,7 @@ mod linux {
         pub fn madvise(a: *mut c_void, l: usize, advice: c_int) -> c_int;
         pub fn mlock(a: *const c_void, l: usize) -> c_int;
         pub fn munmap(a: *mut c_void, l: usize) -> c_int;
+        pub fn kill(pid: c_int, sig: c_int) -> c_int;
     }
 }
 
@@ -116,7 +126,7 @@ const SC_PAGESIZE: c_int = linux::SC_PAGESIZE;
 fn usage() -> ! {
     eprintln!("usage: helper run [--thp-off] [--cpus N] [--oom-first] [--stderr FILE] [--env-file FILE] -- CMD ARG...");
     eprintln!("       helper fragment MIB [PIDFILE]");
-    eprintln!("       helper guard PID RESTORE PIDFILE");
+    eprintln!("       helper guard PID [PATH VALUE]...");
     eprintln!("       helper evict PATH...");
     process::exit(64)
 }
@@ -253,7 +263,8 @@ fn run(args: &[String]) {
     // the output, as a hash of its lines that ignores their order (parallel
     // workers print in any order): did both binaries compute the same?
     let out = child.stdout.take().expect("piped");
-    let hasher = thread::spawn(move || hash_lines(out));
+    let (hash_tx, hash_rx) = mpsc::channel();
+    thread::spawn(move || hash_tx.send(hash_lines(out)));
     let psi0 = psi();
     let peak = Arc::new(AtomicU64::new(0));
     let done = Arc::new(AtomicBool::new(false));
@@ -279,9 +290,14 @@ fn run(args: &[String]) {
     done.store(true, Ordering::Relaxed);
     let (sched, mut tree) = sampler.join().unwrap_or_default();
     // what the command left running (a process that exits early and frees
-    // its heap in a child): waited for, at most ten minutes
-    let teardown = reap_orphans(Duration::from_secs(600));
-    let (out_hash, out_lines, out_bytes) = hasher.join().unwrap_or_default();
+    // its heap in a child): waited for, at most ten minutes, then killed
+    let (teardown, orphans_killed) = reap_orphans(Duration::from_secs(600));
+    // the output ends when every process holding the pipe is gone, which
+    // the reaping saw to; a process outside the tree that still holds it
+    // (handed the descriptor) must not hang the suite: no hash then
+    let hashed = hash_rx.recv_timeout(Duration::from_secs(10)).ok();
+    let (out_hash, out_lines, out_bytes) = hashed.unwrap_or_default();
+    let out_hash = if hashed.is_some() { format!("{out_hash:016x}") } else { "unknown".to_string() };
     let psi1 = psi();
     let procs1 = proc_cpu();
     let self1 = rusage(RUSAGE_SELF);
@@ -325,7 +341,7 @@ fn run(args: &[String]) {
         .map(|((k, a), (_, b))| format!(",\"psi_{k}_s\":{:.6}", b.saturating_sub(*a) as f64 / 1e6))
         .collect();
     println!(
-        "{{\"wall_s\":{wall:.6},\"teardown_s\":{teardown:.6},\"inblock\":{},\"out_hash\":\"{out_hash:016x}\",\"out_lines\":{out_lines},\"out_bytes\":{out_bytes},\"cpus\":\"{chosen}\",\"user_s\":{:.6},\"sys_s\":{:.6},\"rss_peak_bytes\":{peak},\"rss_maxchild_bytes\":{maxchild},\"minflt\":{},\"majflt\":{},\"vcsw\":{},\"ivcsw\":{},\"threads\":{},\"oncpu_s\":{:.6},\"runq_s\":{:.6}{}{},\"exit\":{code},\"signal\":{signal}}}",
+        "{{\"wall_s\":{wall:.6},\"teardown_s\":{teardown:.6},\"inblock\":{},\"orphans_killed\":{orphans_killed},\"out_hash\":\"{out_hash}\",\"out_lines\":{out_lines},\"out_bytes\":{out_bytes},\"cpus\":\"{chosen}\",\"user_s\":{:.6},\"sys_s\":{:.6},\"rss_peak_bytes\":{peak},\"rss_maxchild_bytes\":{maxchild},\"minflt\":{},\"majflt\":{},\"vcsw\":{},\"ivcsw\":{},\"threads\":{},\"oncpu_s\":{:.6},\"runq_s\":{:.6}{}{},\"exit\":{code},\"signal\":{signal}}}",
         ru.rest[6],
         secs(&ru.utime),
         secs(&ru.stime),
@@ -349,9 +365,12 @@ fn rusage(who: c_int) -> Rusage {
 }
 
 /// Waits for every remaining child (orphans adopted as their subreaper)
-/// until none is left or `limit` passes; the seconds it took.
-fn reap_orphans(limit: Duration) -> f64 {
+/// until none is left; the seconds it took, and how many were still
+/// running after `limit` and killed (with whatever they started), so the
+/// next run starts on a quiet machine and the output pipe closes.
+fn reap_orphans(limit: Duration) -> (f64, u32) {
     let t = Instant::now();
+    let mut killed: HashSet<i32> = HashSet::new();
     loop {
         let mut st = 0;
         // SAFETY: waits for any child of ours.
@@ -361,13 +380,49 @@ fn reap_orphans(limit: Duration) -> f64 {
         }
         if r == 0 {
             if t.elapsed() > limit {
-                eprintln!("helper: the command left processes running after {} s", limit.as_secs());
-                break;
+                if killed.is_empty() {
+                    eprintln!("helper: the command left processes running after {} s; killed", limit.as_secs());
+                }
+                killed.extend(kill_children());
+                // a child killed now is reaped on a later pass; one the
+                // kill cannot end yet (uninterruptible sleep) is waited
+                // for another minute at most
+                if t.elapsed() > limit + Duration::from_secs(60) {
+                    eprintln!("helper: processes survived SIGKILL for 60 s; giving up");
+                    break;
+                }
             }
             thread::sleep(Duration::from_millis(5));
         }
     }
-    t.elapsed().as_secs_f64()
+    (t.elapsed().as_secs_f64(), killed.len() as u32)
+}
+
+/// SIGKILL to every process whose parent is this one; their pids. Their
+/// own children then come to this process as subreaper, for the next pass.
+#[cfg(target_os = "linux")]
+fn kill_children() -> Vec<i32> {
+    let me = process::id().to_string();
+    let Ok(rd) = fs::read_dir("/proc") else { return vec![] };
+    let mut n = vec![];
+    for e in rd.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+        let Ok(s) = fs::read_to_string(e.path().join("stat")) else { continue };
+        let f: Vec<&str> = s.rsplit(')').next().unwrap_or("").split_whitespace().collect();
+        // a zombie is dead already, only not yet reaped
+        if f.first() != Some(&"Z") && f.get(1) == Some(&me.as_str()) {
+            // SAFETY: a signal to a child of ours.
+            unsafe { linux::kill(pid, linux::SIGKILL) };
+            n.push(pid);
+        }
+    }
+    n
+}
+
+/// Without a subreaper nothing is adopted, so there is nothing to kill.
+#[cfg(not(target_os = "linux"))]
+fn kill_children() -> Vec<i32> {
+    vec![]
 }
 
 /// An order-free hash of the lines read from `r`: the wrapping sum of a
@@ -640,10 +695,18 @@ fn fragment(args: &[String]) {
     let mib: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage());
     // first, so whoever started it can always stop it
     if let Some(f) = args.get(1) {
-        fs::write(f, process::id().to_string()).unwrap_or_else(|e| {
-            eprintln!("helper: {f}: {e}");
-            process::exit(1)
-        });
+        // a new file only: this runs as root in a directory the user can
+        // write, and O_CREAT | O_EXCL never follows a symlink
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(f)
+            .and_then(|mut h| h.write_all(process::id().to_string().as_bytes()))
+            .unwrap_or_else(|e| {
+                eprintln!("helper: {f}: {e}");
+                process::exit(1)
+            });
     }
     let page = page_size() as usize;
     let half = (mib << 20) / 2 / page * page;
@@ -693,8 +756,16 @@ fn fragment(_args: &[String]) {
 
 // ---- guard --------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 fn guard(args: &[String]) {
-    let (Some(pid), Some(restore), Some(pidfile)) = (args.first(), args.get(1), args.get(2)) else { usage() };
+    let Some(pid) = args.first() else { usage() };
+    // what to put back, read now, while root starts it: from the command
+    // line, not from a file in the user's work directory, which anything
+    // running as the user could rewrite before the guard acts on it
+    let pairs = &args[1..];
+    if pairs.len() % 2 != 0 {
+        usage();
+    }
     // the process's start time too, so a new process that gets its pid
     // does not keep the guard waiting; a zombie (exited, not yet reaped by
     // a slow parent) is gone
@@ -707,18 +778,35 @@ fn guard(args: &[String]) {
     while first.is_some() && start(pid) == first {
         thread::sleep(Duration::from_millis(500));
     }
-    if let Ok(p) = fs::read_to_string(pidfile)
-        && let Ok(p) = p.trim().parse::<i32>()
-    {
-        let _ = Command::new("kill").arg(p.to_string()).status();
+    // the fragmenters: processes of this very binary (each run builds its
+    // own, in its own work directory) started as `fragment`, found in
+    // /proc rather than through a pid file the user could point anywhere
+    let fragmenters = || -> Vec<i32> {
+        let Ok(me) = fs::read_link("/proc/self/exe") else { return vec![] };
+        let Ok(rd) = fs::read_dir("/proc") else { return vec![] };
+        rd.flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|p| fs::read_link(format!("/proc/{p}/exe")).is_ok_and(|x| x == me))
+            .filter(|p| fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c.split(|b| *b == 0).nth(1) == Some(b"fragment")))
+            .collect()
+    };
+    for p in fragmenters() {
+        // SAFETY: a signal to a process we just identified.
+        unsafe { linux::kill(p, linux::SIGKILL) };
     }
-    if let Ok(s) = fs::read_to_string(restore) {
-        for line in s.lines() {
-            if let Some((path, value)) = line.split_once('\t') {
-                let _ = fs::write(path, value);
-            }
-        }
+    // gone before the settings return: it holds most of memory locked
+    let t = Instant::now();
+    while !fragmenters().is_empty() && t.elapsed() < Duration::from_secs(60) {
+        thread::sleep(Duration::from_millis(100));
     }
+    for kv in pairs.chunks(2) {
+        let _ = fs::write(&kv[0], &kv[1]);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn guard(_args: &[String]) {
+    unsupported("guard")
 }
 
 // ---- evict --------------------------------------------------------------

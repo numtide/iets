@@ -43,6 +43,27 @@ in
     args = [ "-c" "echo 'dotted' > $out" ];
   };
 
+  # names that are not plain identifiers, which `attr` quotes (whole
+  # nixpkgs has `vscode-extensions."1Password"` and `nerd-fonts."m+"`)
+  quoted = {
+    recurseForDerivations = true;
+    "1Password" = derivation {
+      name = "digit-first";
+      inherit system;
+      builder = ":";
+    };
+    "m+" = derivation {
+      name = "plus";
+      inherit system;
+      builder = ":";
+    };
+    "q\"u\\o$te" = derivation {
+      name = "escaped";
+      inherit system;
+      builder = ":";
+    };
+  };
+
   package-with-deps = derivation {
     name = "package-with-deps";
     inherit system;

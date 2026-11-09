@@ -635,7 +635,7 @@ nix-eval-jobs. A job:
 | `isCached`, `cacheStatus`, `neededBuilds`, `neededSubstitutes` | with `--check-cache-status`; `cacheStatus` is `local`, `cached` or `notBuilt` |
 | `extraValue` | with `--apply` |
 | `pos` | with `--provenance`: `file:line:col` of the derivation. iets only |
-| `stats` | from worker processes, as nix-eval-jobs 2.35.3 and later write it: `wallMs`, the time to evaluate the attribute, and `allocBytes`, the arena bytes that took. Nix counts its garbage collector's bytes instead. Work that attributes share counts toward the first one that needs it. Only with `--max-memory-size MB` |
+| `stats` | on every line, as nix-eval-jobs 2.35.3 and later write it: `wallMs`, the time to evaluate the attribute, and `allocBytes`, the arena bytes that took. Nix counts its garbage collector's bytes instead. Work that attributes share counts toward the first one that needs it, so the numbers depend on the order and are for finding the expensive attributes. In one process, a job's time and bytes are what the fibers that evaluated it ran and allocated, the helpers that forced it ahead of the walk included; time a fiber waited for another one does not count, and 32 fibers on 16 cores each run slower than one worker process |
 
 An error line:
 
@@ -644,7 +644,7 @@ An error line:
 ```
 
 The error text has no color codes. It is also printed on stderr. An error
-line from a worker process has `stats` too.
+line has `stats` too.
 
 ### Instantiation
 

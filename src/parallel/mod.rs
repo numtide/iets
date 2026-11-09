@@ -130,6 +130,9 @@ pub fn try_run<R: Send + 'static>(
         ev.lints.flush();
         return Ok(r);
     }
+    // from here this evaluator runs on the main fiber, whose switches start
+    // and pause its clock
+    ev.clock.pause(&ev.arena);
     let mut template = ev.clone();
     // every fiber's evaluator borrows its worker's interner cache
     template.interner.drop_cache();

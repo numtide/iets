@@ -268,6 +268,9 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     let mut run = run_for(&a);
     run.cfg = run.cfg.keep_aterm(!j.opts.no_instantiate);
     run.cfg = run.cfg.keep_site(j.opts.provenance);
+    // one process clocks its fibers for the per-job `stats`; a worker
+    // process times each job on its one thread
+    run.cfg = run.cfg.job_clock(!j.worker);
     if j.worker {
         let run = run.workers(1);
         return cli::run_parallel(run, move |ev, _| jobs_worker(ev, a, &j, &transport));

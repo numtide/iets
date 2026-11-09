@@ -495,10 +495,11 @@ fn ci(bin: &Iets) -> Command {
     c
 }
 
-/// Every line from a worker carries the `stats` nixbot reads.
+/// Every line carries the `stats` nixbot reads, from worker processes and
+/// from one process alike.
 #[rstest]
-fn every_line_has_stats(bin: Iets) {
-    let o = ok(ci(&bin).args(["--max-memory-size", "4096", "ci.nix"]));
+fn every_line_has_stats(bin: Iets, #[values("4096", "0")] max_memory: &str) {
+    let o = ok(ci(&bin).args(["--max-memory-size", max_memory, "ci.nix"]));
     let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout)
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

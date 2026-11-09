@@ -261,7 +261,6 @@ before you swap it in:
   order from worker processes, as for nix-eval-jobs. With `--constituents`
   an aggregate that names its constituents comes after the walk. Sort by
   `attrPath` when you compare two runs.
-- The `stats` field comes only from worker processes.
 - `--override-input`, `--override-flake` and `--repair` are errors. iets only
   evaluates a flake from a complete lock file. `--reference-lock-file`
   works: that file is the lock, and it must be complete too.

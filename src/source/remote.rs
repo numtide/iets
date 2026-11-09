@@ -487,7 +487,7 @@ pub fn fetch_file(
 /// through the accessor a `readFile` uses, which follows no link out of what
 /// the evaluation may read (docs/explanation/pure-eval-and-local-sources.md).
 /// `None` for any other URL and in impure evaluation, where
-/// [`http::get`] reads the file as libcurl does.
+/// [`http::get_or_read`] reads the file as libcurl does.
 fn local_file(ev: &Evaluator, url: &str, pos: Pos) -> EvalResult<Option<SrcPath>> {
     if !ev.pure() {
         return Ok(None);
@@ -499,7 +499,7 @@ fn local_file(ev: &Evaluator, url: &str, pos: Pos) -> EvalResult<Option<SrcPath>
     Ok(Some(at))
 }
 
-/// [`http::get`], or the read of the [`local_file`] the URL names.
+/// [`http::get_or_read`], or the read of the [`local_file`] the URL names.
 fn download(
     ev: &Evaluator,
     url: &str,
@@ -510,7 +510,8 @@ fn download(
     sink: &mut dyn Write,
 ) -> result::Result<u64, String> {
     let Some(at) = local else {
-        return http::get(url, headers, limits, decompress, sink).map_err(|e| e.to_string());
+        return http::get_or_read(url, headers, limits, decompress, sink)
+            .map_err(|e| e.to_string());
     };
     let bytes = at.read(ev, false).map_err(|(_, e)| {
         let path = http::local_path(url).unwrap_or_default();

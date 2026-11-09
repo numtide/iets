@@ -43,6 +43,13 @@ in
     args = [ "-c" "echo 'dotted' > $out" ];
   };
 
+  quoted = {
+    recurseForDerivations = true;
+    "1Password" = dep-a;
+    "m+" = dep-b;
+    "q\"u\\o$te" = dep-a;
+  };
+
   package-with-deps = derivation {
     name = "package-with-deps";
     inherit system;

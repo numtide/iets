@@ -238,7 +238,10 @@ fn show_short(ev: &Evaluator, w: Word, out: &mut String, depth: usize) {
                     break;
                 }
                 out.push(' ');
-                out.push_str(ev.interner.name_str(attr.sym));
+                // print.cc printAttributeName: `"a b"`, not `a b`
+                let mut name = Vec::new();
+                print_attr_name(&mut name, ev.interner.name(attr.sym));
+                out.push_str(&String::from_utf8_lossy(&name));
                 out.push_str(" = ");
                 show_short(ev, attr.cell.get(), out, depth + 1);
                 out.push(';');

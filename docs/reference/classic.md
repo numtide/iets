@@ -456,9 +456,9 @@ A name falls back in these cases:
      `github`, `gitlab`, `sourcehut`, `git` or `tarball`, or without
      a `narHash` for a type other than `path`, or, in pure evaluation,
      without a `rev` for a type other than `path` and `tarball`;
-   - `getFlake` on anything but a local path, or in pure evaluation on a
-     reference with a `rev`, or with a `narHash` and more than `path:`.
-     `path:DIR?narHash=H` evaluates when the tree's NAR hash is `H`;
+   - `getFlake` on anything but a local path or local SCM reference.
+     Pure evaluation needs a matching `narHash` for a path or a locked SCM revision,
+     and local SCM sources outside the native allow list also fall back.
    - a flake reference iets does not parse (`hg+…`, `sourcehut:`, an
      IP-literal host; `docs/reference/divergences.md`);
    - `getContext` on the output of a dynamic derivation;

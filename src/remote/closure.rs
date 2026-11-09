@@ -246,7 +246,7 @@ fn streamed(
     let (r, mut w) = io::pipe().map_err(|e| Error::io("cannot create a pipe", e))?;
     thread::scope(|scope| {
         let got = scope.spawn(session::bind(move || {
-            http::get(&url, &[], limits, false, &mut w)
+            http::get_or_read(&url, &[], limits, false, &mut w)
         }));
         let used = http::decompress_reader(Box::new(r), u64::MAX).and_then(|mut r| use_(&mut r));
         let got = got.join().unwrap_or_else(|p| panic::resume_unwind(p));
@@ -330,6 +330,6 @@ fn one(f: &Fetched, limits: Limits) -> Result<TempPath> {
     let url = format!("{}/{}", f.store, f.info.url);
     let mut file =
         NamedTempFile::new().map_err(|e| Error::io("cannot create a temporary file", e))?;
-    http::get(&url, &[], limits, false, file.as_file_mut())?;
+    http::get_or_read(&url, &[], limits, false, file.as_file_mut())?;
     Ok(file.into_temp_path())
 }

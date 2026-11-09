@@ -98,7 +98,7 @@ fn parse(argv: &[String]) -> Result<Inst, String> {
 }
 
 enum Made {
-    /// `--eval`: each value went to stdout as it was made.
+    /// `--eval`: values were rendered or buffered until registration.
     Values,
     /// The default mode: the roots to register and print, and their closure.
     Drvs(Vec<Root>, Option<Box<Plan>>),
@@ -116,13 +116,29 @@ pub fn main(argv: &[String]) -> i32 {
         Err(reason) => fallback(NAME, argv, &reason),
     };
     let transport = local();
-    if !i.readonly && store_given(&i.c) && store != transport {
-        fallback(NAME, argv, "'--store' is not the local daemon");
+    if !i.readonly && (i.eval_only || store_given(&i.c)) && store != transport {
+        fallback(NAME, argv, "the selected store is not the local daemon");
     }
     let ec = eval_config(&i.c, &cfg);
     let i = Arc::new(i);
     let inst = Arc::clone(&i);
-    match cli::run_reported(Run::on(ec), move |ev, _| run(ev, &inst)) {
+    let eval_options = options.clone();
+    match cli::run_reported(Run::on(ec), move |ev, _| {
+        let mut values = Vec::new();
+        let mut made = run(ev, &inst, &mut values);
+        if inst.eval_only && !inst.readonly {
+            // Nix keeps the objects evaluated before a later value fails.
+            let registered = apibuild::register(ev, &local(), &eval_options);
+            let registered_ok = registered.is_ok();
+            made = made.and_then(|value| registered.map(|()| value));
+            let fallback = matches!(&made, Err(crate::error::Error::Unsupported(_)))
+                || matches!(&made, Err(crate::error::Error::Eval(e)) if e.kind == crate::eval::ErrorKind::Unsupported);
+            if registered_ok && !fallback {
+                render::bytes_lossy(&values);
+            }
+        }
+        made
+    }) {
         Outcome::Failed(code) => code,
         Outcome::Unsupported(reason) => fallback(NAME, argv, &reason),
         Outcome::Ok(Made::Values) => 0,
@@ -132,7 +148,7 @@ pub fn main(argv: &[String]) -> i32 {
     }
 }
 
-fn run(ev: &mut Evaluator, i: &Inst) -> error::Result<Made> {
+fn run(ev: &mut Evaluator, i: &Inst, values: &mut Vec<u8>) -> error::Result<Made> {
     let cwd = cwd();
     let mut roots: Vec<Root> = Vec::new();
     let args = auto_args(ev, &i.c.flags.args, &cwd)?;
@@ -145,11 +161,15 @@ fn run(ev: &mut Evaluator, i: &Inst) -> error::Result<Made> {
             let v = installable::find_along_attr_path(ev, root, attr, args)?;
             if i.eval_only {
                 let v = if has_args { ev.auto_call(v, args)? } else { v };
-                // nix-instantiate.cc writes each value as it has it, so what
-                // ran before a failing expression is on stdout already
+                // Keep complete earlier values if a later expression fails.
                 let mut text: Vec<u8> = Vec::new();
                 print_value(ev, v, i, &mut text)?;
-                render::bytes_lossy(&text);
+                if i.readonly {
+                    render::bytes_lossy(&text);
+                } else {
+                    // Registration may fall back, so stdout must still be empty.
+                    values.extend_from_slice(&text);
+                }
             } else {
                 // nix-instantiate.cc: one `getDerivations` per attribute path,
                 // so two of them that name one derivation give two roots

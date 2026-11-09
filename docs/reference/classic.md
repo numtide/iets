@@ -446,7 +446,8 @@ A name falls back in these cases:
    work starts. A setting counts when it is a Nix client setting that iets
    has nothing for, with a value that is not Nix's default
    (`docs/reference/settings.md`, class 4). So does
-   `nix-instantiate --store` with a store other than the local daemon.
+   `nix-instantiate --store` with a store other than the local daemon,
+   or writable evaluation with a nonlocal configured store.
 2. **An evaluation that calls something iets does not support:**
    - `fetchMercurial`, and `fetchClosure` with `toPath`;
    - `fetchGit` of an SCP-like URL (`user@host:path`) without a `rev` in

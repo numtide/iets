@@ -19,9 +19,10 @@ It writes `bench/results/ci/DATE-HOST/report.md` and `results.json` (every
 run, with its evidence), and `rows.jsonl` row by row as it goes, so an
 interrupted run keeps what it finished. It exits 1 when a scenario got
 slower or used more memory with its whole interval past the threshold
-(see below for how small a change that catches), or when the two
-binaries printed different output; `--expect-output-change` says the
-candidate does that on purpose, and the times decide. Its working files (caches, about 200 MB per
+(see below for how small a change that catches), when the two
+binaries printed different output (`--expect-output-change` says the
+candidate does that on purpose, and the times decide), or when a binary's
+output changed from one run to the next. Its working files (caches, about 200 MB per
 `scale` run, and a writable nixpkgs copy for the one-file scenario, kept
 for the next run) are under `~/.cache/iets-ci`. It deletes nothing there
 and warns once the directory passes 5 GB, so a nightly job should clear
@@ -43,10 +44,22 @@ it went on is the teardown column, and a finding names a candidate that
 leaves noticeably more of it than the baseline, since the next step of a
 CI job shares the machine with it. What still runs ten minutes after the
 exit is killed and the run is FAILED. Profiles set `IETS_WAIT_EXIT=1`,
-so they show the teardown inside the process. Every
-run's output is hashed line by line, in any order; a candidate that
-prints something else, say because it evaluates less, is `OUTPUT
-DIFFERS` instead of a timing verdict, with its times still in the row.
+so they show the teardown inside the process.
+
+Every run's output is hashed line by line, in any order, error lines and
+their text included. Only the numbers in an eval-jobs `stats` object are
+set aside: `wallMs` is time, and `allocBytes` counts the arena, which a
+change may move on purpose. Whether `stats` is there still counts, since
+nix-eval-jobs writes it and the default output must match Nix's
+([Trace a store path back to its source](../explanation/provenance.md)).
+A candidate that prints something else, say because it evaluates less, is
+`OUTPUT DIFFERS` instead of a timing verdict, with its times still in the
+row. Evaluation is deterministic by design
+([How iets evaluates](../explanation/evaluation.md#determinism)), so a
+binary whose own output changes from round to round is `NONDETERMINISTIC`,
+and fails even an A/A run; the row names which binary. The one-file
+scenario changes its input every round, so there only the two binaries of
+a round are compared.
 
 ## What it measures
 

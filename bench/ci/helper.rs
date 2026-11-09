@@ -425,18 +425,26 @@ fn kill_children() -> Vec<i32> {
     vec![]
 }
 
-/// An order-free hash of the lines read from `r`: the wrapping sum of a
-/// mixed FNV-1a per line, with the line and byte counts.
+/// An order-free hash of the lines read from `r`: the wrapping sum of a mixed FNV-1a per line,
+/// with the line and byte counts. The numbers in an eval-jobs `"stats":{...}` object count as
+/// `0`: `wallMs` is time and `allocBytes` the arena's bytes, which a change may move on purpose.
+/// That `stats` is there, and its keys, still count, as does every other byte: nix-eval-jobs
+/// writes `stats`, and the default output must match it.
 fn hash_lines(mut r: impl io::Read) -> (u64, u64, u64) {
+    const STATS: &[u8] = b"\"stats\":{";
     let (mut sum, mut lines, mut bytes) = (0u64, 0u64, 0u64);
     let mut h = 0xcbf29ce484222325u64;
     let mut buf = vec![0u8; 1 << 16];
     let mut partial = false;
+    // how much of STATS the line has just matched; inside the object; in
+    // a number that follows a `:` there
+    let (mut matched, mut in_stats, mut in_number) = (0usize, false, false);
     let mix = |mut z: u64| {
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         z ^ (z >> 31)
     };
+    let feed = |h: u64, b: u8| (h ^ b as u64).wrapping_mul(0x100000001b3);
     loop {
         let n = match r.read(&mut buf) {
             Ok(0) => break,
@@ -451,9 +459,35 @@ fn hash_lines(mut r: impl io::Read) -> (u64, u64, u64) {
                 lines += 1;
                 h = 0xcbf29ce484222325;
                 partial = false;
+                (matched, in_stats, in_number) = (0, false, false);
+                continue;
+            }
+            partial = true;
+            if in_stats {
+                if in_number && b.is_ascii_digit() {
+                    continue;
+                }
+                in_number = false;
+                h = feed(h, b);
+                match b {
+                    b':' => {
+                        h = feed(h, b'0');
+                        in_number = true;
+                    }
+                    b'}' => in_stats = false,
+                    _ => {}
+                }
+                continue;
+            }
+            h = feed(h, b);
+            // only the leading `"` of STATS recurs in it
+            matched = if b == STATS[matched] {
+                matched + 1
             } else {
-                h = (h ^ b as u64).wrapping_mul(0x100000001b3);
-                partial = true;
+                usize::from(b == b'"')
+            };
+            if matched == STATS.len() {
+                (matched, in_stats) = (0, true);
             }
         }
     }
@@ -845,4 +879,42 @@ fn evict(args: &[String]) {
 #[cfg(not(target_os = "linux"))]
 fn evict(_args: &[String]) {
     unsupported("evict")
+}
+
+// rustc --test --edition 2024 bench/ci/helper.rs
+#[cfg(test)]
+mod tests {
+    use super::hash_lines;
+
+    fn hash(s: &str) -> u64 {
+        hash_lines(s.as_bytes()).0
+    }
+
+    #[test]
+    fn the_order_of_lines_does_not_count() {
+        assert_eq!(hash("a\nb\n"), hash("b\na\n"));
+        assert_ne!(hash("a\nb\n"), hash("a\nc\n"));
+        // a last line without its newline is a line
+        assert_eq!(hash_lines("a\nb".as_bytes()), (hash("b\na\n"), 2, 3));
+    }
+
+    #[test]
+    fn only_the_numbers_in_stats_are_set_aside() {
+        let job = |stats: &str, drv: &str| format!(r#"{{"attr":"a","drvPath":"{drv}"{stats},"system":"x"}}"#);
+        let a = job(r#","stats":{"allocBytes":45452940,"wallMs":62}"#, "/s/1");
+        let b = job(r#","stats":{"allocBytes":1,"wallMs":7}"#, "/s/1");
+        assert_eq!(hash(&a), hash(&b));
+        // no stats, other keys in it, or another drvPath: different output
+        assert_ne!(hash(&a), hash(&job("", "/s/1")));
+        assert_ne!(hash(&a), hash(&job(r#","stats":{"wallMs":62}"#, "/s/1")));
+        assert_ne!(hash(&a), hash(&job(r#","stats":{"allocBytes":45452940,"wallMs":62}"#, "/s/2")));
+        // a number outside stats still counts, and so does an error's text
+        assert_ne!(hash(r#"{"n":1}"#), hash(r#"{"n":2}"#));
+        assert_ne!(
+            hash(r#"{"error":"error: a","stats":{"allocBytes":1,"wallMs":1}}"#),
+            hash(r#"{"error":"error: b","stats":{"allocBytes":1,"wallMs":1}}"#)
+        );
+        // a `"` just before the key still finds it
+        assert_eq!(hash(r#"{"x":"","stats":{"wallMs":1}}"#), hash(r#"{"x":"","stats":{"wallMs":2}}"#));
+    }
 }

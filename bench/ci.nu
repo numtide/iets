@@ -590,17 +590,24 @@ def summarize [sc: record, state: string, m: record, opts: record]: nothing -> r
   let eb = (evidence $base)
   let ec = (evidence $cand)
   let t = $opts.threshold / 100
-  # the same output from both in every round, or the times compare
-  # different work; output that differs in some rounds only is
-  # nondeterministic, not compared
+  # Output is deterministic by design, errors included
+  # (docs/explanation/evaluation.md), so a binary whose output changes from
+  # round to round has a bug. The edit scenario changes its input every
+  # round, so there only the two binaries of one round compare. Otherwise
+  # the same output from both, or the times compare different work.
+  let nondet = if $sc.cache == "edit" { [] } else {
+    [[role runs]; [baseline $base] [candidate $cand]] | where {|x| ($x.runs | get -o out_hash | uniq | length) > 1 } | get role
+  }
   let same = ($base | each {|b| $b.out_hash? == ($cand | where round == $b.round | get -o 0.out_hash?) })
-  let out = if ($same | all { $in }) { "same" } else if ($same | any { $in }) { "varies" } else { "differs" }
+  let out = if ($nondet | is-not-empty) { "nondeterministic" } else if ($same | all { $in }) { "same" } else { "differs" }
   # memory too needs its whole interval past the threshold, and 20 MB, so
   # one peak of a summed process tree cannot fail a run
   # cold-files with nothing read from disk was not cold (a file system
   # that ignores the page-cache advice): no result for that state
   let not_cold = $state == "cold-files" and ($eb.inblock_bytes < 1e6 or $ec.inblock_bytes < 1e6)
-  let verdict = if $out == "differs" and not $opts.expect_output_change {
+  let verdict = if $out == "nondeterministic" {
+    "NONDETERMINISTIC"
+  } else if $out == "differs" and not $opts.expect_output_change {
     "OUTPUT DIFFERS"
   } else if $not_cold {
     "n/a"
@@ -631,10 +638,11 @@ def summarize [sc: record, state: string, m: record, opts: record]: nothing -> r
     verdict: $verdict
     detail: ([
       (if $not_cold { $"not cold: the runs read (fmt-gb $eb.inblock_bytes) / (fmt-gb $ec.inblock_bytes) from disk after the eviction" })
+      (if $out == "nondeterministic" { $"the output of the ($nondet | str join ' and the ') changed from round to round \(($nondet | each {|r| $m.runs | where role == $r | get -o out_hash | uniq | length } | str join ' / ') different outputs\); the times are in the row" })
       (if $out == "differs" { $"the binaries printed different output: baseline ($base | get 0.out_lines) lines, candidate ($cand | get 0.out_lines) lines(if $opts.expect_output_change { ' (expected: --expect-output-change)' } else { '; the times are in the row' })" })
       (if ($base | get 0.cpus? | default "") != "" { $"CPUs ($base | get 0.cpus)" })
     ] | compact | str join "; ")
-    findings: ((checklist $state $eb $opts) ++ (checklist $state $ec $opts) ++ (teardown-finding $eb $ec) ++ (if $out == "varies" { ["the output differed between the binaries in some rounds only (nondeterministic output?): the outputs were not checked, the times still were"] } else { [] }) | uniq)
+    findings: ((checklist $state $eb $opts) ++ (checklist $state $ec $opts) ++ (teardown-finding $eb $ec) | uniq)
   }
 }
 
@@ -854,7 +862,7 @@ def main [
     "- change: median of the per-round ratios [distribution-free interval] and that interval's coverage"
     $"- before the run: ($pre.busy_cpus) CPUs busy, load ($pre.load)(if $pre.waited_s > 0 { $', after waiting ($pre.waited_s) s' } else { '' }); heaviest processes: ($pre.top | each {|t| $'($t.cmd) ($t.cpu)%' } | str join ', ')"
     "- foreign CPU: CPU seconds other user processes used during a run, per process from /proc plus short-lived ones from the machine total, the largest of all runs; each run also waits until nothing else is runnable before it starts"
-    "- output: every run's output is hashed; OUTPUT DIFFERS when the two binaries printed different output"
+    "- output: every run's output is hashed, the numbers in eval-jobs `stats` aside; NONDETERMINISTIC when a binary's own output changed from round to round, OUTPUT DIFFERS when the two binaries printed different output"
     "- teardown: how long what the binary left running went on after it exited (its CPU time is in CPU s); the next run starts after it, and a run whose leftovers still go on after ten minutes is killed and FAILED"
     "- busy CPUs: CPU time / wall; run-queue: time threads waited for a CPU / on-CPU time; huge pages: share of huge-page faults that got one, counted machine-wide (/proc/vmstat), which an idle machine makes this run's"
     ""
@@ -887,7 +895,8 @@ def main [
   print $md
   print $"results: ($out)"
   print $"work files left in ($work)"
-  let bad = ($rows | where verdict in [SLOWER "MORE MEMORY" OOM FAILED "OUTPUT DIFFERS"])
-  # an A/A run fails on a crash, not on a difference
-  if ($rows | where verdict == FAILED | is-not-empty) or (($bad | is-not-empty) and not $aa) { exit 1 }
+  let bad = ($rows | where verdict in [SLOWER "MORE MEMORY" OOM FAILED "OUTPUT DIFFERS" NONDETERMINISTIC])
+  # an A/A run fails on a crash or on output that changes from run to run,
+  # not on a difference
+  if ($rows | where verdict in [FAILED NONDETERMINISTIC] | is-not-empty) or (($bad | is-not-empty) and not $aa) { exit 1 }
 }

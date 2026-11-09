@@ -441,8 +441,7 @@ fn the_file_argument_keeps_one_entry(work: Work) {
     assert_eq!(k.why, format!("re-evaluating: {top} is gone"));
 }
 
-/// A flake's directory is the key, and flake.nix and flake.lock are read like
-/// any other file.
+/// A flake's directory is the key, and changes to its source tree invalidate it.
 #[rstest]
 fn a_flake_keeps_one_entry(work: Work) {
     let fd = work.s("flakecache");
@@ -463,7 +462,7 @@ fn a_flake_keeps_one_entry(work: Work) {
     assert_eq!(f.why, format!("re-evaluating: source tree {fl} changed"));
     assert_eq!(f.out, "42");
     work.write("fl/flake.lock", &LOCK.replace('\n', " \n"));
-    assert_eq!(ev().why, format!("re-evaluating: {fl}/flake.lock changed"));
+    assert_eq!(ev().why, format!("re-evaluating: source tree {fl} changed"));
     assert_eq!(entries(&work.path("flakecache/trace")), 1);
 
     // a `path:` flake's lastModified is the newest mtime of its tree

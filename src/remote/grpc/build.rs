@@ -303,24 +303,54 @@ fn upload_outcome<T>(
     }
 }
 
+/// The user's `timeout` and `max-silent-time`, in seconds. 0 is no limit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Limits {
+    pub build_timeout: u64,
+    pub max_silent_time: u64,
+}
+
 /// One derivation the farm must build, in the shape `BuildDerivation` wants.
 pub struct Job {
     pub drv_path: StorePath,
     pub drv: Derivation,
     pub input_srcs: BTreeSet<StorePath>,
     pub features: Vec<String>,
+    limits: Limits,
 }
 
 impl Job {
     /// The features the balancer routes on.
-    pub fn new(drv_path: StorePath, drv: Derivation, input_srcs: BTreeSet<StorePath>) -> Job {
+    pub fn new(
+        drv_path: StorePath,
+        drv: Derivation,
+        input_srcs: BTreeSet<StorePath>,
+        limits: Limits,
+    ) -> Job {
         let features = required_system_features(&drv);
         Job {
             drv_path,
             drv,
             input_srcs,
             features,
+            limits,
         }
+    }
+
+    fn request(&self, assign_id: u64) -> Result<proto::BuildDerivationRequest> {
+        let mut drv = Vec::new();
+        write_basic_derivation(&mut drv, &self.drv, &self.input_srcs)
+            .map_err(|e| Error::io("serialising a derivation", e))?;
+        Ok(proto::BuildDerivationRequest {
+            // `StorePath::to_string()` on the C++ side: the base name.
+            drv_path: self.drv_path.base_name().to_string(),
+            drv,
+            build_mode: 0,
+            protocol: BUILD_PROTOCOL,
+            assign_id,
+            build_timeout: self.limits.build_timeout,
+            max_silent_time: self.limits.max_silent_time,
+        })
     }
 
     /// build.cc:`fillWant`. `drv_path` is the base name, as C++
@@ -388,7 +418,7 @@ pub fn build(
     // fail the derivation with nothing attempted. Bounded like `Unplaceable`.
     let refuse_by = Instant::now() + sched.grace();
     loop {
-        let (worker, assign_id) = match sched.place(job.want())? {
+        let (worker, assign_id, system) = match sched.place(job.want())? {
             // 2 = AlreadyValid.
             Answer::Cached => {
                 return Ok((
@@ -399,7 +429,11 @@ pub fn build(
                     calls,
                 ));
             }
-            Answer::Assigned { worker, assign_id } => (worker, assign_id),
+            Answer::Assigned {
+                worker,
+                assign_id,
+                system,
+            } => (worker, assign_id, system),
         };
         if let Some(wait) = sched.health.refusal(&worker) {
             let left = refuse_by.saturating_duration_since(Instant::now());
@@ -413,7 +447,12 @@ pub fn build(
             thread::sleep(wait.min(left));
             continue;
         }
-        match build_derivation(c, job, &worker, assign_id, objects, tx, act, &mut calls)? {
+        let at = Placement {
+            worker: &worker,
+            assign_id,
+            system: &system,
+        };
+        match build_derivation(c, job, &at, objects, tx, act, &mut calls)? {
             Some(res) => {
                 sched.health.worked(&worker);
                 return Ok((res, calls));
@@ -443,37 +482,38 @@ fn reschedule_pause(n: u32) -> Duration {
     Duration::from_secs((1u64 << n.saturating_sub(1).min(5)).min(30))
 }
 
+/// Where the scheduler put a build.
+struct Placement<'a> {
+    worker: &'a str,
+    assign_id: u64,
+    /// The worker's native system; empty from an older scheduler.
+    system: &'a str,
+}
+
 /// build.cc:`buildAssigned`: `NOT_FOUND` means the worker lacks the `.drv`
 /// closure, so upload it and ask once more. `None` when the worker bounced
 /// the build and the scheduler must place it again.
-#[allow(clippy::too_many_arguments)]
 fn build_derivation(
     c: &Client,
     job: &Job,
-    worker: &str,
-    assign_id: u64,
+    at: &Placement,
     objects: &Objects,
     tx: &Sender<Event>,
     act: &Activity,
     calls: &mut usize,
 ) -> Result<Option<BuildResult>> {
-    let mut drv_bytes = Vec::new();
-    write_basic_derivation(&mut drv_bytes, &job.drv, &job.input_srcs)
-        .map_err(|e| Error::io("serialising a derivation", e))?;
-    let req = proto::BuildDerivationRequest {
-        // `StorePath::to_string()` on the C++ side: the base name.
-        drv_path: job.drv_path.base_name().to_string(),
-        drv: drv_bytes,
-        build_mode: 0,
-        protocol: BUILD_PROTOCOL,
-        assign_id,
+    let req = job.request(at.assign_id)?;
+    // build.cc:routingFor. The worker's own system beats the derivation's,
+    // which may be `builtin` or an extra platform only some workers offer.
+    let system = match at.system {
+        "" => job.drv.platform.clone(),
+        s => s.to_string(),
     };
-    // build.cc:routingFor.
     let mut headers = c.headers()?;
     headers.retain(|(k, _)| *k != "x-nix-system");
-    headers.push(("x-nix-system", job.drv.platform.clone()));
+    headers.push(("x-nix-system", system));
     headers.push(("x-nix-features", job.features.join(",")));
-    headers.push(("x-nix-worker", worker.to_string()));
+    headers.push(("x-nix-worker", at.worker.to_string()));
 
     *calls += 1;
     let mut r = try_build_derivation(c, &req, &headers, &job.drv_path, tx, act);
@@ -840,6 +880,18 @@ mod tests {
     use super::*;
 
     use crate::build::backend::tests::every_timing;
+
+    #[test]
+    fn the_request_carries_the_build_limits() {
+        let drv_path = StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x.drv").unwrap();
+        let limits = Limits {
+            build_timeout: 600,
+            max_silent_time: 60,
+        };
+        let job = Job::new(drv_path, Derivation::default(), BTreeSet::new(), limits);
+        let req = job.request(7).unwrap();
+        assert_eq!((req.build_timeout, req.max_silent_time), (600, 60));
+    }
 
     #[test]
     fn the_timings_report_with_every_line() {

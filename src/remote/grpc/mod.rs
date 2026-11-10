@@ -9,7 +9,8 @@ pub mod drvwire;
 pub mod health;
 pub mod sched;
 
-#[allow(clippy::all, clippy::pedantic)]
+// generated: its doc comments are the vendored proto's, `<hash>` and all
+#[allow(clippy::all, clippy::pedantic, rustdoc::all)]
 pub mod proto {
     tonic::include_proto!("nix.remote");
 }

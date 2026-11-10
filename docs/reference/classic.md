@@ -446,7 +446,8 @@ A name falls back in these cases:
    work starts. A setting counts when it is a Nix client setting that iets
    has nothing for, with a value that is not Nix's default
    (`docs/reference/settings.md`, class 4). So does
-   `nix-instantiate --store` with a store other than the local daemon.
+   `nix-instantiate --store` with a store other than the local daemon,
+   or writable evaluation with a nonlocal configured store.
 2. **An evaluation that calls something iets does not support:**
    - `fetchMercurial`, and `fetchClosure` with `toPath`;
    - `fetchGit` of an SCP-like URL (`user@host:path`) without a `rev` in
@@ -456,9 +457,9 @@ A name falls back in these cases:
      `github`, `gitlab`, `sourcehut`, `git` or `tarball`, or without
      a `narHash` for a type other than `path`, or, in pure evaluation,
      without a `rev` for a type other than `path` and `tarball`;
-   - `getFlake` on anything but a local path, or in pure evaluation on a
-     reference with a `rev`, or with a `narHash` and more than `path:`.
-     `path:DIR?narHash=H` evaluates when the tree's NAR hash is `H`;
+   - `getFlake` on anything but a local path or local SCM reference.
+     Pure evaluation needs a matching `narHash` for a path or a locked SCM revision,
+     and local SCM sources outside the native allow list also fall back.
    - a flake reference iets does not parse (`hg+…`, `sourcehut:`, an
      IP-literal host; `docs/reference/divergences.md`);
    - `getContext` on the output of a dynamic derivation;

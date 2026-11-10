@@ -3,8 +3,9 @@
 //! `Heap` of the session drops. Thus it is sound for cells to share any
 //! part of the graph with no further check.
 
-use std::sync::Arc;
-use std::{process, ptr, slice};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::{process, ptr, slice, thread};
 
 #[cfg(feature = "stats2")]
 use super::census::Census;
@@ -17,6 +18,94 @@ use crate::syntax::symbol::{FxHashMap, FxHashSet};
 use crate::sys::{self, vm};
 
 const CHUNK: usize = 32 << 20;
+
+/// Full chunks a helper thread keeps mapped and populated ahead of the
+/// arenas: 128 MB. Depths of 8 and 16 were no faster on whole nixpkgs.
+const STOCK: usize = 4;
+
+/// The most workers the stock serves. One helper behind more workers costs
+/// wall time: eval-jobs on whole nixpkgs in one process at 32 workers took
+/// 4.47 s to its result with the stock against 4.10 s without.
+const STOCK_MAX_WORKERS: usize = 8;
+
+/// Whether full chunks come from the stock, set for each run by
+/// `use_stock_for`. Off until a run says otherwise, so the allocations made
+/// before a run with many workers do not start the helper.
+static USE_STOCK: AtomicBool = AtomicBool::new(false);
+
+/// Sets whether the arenas of a run with `workers` workers take their full
+/// chunks from the stock.
+pub(crate) fn use_stock_for(workers: usize) {
+    USE_STOCK.store(workers <= STOCK_MAX_WORKERS, Ordering::Relaxed);
+}
+
+/// Chunks populated off the evaluation threads, when huge pages are scarce. A 4 KB fault costs
+/// more in entering the kernel, finding the VMA and charging the cgroup than in zeroing;
+/// `MADV_POPULATE_WRITE` pays that once per chunk. On the worker that needs the chunk, the workers
+/// took turns in the kernel and lost at 8; one helper thread does it ahead of them. Whole nixpkgs
+/// with huge pages off: 15% faster at one worker, 5% at eight; with them it saves nothing, and at
+/// 32 workers it is slower (`STOCK_MAX_WORKERS`). Chunks in stock belong to no session until an
+/// arena takes one; the stock is process-wide.
+struct Stock {
+    ready: Mutex<Vec<usize>>,
+    low: Condvar,
+}
+
+impl Stock {
+    /// The stock, its helper started on first use. `None` off Linux, which
+    /// cannot populate a range in one call, or when the thread cannot start.
+    fn get() -> Option<&'static Stock> {
+        static STOCK_: OnceLock<Option<&'static Stock>> = OnceLock::new();
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        *STOCK_.get_or_init(|| {
+            let s: &'static Stock = Box::leak(Box::new(Stock {
+                ready: Mutex::new(Vec::with_capacity(STOCK)),
+                low: Condvar::new(),
+            }));
+            thread::Builder::new()
+                .name("iets-prefault".into())
+                .spawn(move || s.fill())
+                .ok()?;
+            Some(s)
+        })
+    }
+
+    /// The helper's loop. A kernel before 5.14 refuses the advice: the
+    /// chunk goes out unpopulated and the helper stops, so arenas map their
+    /// own chunks as before. A chunk it cannot map ends it too: nobody asked
+    /// for that chunk yet, and the arena that does maps its own and reports
+    /// the failure.
+    fn fill(&self) {
+        loop {
+            let mut g = self.ready.lock().unwrap();
+            while g.len() >= STOCK {
+                g = self.low.wait(g).unwrap();
+            }
+            drop(g);
+            let Ok(p) = vm::map(CHUNK, false) else {
+                return;
+            };
+            // SAFETY: an anonymous mapping of the helper's own; the advice
+            // only changes how its pages are backed.
+            unsafe { sys::advise_huge(p.cast(), CHUNK) };
+            // SAFETY: the chunk was just mapped and nothing else knows it.
+            let populated = unsafe { sys::populate(p.cast(), CHUNK) };
+            self.ready.lock().unwrap().push(p as usize);
+            if populated.is_none() {
+                return;
+            }
+        }
+    }
+
+    /// A populated chunk, or `None` when the helper is behind.
+    fn take(&self) -> Option<usize> {
+        let p = self.ready.lock().unwrap().pop();
+        self.low.notify_one();
+        p
+    }
+}
 
 fn map_chunk(chunk: usize) -> usize {
     // SAFETY: the advice only changes how the chunk's own pages are backed.
@@ -193,9 +282,22 @@ impl Arena {
     #[cold]
     fn alloc_slow(&mut self, size: usize, align: usize) -> *mut u8 {
         let chunk = CHUNK.max((size + align + CHUNK - 1) & !(CHUNK - 1));
-        // Anonymous mmap, its pages faulted in as they are touched. The
-        // chunk goes with the session's heap.
-        let base = map_chunk(chunk) as *mut u8;
+        // A populated chunk from the stock, or an anonymous mmap whose pages
+        // fault in as they are touched. The chunk goes with the session's
+        // heap. An arena's first chunk is its own: most arenas never fill
+        // one, and a small evaluation then neither starts the helper nor
+        // holds 32 MB populated per worker. With huge pages to be had, a
+        // chunk faults in 2 MB at a time and the helper only costs memory.
+        let stocked = if chunk == CHUNK
+            && !self.ptr.is_null()
+            && USE_STOCK.load(Ordering::Relaxed)
+            && sys::huge_pages_scarce()
+        {
+            Stock::get().and_then(Stock::take)
+        } else {
+            None
+        };
+        let base = stocked.unwrap_or_else(|| map_chunk(chunk)) as *mut u8;
         self.heap
             .get_or_insert_with(|| Session::current().heap.clone())
             .adopt(base as usize, chunk);

@@ -64,6 +64,22 @@ fn huge() -> bool {
     false
 }
 
+/// Whether this process gets no huge pages: the gate closed (the kernel
+/// failed to fill them), or transparent huge pages are off for the machine
+/// (`never`) or for this process (`PR_SET_THP_DISABLE`, as some service
+/// managers and containers set). Then every page is a 4 KB fault.
+pub fn huge_pages_scarce() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    HUGE_CLOSED.load(Ordering::Relaxed)
+        || *OFF.get_or_init(|| {
+            // SAFETY: reads this process's flag, nothing else.
+            let process = unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) } == 1;
+            process
+                || fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
+                    .is_ok_and(|s| s.contains("[never]"))
+        })
+}
+
 /// A read older than the base, by a worker that lost the race to set it,
 /// counts as no failures.
 fn gate_closes(base: u64, n: u64) -> bool {
@@ -108,14 +124,29 @@ fn unadvise_allocator() {
 }
 
 /// Advises `[p, p + len)` to be huge pages while the kernel can fill them.
-/// The pages fault in on first touch: populating the range up front
-/// (`MADV_POPULATE_WRITE`) made the workers take turns in the kernel.
+/// A worker never populates its own chunk: `MADV_POPULATE_WRITE` there made
+/// the workers take turns in the kernel. Full arena chunks are populated by
+/// a helper thread instead (`runtime::arena`).
 ///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.
 pub unsafe fn advise_huge(p: *mut u8, len: usize) {
     if huge() {
         let _ = unsafe { madvise(p.cast(), len, Advice::LinuxHugepage) };
+    }
+}
+
+/// Faults `[p, p + len)` in now, zeroed, in one syscall (`MADV_POPULATE_WRITE`, Linux 5.14):
+/// `Some(true)` when it did, `Some(false)` when it stopped part way (memory pressure, a signal),
+/// `None` when the kernel has no such advice. Pages it did not fault in fault in on touch.
+///
+/// # Safety
+/// The range is an anonymous mapping of the caller's.
+pub unsafe fn populate(p: *mut u8, len: usize) -> Option<bool> {
+    match unsafe { madvise(p.cast(), len, Advice::LinuxPopulateWrite) } {
+        Ok(()) => Some(true),
+        Err(Errno::INVAL) => None,
+        Err(_) => Some(false),
     }
 }
 

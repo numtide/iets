@@ -99,6 +99,14 @@ and each `Evaluator` made in the session. A `parallel::try_run` holds the
 session only until it returns. The fallback session lives as long as the
 process.
 
+On Linux, when the process gets no huge pages (the kernel failed to fill
+them, or transparent huge pages are off for the machine or the process), one
+thread keeps up to four 32 MB chunks mapped and faulted in ahead of the
+arenas, for runs of up to 8 workers. It starts when an arena
+fills its first chunk, and the chunks it holds belong to no session: up to
+128 MB stays resident after every session is gone, as long as the process
+lives.
+
 A `Value<'e>` borrows its evaluator, so the compiler stops you from keeping
 one too long. A `runtime::Word` from `api::evaluate`, and an error that
 carries one, are plain data: keep them only while the session lives. If you

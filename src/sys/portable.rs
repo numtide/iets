@@ -39,6 +39,20 @@ pub fn futex_wake(_word: &AtomicU32, n: u32) {
 /// The range is an anonymous mapping of the caller's.
 pub unsafe fn advise_huge(_p: *mut u8, _len: usize) {}
 
+/// Linux only: faulting a range in with one syscall. Elsewhere the pages
+/// fault in on touch.
+///
+/// # Safety
+/// The range is an anonymous mapping of the caller's.
+pub unsafe fn populate(_p: *mut u8, _len: usize) -> Option<bool> {
+    None
+}
+
+/// Linux only: elsewhere there is no prefault helper to switch on.
+pub fn huge_pages_scarce() -> bool {
+    false
+}
+
 /// Linux only: the mapping of the allocator's first arena.
 pub fn note_allocator_arena(_p: *const u8) {}
 

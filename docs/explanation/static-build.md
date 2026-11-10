@@ -20,7 +20,7 @@ slower than the glibc build, and 79% slower on server w4 (the nixos-server
 workload at four workers; `w1` is one worker).
 
 The table times each allocator with hyperfine (1 warmup, 5 runs, median) on
-the `bench/ab.nu` workloads, on an idle Ryzen 9 7950X3D pinned to cores 0–7.
+the `ab` example's workloads, on an idle Ryzen 9 7950X3D pinned to cores 0–7.
 The baseline is glibc's malloc.
 
 | variant | server w1 | server w4 | minimal w1 | outpaths 0/8 w1 | outpaths 0/8 w4 |

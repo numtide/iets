@@ -144,10 +144,11 @@ pub fn parse_flake_ref(arg: &str, cwd: &[u8], home: Option<&[u8]>) -> Result<Fla
     Ok(fr)
 }
 
-/// `git+file:///path[?ref=…&rev=…][&dir=…]`: the flake in `dir` of that
-/// tree. With a `rev` the source is that revision, read out of the
+/// `git+file:///path[?ref=…&rev=…][&shallow=1][&dir=…]`: the flake in `dir`
+/// of that tree. With a `rev` the source is that revision, read out of the
 /// repository; without one it is the working tree, as Nix reads it. A `ref`
-/// beside a `rev` is advisory, as it is for Nix: the rev names the tree. The
+/// beside a `rev` is advisory, as it is for Nix: the rev names the tree.
+/// `shallow=1` beside a `rev` drops `revCount`, so a shallow clone works. The
 /// `flake.lock` is the checked-out one either way
 /// (docs/reference/divergences.md).
 fn scm_flake(
@@ -156,7 +157,7 @@ fn scm_flake(
     loc: &str,
     attr: Vec<String>,
 ) -> Result<FlakeRef> {
-    const KNOWN: [&str; 4] = ["type", "url", "ref", "rev"];
+    const KNOWN: [&str; 5] = ["type", "url", "ref", "rev", "shallow"];
     if let Some(k) = p.input.keys().find(|k| !KNOWN.contains(&k.as_str())) {
         return Err(Error::Unsupported(format!(
             "'{k}' in flake reference '{loc}' is not supported"
@@ -173,10 +174,12 @@ fn scm_flake(
     let dir = root.join(&p.dir);
     let mut fr = local_flake(&sys::path_to_internal(&dir), false, attr)?;
     let Some(rev) = source::str_attr(&p.input, "rev") else {
-        if p.input.contains_key("ref") {
+        if let Some(k) = ["ref", "shallow"]
+            .into_iter()
+            .find(|k| p.input.contains_key(*k))
+        {
             return Err(Error::Unsupported(format!(
-                "flake reference '{loc}' names a '{}' but no 'rev'; iets resolves no reference of a root flake, so name the rev or the directory",
-                scm.name()
+                "flake reference '{loc}' names a '{k}' but no 'rev'; iets resolves no reference of a root flake, so name the rev or the directory"
             )));
         }
         return Ok(fr);
@@ -191,6 +194,7 @@ fn scm_flake(
         root,
         rev: rev.to_string(),
         subdir: p.dir.clone(),
+        shallow: source::bool_attr(&p.input, "shallow").unwrap_or(false),
     };
     fr.probed = false;
     Ok(fr)
@@ -780,6 +784,7 @@ mod tests {
                 root: d.clone(),
                 rev: rev.clone(),
                 subdir: String::new(),
+                shallow: false,
             }
         );
 
@@ -793,6 +798,7 @@ mod tests {
                 root: d.clone(),
                 rev,
                 subdir: "sub".to_string(),
+                shallow: false,
             }
         );
 
@@ -812,6 +818,7 @@ mod tests {
             other => panic!("{r}: {other:?}"),
         };
         assert!(unsupported(&format!("{url}?ref=main")).contains("no 'rev'"));
+        assert!(unsupported(&format!("{url}?shallow=1")).contains("no 'rev'"));
         assert!(unsupported(&format!("{url}?submodules=1")).contains("'submodules'"));
         assert!(unsupported("git+https://x.org/a").contains("only local paths"));
 

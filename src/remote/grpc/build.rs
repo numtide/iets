@@ -388,7 +388,7 @@ pub fn build(
     // fail the derivation with nothing attempted. Bounded like `Unplaceable`.
     let refuse_by = Instant::now() + sched.grace();
     loop {
-        let (worker, assign_id) = match sched.place(job.want())? {
+        let (worker, assign_id, system) = match sched.place(job.want())? {
             // 2 = AlreadyValid.
             Answer::Cached => {
                 return Ok((
@@ -399,7 +399,11 @@ pub fn build(
                     calls,
                 ));
             }
-            Answer::Assigned { worker, assign_id } => (worker, assign_id),
+            Answer::Assigned {
+                worker,
+                assign_id,
+                system,
+            } => (worker, assign_id, system),
         };
         if let Some(wait) = sched.health.refusal(&worker) {
             let left = refuse_by.saturating_duration_since(Instant::now());
@@ -413,7 +417,12 @@ pub fn build(
             thread::sleep(wait.min(left));
             continue;
         }
-        match build_derivation(c, job, &worker, assign_id, objects, tx, act, &mut calls)? {
+        let at = Placement {
+            worker: &worker,
+            assign_id,
+            system: &system,
+        };
+        match build_derivation(c, job, &at, objects, tx, act, &mut calls)? {
             Some(res) => {
                 sched.health.worked(&worker);
                 return Ok((res, calls));
@@ -443,15 +452,21 @@ fn reschedule_pause(n: u32) -> Duration {
     Duration::from_secs((1u64 << n.saturating_sub(1).min(5)).min(30))
 }
 
+/// Where the scheduler put a build.
+struct Placement<'a> {
+    worker: &'a str,
+    assign_id: u64,
+    /// The worker's native system; empty from an older scheduler.
+    system: &'a str,
+}
+
 /// build.cc:`buildAssigned`: `NOT_FOUND` means the worker lacks the `.drv`
 /// closure, so upload it and ask once more. `None` when the worker bounced
 /// the build and the scheduler must place it again.
-#[allow(clippy::too_many_arguments)]
 fn build_derivation(
     c: &Client,
     job: &Job,
-    worker: &str,
-    assign_id: u64,
+    at: &Placement,
     objects: &Objects,
     tx: &Sender<Event>,
     act: &Activity,
@@ -466,14 +481,22 @@ fn build_derivation(
         drv: drv_bytes,
         build_mode: 0,
         protocol: BUILD_PROTOCOL,
-        assign_id,
+        assign_id: at.assign_id,
+        // 0 is no limit, what this client has always asked for
+        build_timeout: 0,
+        max_silent_time: 0,
     };
-    // build.cc:routingFor.
+    // build.cc:routingFor. The worker's own system beats the derivation's,
+    // which may be `builtin` or an extra platform only some workers offer.
+    let system = match at.system {
+        "" => job.drv.platform.clone(),
+        s => s.to_string(),
+    };
     let mut headers = c.headers()?;
     headers.retain(|(k, _)| *k != "x-nix-system");
-    headers.push(("x-nix-system", job.drv.platform.clone()));
+    headers.push(("x-nix-system", system));
     headers.push(("x-nix-features", job.features.join(",")));
-    headers.push(("x-nix-worker", worker.to_string()));
+    headers.push(("x-nix-worker", at.worker.to_string()));
 
     *calls += 1;
     let mut r = try_build_derivation(c, &req, &headers, &job.drv_path, tx, act);

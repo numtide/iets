@@ -26,7 +26,12 @@ use super::proto::scheduler_client::SchedulerClient;
 use super::{Client, GrpcConfig, Headers, c_request, first_line, proto};
 
 pub enum Answer {
-    Assigned { worker: String, assign_id: u64 },
+    Assigned {
+        worker: String,
+        assign_id: u64,
+        /// The worker's native system, empty from an older scheduler.
+        system: String,
+    },
     Cached,
 }
 
@@ -70,7 +75,8 @@ impl Sched {
 
     /// Sends `want` and waits for the scheduler's answer. `Unplaceable` is
     /// advisory: the `Want` stays queued, and fails only once `restart-grace`
-    /// passes without an `Assigned`.
+    /// passes without an `Assigned`. `Placeable` says a capable worker is
+    /// back, so the wait starts over (executor.hh:onPlaceable).
     pub fn place(&self, want: proto::Want) -> Result<Answer> {
         let drv = want.drv_path.clone();
         let (tx, rx) = mpsc::channel();
@@ -103,6 +109,7 @@ impl Sched {
                     return Ok(Answer::Assigned {
                         worker: a.worker_addr,
                         assign_id: a.assign_id,
+                        system: a.worker_system,
                     });
                 }
                 Some(Msg::Cached(_)) => return Ok(Answer::Cached),
@@ -117,6 +124,7 @@ impl Sched {
                     }
                     reason = why;
                 }
+                Some(Msg::Placeable(_)) => deadline = None,
                 Some(_) => {}
                 None => {
                     let s = lock(&self.state);
@@ -247,8 +255,9 @@ async fn stream(
                 Msg::Assigned(a) => a.drv_path.clone(),
                 Msg::Cached(c) => c.drv_path.clone(),
                 Msg::Unplaceable(u) => u.drv_path.clone(),
+                Msg::Placeable(p) => p.drv_path.clone(),
             };
-            let settled = !matches!(msg, Msg::Unplaceable(_));
+            let settled = !matches!(msg, Msg::Unplaceable(_) | Msg::Placeable(_));
             if let Some((_, tx)) = s.open.get(&drv) {
                 let _ = tx.send(msg);
                 if settled {

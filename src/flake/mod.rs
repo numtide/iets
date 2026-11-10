@@ -44,10 +44,15 @@ pub struct FlakeRef {
 }
 
 /// A command-line input that names a flake rather than a `.nix` file: it
-/// has a `#`, a `path:` prefix, or is a directory with `flake.nix` and no
-/// `default.nix`.
+/// has a `#`, a `path:` prefix, the `file:` URL of a checkout an SCM names
+/// (`git+file:`), or is a directory with `flake.nix` and no `default.nix`.
 pub fn is_flake_ref(arg: &str) -> bool {
     if arg.contains('#') || arg.starts_with("path:") {
+        return true;
+    }
+    if let Some((scm, _)) = arg.split_once("+file:")
+        && source::scm::named(scm).is_some()
+    {
         return true;
     }
     let p = Path::new(arg);
@@ -762,6 +767,9 @@ mod tests {
 
         assert!(is_flake_ref(&format!("{}/sub", d.display())));
         assert!(!is_flake_ref("x.nix"));
+        // a pinned checkout, as CI names it, needs no `#`
+        assert!(is_flake_ref("git+file:///repo?ref=HEAD&rev=0&shallow=1"));
+        assert!(!is_flake_ref("hg+file:///repo"));
     }
 
     #[rstest]

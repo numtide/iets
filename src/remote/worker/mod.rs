@@ -43,6 +43,9 @@ pub struct Options {
     pub try_fallback: bool,
     /// `max-silent-time` in seconds; `0` is no limit.
     pub max_silent_time: u64,
+    /// `timeout` in seconds; `0` is no limit. The daemon gets it with the
+    /// overrides, a gRPC build with the request.
+    pub build_timeout: u64,
     /// The override map: `Config::forwarded`.
     pub overrides: Vec<(String, String)>,
 }
@@ -57,6 +60,7 @@ impl Default for Options {
             substitutes: true,
             try_fallback: false,
             max_silent_time: 0,
+            build_timeout: 0,
             overrides: Vec::new(),
         }
     }
@@ -74,6 +78,7 @@ impl TryFrom<&Config> for Options {
             substitutes: c.bool("substitute")?.unwrap_or(true),
             try_fallback: c.bool("fallback")?.unwrap_or(false),
             max_silent_time: c.int("max-silent-time")?.unwrap_or(0),
+            build_timeout: c.int("timeout")?.unwrap_or(0),
             overrides: c.forwarded(),
         })
     }

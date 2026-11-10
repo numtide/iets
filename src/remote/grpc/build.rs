@@ -303,24 +303,54 @@ fn upload_outcome<T>(
     }
 }
 
+/// The user's `timeout` and `max-silent-time`, in seconds. 0 is no limit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Limits {
+    pub build_timeout: u64,
+    pub max_silent_time: u64,
+}
+
 /// One derivation the farm must build, in the shape `BuildDerivation` wants.
 pub struct Job {
     pub drv_path: StorePath,
     pub drv: Derivation,
     pub input_srcs: BTreeSet<StorePath>,
     pub features: Vec<String>,
+    limits: Limits,
 }
 
 impl Job {
     /// The features the balancer routes on.
-    pub fn new(drv_path: StorePath, drv: Derivation, input_srcs: BTreeSet<StorePath>) -> Job {
+    pub fn new(
+        drv_path: StorePath,
+        drv: Derivation,
+        input_srcs: BTreeSet<StorePath>,
+        limits: Limits,
+    ) -> Job {
         let features = required_system_features(&drv);
         Job {
             drv_path,
             drv,
             input_srcs,
             features,
+            limits,
         }
+    }
+
+    fn request(&self, assign_id: u64) -> Result<proto::BuildDerivationRequest> {
+        let mut drv = Vec::new();
+        write_basic_derivation(&mut drv, &self.drv, &self.input_srcs)
+            .map_err(|e| Error::io("serialising a derivation", e))?;
+        Ok(proto::BuildDerivationRequest {
+            // `StorePath::to_string()` on the C++ side: the base name.
+            drv_path: self.drv_path.base_name().to_string(),
+            drv,
+            build_mode: 0,
+            protocol: BUILD_PROTOCOL,
+            assign_id,
+            build_timeout: self.limits.build_timeout,
+            max_silent_time: self.limits.max_silent_time,
+        })
     }
 
     /// build.cc:`fillWant`. `drv_path` is the base name, as C++
@@ -472,20 +502,7 @@ fn build_derivation(
     act: &Activity,
     calls: &mut usize,
 ) -> Result<Option<BuildResult>> {
-    let mut drv_bytes = Vec::new();
-    write_basic_derivation(&mut drv_bytes, &job.drv, &job.input_srcs)
-        .map_err(|e| Error::io("serialising a derivation", e))?;
-    let req = proto::BuildDerivationRequest {
-        // `StorePath::to_string()` on the C++ side: the base name.
-        drv_path: job.drv_path.base_name().to_string(),
-        drv: drv_bytes,
-        build_mode: 0,
-        protocol: BUILD_PROTOCOL,
-        assign_id: at.assign_id,
-        // 0 is no limit, what this client has always asked for
-        build_timeout: 0,
-        max_silent_time: 0,
-    };
+    let req = job.request(at.assign_id)?;
     // build.cc:routingFor. The worker's own system beats the derivation's,
     // which may be `builtin` or an extra platform only some workers offer.
     let system = match at.system {
@@ -863,6 +880,18 @@ mod tests {
     use super::*;
 
     use crate::build::backend::tests::every_timing;
+
+    #[test]
+    fn the_request_carries_the_build_limits() {
+        let drv_path = StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x.drv").unwrap();
+        let limits = Limits {
+            build_timeout: 600,
+            max_silent_time: 60,
+        };
+        let job = Job::new(drv_path, Derivation::default(), BTreeSet::new(), limits);
+        let req = job.request(7).unwrap();
+        assert_eq!((req.build_timeout, req.max_silent_time), (600, 60));
+    }
 
     #[test]
     fn the_timings_report_with_every_line() {

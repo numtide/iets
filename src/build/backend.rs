@@ -23,6 +23,7 @@ use crate::remote::closure;
 use crate::remote::copy::{self, Copying};
 use crate::remote::event::Event;
 use crate::remote::grpc::backend::Grpc;
+use crate::remote::grpc::build::Limits;
 use crate::remote::plan::{self, Object, Plan};
 use crate::remote::worker::wire::{self, write_object};
 use crate::remote::worker::{Connection, Missing, Options, Stats, Transport, default_socket};
@@ -209,7 +210,11 @@ pub fn open(
     on_event: &mut dyn FnMut(Event),
 ) -> Result<Box<dyn Backend>> {
     if let Transport::Grpc(cfg) = transport {
-        return Ok(Box::new(Grpc::open(cfg)?));
+        let limits = Limits {
+            build_timeout: options.build_timeout,
+            max_silent_time: options.max_silent_time,
+        };
+        return Ok(Box::new(Grpc::open(cfg, limits)?));
     }
     Ok(Box::new(Worker::open(transport, options, on_event)?))
 }

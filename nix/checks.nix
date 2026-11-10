@@ -15,6 +15,8 @@ in
     nativeCheckInputs = [ git nix openssh ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
     # no e2e test may skip for want of nix-daemon
     IETS_TEST_E2E = "1";
+    # nextest runs no example's tests by default, and examples/ab.rs has some
+    cargoNextestExtraArgs = "--lib --bins --tests --examples";
     # cargo would create /homeless-shelter, and then that daemon refuses to
     # build without a sandbox
     postUnpack = "export HOME=$(mktemp -d)";

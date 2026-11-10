@@ -6,7 +6,8 @@
 # GNU time's %e has 10 ms steps, so wall comes from the clock.
 def run-once [bin: string, args: list<string>]: nothing -> record {
   let t0 = (date now)
-  let r = (^time -f "TIME %U %S %M" $bin ...$args | complete)
+  # IETS_WAIT_EXIT: one process, so time sees the evaluation's CPU and memory
+  let r = (with-env {IETS_WAIT_EXIT: "1"} { ^time -f "TIME %U %S %M" $bin ...$args | complete })
   let wall = (((date now) - $t0) | into int) / 1e9
   if $r.exit_code != 0 {
     error make {msg: $"($bin) ($args | str join ' ') exited ($r.exit_code):\n($r.stderr | lines | last 5 | str join "\n")"}

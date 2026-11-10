@@ -6,8 +6,16 @@ mod hermetic;
 use hermetic::{Iets, bin, stderr, stdout};
 
 use rstest::rstest;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::process::{Command, Output};
+#[cfg(target_os = "linux")]
+use std::thread;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 use std::{env, fs};
 use tempfile::tempdir;
 
@@ -419,6 +427,47 @@ fn a_full_stdout_is_an_error(bin: Iets, #[case] args: &[&str]) {
     assert_eq!(o.status.code(), Some(1));
     let err = stderr(&o);
     assert!(err.contains("No space left on device"), "{err}");
+}
+
+/// The forked parent passes on a child that ends without a note, here by a
+/// signal sent to the child alone, even when it was started with SIGCHLD
+/// ignored, which would have the kernel reap the child behind its back.
+#[cfg(target_os = "linux")]
+#[rstest]
+fn a_detached_child_killed_alone_kills_its_parent_with_sigchld_ignored(bin: Iets) {
+    let mut c = bin.cmd();
+    // runs until killed
+    let forever = "builtins.length (builtins.genericClosure { startSet = [ { key = 0; } ]; \
+                   operator = x: [ { key = x.key + 1; } ]; })";
+    c.args(["eval", "--expr", forever])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: signal(2) is async-signal-safe.
+    unsafe {
+        c.pre_exec(|| {
+            libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let mut p = c.spawn().unwrap();
+    let children = format!("/proc/{0}/task/{0}/children", p.id());
+    let start = Instant::now();
+    let child = loop {
+        let s = fs::read_to_string(&children).unwrap_or_default();
+        if let Some(pid) = s.split_whitespace().next() {
+            break pid.parse::<i32>().unwrap();
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            p.kill().unwrap();
+            panic!("no forked child: {:?}", p.wait());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    // SAFETY: a signal to the child iets forked, still evaluating.
+    assert_eq!(unsafe { libc::kill(child, libc::SIGKILL) }, 0);
+    let st = p.wait().unwrap();
+    assert_eq!(st.signal(), Some(libc::SIGKILL), "{st:?}");
 }
 
 #[rstest]

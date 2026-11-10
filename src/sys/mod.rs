@@ -45,7 +45,8 @@ pub use ffi::{
     OsStrExt, OsStringExt, anchor_len, from_native, path_from_internal, path_to_internal,
 };
 pub use imp::{
-    advise_huge, beneath, discard, futex_wait, futex_wake, note_allocator_arena, start_writeback,
+    ExitNote, advise_huge, beneath, detach_exit, discard, futex_wait, futex_wake,
+    note_allocator_arena, start_writeback,
 };
 pub use vm::resident;
 

@@ -52,14 +52,15 @@ struct BuildArgs {
 /// build that fails on its hash gets it fixed per the `fix-hashes` setting.
 pub fn cmd_build(argv: &[String]) -> i32 {
     let mut ask = match Session::current().settings().fix_hashes {
-        FixHashes::Never => return build_once(argv),
-        FixHashes::Ask if !fixhash::interactive() => return build_once(argv),
+        FixHashes::Never => return build_once(argv, true),
+        FixHashes::Ask if !fixhash::interactive() => return build_once(argv, true),
         FixHashes::Ask => true,
         FixHashes::Always => false,
     };
     let mut wrote: Vec<String> = Vec::new();
     loop {
-        let code = build_once(argv);
+        // a fixed hash builds again, so this run frees what it built
+        let code = build_once(argv, false);
         let mismatches = log::take_mismatches();
         if code == 0 || mismatches.is_empty() {
             return code;
@@ -198,7 +199,9 @@ fn local_files(argv: &[String]) -> Vec<PathBuf> {
     })
 }
 
-fn build_once(argv: &[String]) -> i32 {
+/// One evaluation and build. `last`: the process exits after it, so the
+/// run leaves its tables to the exit (`Run::last`).
+fn build_once(argv: &[String], last: bool) -> i32 {
     let (b, a) = parse(argv);
     if a.more.is_empty()
         && let Some(Input::File(f)) = &a.input
@@ -257,6 +260,7 @@ fn build_once(argv: &[String]) -> i32 {
         return code;
     }
     // parallel: eval and build run as the main fiber
+    let run = if last { run.last() } else { run };
     cli::run_parallel(run, move |ev, cache| build_eval(ev, &b, all, t0, cache))
 }
 

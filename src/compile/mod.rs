@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod ir;
+mod show;
 
 use crate::eval::{Error, ErrorKind, Pos};
 use crate::lint::{self, Level, LintId};
@@ -463,11 +464,19 @@ impl<'a> Compiler<'a> {
                 else_: self.expr(*else_)?,
                 pos: self.pos(*cond),
             },
-            Expr::Assert { cond, body } => Ir::Assert {
-                cond: self.expr(*cond)?,
-                body: self.expr(*body)?,
-                pos,
-            },
+            Expr::Assert { cond, body } => {
+                // eval.cc names a failed condition by `Expr::show`
+                let text = self.show(*cond);
+                Ir::Assert {
+                    cond: self.expr(*cond)?,
+                    body: self.expr(*body)?,
+                    pos,
+                    text: {
+                        let t: &'static [u8] = self.arena.alloc_slice(&text);
+                        self.alloc(t)
+                    },
+                }
+            }
             Expr::Unary { op, expr } => {
                 let e = self.expr(*expr)?;
                 match op {

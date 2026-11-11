@@ -649,7 +649,11 @@ line from a worker process has `stats` too.
 ### Instantiation
 
 iets puts each job's `.drv` and its input closure into the store through
-the daemon, in batches of 256 jobs. It prints a batch's lines only after the
+the daemon, in batches of 256 jobs. nix-eval-jobs writes every `.drv` the
+evaluation makes, the moment it is made, so it also writes derivations no
+job needs, such as those a failing job made before it failed: on the whole
+nixpkgs job set, 446 store paths outside the jobs' closures, where the
+closures themselves are the same, byte for byte. It prints a batch's lines only after the
 batch is registered and its GC roots exist. So a printed `drvPath` is
 always valid in the store, as with nix-eval-jobs. Registration runs while
 the evaluation goes on. The stderr summary has an `instantiate:` line with

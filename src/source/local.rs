@@ -276,6 +276,7 @@ pub fn commit_source(
     root: &Path,
     rev: &str,
     subdir: &str,
+    shallow: bool,
     pos: Pos,
 ) -> EvalResult<Tree> {
     let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", false, None, true, false, pos)?
@@ -292,6 +293,10 @@ pub fn commit_source(
         ));
     };
     tree.subdir = subdir.to_string();
+    // git.cc:getAccessorFromCommit counts the revisions only without `shallow`
+    if shallow {
+        tree.counter = None;
+    }
     Ok(tree)
 }
 

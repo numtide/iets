@@ -61,10 +61,35 @@ mod ab {
         np: String,
         checkout: PathBuf,
         work: PathBuf,
+        workloads: PathBuf,
     }
 
     fn scenarios(c: &Ctx) -> Vec<Scenario> {
         let table = [
+            (
+                "synthetic/calls-w1",
+                false,
+                Cache::Cold,
+                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/calls.nix",
+            ),
+            (
+                "synthetic/strings-w1",
+                false,
+                Cache::Cold,
+                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/strings.nix",
+            ),
+            (
+                "synthetic/attrs-w1",
+                false,
+                Cache::Cold,
+                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/attrs.nix",
+            ),
+            (
+                "synthetic/derivations-w1",
+                false,
+                Cache::Cold,
+                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/derivations.nix",
+            ),
             (
                 "nixos/server-w1",
                 false,
@@ -76,6 +101,18 @@ mod ab {
                 false,
                 Cache::Cold,
                 "eval --impure --strict --no-cache --workers 4 -I nixpkgs={np} {wl}/nixos-server.nix",
+            ),
+            (
+                "nixos/plasma-w1",
+                false,
+                Cache::Cold,
+                "eval --impure --strict --no-cache --workers 1 -I nixpkgs={np} {wl}/nixos-plasma.nix",
+            ),
+            (
+                "nixos/plasma-w4",
+                false,
+                Cache::Cold,
+                "eval --impure --strict --no-cache --workers 4 -I nixpkgs={np} {wl}/nixos-plasma.nix",
             ),
             (
                 "nixos/server-pure-w1",
@@ -130,10 +167,7 @@ mod ab {
         let fill = |a: &str| {
             a.replace("{np}", np)
                 .replace("{ck}", &c.checkout.display().to_string())
-                .replace(
-                    "{wl}",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/bench/workloads"),
-                )
+                .replace("{wl}", &c.workloads.display().to_string())
                 .replace("{work}", &c.work.display().to_string())
                 .replace(
                     "{rs}",
@@ -266,6 +300,9 @@ mod ab {
                     let mut attr = [0u64; 16];
                     attr[0] = 128 << 32; // type PERF_TYPE_HARDWARE, size
                     attr[1] = config;
+                    // PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING:
+                    // multiplexed events need scaling by their actual scheduled time.
+                    attr[4] = 1 | 1 << 1;
                     // disabled, inherit, exclude_kernel, exclude_hv, enable_on_exec
                     attr[5] = 1 | 1 << 1 | 1 << 5 | 1 << 6 | 1 << 12;
                     // SAFETY: attr is a perf_event_attr of the size it names.
@@ -282,11 +319,40 @@ mod ab {
             files
                 .iter_mut()
                 .map(|f| {
-                    let mut b = [0u8; 8];
+                    let mut b = [0u8; 24];
                     f.read_exact(&mut b).ok()?;
-                    Some(u64::from_ne_bytes(b) as f64)
+                    scaled(
+                        u64::from_ne_bytes(b[..8].try_into().unwrap()),
+                        u64::from_ne_bytes(b[8..16].try_into().unwrap()),
+                        u64::from_ne_bytes(b[16..].try_into().unwrap()),
+                    )
                 })
                 .collect()
+        }
+
+        fn scaled(value: u64, enabled: u64, running: u64) -> Option<f64> {
+            // Zero scheduled time means unavailable, not zero instructions.
+            (running > 0 && running <= enabled)
+                .then(|| value as f64 * (enabled as f64 / running as f64))
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::scaled;
+
+            #[test]
+            fn full_and_partial_pmu_coverage() {
+                assert_eq!(scaled(120, 1000, 1000), Some(120.0));
+                assert_eq!(scaled(30, 1000, 250), Some(120.0));
+            }
+
+            #[test]
+            fn an_unscheduled_event_is_not_a_zero_count() {
+                assert_eq!(scaled(0, 1000, 0), None);
+                assert_eq!(scaled(0, 0, 0), None);
+                assert_eq!(scaled(0, 1000, 1000), Some(0.0));
+                assert_eq!(scaled(120, 500, 1000), None);
+            }
         }
     }
 
@@ -526,18 +592,16 @@ mod ab {
         String::from_utf8(out.stdout).expect("utf-8 path")
     }
 
-    fn make_checkout(np: &str, at: &Path) -> Result<(), String> {
+    fn make_checkout(np: &str, at: &Path, workloads: &Path) -> Result<(), String> {
         let ok = |c: &mut Command| c.status().is_ok_and(|s| s.success());
         if !ok(Command::new("cp").arg("-r").arg(format!("{np}/.")).arg(at))
             || !ok(Command::new("chmod").arg("-R").arg("u+w").arg(at))
         {
             return Err(format!("cannot copy {np}"));
         }
-        let server = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/bench/workloads/nixos-server.nix"
-        );
-        let server = fs::read_to_string(server).map_err(|e| format!("{server}: {e}"))?;
+        let server = workloads.join("nixos-server.nix");
+        let server =
+            fs::read_to_string(&server).map_err(|e| format!("{}: {e}", server.display()))?;
         let w = |name: &str, text: &str| fs::write(at.join(name), text).map_err(|e| e.to_string());
         // a project marker, so a pure evaluation may read the whole tree
         w("iets.toml", "")?;
@@ -583,6 +647,7 @@ mod ab {
                 if round >= o.rounds
                     && intervals(&row.runs)
                         .iter()
+                        .take(2) // only the wall/RSS metrics used by the gate
                         .flatten()
                         .all(|i| i.hi - i.lo <= precision)
                 {
@@ -720,9 +785,17 @@ mod ab {
             np: nixpkgs(),
             checkout: work.path().join("nixpkgs"),
             work: work.path().to_path_buf(),
+            workloads: env::var_os("IETS_BENCH_WORKLOADS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/workloads"))
+                }),
         };
         let todo: Vec<Scenario> = scenarios(&c)
             .into_iter()
+            // Tiny inputs belong to Callgrind's instruction gate by default.
+            // Keep native runs available for explicit comparisons and smoke checks.
+            .filter(|s| o.only.is_some() || !s.id.starts_with("synthetic/"))
             .filter(|s| o.full || !s.full)
             .filter(|s| o.only.as_ref().is_none_or(|p| s.id.contains(p.as_str())))
             .collect();
@@ -731,7 +804,7 @@ mod ab {
             return ExitCode::from(2);
         }
         if todo.iter().any(|s| s.checkout)
-            && let Err(e) = make_checkout(&c.np, &c.checkout)
+            && let Err(e) = make_checkout(&c.np, &c.checkout, &c.workloads)
         {
             eprintln!("ab: {e}");
             return ExitCode::from(2);
@@ -778,9 +851,8 @@ mod ab {
                 if mem.lo > t {
                     slow.push("MORE MEMORY");
                 }
-                if instr.as_ref().is_some_and(|i| i.lo > t) {
-                    slow.push("MORE INSTRUCTIONS");
-                }
+                // Inherited, multiplexed PMU readings are descriptive estimates.
+                // Use Callgrind for instruction regression gates.
                 if !slow.is_empty() {
                     row.status = [slow.join(", "), row.status.clone()]
                         .join(" ")

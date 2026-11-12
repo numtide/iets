@@ -676,14 +676,25 @@ fn drop_clone(path: &Path, ttl: Duration) -> bool {
     let Ok(f) = open_lock(&lock) else {
         return false;
     };
-    if !sysfs::try_lock(&f) || entry_age(path, Shape::Clones).is_some_and(|a| a < ttl) {
+    drop_locked_clone(path, &lock, &f, ttl)
+}
+
+/// `drop_clone` with the lock file `f` open. The lock must be the file at
+/// `lock` still: another sweep may have removed the clone and its lock file
+/// since `f` was opened, and a fetch made both again, so a lock on the
+/// removed file holds nothing (as in `wait_lock`).
+fn drop_locked_clone(path: &Path, lock: &Path, f: &fs::File, ttl: Duration) -> bool {
+    if !sysfs::try_lock(f)
+        || !sysfs::same_file(f, lock)
+        || entry_age(path, Shape::Clones).is_some_and(|a| a < ttl)
+    {
         return false;
     }
     if fs::remove_dir_all(path).is_err() {
         return false;
     }
     // under the lock, so a waiter sees the file gone and locks a new one
-    let _ = fs::remove_file(&lock);
+    let _ = fs::remove_file(lock);
     true
 }
 
@@ -1063,6 +1074,31 @@ mod tests {
 
     /// A waiter that queued on a lock file the sweep then removed must not
     /// take it alongside one that locked the new file at the same path.
+    /// Sweep B opened the lock file, sweep A then removed the clone and the
+    /// file, and a fetch made both again and holds the new lock: B's lock on
+    /// the removed file must not let it take the clone.
+    #[test]
+    fn a_sweep_keeps_a_clone_whose_lock_file_was_replaced() {
+        let d = tempdir().unwrap();
+        let r = d.path().to_path_buf();
+        assert!(prepare(&r, Shape::Clones, false));
+        let clone = r.join(nix32(1, 52));
+        let lock = clone_lock(&clone);
+        fs::create_dir_all(clone.join("objects")).unwrap();
+        let stale = open_lock(&lock).unwrap();
+        fs::remove_file(&lock).unwrap();
+        let _held = wait_lock(&lock, || {}).unwrap();
+        // old enough that the age check alone would not keep it
+        back_date(&lock, 40 * DAY);
+        assert!(!drop_locked_clone(
+            &clone,
+            &lock,
+            &stale,
+            Duration::from_secs(DAY)
+        ));
+        assert!(clone.join("objects").is_dir() && lock.is_file());
+    }
+
     #[test]
     fn a_clone_lock_excludes_across_a_sweep() {
         let d = tempdir().unwrap();

@@ -1,7 +1,7 @@
 # All tools and inputs belong to the flake closure. Measurements run outside
 # the build sandbox; only correctness smoke checks run as derivations.
 { lib, craneLib, commonArgs, sources
-, iets, nixpkgs, runCommand, writeShellApplication, coreutils, nix, valgrind, perf, util-linux, jq, python3 }:
+, iets, nixpkgs, runCommand, writeShellApplication, coreutils, nix, valgrind, perf, util-linux, jq }:
 let
   lock = builtins.fromTOML (builtins.readFile ../bench/Cargo.lock);
   crate = name: lib.findSingle (p: p.name == name)
@@ -102,23 +102,15 @@ let
       exec ${harness}/bin/iets-callgrind --bench "$@"
     '';
   };
-  report = writeShellApplication {
-    name = "iets-bench-report";
-    runtimeInputs = [ python3 ];
-    text = ''
-      exec python3 ${../bench/report.py} "$@"
-    '';
-  };
 in
 {
-  inherit ab callgrind report workloads runner profilingValgrind;
+  inherit ab callgrind workloads runner profilingValgrind;
   # Exercise installed paths and Valgrind compatibility. These build-time
   # counts are discarded; comparative measurements run outside derivations.
-  smoke = runCommand "iets-bench-smoke" { nativeBuildInputs = [ callgrind ab ]; } ''
+  smoke = runCommand "iets-bench-smoke" { nativeBuildInputs = [ callgrind ]; } ''
     export HOME=$TMPDIR XDG_CACHE_HOME=$TMPDIR/cache
     iets-bench-callgrind --test
     iets-bench-callgrind --save-summary=json
-    iets-bench-ab ${iets}/bin/iets ${iets}/bin/iets --only synthetic --rounds 2 --max-rounds 2 --json ab.json
-    cp ab.json $out
+    touch $out
   '';
 }

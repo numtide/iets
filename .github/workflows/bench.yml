@@ -25,7 +25,6 @@ jobs:
           nix build .#default --out-link result-candidate
           nix build .#bench-ab --out-link result-ab
           nix build .#bench-callgrind --out-link result-callgrind
-          nix build .#bench-report --out-link result-report
       # Use the candidate's locked toolchain for both sides, even when the
       # base has an older flake.lock. No host Cargo or floating stable Rust.
       - name: Build the base
@@ -43,19 +42,26 @@ jobs:
       # Compare alternating pairs; report confidence intervals in the summary.
       - name: Compare
         run: |
+          set -o pipefail
           ./result-ab/bin/iets-bench-ab ./result-base/bin/iets \
             ./result-candidate/bin/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Compare instructions on evaluation and component workloads
         run: |
+          set -o pipefail
           IETS_BENCH_BIN="$PWD/result-base/bin/iets" \
             ./result-callgrind/bin/iets-bench-callgrind --save-baseline=base --save-summary=json
           ./result-callgrind/bin/iets-bench-callgrind \
-            --baseline=base --callgrind-limits='Ir=5%' --save-summary=json
+            --baseline=base --callgrind-limits='Ir=5%' --callgrind-metrics=Ir \
+            --show-intermediate --save-summary=json 2>&1 | tee callgrind.txt
       - name: Summarize benchmark and thread counts
         if: ${{ !cancelled() }}
         run: |
-          if test -x result-report/bin/iets-bench-report && test -d target/gungraun; then
-            ./result-report/bin/iets-bench-report target/gungraun >> "$GITHUB_STEP_SUMMARY"
+          if test -f callgrind.txt; then
+            {
+              echo '```text'
+              cat callgrind.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -63,4 +69,5 @@ jobs:
           name: ab
           path: |
             ab.json
+            callgrind.txt
             target/gungraun

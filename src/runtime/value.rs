@@ -1273,7 +1273,19 @@ impl Arena {
     /// `a // b` as a union over the flat leaves of both sides; the caller
     /// checked the leaf budget (`leaf_count`).
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
-        let n = leaf_count(a) + leaf_count(b);
+        // The leaves are read once, here: another worker may flatten `a` or
+        // `b` meanwhile, after which `for_each_leaf` gives its one flat copy
+        // where `leaf_count` counted all its leaves, and a union sized by the
+        // count would keep null leaves. Flattening only shrinks the count,
+        // so the caller's budget still bounds it.
+        let mut got: [Option<&'static AttrsObj>; MAX_LEAVES as usize] = [None; MAX_LEAVES as usize];
+        let mut n = 0;
+        for side in [a, b] {
+            for_each_leaf(side, |leaf| {
+                got[n] = Some(leaf);
+                n += 1;
+            });
+        }
         debug_assert!(n <= MAX_LEAVES as usize);
         let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
         self.stats.note(Stat::AttrsUpd, size);
@@ -1291,12 +1303,9 @@ impl Arena {
             tail.write(UnionTail {
                 flat: Cell::new(Word::EMPTY),
             });
-            let mut leaves = tail.add(1) as *mut &'static AttrsObj;
-            for side in [a, b] {
-                for_each_leaf(side, |leaf| {
-                    leaves.write(leaf);
-                    leaves = leaves.add(1);
-                });
+            let leaves = tail.add(1) as *mut &'static AttrsObj;
+            for (i, leaf) in got[..n].iter().enumerate() {
+                leaves.add(i).write(leaf.expect("collected above"));
             }
             #[cfg(feature = "stats2")]
             self.stats.census.note_attrs(
@@ -1601,6 +1610,8 @@ mod tests {
     use super::*;
 
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
+    use std::{hint, mem, thread};
 
     /// The leaves of `sets`, folded left to right: the last set holding a sym
     /// wins, as `//` does.
@@ -1694,6 +1705,61 @@ mod tests {
             assert_eq!(got.cell.get().imm_int_value(), want);
         }
         assert!(a.get(Sym(999)).is_none());
+    }
+
+    /// A union of a union another thread flattens meanwhile: before the
+    /// leaves were read once, about one in 100,000 such unions kept a null
+    /// leaf. The threads meet at every union, the flattener a little later
+    /// each time, so the flatten lands at every point of `alloc_union`.
+    #[test]
+    fn a_union_of_a_union_being_flattened_has_no_null_leaf() {
+        const N: usize = 200_000;
+        static READY: AtomicUsize = AtomicUsize::new(0);
+        static GO: AtomicUsize = AtomicUsize::new(0);
+        let mut arena = Arena::new();
+        let sets = |base: u32| (base..base + 10).map(|s| (s, s as i64)).collect::<Vec<_>>();
+        let x = build(&mut arena, &[sets(1000)]);
+        let unions: Vec<usize> = (0..N)
+            .map(|_| build(&mut arena, &[sets(0), sets(5), sets(9)]) as *const AttrsObj as usize)
+            .collect();
+        // the sets live as long as the arena's chunks, which nothing frees
+        mem::forget(arena);
+        let unions: &'static [usize] = Box::leak(unions.into_boxed_slice());
+        // SAFETY: each entry is a union `build` made above, never freed.
+        let union = |i: usize| unsafe { &*(unions[i] as *const AttrsObj) };
+        let flattener = thread::spawn(move || {
+            let mut arena = Arena::new();
+            for i in 0..N {
+                READY.fetch_add(1, Ordering::AcqRel);
+                while GO.load(Ordering::Acquire) <= i {
+                    thread::yield_now();
+                }
+                for _ in 0..i % 64 {
+                    hint::spin_loop();
+                }
+                arena.flat(union(i));
+            }
+            mem::forget(arena);
+        });
+        let mut arena = Arena::new();
+        let mut bad = 0;
+        for i in 0..N {
+            while READY.load(Ordering::Acquire) <= i {
+                thread::yield_now();
+            }
+            GO.store(i + 1, Ordering::Release);
+            // SAFETY: `alloc_union` returns a pointer to an arena set.
+            let u = unsafe { &*arena.alloc_union(union(i), x).ptr::<AttrsObj>() };
+            // read the leaf slots as words: a null one is what this is about
+            let leaves = (u.union() as *const UnionTail).wrapping_add(1) as *const usize;
+            // SAFETY: the union holds `u.leaves` leaf slots after its tail.
+            if (0..u.leaves as usize).any(|j| unsafe { *leaves.add(j) } == 0) {
+                bad += 1;
+            }
+        }
+        flattener.join().unwrap();
+        mem::forget(arena);
+        assert_eq!(bad, 0, "unions with a null leaf, of {N}");
     }
 }
 

@@ -38,6 +38,7 @@
         # the differential fuzzer against Nix (docs/how-to/fuzz.md)
         fuzz = final.callPackage ./nix/fuzz.nix { };
         benchmarks = final.callPackage ./nix/bench.nix { };
+        optimizations = final.callPackage ./nix/pgo.nix { };
         # for files that return a set of packages
         callPackages = pkgs.lib.callPackagesWith (pkgs // final);
       });
@@ -68,6 +69,9 @@
           (scope.callPackages ./nix/packages.nix { })
           { default = scope.iets; }))
         { x86_64-linux = { inherit release; }; };
+      # Profile training is an explicit experiment, outside the package checks.
+      experiments = forAll (scope: onLinux scope
+        (lib.filterAttrs (_: lib.isDerivation) scope.optimizations) { });
       # every package and dev shell, so that CI pushes them to the cache; the
       # fuzz campaigns run for an hour each
       checks = lib.mapAttrs (system: scope:

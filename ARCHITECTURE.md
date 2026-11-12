@@ -281,6 +281,7 @@ measure against, and defaults to the pinned source in the scripts;
 | `nix run .#bench-ab -- BEFORE AFTER` | two iets binaries over NixOS configurations, cached reruns and job sets: wall, user, sys and peak RSS, with an interval for each change and a check that the outputs match. `--full` adds nixpkgs outpaths, `--threshold PCT` fails on a slowdown |
 | `nix run .#bench-callgrind -- --save-summary=json` | evaluation, parsing and value rendering under Callgrind, with the Nix-packaged matching Gungraun runner; [benchmark guide](docs/how-to/benchmark.md) |
 | `nix run .#bench-report` | checked whole-process and per-thread instruction totals, with cache miss rates computed from raw events |
+| `nix build .#experiments.x86_64-linux.pgoBolt` | optional native PGO and BOLT training/build pipeline; [optimization guide](docs/how-to/profile-guided-optimization.md) |
 | `bench/nar.nu` | the NAR writer, reader and hashes; `--nix` adds the real-nix reference rows |
 | `bench/eval-jobs.nu [rounds]` | `iets eval-jobs` against `nix-eval-jobs` on `nixos/release-small.nix`, 4 workers, cold and warm cache runs interleaved; `--no-parity` skips the `--force-recurse` job-set comparison |
 | `bench/cache-growth.nu` | evaluates `bench/workloads/nixos-server.nix` at two nixpkgs revisions and reports what the second adds to each cache |

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::{Error, Result};
+use crate::eval::EvalLogs;
 use crate::store::path::StorePath;
 
 pub struct Job {
@@ -30,12 +31,42 @@ pub struct ErrorLine {
     pub fatal: bool,
     /// `stats` as raw JSON, when a worker measured the request.
     pub stats: Option<Vec<u8>>,
+    /// `warnings` and `traces` as raw JSON, when the attribute printed any.
+    pub warnings: Option<Vec<u8>>,
+    pub traces: Option<Vec<u8>>,
 }
 
 /// worker.cc:processJobRequest's `stats`: the request's wall time and the
 /// bytes it allocated, arena bytes here where nix counts Boehm's.
 pub fn stats_json(wall_ms: u64, alloc_bytes: u64) -> Vec<u8> {
     format!("{{\"allocBytes\":{alloc_bytes},\"wallMs\":{wall_ms}}}").into_bytes()
+}
+
+/// response.cc: `warnings` and `traces`, each only when not empty.
+fn logs_json(logs: &[String]) -> Option<Vec<u8>> {
+    (!logs.is_empty()).then(|| json_str_list(logs.iter()))
+}
+
+impl Line {
+    /// Puts what `builtins.warn` and `builtins.trace` printed while the
+    /// attribute was evaluated on its line.
+    pub fn with_logs(mut self, logs: &EvalLogs) -> Line {
+        let (w, t) = (logs_json(&logs.warnings), logs_json(&logs.traces));
+        match &mut self {
+            Line::Job(j) => {
+                for (k, v) in [("warnings", w), ("traces", t)] {
+                    if let Some(v) = v {
+                        j.extra.insert(k.into(), v);
+                    }
+                }
+            }
+            Line::Error(e) => {
+                e.warnings = w;
+                e.traces = t;
+            }
+        }
+        self
+    }
 }
 
 pub enum Line {
@@ -118,8 +149,14 @@ impl ErrorLine {
                 },
             ),
         ];
-        if let Some(s) = &self.stats {
-            fields.push(("stats", s.clone()));
+        for (k, v) in [
+            ("stats", &self.stats),
+            ("traces", &self.traces),
+            ("warnings", &self.warnings),
+        ] {
+            if let Some(v) = v {
+                fields.push((k, v.clone()));
+            }
         }
         render_fields(&fields)
     }
@@ -165,12 +202,16 @@ impl Line {
             let error = take_str(&mut map, "error")?;
             let fatal = map.remove("fatal") == Some(b"true".as_slice());
             let stats = map.remove("stats").map(<[u8]>::to_vec);
+            let warnings = map.remove("warnings").map(<[u8]>::to_vec);
+            let traces = map.remove("traces").map(<[u8]>::to_vec);
             return Ok(Line::Error(ErrorLine {
                 attr,
                 attr_path,
                 error,
                 fatal,
                 stats,
+                warnings,
+                traces,
             }));
         }
         let parse_path = |s: String| StorePath::parse(&s).map_err(Error::from);

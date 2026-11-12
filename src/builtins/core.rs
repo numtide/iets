@@ -191,11 +191,15 @@ fn throw(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     bail!(ErrorKind::Throw, pos, "{}", String::from_utf8_lossy(&s))
 }
 
-fn say(ev: &mut Evaluator, line: String) {
+/// Prints `msg` after its prefix, `trace: ` for a trace, and records it for
+/// the eval-jobs line of the attribute being evaluated.
+fn say(ev: &mut Evaluator, trace: bool, msg: &str) {
     // parallel: helpers journal, the demand path prints
     if !parallel::journal(ev) {
         ev.lints.flush();
-        log::line(&line);
+        let prefix = if trace { "trace" } else { "evaluation warning" };
+        log::line(&format!("{prefix}: {msg}"));
+        ev.note_log(trace, msg);
     }
 }
 
@@ -205,7 +209,7 @@ fn trace(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
         Value::String(s) => String::from_utf8_lossy(s.bytes).into_owned(),
         _ => print::show_value_short(ev, w),
     };
-    say(ev, format!("trace: {msg}"));
+    say(ev, true, &msg);
     ev.force(args[1])
 }
 
@@ -215,10 +219,7 @@ fn warn(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the first argument; the message passed to builtins.warn",
     )?;
-    say(
-        ev,
-        format!("evaluation warning: {}", String::from_utf8_lossy(s.bytes)),
-    );
+    say(ev, false, &String::from_utf8_lossy(s.bytes));
     ev.force(args[1])
 }
 

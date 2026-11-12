@@ -497,6 +497,25 @@ fn every_line_has_stats(bin: Iets) {
     );
 }
 
+/// A write that fails (here a full disk) fails the run: the output is not
+/// the whole job set. With worker processes and in one process.
+#[cfg(target_os = "linux")]
+#[rstest]
+fn a_failed_write_fails_the_run(bin: Iets, #[values("4096", "0")] max_memory: &str) {
+    let full = File::options().write(true).open("/dev/full").unwrap();
+    let o = ci(&bin)
+        .args(["--max-memory-size", max_memory, "ci.nix"])
+        .stdout(full)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("error: cannot write to stdout: No space left on device"),
+        "{}",
+        stderr(&o)
+    );
+}
+
 /// `--verbose` and `--debug` are one warning each, from the main process;
 /// `--max-jobs` and `--quiet` hold (docs/reference/divergences.md).
 #[rstest]

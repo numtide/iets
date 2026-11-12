@@ -1,7 +1,10 @@
-{ iets, ietsStatic, classic, fuzz }:
+{ iets, ietsStatic, classic, fuzz, benchmarks }:
 {
   default = iets;
   inherit classic;
+  bench-ab = benchmarks.ab;
+  bench-callgrind = benchmarks.callgrind;
+  bench-workloads = benchmarks.workloads;
   # one musl file that needs nothing on the machine (docs/explanation/static-build.md)
   static = ietsStatic;
   fuzz-oracles = fuzz.oracles;

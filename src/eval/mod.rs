@@ -343,6 +343,9 @@ pub struct Evaluator {
     pub nr_function_calls: u64,
     pub nr_store_adds: u64,
     pub t_compile: Duration,
+    /// The time this evaluator ran and the bytes it allocated, for
+    /// eval-jobs's per-job `stats` (`crate::parallel::force::on_switch`).
+    pub(crate) clock: FiberClock,
     /// Where those counters and `drv.nr_derivations` go when this fiber
     /// finishes a task. Shared, so a stats line covers every fiber.
     totals: Arc<Totals>,
@@ -576,6 +579,7 @@ pub struct EvalConfig {
     dump_dir: Option<PathBuf>,
     trace: bool,
     trace_store: Option<store::Store>,
+    job_clock: bool,
 }
 
 impl Default for EvalConfig {
@@ -594,6 +598,7 @@ impl Default for EvalConfig {
             dump_dir: None,
             trace: false,
             trace_store: None,
+            job_clock: false,
         }
     }
 }
@@ -679,6 +684,14 @@ impl EvalConfig {
     /// paths: 331 MB on the outpaths chunk (docs/explanation/evaluation.md).
     pub fn keep_aterm(mut self, keep: bool) -> EvalConfig {
         self.keep_aterm = keep;
+        self
+    }
+
+    /// Clock what each fiber runs and allocates, for the per-job `stats` of
+    /// eval-jobs in one process (`FiberClock`). Off, a fiber switch reads no
+    /// clock.
+    pub fn job_clock(mut self, on: bool) -> EvalConfig {
+        self.job_clock = on;
         self
     }
 
@@ -783,6 +796,7 @@ impl EvalConfig {
             nr_function_calls: 0,
             nr_store_adds: 0,
             t_compile: Duration::ZERO,
+            clock: FiberClock::new(self.job_clock),
             totals: Default::default(),
             fold_arenas: Session::current().settings().stats >= 1,
             sym_strings: SymWords::new(),
@@ -3544,5 +3558,80 @@ impl Evaluator {
             #[cfg(not(feature = "stats2"))]
             errln!("census: build with --features stats2");
         }
+    }
+}
+
+/// The time an evaluator ran and the bytes it allocated, over its whole
+/// life. A fiber's evaluator runs only while its fiber is switched in, and
+/// allocates from the worker's arena then, so the scheduler pauses the clock
+/// on every switch out and starts it on every switch in. A clone starts
+/// paused, as a fiber's evaluator does; the evaluator `build` makes runs
+/// until a fiber runtime takes it over.
+#[derive(Debug)]
+pub(crate) struct FiberClock {
+    /// `EvalConfig::job_clock`; a clone keeps it.
+    pub(crate) on: bool,
+    ns: u64,
+    bytes: u64,
+    /// When it last started, and the arena's total then; `None` when paused.
+    since: Option<(Instant, usize)>,
+}
+
+impl Clone for FiberClock {
+    fn clone(&self) -> FiberClock {
+        FiberClock {
+            on: self.on,
+            ns: 0,
+            bytes: 0,
+            since: None,
+        }
+    }
+}
+
+impl FiberClock {
+    fn new(on: bool) -> FiberClock {
+        FiberClock {
+            on,
+            ns: 0,
+            bytes: 0,
+            since: on.then(|| (Instant::now(), 0)),
+        }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.since.is_some()
+    }
+
+    /// Starts the clock over `arena`, the one the evaluator allocates from
+    /// from now on.
+    pub(crate) fn start(&mut self, arena: &arena::Arena) {
+        self.since = Some((Instant::now(), arena.bytes_allocated));
+    }
+
+    /// Pauses the clock, `arena` being the one the evaluator allocated from
+    /// while it ran.
+    pub(crate) fn pause(&mut self, arena: &arena::Arena) {
+        if let Some((t, b)) = self.since.take() {
+            self.ns += t.elapsed().as_nanos() as u64;
+            self.bytes += arena.bytes_allocated.saturating_sub(b) as u64;
+        }
+    }
+
+    /// Nanoseconds run and bytes allocated so far.
+    pub(crate) fn read(&self, arena: &arena::Arena) -> (u64, u64) {
+        match self.since {
+            Some((t, b)) => (
+                self.ns + t.elapsed().as_nanos() as u64,
+                self.bytes + arena.bytes_allocated.saturating_sub(b) as u64,
+            ),
+            None => (self.ns, self.bytes),
+        }
+    }
+}
+
+impl Evaluator {
+    /// Nanoseconds this evaluator has run and bytes it has allocated.
+    pub(crate) fn cost_so_far(&self) -> (u64, u64) {
+        self.clock.read(&self.arena)
     }
 }

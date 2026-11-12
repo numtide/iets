@@ -252,9 +252,14 @@ already pass from Hydra or nixpkgs CI work as they are
 (`tests/e2e_evaljobs.rs` compares both tools). Check these differences
 before you swap it in:
 
-- `--workers N` counts worker processes. The default is the CPU count,
-  capped at 4. With `--max-memory-size 0` it counts fibers in one process.
-- Line order is completion order, as it is for nix-eval-jobs. Sort by
+- iets evaluates in one process by default, with no memory limit, and
+  `--workers N` counts its fibers (default: the CPU count). Pass
+  `--max-memory-size 4096` for nix-eval-jobs's worker processes, each
+  restarted above the limit; `--workers` then counts processes (default:
+  the CPU count, capped at 4).
+- Line order is depth-first in name order from one process, and completion
+  order from worker processes, as for nix-eval-jobs. With `--constituents`
+  an aggregate that names its constituents comes after the walk. Sort by
   `attrPath` when you compare two runs.
 - `--override-input`, `--override-flake` and `--repair` are errors. iets only
   evaluates a flake from a complete lock file. `--reference-lock-file`

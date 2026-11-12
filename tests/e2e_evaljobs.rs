@@ -468,6 +468,26 @@ fn one_session_id_per_run(bin: Iets) {
     assert!(sids(Some("run-42")).iter().all(|s| s == "run-42"));
 }
 
+/// A fatal error line (a stack overflow) ends the walk in one process, as
+/// it does with worker processes and in nix-eval-jobs: nothing after it,
+/// exit 1.
+#[rstest]
+fn a_fatal_error_ends_the_walk(bin: Iets) {
+    let e = r#"let d = n: derivation { name = n; system = "x"; builder = ":"; }; f = x: 1 + f x; in { a = d "a"; b = (d "b") // { name = f 0; }; c = d "c"; }"#;
+    let o = bin
+        .cmd()
+        .args(["eval-jobs", "--workers", "2", "--no-instantiate"])
+        .args(["--expr", e])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let attrs: Vec<String> = String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap()["attr"].to_string())
+        .collect();
+    assert_eq!(attrs, [r#""a""#, r#""b""#]);
+}
+
 fn ci(bin: &Iets) -> Command {
     let mut c = bin.cmd();
     c.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs"))
@@ -475,10 +495,11 @@ fn ci(bin: &Iets) -> Command {
     c
 }
 
-/// Every line from a worker carries the `stats` nixbot reads.
+/// Every line carries the `stats` nixbot reads, from worker processes and
+/// from one process alike.
 #[rstest]
-fn every_line_has_stats(bin: Iets) {
-    let o = ok(ci(&bin).arg("ci.nix"));
+fn every_line_has_stats(bin: Iets, #[values("4096", "0")] max_memory: &str) {
+    let o = ok(ci(&bin).args(["--max-memory-size", max_memory, "ci.nix"]));
     let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout)
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

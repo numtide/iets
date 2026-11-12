@@ -590,8 +590,8 @@ element that is not an identifier (`names."7zip"`, where 2.35.2 writes
 | `--constituents` | identical | Named, derivation and glob (`_hydraGlobConstituents`) constituents, dependency cycles, missing and failed constituents, rewritten `drvPath`/`outputs`, `namedConstituents` emptied, roots. Not across `--chunks`: a name in another chunk "does not exist". |
 | `--apply EXPR` | identical | `extraValue`. A result that is not an attrset is the job's error. |
 | `--select EXPR` | identical | Applied to the top level after it is called. A result that is not an attrset is fatal. |
-| `--workers N` | different meaning | Worker processes (default: the cores, at most 4; nix-eval-jobs: 1), or fibers of one process with `--max-memory-size 0`. |
-| `--max-memory-size MB` | identical default | Worker processes restart above `MB`, 4096 like nix-eval-jobs. `0` is iets's own: one process with no limit. |
+| `--workers N` | different meaning | Fibers of one process (default: the visible CPUs; nix-eval-jobs: 1 process), or worker processes with `--max-memory-size MB` (default: the CPUs, at most 4). |
+| `--max-memory-size MB` | different default | Worker processes, each restarted above `MB`. The default is `0`, one process with no limit; nix-eval-jobs's is 4096. |
 | `--chunks M --chunk N`, `--chunk-depth D` | iets only | Evaluate part `N` (0 to M-1) of `M` parts of the tree, split at depth `D` (default 2). |
 | `--impure` | identical | Turns off the pure evaluation that `--flake` implies. |
 | `--show-trace` | accepted | The trace is always in the error text. With `--log-format internal-json` it also goes into the error records, as in Nix. |
@@ -635,7 +635,7 @@ nix-eval-jobs. A job:
 | `isCached`, `cacheStatus`, `neededBuilds`, `neededSubstitutes` | with `--check-cache-status`; `cacheStatus` is `local`, `cached` or `notBuilt` |
 | `extraValue` | with `--apply` |
 | `pos` | with `--provenance`: `file:line:col` of the derivation. iets only |
-| `stats` | from worker processes, as nix-eval-jobs 2.35.3 and later write it: `wallMs`, the time to evaluate the attribute, and `allocBytes`, the arena bytes that took. Nix counts its garbage collector's bytes instead. Work that attributes share counts toward the first one that needs it. Not present with `--max-memory-size 0` |
+| `stats` | on every line, as nix-eval-jobs 2.35.3 and later write it: `wallMs`, the time to evaluate the attribute, and `allocBytes`, the arena bytes that took. Nix counts its garbage collector's bytes instead. Work that attributes share counts toward the first one that needs it, so the numbers depend on the order and are for finding the expensive attributes. In one process, a job's time and bytes are what the fibers that evaluated it ran and allocated, the helpers that forced it ahead of the walk included; time a fiber waited for another one does not count, and 32 fibers on 16 cores each run slower than one worker process |
 
 An error line:
 
@@ -644,7 +644,7 @@ An error line:
 ```
 
 The error text has no color codes. It is also printed on stderr. An error
-line from a worker process has `stats` too.
+line has `stats` too.
 
 ### Instantiation
 
@@ -690,22 +690,30 @@ constituent as an input. iets writes it through the daemon and roots it, and
 ### The memory limit
 
 iets cannot free what a process has evaluated, so the only way to limit
-memory is to start a new process. `--max-memory-size MB` is 4096 by
-default, as in nix-eval-jobs.
+memory is to start a new process. By default there is no limit: one
+process evaluates every job on its fibers, and what jobs share, such as
+`lib` and stdenv, is evaluated once. `--max-memory-size MB` asks for worker
+processes instead, as nix-eval-jobs runs them with its default of 4096.
+Each of them evaluates what its jobs share again, so they are slower, and
+together they can hold more memory than one process. Whole nixpkgs at
+4096 MB took 25.1 s on 4 worker processes (15.5 GB in all) and 18.3 s on
+8 (29.7 GB), against 13.9 s (21.3 GB) and 8.8 s (21.6 GB) in one process.
 
-The main process runs `--workers` worker processes and shares the
+With `--max-memory-size MB`, the main process runs `--workers` worker processes and shares the
 attribute paths among them. When a worker's peak memory goes above the
 limit, it registers its open batch and exits, and a new worker takes its
 place. A worker that dies is reported as nix-eval-jobs reports it.
 
 Cache status and constituents run in the main process, from the lines.
-`--max-memory-size 0` is one process with no limit, which cannot finish a
-jobset larger than the machine.
+One process cannot finish a jobset larger than the machine's memory; that
+is what `--max-memory-size` is for.
 
 iets differs from nix-eval-jobs in these ways:
 
-- **Order** is completion order, as in nix-eval-jobs, and depth-first in
-  name order with `--max-memory-size 0`. Sort by `attrPath` to compare.
+- **Order** is depth-first in name order from one process, and completion
+  order, as in nix-eval-jobs, from worker processes. With `--constituents`
+  an aggregate that names its constituents comes after the walk, in either
+  mode. Sort by `attrPath` to compare.
 - **Error text** is iets's own (`error: msg`, `at file:line:col`, `… trace`
   lines). The same attributes fail as in Nix; the text differs.
 - **`system`** comes from the `.drv` in memory, or from `/nix/store` for an

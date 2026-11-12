@@ -489,6 +489,10 @@ pub struct BuildResult {
     pub path: String,
     pub status: u64,
     pub msg: String,
+    /// `builtOutputs`: output name to the store path the build realised. For a
+    /// floating content-addressed derivation this is the only place the daemon
+    /// names the path: `QueryDerivationOutputMap` cannot.
+    pub built_outputs: BTreeMap<String, String>,
 }
 
 impl BuildResult {
@@ -1124,11 +1128,27 @@ impl Connection {
         }
         let r = self.r();
         let outputs = read_u64(r)?;
+        let mut built_outputs = BTreeMap::new();
         for _ in 0..outputs {
             wire::drv_output(&read_str(r)?).map_err(conn)?;
-            wire::realisation(&wire::read_bytes(r, wire::MAX_STRING)?).map_err(conn)?;
+            let (name, out_path) =
+                wire::realisation(&wire::read_bytes(r, wire::MAX_STRING)?).map_err(conn)?;
+            // a name becomes part of an out link's file name
+            check_name(&name).map_err(|e| {
+                Error::Protocol(format!(
+                    "the daemon named an output '{}': {}",
+                    name.escape_debug(),
+                    e.0.escape_debug()
+                ))
+            })?;
+            built_outputs.insert(name, out_path.to_string());
         }
-        Ok(BuildResult { path, status, msg })
+        Ok(BuildResult {
+            path,
+            status,
+            msg,
+            built_outputs,
+        })
     }
 
     /// `QueryMissing`; `paths` are derived paths, as for `BuildPathsWithResults`.
@@ -1319,6 +1339,7 @@ mod tests {
             path: String::new(),
             status,
             msg: String::new(),
+            built_outputs: BTreeMap::new(),
         };
         assert!(r(0).success() && r(13).success());
         assert!(!r(256).success() && !r(269).success() && !r(3).success());
@@ -1326,6 +1347,97 @@ mod tests {
     }
 
     use super::*;
+
+    /// A `Connection` that reads `reply` and writes nowhere, at protocol 1.`minor`.
+    fn replying(minor: u64, reply: Vec<u8>) -> Connection {
+        let sink: Box<dyn Write + Send> = Box::new(io::sink());
+        Connection {
+            to: BufWriter::new(Counting {
+                inner: sink,
+                bytes: 0,
+            }),
+            from: BufReader::new(Box::new(io::Cursor::new(reply))),
+            child: None,
+            minor,
+            daemon_nix_version: String::new(),
+            trusted: None,
+            stats: Stats::default(),
+            activities: HashMap::new(),
+            parents: HashMap::new(),
+            ids: HashMap::new(),
+            builds: BuildCounts::default(),
+        }
+    }
+
+    /// One `KeyedBuildResult` as a daemon of protocol 1.`minor` writes it
+    /// (worker-protocol.cc:Serialise<KeyedBuildResult>): a built derivation
+    /// whose `builtOutputs` are `outs`, pairs of output name and store path.
+    fn built(minor: u64, drv: &str, outs: &[(&str, &str)]) -> Vec<u8> {
+        let hex = "4ab29c33e1fd9f3e3e1ebf6e0da0e8f8c3a5e3a73c92c4e9d6e8c04b1a5f2b3d";
+        let mut b = Vec::new();
+        wire::write_str(&mut b, drv.as_bytes()).unwrap();
+        wire::write_u64(&mut b, 0).unwrap(); // Built
+        wire::write_str(&mut b, b"").unwrap(); // errorMsg
+        wire::write_u64(&mut b, 1).unwrap(); // times built
+        wire::write_u64(&mut b, 0).unwrap(); // non-deterministic
+        wire::write_u64(&mut b, 1_700_000_000).unwrap(); // start
+        wire::write_u64(&mut b, 1_700_000_001).unwrap(); // stop
+        if minor >= 37 {
+            wire::write_u64(&mut b, 1).unwrap(); // CPU user: some
+            wire::write_u64(&mut b, 1500).unwrap(); // microseconds
+            wire::write_u64(&mut b, 0).unwrap(); // CPU system: none
+        }
+        wire::write_u64(&mut b, outs.len() as u64).unwrap();
+        for (name, path) in outs {
+            let id = format!("sha256:{hex}!{name}");
+            let base = path.rsplit('/').next().unwrap();
+            let real = format!(r#"{{"id":"{id}","outPath":"{base}"}}"#);
+            wire::write_str(&mut b, id.as_bytes()).unwrap();
+            wire::write_str(&mut b, real.as_bytes()).unwrap();
+        }
+        b
+    }
+
+    /// A floating content-addressed derivation with a content-addressed input
+    /// has no output path for `QueryDerivationOutputMap` to give, so the
+    /// verdict's `builtOutputs` is the only place the daemon names it. Drop
+    /// them in `read_build_result` and the run prints no path.
+    #[rstest]
+    #[case(35)]
+    #[case(36)]
+    #[case(37)]
+    fn a_build_result_names_the_outputs_it_built(#[case] minor: u64) {
+        let drv = "/nix/store/7q6r5bxprr5bzxqyhjmzjvcg9c0sfbyk-a.drv";
+        let out = "/nix/store/0c6ld7f4z8xbwgaz1mqk5c5bkwlhypzb-a";
+        let dev = "/nix/store/1b5jq6r8s2x4w7yvhzg0mfapl9ndk3ci-a-dev";
+        let mut reply = built(
+            minor,
+            &format!("{drv}!dev,out"),
+            &[("out", out), ("dev", dev)],
+        );
+        // a second result after it must start where the first ended
+        reply.extend(built(minor, drv, &[]));
+        let mut c = replying(minor, reply);
+        let r = c.read_build_result().unwrap();
+        assert!(r.success());
+        assert_eq!(
+            r.built_outputs,
+            BTreeMap::from([("out".into(), out.into()), ("dev".into(), dev.into())])
+        );
+        let next = c.read_build_result().unwrap();
+        assert_eq!(next.path, drv);
+        assert!(next.built_outputs.is_empty());
+    }
+
+    /// An output name becomes part of an out link's file name, as in
+    /// `query_derivation_output_map`.
+    #[test]
+    fn a_build_result_with_a_bad_output_name_is_a_protocol_error() {
+        let drv = "/nix/store/7q6r5bxprr5bzxqyhjmzjvcg9c0sfbyk-a.drv";
+        let out = "/nix/store/0c6ld7f4z8xbwgaz1mqk5c5bkwlhypzb-a";
+        let mut c = replying(37, built(37, drv, &[("../x", out)]));
+        assert!(matches!(c.read_build_result(), Err(Error::Protocol(_))));
+    }
 
     #[test]
     fn transport_from_url() {

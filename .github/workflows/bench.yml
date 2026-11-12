@@ -20,29 +20,54 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - uses: cachix/install-nix-action@v31
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # into the same target directory, so both share the cached dependencies
+      - name: Build the benchmark environment
+        run: |
+          nix build .#default --out-link result-candidate
+          nix build .#bench-ab --out-link result-ab
+          nix build .#bench-callgrind --out-link result-callgrind
+      # Use the candidate's locked toolchain for both sides, even when the
+      # base has an older flake.lock. No host Cargo or floating stable Rust.
       - name: Build the base
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           git worktree add "$RUNNER_TEMP/base" "$BASE"
-          cargo build --release --locked --bin iets \
-            --manifest-path "$RUNNER_TEMP/base/Cargo.toml" --target-dir target
-          cp target/release/iets "$RUNNER_TEMP/iets-base"
-      - name: Build the pull request
-        run: cargo build --release --locked --bin iets --example ab
+          nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath')
+          crane=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./.)).inputs.crane.outPath')
+          nix build "path:$RUNNER_TEMP/base#default" --out-link result-base \
+            --override-input nixpkgs "path:$nixpkgs" \
+            --override-input crane "path:$crane"
       # Ubuntu forbids perf counters to users by default
       - run: sudo sysctl kernel.perf_event_paranoid=2
-      # shared runners vary by about 1 %, and only scenarios that take
-      # milliseconds by more
+      # Compare alternating pairs; report confidence intervals in the summary.
       - name: Compare
         run: |
-          ./target/release/examples/ab "$RUNNER_TEMP/iets-base" \
-            target/release/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
+          set -o pipefail
+          ./result-ab/bin/iets-bench-ab ./result-base/bin/iets \
+            ./result-candidate/bin/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Compare instructions on evaluation and component workloads
+        run: |
+          set -o pipefail
+          IETS_BENCH_BIN="$PWD/result-base/bin/iets" \
+            ./result-callgrind/bin/iets-bench-callgrind --save-baseline=base --save-summary=json
+          ./result-callgrind/bin/iets-bench-callgrind \
+            --baseline=base --callgrind-limits='Ir=5%' --callgrind-metrics=Ir \
+            --show-intermediate --save-summary=json 2>&1 | tee callgrind.txt
+      - name: Summarize benchmark and thread counts
+        if: ${{ !cancelled() }}
+        run: |
+          if test -f callgrind.txt; then
+            {
+              echo '```text'
+              cat callgrind.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: ab
-          path: ab.json
+          path: |
+            ab.json
+            callgrind.txt
+            target/gungraun

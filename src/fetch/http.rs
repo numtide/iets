@@ -325,9 +325,9 @@ fn normalise(path: &str) -> String {
     format!("/{}{}", out.join("/"), if slash { "/" } else { "" })
 }
 
-/// `Location` against the URL it came from: absolute, host-relative or
-/// path-relative (libcurl resolves all three).
-fn resolve(base: &str, location: &str) -> String {
+/// `location` against `base`: absolute, host-relative or path-relative, as
+/// libcurl resolves a redirect and Nix a narinfo's `URL`.
+pub fn resolve(base: &str, location: &str) -> String {
     if has_scheme(location) {
         return location.to_string();
     }

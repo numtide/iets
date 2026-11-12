@@ -1,9 +1,7 @@
 //! Executable benchmarks measure the CLI and retain its production allocator.
 //! `nix run .#bench-callgrind -- --help` lists the runner's options.
 use gungraun::prelude::*;
-use gungraun::{
-    Callgrind, EntryPoint, EventKind, FlamegraphConfig, FlamegraphKind, Sandbox, Stdio,
-};
+use gungraun::{Callgrind, EventKind, FlamegraphConfig, FlamegraphKind, Sandbox, Stdio};
 use std::fmt::Write;
 use std::path::PathBuf;
 
@@ -156,23 +154,19 @@ fn check_nix() {
 binary_benchmark_group!(name = evaluation; benchmarks = evaluate);
 binary_benchmark_group!(name = components; benchmarks = frontend, render);
 fn config() -> BinaryBenchmarkConfig {
-    // A binary has no library-benchmark toggle: count every executed thread.
-    let mut callgrind = Callgrind::default();
-    callgrind.entry_point(EntryPoint::None);
+    let mut config = BinaryBenchmarkConfig::default();
+    config.sandbox(Sandbox::new(true));
     // Expanding recursive call graphs into differential SVGs can consume a lot
     // of memory. Counts and raw profiles are always collected; SVGs are opt-in.
     if std::env::var("IETS_BENCH_FLAMEGRAPHS").as_deref() == Ok("1") {
-        callgrind.flamegraph(
-            FlamegraphConfig::default()
-                .kind(FlamegraphKind::All)
-                .event_kinds([EventKind::Ir, EventKind::TotalRW]),
+        config.tool(
+            Callgrind::default().flamegraph(
+                FlamegraphConfig::default()
+                    .kind(FlamegraphKind::All)
+                    .event_kinds([EventKind::Ir, EventKind::TotalRW]),
+            ),
         );
     }
-    let mut config = BinaryBenchmarkConfig::default();
-    config
-        .env_clear(true)
-        .sandbox(Sandbox::new(true))
-        .tool(callgrind);
     config
 }
 

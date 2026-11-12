@@ -67,30 +67,6 @@ mod ab {
     fn scenarios(c: &Ctx) -> Vec<Scenario> {
         let table = [
             (
-                "synthetic/calls-w1",
-                false,
-                Cache::Cold,
-                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/calls.nix",
-            ),
-            (
-                "synthetic/strings-w1",
-                false,
-                Cache::Cold,
-                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/strings.nix",
-            ),
-            (
-                "synthetic/attrs-w1",
-                false,
-                Cache::Cold,
-                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/attrs.nix",
-            ),
-            (
-                "synthetic/derivations-w1",
-                false,
-                Cache::Cold,
-                "eval --strict --json --no-cache --workers 1 {wl}/synthetic/derivations.nix",
-            ),
-            (
                 "nixos/server-w1",
                 false,
                 Cache::Cold,
@@ -793,9 +769,6 @@ mod ab {
         };
         let todo: Vec<Scenario> = scenarios(&c)
             .into_iter()
-            // Tiny inputs belong to Callgrind's instruction gate by default.
-            // Keep native runs available for explicit comparisons and smoke checks.
-            .filter(|s| o.only.is_some() || !s.id.starts_with("synthetic/"))
             .filter(|s| o.full || !s.full)
             .filter(|s| o.only.as_ref().is_none_or(|p| s.id.contains(p.as_str())))
             .collect();

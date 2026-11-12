@@ -569,11 +569,11 @@ iets eval-jobs [FLAGS] (-E EXPR | FILE | --flake FLAKEREF[#attr])
 ```
 
 Walk a jobset and print one JSON line per derivation, as nix-eval-jobs
-2.35.2 does: the same walk and the same lines. Newer nix-eval-jobs
-releases differ: 2.35.4 adds a `stats` key to every line, prints
-`requiredSystemFeatures` without `--show-input-drvs`, and quotes an `attr`
-element that is not an identifier (`names."7zip"`, where 2.35.2 writes
-`names.7zip`).
+2.35.4 does: the same walk and the same lines, with two differences.
+Messages from `builtins.warn` and `builtins.trace` go to stderr only;
+nix-eval-jobs also attaches them to the line of the attribute that was
+evaluated, as `warnings` and `traces`. And with `--max-memory-size 0` the
+lines have no `stats`.
 
 | Flag | Status | Notes |
 |---|---|---|
@@ -623,7 +623,7 @@ nix-eval-jobs. A job:
 
 | Key | Value |
 |:---|:---|
-| `attr` | the path elements joined with `.`; an element that contains a dot is wrapped in `"` |
+| `attr` | the path elements joined with `.`; an element that is not a plain identifier (a letter or `_`, then letters, digits, `_`, `'` and `-`) is wrapped in `"`, with `"`, `\` and `$` escaped |
 | `attrPath` | the same elements as a list |
 | `constituents`, `namedConstituents`, `globConstituents` | always present; filled only with `--constituents` on `_hydraAggregate` jobs |
 | `drvPath` | the derivation |

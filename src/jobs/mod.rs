@@ -226,22 +226,37 @@ pub fn error_line(ev: &Evaluator, path: &[String], e: &Error) -> ErrorLine {
     }
 }
 
-/// worker.cc:attrPathJoin: elements containing a dot are quoted.
+/// response.cc:joinAttrPath: an element that is not a plain identifier is
+/// quoted, with `"`, `\` and `$` escaped. Keywords count as plain, as there.
 pub fn attr_join(path: &[String]) -> String {
     let mut s = String::new();
     for (i, p) in path.iter().enumerate() {
         if i > 0 {
             s.push('.');
         }
-        if p.contains('.') {
-            s.push('"');
+        if is_plain_identifier(p) {
             s.push_str(p);
-            s.push('"');
-        } else {
-            s.push_str(p);
+            continue;
         }
+        s.push('"');
+        for c in p.chars() {
+            if matches!(c, '"' | '\\' | '$') {
+                s.push('\\');
+            }
+            s.push(c);
+        }
+        s.push('"');
     }
     s
+}
+
+/// response.cc:isPlainIdentifier, in the C locale: a letter or `_`, then
+/// letters, digits, `_`, `'` and `-`.
+fn is_plain_identifier(s: &str) -> bool {
+    let mut b = s.bytes();
+    b.next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+        && b.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'\'' | b'-'))
 }
 
 /// `api::report`'s report without the provenance rewrite.
@@ -912,5 +927,31 @@ mod tests {
         assert_eq!(at(&["9", "a"]), Some(1));
         assert_eq!(at(&["9"]), None);
         assert_eq!(at(&["l", "0"]), Some(7));
+    }
+
+    /// Names from whole nixpkgs that nix-eval-jobs 2.35.4 quotes, and the
+    /// escapes and corner cases of its joinAttrPath.
+    #[test]
+    fn an_element_that_is_not_a_plain_identifier_is_quoted() {
+        let join = |p: &[&str]| attr_join(&p.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let cases: &[(&[&str], &str)] = &[
+            (&["hello", "x86_64-linux"], "hello.x86_64-linux"),
+            (
+                &["vscode-extensions", "1Password", "op-vscode"],
+                r#"vscode-extensions."1Password".op-vscode"#,
+            ),
+            (&["gnomeExtensions", "1440"], r#"gnomeExtensions."1440""#),
+            (&["nerd-fonts", "m+"], r#"nerd-fonts."m+""#),
+            (&["pkgs", "ncurses++w"], r#"pkgs."ncurses++w""#),
+            (&["a", "b.c"], r#"a."b.c""#),
+            (&["_private", "it's"], "_private.it's"),
+            (&["if", "let"], "if.let"),
+            (&[""], r#""""#),
+            (&[r#"q"u\o$te"#], r#""q\"u\\o\$te""#),
+            (&["ünicode"], r#""ünicode""#),
+        ];
+        for (path, want) in cases {
+            assert_eq!(join(path), *want, "{path:?}");
+        }
     }
 }

@@ -1273,25 +1273,26 @@ impl Arena {
     /// `a // b` as a union over the flat leaves of both sides; the caller
     /// checked the leaf budget (`leaf_count`).
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
-        let n = leaf_count(a) + leaf_count(b);
-        debug_assert!(n <= MAX_LEAVES as usize);
-        // SAFETY: publishing a flat copy can only reduce the leaf count.
-        unsafe { self.alloc_union_with_capacity(a, b, n) }
+        self.alloc_union_with_hook(a, b, || {})
     }
 
-    /// # Safety
-    /// n must cover both operands' leaves and be within MAX_LEAVES.
+    /// The no-op hook is eliminated in production; tests use it to publish a
+    /// flat copy between sizing and copying, as another worker can do.
     #[inline]
-    unsafe fn alloc_union_with_capacity(
+    fn alloc_union_with_hook(
         &mut self,
         a: &'static AttrsObj,
         b: &'static AttrsObj,
-        n: usize,
+        hook: impl FnOnce(),
     ) -> Word {
+        let n = leaf_count(a) + leaf_count(b);
+        debug_assert!(n <= MAX_LEAVES as usize);
+        hook();
         let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header, tail and n pointers.
+        // Publishing a flat copy can only reduce the number of leaves.
         unsafe {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
@@ -1663,11 +1664,11 @@ mod tests {
         let b = build(&mut arena, &[vec![(2, 99)]]);
         let capacity = leaf_count(a) + leaf_count(b);
         assert_eq!(capacity, 4);
-        // Deterministically publish a flat copy between the constructor's
-        // capacity read and its leaf copy, as another worker can do.
-        arena.flat(a);
-        // SAFETY: this earlier capacity remains an upper bound.
-        let w = unsafe { arena.alloc_union_with_capacity(a, b, capacity) };
+        // A second arena in this session models the publishing worker.
+        let mut worker = Arena::new();
+        let w = arena.alloc_union_with_hook(a, b, || {
+            worker.flat(a);
+        });
         let out = unsafe { &*w.ptr::<AttrsObj>() };
         // Check the header before traversing: the old value would expose
         // uninitialized pointer slots and must not be dereferenced.

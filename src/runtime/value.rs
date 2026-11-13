@@ -1275,6 +1275,19 @@ impl Arena {
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
         let n = leaf_count(a) + leaf_count(b);
         debug_assert!(n <= MAX_LEAVES as usize);
+        // SAFETY: publishing a flat copy can only reduce the leaf count.
+        unsafe { self.alloc_union_with_capacity(a, b, n) }
+    }
+
+    /// # Safety
+    /// n must cover both operands' leaves and be within MAX_LEAVES.
+    #[inline]
+    unsafe fn alloc_union_with_capacity(
+        &mut self,
+        a: &'static AttrsObj,
+        b: &'static AttrsObj,
+        n: usize,
+    ) -> Word {
         let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
@@ -1298,6 +1311,9 @@ impl Arena {
                     leaves = leaves.add(1);
                 });
             }
+            // A worker may have flattened an operand since capacity was
+            // measured. Only the initialized leaf pointers belong in the view.
+            (*p).leaves = leaves.offset_from(tail.add(1).cast()) as u8;
             #[cfg(feature = "stats2")]
             self.stats.census.note_attrs(
                 p,
@@ -1637,6 +1653,26 @@ mod tests {
         a.iter()
             .map(|e| (e.sym.0, e.cell.get().imm_int_value()))
             .collect()
+    }
+
+    #[test]
+    fn union_header_uses_written_leaves_when_flattening_changes_capacity() {
+        let mut arena = Arena::new();
+        let sets = vec![vec![(1, 10)], vec![(2, 20)], vec![(3, 30)]];
+        let a = build(&mut arena, &sets);
+        let b = build(&mut arena, &[vec![(2, 99)]]);
+        let capacity = leaf_count(a) + leaf_count(b);
+        assert_eq!(capacity, 4);
+        // Deterministically publish a flat copy between the constructor's
+        // capacity read and its leaf copy, as another worker can do.
+        arena.flat(a);
+        // SAFETY: this earlier capacity remains an upper bound.
+        let w = unsafe { arena.alloc_union_with_capacity(a, b, capacity) };
+        let out = unsafe { &*w.ptr::<AttrsObj>() };
+        // Check the header before traversing: the old value would expose
+        // uninitialized pointer slots and must not be dereferenced.
+        assert_eq!(out.leaves, 2);
+        assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

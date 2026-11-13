@@ -334,6 +334,8 @@ impl Census {
         }
     }
 
+    /// A snapshot of this arena: helpers may still mark shared objects.
+    /// Each mark is read atomically, but the report is not a global snapshot.
     pub(crate) fn report(&self, out: &mut String) {
         let _ = writeln!(out, "--- census (IETS_STATS=2) ---");
         let _ = writeln!(out, "envs by slot count (count, bytes):");
@@ -343,13 +345,13 @@ impl Census {
             }
         }
         // SAFETY: every pointer was allocated in the arena, which lives
-        // until exit; the read-bit lives in the low bit of `up`.
+        // until exit; marks() atomically reads the low bits of `up`.
         let (mut env_unread, mut env_unread_bytes) = (0u64, 0u64);
         let mut env_unread_by: [u64; 11] = [0; 11];
         let mut env_uncaptured_by: [u64; 11] = [0; 11];
         let mut env_uncaptured_bytes = 0u64;
         for (e, n) in &self.envs {
-            let up = unsafe { (**e).up } as usize;
+            let up = unsafe { (**e).marks() };
             if up & 1 == 0 {
                 env_unread += 1;
                 env_unread_bytes += (8 + 8 * *n) as u64;
@@ -399,16 +401,17 @@ impl Census {
         for a in &self.attrs {
             let a = unsafe { &**a };
             let o = a.origin as usize;
-            let bytes = (8 + 16 * a.len()) as u64;
+            let bytes = (8 + 16 * a.len_unmarked()) as u64;
             total_bytes[o] += bytes;
-            let sel = a.flags & 0x7f;
-            if a.flags & 0x80 != 0 {
+            let flags = a.flags.load(Ordering::Relaxed);
+            let sel = flags & 0x7f;
+            if flags & 0x80 != 0 {
                 iterated[o] += 1;
             }
-            if sel == 0 && a.flags & 0x80 == 0 {
+            if sel == 0 && flags & 0x80 == 0 {
                 never[o] += 1;
                 never_bytes[o] += bytes;
-            } else if sel == 1 && a.flags & 0x80 == 0 {
+            } else if sel == 1 && flags & 0x80 == 0 {
                 once[o] += 1;
             }
         }
@@ -470,7 +473,7 @@ impl Census {
         let mut uses = [0u64; 7];
         for (r, (_, left, right)) in &u.results {
             // SAFETY: results are arena sets, alive until exit.
-            let flags = unsafe { (**r).flags };
+            let flags = unsafe { (**r).flags.load(Ordering::Relaxed) };
             let sel = (flags & 0x7f) as u32;
             let iter = (flags >> 7) as u32;
             uses[match (sel + iter + left + right, sel, iter, left) {
@@ -528,7 +531,7 @@ impl Census {
         }
         let mut str_unread = 0u64;
         for s in &self.strings {
-            if unsafe { (**s).flags } == 0 {
+            if unsafe { (**s).flags.load(Ordering::Relaxed) } == 0 {
                 str_unread += 1;
             }
         }
@@ -560,7 +563,7 @@ impl Census {
         let mut list_unread_bytes = 0u64;
         for l in &self.lists {
             let l = unsafe { &**l };
-            if l.flags == 0 {
+            if l.flags.load(Ordering::Relaxed) == 0 {
                 list_unread += 1;
                 list_unread_bytes += (8 + 8 * l.len as usize) as u64;
             }

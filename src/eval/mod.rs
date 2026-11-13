@@ -2509,8 +2509,6 @@ impl Evaluator {
         #[cfg(feature = "stats2")]
         let before = (
             census::upd_path(a, b),
-            a.flags,
-            b.flags,
             self.arena.bytes_allocated,
             matches!(r, Ir::Update(..)),
         );
@@ -3158,9 +3156,8 @@ impl Evaluator {
         Word::from_ref(out)
     }
 
-    /// Census of one `//`. The update flattens union operands, which marks
-    /// them iterated; their marks are put back so a use counts once, as
-    /// an operand.
+    /// Census of one `//`. Internal flattening/length queries do not record
+    /// user iteration, so each operand is counted once as an operand.
     #[cfg(feature = "stats2")]
     fn note_upd(
         &mut self,
@@ -3168,10 +3165,8 @@ impl Evaluator {
         b: &'static AttrsObj,
         out: Word,
         pos: Pos,
-        (path, fa, fb, bytes, nested): (usize, u8, u8, usize, bool),
+        (path, bytes, nested): (usize, usize, bool),
     ) {
-        a.set_flags(fa);
-        b.set_flags(fb);
         let file = self
             .file_of(pos)
             .map(|(f, _)| (f as *const FileInfo as usize, &f.path[..]));

@@ -29,6 +29,16 @@ The graph then answers "which stack made the 27 MB this run holds", which
 Nix's profiler cannot. `IETS_STATS=2` answers it by kind of object,
 not by call stack.
 
+The `stats2` census describes the arena of the worker printing the report.
+With multiple workers it observes shared use marks atomically while helpers
+may still run; it is not a final, globally consistent census. Use one worker
+when comparing objects never used, selected once, or iterated. Internal
+update merging and census length queries do not count as user iterations.
+These marks describe individual allocation headers, rather than every use
+of a logical value: flattening can transfer subsequent reads to a copy,
+and some internal consumers deliberately read entries without marking them.
+An unmarked header therefore does not establish that its value was unused.
+
 Every byte goes to the next sample, so only the bytes after the last sample
 are missing: a `hello` evaluation counts about 98 % of its 27 million bytes,
 and a test checks that it counts more than 90 %.

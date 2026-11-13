@@ -214,6 +214,12 @@ pub struct Lexer<'a> {
     pub eof_at: Option<u32>,
 }
 
+// Keep the searcher's setup and stack frame out of the per-token path.
+#[inline(never)]
+fn block_comment_end(src: &[u8]) -> Option<usize> {
+    memchr::memmem::find(src, b"*/")
+}
+
 #[inline]
 fn is_id_char(b: u8) -> bool {
     CLASS[b as usize] & ID != 0
@@ -394,7 +400,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'/' if self.at(p + 1) == b'*' => {
                     let body = p + 2;
-                    match memchr::memmem::find(&src[body.min(src.len())..], b"*/") {
+                    match block_comment_end(&src[body.min(src.len())..]) {
                         Some(k) => p = body + k + 2,
                         None => break,
                     }

@@ -1251,6 +1251,62 @@ fn iets_fetches_a_tarball_input() {
     );
 }
 
+/// `"${root}"` of a fetched tree's top, as `"${pkgs.path}"` is: Nix copies it
+/// under its base name, so the name holds two hashes, whether or not the
+/// store has the tree yet.
+#[test]
+fn a_fetched_trees_root_is_copied_under_its_base_name() {
+    let Some(mut f) = F::new() else { return };
+    let w = f.work();
+    let work = f.w("");
+    let work = work.trim_end_matches('/').to_string();
+    write(&w.join("rootsrc/default.nix"), "{ root = ./.; }\n");
+    tar(&w, &format!("{work}/root.tar.gz"), "rootsrc");
+    let url = format!("file://{work}/root.tar.gz");
+    let h = f.nar_hash(&format!("{work}/rootsrc"));
+    let root = format!(
+        "\"${{(import (builtins.fetchTree {{ type = \"tarball\"; url = \"{url}\"; narHash = \"{h}\"; }})).root}}\""
+    );
+    let drv = format!(
+        "derivation {{ name = \"uses-root\"; system = \"x86_64-linux\"; builder = \"/bin/sh\"; root = {root}; }}"
+    );
+    // the tree only in iets's input store: there is no nix to fetch it with
+    let env = f.no_nix();
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let cold = f.iets_eval(&env, &["--raw", "--no-tracing-cache", "-E", &root]);
+    let copy = stdout(&cold);
+    let built = f
+        .iets()
+        .envs(env.iter().copied())
+        .args(["build", "--no-build", "--iets-option", "builder", "daemon"])
+        .args(["--no-tracing-cache", "-E", &drv])
+        .output()
+        .unwrap();
+    let written = f.nar_hash(&copy);
+    // then Nix, which fetches the tree into the store, and iets again
+    let exp = stdout(&f.nix(&["eval", "--raw", "--expr", &root]));
+    let warm = stdout(&f.iets_eval(&[], &["--raw", "--no-tracing-cache", "-E", &root]));
+    let doubled = exp
+        .rsplit('/')
+        .next()
+        .and_then(|b| b.split_once('-'))
+        .is_some_and(|(_, name)| name.ends_with("-source") && name.len() > 33);
+    f.verdict(
+        cold.status.success()
+            && built.status.success()
+            && doubled
+            && copy == exp
+            && warm == exp
+            && written == h,
+        || {
+            format!(
+                "root copy\n  nix:  {exp}\n  cold: {copy} (wrote {written}) {}\n  warm: {warm}",
+                last(&stderr(&built), 2)
+            )
+        },
+    );
+}
+
 /// One download per tree: a sibling holds the tree's fetch lock and stores
 /// the entry before it lets go, so iets waits and reads that entry.
 #[cfg(target_os = "linux")]

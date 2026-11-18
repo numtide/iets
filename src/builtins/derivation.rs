@@ -785,10 +785,9 @@ fn derivation_strict_internal(
     // the package's own `pname` through, as nixpkgs' meta.position does. A
     // name-only builder (runCommand) loses the caller's `name` binding the
     // same way, so the first attribute still bound in a root tree is next.
-    let pname_pos = attrs.get(s.pname).map(|a| a.pos);
     let site = if ev.drv.keep_site {
         provenance::real_pos(ev, pos)
-            .or_else(|| pname_pos.and_then(|p| provenance::real_pos(ev, p)))
+            .or_else(|| attrs.get(s.pname).and_then(|a| provenance::real_pos(ev, a.pos)))
             .or_else(|| {
                 let p = coerce::drv_fallback(ev, attrs, pos, name_pos);
                 provenance::real_pos(ev, p)

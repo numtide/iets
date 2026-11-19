@@ -1072,8 +1072,6 @@ mod tests {
         }
     }
 
-    /// A waiter that queued on a lock file the sweep then removed must not
-    /// take it alongside one that locked the new file at the same path.
     /// Sweep B opened the lock file, sweep A then removed the clone and the
     /// file, and a fetch made both again and holds the new lock: B's lock on
     /// the removed file must not let it take the clone.

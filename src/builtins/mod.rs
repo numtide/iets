@@ -17,6 +17,7 @@ pub mod text;
 use crate::eval::{Evaluator, Pos};
 use crate::runtime::{PrimFn, Word};
 use crate::syntax::symbol::Sym;
+use crate::trace::fine;
 use crate::{config, log};
 
 pub struct Registry {
@@ -58,7 +59,7 @@ fn builtins_name(name: &'static str) -> &'static str {
 fn exposed(name: &'static str) -> bool {
     // the fine trace's own (`trace::fine`), which mean nothing without it
     if matches!(builtins_name(name), "fineRoot" | "fineQuery") {
-        return crate::trace::fine::on();
+        return fine::on();
     }
     if !log::classic() {
         return true;

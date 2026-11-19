@@ -19,17 +19,23 @@
 //! which its state word holds (`Word::traced`). So one evaluation of many
 //! jobs that share thunks still gives each job all that it depends on.
 
+use crate::compile;
+use crate::profile::Stack;
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::fmt::Write as _;
+use std::io::BufRead;
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{env, fs, io, iter, mem, ptr, thread};
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
 };
-use crate::eval::Evaluator;
+use crate::eval::{self, Evaluator, Pos};
 use crate::runtime::Word;
 use crate::runtime::value::{Attr, AttrsObj, Value};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
@@ -59,7 +65,7 @@ static NEXT_LIT: AtomicU32 = AtomicU32::new(0);
 /// Where the builtin that runs now was called.
 static AT: AtomicU32 = AtomicU32::new(0);
 /// The Nix call stack of that builtin, which is alive while it runs.
-static STACK: AtomicPtr<crate::profile::Stack> = AtomicPtr::new(std::ptr::null_mut());
+static STACK: AtomicPtr<Stack> = AtomicPtr::new(ptr::null_mut());
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -180,7 +186,7 @@ enum Prov {
 /// Turns the trace on when `IETS_FINE_TRACE` is set; empty, the run writes no
 /// whole trace of its own.
 pub fn init() {
-    if let Some(p) = std::env::var_os("IETS_FINE_TRACE") {
+    if let Some(p) = env::var_os("IETS_FINE_TRACE") {
         start((!p.is_empty()).then(|| PathBuf::from(p)));
     }
 }
@@ -203,13 +209,10 @@ pub fn on() -> bool {
 }
 
 #[inline]
-pub fn at(pos: u32, stack: &crate::profile::Stack) {
+pub fn at(pos: u32, stack: &Stack) {
     if on() {
         AT.store(pos, Ordering::Relaxed);
-        STACK.store(
-            stack as *const crate::profile::Stack as *mut _,
-            Ordering::Relaxed,
-        );
+        STACK.store(stack as *const Stack as *mut _, Ordering::Relaxed);
     }
 }
 
@@ -485,7 +488,7 @@ impl State {
         };
         let c = self.path(p, at.sym);
         let n = self.grown[self.head[p as usize] as usize] + 1;
-        if std::mem::replace(&mut self.fanned[c as usize], n) == n {
+        if mem::replace(&mut self.fanned[c as usize], n) == n {
             return;
         }
         let mut r = p;
@@ -699,7 +702,7 @@ pub fn compared(a: &AttrsObj) {
 impl State {
     fn whole(&mut self, p: u32) {
         let st = self.stamp();
-        if std::mem::replace(&mut self.whole_stamp[p as usize], st) == st {
+        if mem::replace(&mut self.whole_stamp[p as usize], st) == st {
             return;
         }
         let t = self.qtrace[self.head[p as usize] as usize];
@@ -1426,7 +1429,7 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
+fn lossy(b: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 
@@ -1490,14 +1493,10 @@ impl State {
         let Some((at, nix, frames)) = self.sites.get(&p) else {
             return format!("A\t{p}\t?\t?\t");
         };
-        let nix = ev.describe_pos(crate::eval::Pos(*nix));
+        let nix = ev.describe_pos(Pos(*nix));
         let mut st = String::new();
         for f in frames.iter().rev().take(12) {
-            let _ = write!(
-                st,
-                " < {}",
-                ev.describe_pos(crate::eval::Pos((f >> 32) as u32))
-            );
+            let _ = write!(st, " < {}", ev.describe_pos(Pos((f >> 32) as u32)));
         }
         format!("A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line())
     }
@@ -1546,7 +1545,7 @@ impl State {
             .chain(alls.iter().copied())
             .collect();
         while let Some(p) = stack.pop() {
-            if std::mem::replace(&mut used[p as usize], true) {
+            if mem::replace(&mut used[p as usize], true) {
                 continue;
             }
             match &self.provs[p as usize] {
@@ -1581,31 +1580,26 @@ impl State {
     /// The trace graph of the run in `dir`: `obs` (a line per observation),
     /// `provs`, `nodes` (the traces as little-endian `u32`, see `nodes`) and
     /// `roots` (the trace of each job, a line each).
-    fn write_dag(
-        &self,
-        ev: &Evaluator,
-        dir: &std::path::Path,
-        roots: &[u32],
-    ) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
+    fn write_dag(&self, ev: &Evaluator, dir: &Path, roots: &[u32]) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
             // a name may hold a newline, and a line is an id
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
-        std::fs::write(dir.join("obs"), o)?;
+        fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
             p.push_str(&self.prov_line(ev, i).replace('\n', "\\n"));
             p.push('\n');
         }
-        std::fs::write(dir.join("provs"), p)?;
-        let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("nodes"))?);
+        fs::write(dir.join("provs"), p)?;
+        let mut w = io::BufWriter::new(fs::File::create(dir.join("nodes"))?);
         for x in &self.nodes {
-            std::io::Write::write_all(&mut w, &x.to_le_bytes())?;
+            io::Write::write_all(&mut w, &x.to_le_bytes())?;
         }
-        std::io::Write::flush(&mut w)?;
+        io::Write::flush(&mut w)?;
         let mut q = String::new();
         for (i, (parent, sym)) in self.paths.iter().enumerate() {
             let parent = if *parent == NO_PATH {
@@ -1622,9 +1616,9 @@ impl State {
                 self.qtrace[i]
             );
         }
-        std::fs::write(dir.join("queries"), q)?;
+        fs::write(dir.join("queries"), q)?;
         let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        fs::write(dir.join("roots"), r)
     }
 }
 
@@ -1662,26 +1656,26 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
     with(|s| {
         if let Some(p) = &s.out {
             let all = s.flatten(&s.log[s.frames[0].0..]);
-            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
+            if let Err(e) = fs::write(p, s.text(ev, &all)) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
         let roots = v.map(roots).unwrap_or_default();
-        if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
+        if let Some(dir) = env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
                 let obs = if *t == 0 {
                     Vec::new()
                 } else {
                     s.flatten(&[EDGE | t])
                 };
-                let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+                let p = Path::new(&dir).join(i.to_string());
+                if let Err(e) = fs::write(&p, s.text(ev, &obs)) {
                     errln!("fine trace: writing {}: {e}", p.display());
                 }
             }
         }
-        if let Some(dir) = std::env::var_os("IETS_FINE_DAG")
-            && let Err(e) = s.write_dag(ev, std::path::Path::new(&dir), &roots)
+        if let Some(dir) = env::var_os("IETS_FINE_DAG")
+            && let Err(e) = s.write_dag(ev, Path::new(&dir), &roots)
         {
             errln!("fine trace: writing {}: {e}", dir.display());
         }
@@ -1713,15 +1707,15 @@ pub fn regions_main(argv: &[String]) -> i32 {
     let mut ev = Evaluator::new();
     for arg in argv {
         let (f, at) = arg.split_once('=').unwrap_or((arg, arg));
-        let path = crate::compile::canon_path(at.as_bytes());
-        let src = match std::fs::read(f) {
+        let path = compile::canon_path(at.as_bytes());
+        let src = match fs::read(f) {
             Ok(s) => s,
             Err(e) => {
                 errln!("{f}: {e}");
                 continue;
             }
         };
-        let dir = crate::eval::dir_of(&path).to_vec();
+        let dir = eval::dir_of(&path).to_vec();
         if let Err(e) = ev.compile_file(&path, src, &dir) {
             println!("E\t{at}\t{}", e.msg);
             continue;
@@ -1849,8 +1843,8 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
-fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+fn read_words(path: &Path) -> io::Result<Vec<u32>> {
+    Ok(fs::read(path)?
         .as_chunks::<4>()
         .0
         .iter()
@@ -1860,18 +1854,14 @@ fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
 
 /// The steps each job of the trace graph in `dir` must be evaluated again
 /// for, with every query read as the trace of its force: `(job, mask)`.
-fn check_dag(
-    c: &Changes,
-    dir: &std::path::Path,
-    skip: Option<&str>,
-) -> std::io::Result<Vec<(usize, u128)>> {
+fn check_dag(c: &Changes, dir: &Path, skip: Option<&str>) -> io::Result<Vec<(usize, u128)>> {
     let every = if c.steps.is_empty() {
         0
     } else {
         u128::MAX >> (128 - c.steps.len())
     };
-    let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let leaves = leaves(c, &fs::read_to_string(dir.join("provs"))?);
+    let obs = ObsIndex::new(&fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -1899,10 +1889,7 @@ fn check_dag(
         at += 2 + n;
     }
     let mut out = Vec::new();
-    for (i, line) in std::fs::read_to_string(dir.join("roots"))?
-        .lines()
-        .enumerate()
-    {
+    for (i, line) in fs::read_to_string(dir.join("roots"))?.lines().enumerate() {
         let t: usize = line.parse().unwrap_or(0);
         let m = match t {
             0 => 0,
@@ -2187,9 +2174,9 @@ impl Keys {
 impl Graph {
     /// The paths of the graph in `dir`.
     fn paths(dir: &str, keys: &mut Keys) -> Vec<GPath> {
-        let d = std::path::Path::new(dir);
+        let d = Path::new(dir);
         let mut paths: Vec<GPath> = Vec::new();
-        if let Ok(t) = std::fs::read_to_string(d.join("queries")) {
+        if let Ok(t) = fs::read_to_string(d.join("queries")) {
             for line in t.lines() {
                 let f: Vec<&str> = line.split('\t').collect();
                 let num = |s: &str| s.parse::<u32>().unwrap_or(0);
@@ -2221,8 +2208,8 @@ impl Graph {
         paths
     }
 
-    fn load(dir: String, step: u32, paths: Vec<GPath>) -> std::io::Result<Graph> {
-        let d = std::path::Path::new(&dir);
+    fn load(dir: String, step: u32, paths: Vec<GPath>) -> io::Result<Graph> {
+        let d = Path::new(&dir);
         let mut rings: Vec<(u32, u32)> = Vec::new();
         let mut forced: Vec<(u32, u32)> = Vec::new();
         let mut below = vec![0u32; paths.len() + 1];
@@ -2256,10 +2243,10 @@ impl Graph {
             by_key[p.key as usize] = i as u32;
         }
         let (provs, index, words, roots) = (
-            std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            fs::read_to_string(d.join("provs"))?,
+            ObsIndex::new(&fs::read_to_string(d.join("obs"))?, None),
             read_words(&d.join("nodes"))?,
-            std::fs::read_to_string(d.join("roots"))?
+            fs::read_to_string(d.join("roots"))?
                 .lines()
                 .map(|l| l.parse().unwrap_or(0))
                 .collect(),
@@ -2296,14 +2283,14 @@ impl Graph {
         struct Pairs(Vec<u32>, Vec<(u32, u32)>);
         impl Pairs {
             fn add(&mut self, k: u32, b: u32) -> bool {
-                let new = std::mem::replace(&mut self.0[k as usize], b + 1) != b + 1;
+                let new = mem::replace(&mut self.0[k as usize], b + 1) != b + 1;
                 if new {
                     self.1.push((k, b));
                 }
                 new
             }
         }
-        let mut words = std::mem::take(&mut self.words);
+        let mut words = mem::take(&mut self.words);
         let nb = (words.len() >> BLOCK) + 1;
         self.starts = vec![NO_PATH; nb];
         let mut obs = Pairs(vec![0; self.index.n], Vec::new());
@@ -2369,7 +2356,7 @@ impl Graph {
     }
 
     fn ring(&self, h: u32) -> impl Iterator<Item = u32> + '_ {
-        std::iter::once(h).chain(self.rings.get(h).iter().copied())
+        iter::once(h).chain(self.rings.get(h).iter().copied())
     }
 
     fn read(&self, i: u32) -> bool {
@@ -2446,7 +2433,7 @@ struct Server {
     graphs: Vec<Graph>,
     keys: Keys,
     /// The graphs that `load` started to read.
-    loading: Vec<std::thread::JoinHandle<std::io::Result<Graph>>>,
+    loading: Vec<thread::JoinHandle<io::Result<Graph>>>,
     /// By key, made again after a load or a drop: the graph of the newest
     /// step that read it, plus one, where a check takes its trace; and how
     /// many graphs read it.
@@ -2527,7 +2514,7 @@ impl Server {
         self.readers.clear();
         self.readers.resize(n, 0);
         let mut order: Vec<usize> = (0..self.graphs.len()).collect();
-        order.sort_by_key(|i| std::cmp::Reverse(self.graphs[*i].step));
+        order.sort_by_key(|i| Reverse(self.graphs[*i].step));
         for i in order {
             let g = &self.graphs[i];
             for (j, p) in g.paths.iter().enumerate() {
@@ -2557,8 +2544,8 @@ impl Server {
     }
 
     /// Takes the graphs that `load` started.
-    fn settle(&mut self) -> std::io::Result<()> {
-        for h in std::mem::take(&mut self.loading) {
+    fn settle(&mut self) -> io::Result<()> {
+        for h in mem::take(&mut self.loading) {
             self.graphs.push(h.join().expect("a loader thread")?);
             self.fresh = false;
         }
@@ -2607,9 +2594,9 @@ impl Server {
                 .collect();
             let mut taken: Vec<(usize, Vec<u32>)> = idx
                 .into_iter()
-                .map(|i| (i, std::mem::take(&mut self.graphs[i].words)))
+                .map(|i| (i, mem::take(&mut self.graphs[i].words)))
                 .collect();
-            let out: Vec<Pass> = std::thread::scope(|sc| {
+            let out: Vec<Pass> = thread::scope(|sc| {
                 let (graphs, stale) = (&self.graphs, &stale);
                 let hs: Vec<_> = taken
                     .iter_mut()
@@ -2670,7 +2657,7 @@ fn pass(graphs: &[Graph], i: usize, words: &mut [u32], c: &Changes, stale_keys: 
     }
     let mut obs = vec![false; g.index.n];
     g.index.each_changed(c, &leaves, &mut |o, m| {
-        if m != 0 && !std::mem::replace(&mut obs[o as usize], true) {
+        if m != 0 && !mem::replace(&mut obs[o as usize], true) {
             mark(&mut visit, g.by_obs.get(o));
         }
     });
@@ -2782,7 +2769,7 @@ fn pass(graphs: &[Graph], i: usize, words: &mut [u32], c: &Changes, stale_keys: 
                 stat.len() as u32
             };
             if st != CLEAN {
-                if std::mem::replace(&mut part, at >> PART) != at >> PART {
+                if mem::replace(&mut part, at >> PART) != at >> PART {
                     mark(&mut visit, g.readers.get(part as u32));
                 }
                 out.dirty.push(at as u32);
@@ -2810,26 +2797,16 @@ fn pass(graphs: &[Graph], i: usize, words: &mut [u32], c: &Changes, stale_keys: 
     out
 }
 
-/// `iets fine-check --serve`: reads commands, one a line, and answers each:
-///
-/// - `load DIR STEP`: starts to read the graph in DIR, written at STEP, and
-///   keeps it; `ok`. When it cannot be read, the next command that is no
-///   `load` fails.
-/// - `drop DIR`: forgets it; `ok`.
-/// - `gc FILE OUT`: of the graphs in FILE, a line each, which own no job,
-///   forgets those whose traces no other graph needs, and writes them to
-///   OUT; `ok`.
-/// - `check FILE OUT`: checks every graph against the one step of changes
-///   in FILE, and writes to OUT a line per job that is not clean,
-///   `H\tDIR\tINDEX` when its own trace changed and `S\tDIR\tINDEX\tKEY...`
-///   when only queries it read may have, then `Q\tKEY\tFINGERPRINT\tNAME...`
-///   per suspect query, with the fingerprint the newest graph that read it
-///   recorded and the names of its path from the root set; `ok`.
+/// The resident checker retains graphs across commands to reuse their evidence.
+/// `load DIR STEP` defers load failures until a non-load command; `drop DIR` forgets it.
+/// `gc FILE OUT` removes unneeded, unowned graphs listed in FILE and writes their names.
+/// `check FILE OUT` checks one change step, writing changed jobs as `H\tDIR\tINDEX`
+/// and suspect jobs as `S\tDIR\tINDEX\tKEY...`, followed by each query's
+/// `Q\tKEY\tFINGERPRINT\tNAME...` from its newest reader. Successful commands answer `ok`.
 fn serve() -> i32 {
-    use std::io::BufRead;
     let mut s = Server::default();
-    let stdin = std::io::stdin();
-    let mut out = std::io::stdout().lock();
+    let stdin = io::stdin();
+    let mut out = io::stdout().lock();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let f: Vec<&str> = line.split(' ').collect();
@@ -2844,9 +2821,8 @@ fn serve() -> i32 {
                 let (dir, step) = (dir.to_string(), step.parse().unwrap_or(0));
                 let paths = Graph::paths(&dir, &mut s.keys);
                 let d = dir.clone();
-                s.loading.push(std::thread::spawn(move || {
-                    Graph::load(dir, step, paths)
-                        .map_err(|e| std::io::Error::other(format!("{d}: {e}")))
+                s.loading.push(thread::spawn(move || {
+                    Graph::load(dir, step, paths).map_err(|e| io::Error::other(format!("{d}: {e}")))
                 }));
                 "ok\n".to_string()
             }
@@ -2855,18 +2831,18 @@ fn serve() -> i32 {
                 s.fresh = false;
                 "ok\n".to_string()
             }
-            ["gc", file, dest] => match std::fs::read_to_string(file) {
+            ["gc", file, dest] => match fs::read_to_string(file) {
                 Ok(t) => {
                     let dirs: FxHashSet<&str> = t.lines().collect();
                     let gone: String = s.gc(&dirs).into_iter().map(|d| d + "\n").collect();
-                    match std::fs::write(dest, gone) {
+                    match fs::write(dest, gone) {
                         Ok(()) => "ok\n".to_string(),
                         Err(e) => format!("error {dest}: {e}\n"),
                     }
                 }
                 Err(e) => format!("error {file}: {e}\n"),
             },
-            ["check", file, dest] => match std::fs::read_to_string(file) {
+            ["check", file, dest] => match fs::read_to_string(file) {
                 Ok(t) => {
                     let c = Changes::read(&t);
                     let res = s.check(&c);
@@ -2904,7 +2880,7 @@ fn serve() -> i32 {
                         let names = s.keys.names(k).join("\t");
                         let _ = writeln!(o, "Q\t{k}\t{fp}\t{names}");
                     }
-                    match std::fs::write(dest, o) {
+                    match fs::write(dest, o) {
                         Ok(()) => "ok\n".to_string(),
                         Err(e) => format!("error {dest}: {e}\n"),
                     }
@@ -2913,8 +2889,8 @@ fn serve() -> i32 {
             },
             _ => format!("error unknown command: {line}\n"),
         };
-        if std::io::Write::write_all(&mut out, reply.as_bytes()).is_err()
-            || std::io::Write::flush(&mut out).is_err()
+        if io::Write::write_all(&mut out, reply.as_bytes()).is_err()
+            || io::Write::flush(&mut out).is_err()
         {
             break;
         }
@@ -2936,7 +2912,7 @@ pub fn check_main(argv: &[String]) -> i32 {
     if let [flag, job, dir] = argv
         && flag == "--job"
     {
-        return match show_job(std::path::Path::new(dir), job.parse().unwrap_or(0)) {
+        return match show_job(Path::new(dir), job.parse().unwrap_or(0)) {
             Ok(()) => 0,
             Err(e) => {
                 errln!("{dir}: {e}");
@@ -2948,7 +2924,7 @@ pub fn check_main(argv: &[String]) -> i32 {
         errln!("usage: iets fine-check CHANGES [--skip TEXT] DAG...");
         return 2;
     };
-    let c = match std::fs::read_to_string(changes) {
+    let c = match fs::read_to_string(changes) {
         Ok(t) => Changes::read(&t),
         Err(e) => {
             errln!("{changes}: {e}");
@@ -2962,10 +2938,10 @@ pub fn check_main(argv: &[String]) -> i32 {
         dags = &dags[2..];
     }
     let mut out = String::new();
-    let results: Vec<_> = std::thread::scope(|sc| {
+    let results: Vec<_> = thread::scope(|sc| {
         let hs: Vec<_> = dags
             .iter()
-            .map(|d| sc.spawn(|| check_dag(&c, std::path::Path::new(d), skip)))
+            .map(|d| sc.spawn(|| check_dag(&c, Path::new(d), skip)))
             .collect();
         hs.into_iter()
             .map(|h| h.join().expect("a checker thread"))
@@ -2993,13 +2969,13 @@ pub fn check_main(argv: &[String]) -> i32 {
 }
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
-fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
+fn show_job(dir: &Path, job: usize) -> io::Result<()> {
+    let obs: Vec<String> = fs::read_to_string(dir.join("obs"))?
         .lines()
         .map(String::from)
         .collect();
     let words = read_words(&dir.join("nodes"))?;
-    let roots = std::fs::read_to_string(dir.join("roots"))?;
+    let roots = fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots
         .lines()
         .nth(job)

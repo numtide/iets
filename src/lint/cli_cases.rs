@@ -281,3 +281,63 @@ fn an_allow_table_travels_in_the_ir_cache_entry_and_a_load_stays_silent() {
         );
     }
 }
+
+#[test]
+fn ir_cache_preserves_the_callers_compile_warning_order() {
+    for (src, ordered_by_symbol) in [
+        (
+            "rec { aaaLint = /warn-first; zzzLint = /warn-second; }",
+            true,
+        ),
+        (
+            "let aaaLint = /warn-first; zzzLint = /warn-second; in 0",
+            true,
+        ),
+        ("{ aaaLint ? /warn-first, zzzLint ? /warn-second }: 0", true),
+        ("[ /warn-first /warn-second ]", false),
+    ] {
+        let (work, c) = cache();
+        let path = work.path().join("module.nix");
+        fs::write(&path, src).unwrap();
+        let shown = String::from_utf8(sys::path_to_internal(&path)).unwrap();
+        let host = Host::default().env([("IETS_IR_MIN", "0"), ("IETS_IR_STATS", "1")]);
+        let go = |prior: &str, no_ir| {
+            let expr = format!(
+                "let before = {prior}; in builtins.seq (import (builtins.toPath {shown:?})) 1"
+            );
+            let mut args = vec![
+                "eval",
+                "--impure",
+                "--no-tracing-cache",
+                "--cache-dir",
+                &c,
+                "--lint-scope",
+                "all",
+                "--lint",
+                "absolute-path-literal=warn",
+                "-E",
+                &expr,
+            ];
+            if no_ir {
+                args.push("--no-ir-cache");
+            }
+            let r = run(&args, &host);
+            assert_eq!(r.rc, 0, "{}", r.stderr);
+            let first = r.stderr.find("'/warn-first'").unwrap();
+            let second = r.stderr.find("'/warn-second'").unwrap();
+            (
+                first < second,
+                r.stderr.contains(&format!("ir-cache load {shown} ")),
+            )
+        };
+        let reversed = "{ zzzLint = 1; aaaLint = 2; }";
+        assert!(go("{}", false).0);
+        let (warm, loaded) = go(reversed, false);
+        let (direct, _) = go(reversed, true);
+        assert_eq!(direct, !ordered_by_symbol, "{src}");
+        assert_eq!(warm, direct, "{src}");
+        if !ordered_by_symbol {
+            assert!(loaded, "{src}");
+        }
+    }
+}

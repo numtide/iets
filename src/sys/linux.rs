@@ -108,8 +108,9 @@ fn unadvise_allocator() {
 }
 
 /// Advises `[p, p + len)` to be huge pages while the kernel can fill them.
-/// The pages fault in on first touch: populating the range up front
-/// (`MADV_POPULATE_WRITE`) made the workers take turns in the kernel.
+/// They fault in on first touch: `MADV_POPULATE_WRITE` made the workers
+/// take turns in the kernel. Past the gate, no advice (not `NOHUGEPAGE`)
+/// lets `enabled=always` still back a chunk with free huge pages.
 ///
 /// # Safety
 /// The range is an anonymous mapping of the caller's.

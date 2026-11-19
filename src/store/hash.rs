@@ -568,11 +568,25 @@ mod tests {
 
     #[test]
     fn streaming_matches_oneshot() {
-        let mut w = Hasher::new(HashAlgo::Sha256);
-        w.write_all(b"a").unwrap();
-        w.write_all(b"bc").unwrap();
-        assert_eq!(w.bytes_written(), 3);
-        assert_eq!(w.finish(), hash_bytes(HashAlgo::Sha256, b"abc"));
+        for algo in [
+            HashAlgo::Md5,
+            HashAlgo::Sha1,
+            HashAlgo::Sha256,
+            HashAlgo::Sha512,
+            HashAlgo::Blake3,
+        ] {
+            for len in [
+                0, 1, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129, 1023, 1024, 1025, 2048,
+            ] {
+                let input: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+                let mut w = Hasher::new(algo);
+                for chunk in input.chunks(17) {
+                    w.write_all(chunk).unwrap();
+                }
+                assert_eq!(w.bytes_written(), len as u64);
+                assert_eq!(w.finish(), hash_bytes(algo, &input), "{algo:?}, len={len}");
+            }
+        }
     }
 
     #[test]

@@ -277,6 +277,7 @@ fn try_eval(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 }
 
 fn function_args(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    crate::trace::fine::introspection();
     let w = ev.force(args[0])?;
     match w.view() {
         Value::PrimOp(_) | Value::PrimOpApp(_) => Ok(ev.empty_attrs()),
@@ -295,6 +296,7 @@ fn function_args(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
 }
 
 fn unsafe_get_attr_pos(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    crate::trace::fine::introspection();
     let name = ev.force_string_no_ctx(
         args[0],
         pos,

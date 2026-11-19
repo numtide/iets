@@ -2,6 +2,7 @@
 //! mismatch is a miss. Stat-only checks come first; a file whose stat
 //! changed is rehashed and accepted when its content did not.
 
+use crate::eval::follow_import_links;
 use crate::sys::fs::file_id;
 use crate::sys::{self, OsStrExt};
 use std::collections::HashSet;
@@ -204,7 +205,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             }
         }
         Obs::ImportPath { path, target } => {
-            if crate::eval::follow_import_links(path) == *target {
+            if follow_import_links(path) == *target {
                 Outcome::Same
             } else {
                 Outcome::Changed(format!(

@@ -9,6 +9,7 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -282,7 +283,7 @@ fn import_starts_following_a_link(work: Work) {
     );
     let read = work.eval(&[&reader]).out;
     fs::remove_file(&entry).unwrap();
-    std::os::unix::fs::symlink("other/entry.nix", &entry).unwrap();
+    symlink("other/entry.nix", &entry).unwrap();
     let r = work.eval(&[&main]);
     assert_eq!(r.out.trim(), "2");
     assert!(r.status.contains("cache: miss"), "{}", r.status);
@@ -295,8 +296,6 @@ fn import_starts_following_a_link(work: Work) {
 
 #[rstest]
 fn import_keeps_the_target_directory_spelling(work: Work) {
-    use std::os::unix::fs::symlink;
-
     let main = work.write("main.nix", "import ./entry.nix");
     work.write("source/entry.nix", "baseNameOf (toString ./.)");
     symlink("source", work.path("alias")).unwrap();

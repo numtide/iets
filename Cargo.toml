@@ -17,6 +17,7 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs", "mm", "net", "param", "thread", "process", "termios", "time"] }
 memchr = "2"
 smallvec = "1"
+indexmap = "2"
 getrandom = "0.4"
 tempfile = "3"
 toml = "1"

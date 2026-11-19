@@ -514,6 +514,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "indexmap",
  "libc",
  "libmimalloc-sys",
  "lz4_flex",

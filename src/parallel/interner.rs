@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::runtime::heap::Heap;
 use crate::session::Session;
-use crate::syntax::symbol::{FxHasher, Sym};
+use crate::syntax::symbol::{FileSymbols, FxHasher, Sym};
 use crate::sys::vm;
 use std::mem;
 
@@ -112,6 +112,9 @@ pub struct CacheEntry {
 pub struct Interner {
     shared: Arc<Inner>,
     cache: Box<[CacheEntry]>,
+    /// Per handle while compiling a cacheable file. A name already present
+    /// in this process may be new in a process that loads the entry.
+    pub(crate) file_symbols: Option<Box<FileSymbols>>,
 }
 
 /// A clone has a cache of its own, unless the handle it clones has none.
@@ -124,6 +127,7 @@ impl Clone for Interner {
             } else {
                 empty_cache()
             },
+            file_symbols: None,
         }
     }
 }
@@ -190,6 +194,7 @@ impl Interner {
                 heap,
             }),
             cache: empty_cache(),
+            file_symbols: None,
         }
     }
 
@@ -211,6 +216,14 @@ impl Interner {
     }
 
     pub fn intern(&mut self, name: &[u8]) -> Sym {
+        let sym = self.intern_cached(name);
+        if let Some(file) = &mut self.file_symbols {
+            file.insert(sym);
+        }
+        sym
+    }
+
+    fn intern_cached(&mut self, name: &[u8]) -> Sym {
         let hash = hash_bytes(name);
         let slot = (hash as usize) & (CACHE - 1);
         let e = &self.cache[slot];

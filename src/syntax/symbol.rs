@@ -3,6 +3,9 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Sym(pub u32);
 
+/// Parser and compiler symbol requests in first-use order.
+pub(crate) type FileSymbols = indexmap::IndexSet<Sym, FxBuild>;
+
 use std::collections::{HashMap, HashSet};
 
 pub use crate::parallel::interner::Interner;

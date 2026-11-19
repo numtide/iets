@@ -140,6 +140,11 @@ pub enum Obs {
         path: Vec<u8>,
         target: Option<Vec<u8>>,
     },
+    /// The source path after following the final component of an import.
+    ImportPath {
+        path: Vec<u8>,
+        target: Vec<u8>,
+    },
     /// `value` is a keyed hash, not the value: the observation needs only to
     /// know whether the value changed, and an entry that held the answer of
     /// every `getEnv` in clear would be a file of the user's secrets.
@@ -179,6 +184,7 @@ impl Obs {
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
+            Obs::ImportPath { path, .. } => (8, Cow::Borrowed(path), 0),
         }
     }
 }

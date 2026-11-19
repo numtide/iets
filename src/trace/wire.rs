@@ -249,6 +249,11 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             e.bytes(entry);
             e.u8(*version);
         }
+        Obs::ImportPath { path, target } => {
+            e.u8(8);
+            e.bytes(path);
+            e.bytes(target);
+        }
     }
 }
 
@@ -321,6 +326,10 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
         7 => Obs::Input {
             entry: d.vec()?,
             version: d.u8()?,
+        },
+        8 => Obs::ImportPath {
+            path: d.vec()?,
+            target: d.vec()?,
         },
         _ => return Err(()),
     })

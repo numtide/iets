@@ -197,6 +197,16 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 Outcome::Changed(format!("{} resolves to a different path", lossy(path)))
             }
         }
+        Obs::ImportPath { path, target } => {
+            if crate::eval::follow_import_links(path) == *target {
+                Outcome::Same
+            } else {
+                Outcome::Changed(format!(
+                    "{} resolves to a different import path",
+                    lossy(path)
+                ))
+            }
+        }
         Obs::Env { name, value } => {
             let now = env_hash(name);
             let what = match (&now, value) {

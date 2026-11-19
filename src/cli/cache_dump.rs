@@ -55,6 +55,9 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
             Obs::Input { entry, version } => {
                 render::line(&format!("input {} v{version}", s(entry)))
             }
+            Obs::ImportPath { path, target } => {
+                render::line(&format!("import {} -> {}", s(path), s(target)))
+            }
         }
     }
     0

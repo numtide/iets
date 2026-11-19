@@ -4,15 +4,19 @@
 mod hermetic;
 
 use hermetic::{Iets, bin, stderr, stdout};
+use iets::eval::EvalConfig;
 use iets::store::hash::{HashAlgo, base64_encode, hash_bytes};
-use iets::store::narinfo::NarInfo;
+use iets::store::narinfo::{Fetched, NarInfo};
 use iets::store::path::{IngestionMethod, make_fixed_output_path};
+use iets::trace::{key::Key, run::Cache as TraceCache, store::Part};
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use rstest::rstest;
 use std::collections::BTreeSet;
 use std::fs;
 use std::process::Output;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tempfile::{TempDir, tempdir};
 
 const ROOT: &str = "00000000000000000000000000000000-ia-root";
@@ -92,6 +96,45 @@ impl Cache {
         }
         c.output().expect("run iets")
     }
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "the store paths are Unix paths")]
+fn refreshing_a_build_readset_retains_its_fetched_closures() {
+    let dir = tempdir().unwrap();
+    let open = || TraceCache::open(dir.path().to_str(), Key::new("build"), false).unwrap();
+    let input = dir.path().join("input.nix");
+    fs::write(&input, b"1").unwrap();
+    let file = fs::File::options().write(true).open(&input).unwrap();
+    let before = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    file.set_modified(before).unwrap();
+
+    let ev = EvalConfig::new().trace(true).build();
+    ev.trace().file(
+        input.as_os_str().as_encoded_bytes(),
+        &file.metadata().unwrap(),
+        b"1",
+    );
+    let fetched = Arc::new(Fetched {
+        store: "https://cache.example.org".into(),
+        info: NarInfo::parse(&narinfo(ROOT, &[], None, None), ROOT).unwrap(),
+    });
+    let path = fetched.info.path.clone();
+    ev.known.add_fetched(path.clone(), fetched.clone());
+    open().write_build(&ev, &[]);
+
+    file.set_modified(before + Duration::from_secs(10)).unwrap();
+    let refreshing = open();
+    assert!(refreshing.lookup());
+    // The lookup still holds the old generation. A fresh run opens the one
+    // the metadata-only hit just published.
+    let next = open();
+    assert_ne!(next.part(Part::Readset), refreshing.part(Part::Readset));
+    assert!(next.lookup());
+    assert_eq!(
+        next.read_build().unwrap().fetched.get(&path),
+        Some(&fetched)
+    );
 }
 
 #[rstest]

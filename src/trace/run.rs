@@ -18,7 +18,7 @@ use crate::store::path::StorePath;
 use crate::store::source::SourceOrigin;
 use crate::syntax::symbol::FxHashMap;
 use crate::trace::key::Key;
-use crate::trace::store::{self, Entry, Opened, Part};
+use crate::trace::store::{self, Opened, Part};
 use crate::trace::{validate, wire};
 
 /// What a `build` entry holds besides its read set.
@@ -114,7 +114,9 @@ impl Cache {
         match validate::validate(&mut obs, threads) {
             Ok(r) => {
                 if r.refreshed > 0 {
-                    self.republish(entry, &wire::encode_readset(&obs));
+                    let _ =
+                        self.store
+                            .refresh_readset(&self.key, entry, &wire::encode_readset(&obs));
                 } else {
                     self.store.touch(&self.key);
                 }
@@ -142,25 +144,6 @@ impl Cache {
                 false
             }
         }
-    }
-
-    /// A hit that refreshed stat fields publishes the whole entry again, with
-    /// the parts it validated and the new read set. The other parts come from
-    /// the open generation, so a sibling's publish in between is not mixed in.
-    fn republish(&self, entry: &Entry, readset: &[u8]) {
-        let kept: Vec<(Part, Vec<u8>)> = [
-            Part::Warnings,
-            Part::NixConfig,
-            Part::Drvs,
-            Part::Sources,
-            Part::Result,
-        ]
-        .into_iter()
-        .filter_map(|p| Some((p, entry.part(p)?)))
-        .collect();
-        let mut parts: Vec<(Part, &[u8])> = kept.iter().map(|(p, b)| (*p, b.as_slice())).collect();
-        parts.push((Part::Readset, readset));
-        let _ = self.store.publish(&self.key, &parts);
     }
 
     /// Writes the entry after a successful run; a run that observed

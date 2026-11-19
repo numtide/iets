@@ -15,8 +15,26 @@ use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
 
 #[derive(Default)]
 struct Slot {
-    prefetched: OnceLock<Option<BTreeSet<StorePath>>>,
+    loading: Mutex<()>,
     answer: OnceLock<BTreeSet<StorePath>>,
+}
+
+impl Slot {
+    fn get_or_query(
+        &self,
+        query: impl FnOnce() -> Option<BTreeSet<StorePath>>,
+    ) -> Option<&BTreeSet<StorePath>> {
+        if let Some(refs) = self.answer.get() {
+            return Some(refs);
+        }
+        // A background prefetch and the first foreground reader share the
+        // lookup. A failed or missing answer leaves the slot available to retry.
+        let _guard = self.loading.lock().expect("references lookup");
+        if self.answer.get().is_none() {
+            self.answer.set(query()?).expect("locked empty slot");
+        }
+        self.answer.get()
+    }
 }
 
 /// What the store answered for a path, kept for the life of the process: the
@@ -38,14 +56,9 @@ fn slot(full: &str) -> (Arc<Slot>, bool) {
 pub fn references_of(path: &StorePath) -> BTreeSet<StorePath> {
     let full = path.to_string();
     let (s, _) = slot(&full);
-    // a failed prefetch queries again
-    s.answer
-        .get_or_init(|| {
-            (s.prefetched.get_or_init(|| None).clone())
-                .or_else(|| query_references(&full))
-                .unwrap_or_default()
-        })
-        .clone()
+    s.get_or_query(|| query_references(&full))
+        .cloned()
+        .unwrap_or_default()
 }
 
 const MAX_PREFETCH: usize = 8;
@@ -61,7 +74,7 @@ pub fn prefetch_references(path: StorePath, session: Arc<Session>) {
     if new && STARTED.fetch_add(1, Ordering::Relaxed) < MAX_PREFETCH {
         thread::spawn(move || {
             let _entered = session.enter();
-            s.prefetched.get_or_init(|| query_references(&full));
+            s.get_or_query(|| query_references(&full));
         });
     }
 }
@@ -128,4 +141,32 @@ pub fn locate_in_store(
             )))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_reference_query_is_retried_without_losing_valid_empty_answers() {
+        let reference =
+            StorePath::from_base_name("00000000000000000000000000000000-reference").unwrap();
+        for registered in [BTreeSet::from([reference]), BTreeSet::new()] {
+            let slot = Slot::default();
+            assert!(
+                slot.get_or_query(|| None)
+                    .cloned()
+                    .unwrap_or_default()
+                    .is_empty()
+            );
+            assert_eq!(
+                slot.get_or_query(|| Some(registered.clone())),
+                Some(&registered)
+            );
+            assert_eq!(
+                slot.get_or_query(|| panic!("registered answer should be reused")),
+                Some(&registered)
+            );
+        }
+    }
 }

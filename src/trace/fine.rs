@@ -1716,7 +1716,9 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                     s.flatten(&[EDGE | t])
                 };
                 let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+                let mut text = s.text(ev, &obs);
+                text.push_str("V\tlist-control-v1\n");
+                if let Err(e) = std::fs::write(&p, text) {
                     errln!("fine trace: writing {}: {e}", p.display());
                 }
             }

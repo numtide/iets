@@ -17,7 +17,7 @@ fn run(bin: &Iets, args: &[&str]) -> Output {
 
 #[rstest]
 fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir_in(iets::sys::temp_dir()).unwrap();
     let path = |name: &str| dir.path().join(name);
     for (name, value) in [
         ("guard", "true"),
@@ -54,7 +54,10 @@ fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
     // Model four revisions, each editing the root region of one imported file.
     let changes: String = ["guard", "left", "right", "other"]
         .iter()
-        .map(|name| format!("{name}\tV\t2\n{name}\tCR\t{}\t\n", path(name).display()))
+        .map(|name| {
+            let file = String::from_utf8(iets::sys::path_to_internal(&path(name))).unwrap();
+            format!("{name}\tV\t2\n{name}\tCR\t{file}\t\n")
+        })
         .collect();
     fs::write(path("changes"), changes).unwrap();
     let checked = ok(bin
@@ -111,6 +114,44 @@ fn run_complete(mut c: Command, words: &[&str]) -> String {
     assert_eq!(o.status.code(), Some(0), "{words:?}: {}", stderr(&o));
     assert!(o.stderr.is_empty(), "{words:?}: {}", stderr(&o));
     String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[cfg(unix)]
+#[rstest]
+fn fine_text_checker_rereads_only_jobs_missing_the_list_control_marker(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    fs::create_dir(path("jobs")).unwrap();
+    ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_JOBS", "jobs")
+        .args([
+            "eval",
+            "--strict",
+            "--no-cache",
+            "--workers",
+            "1",
+            "-E",
+            "[ 0 ]",
+        ]));
+    let current = fs::read_to_string(path("jobs/0")).unwrap();
+    let legacy = current.replace("V\tlist-control-v1\n", "");
+    assert_ne!(current, legacy);
+    fs::write(path("changes"), "1\tV\t2\n1\tCR\tunrelated\t\n").unwrap();
+    fs::write(
+        path("traces"),
+        format!("J\tcurrent\n{current}J\tlegacy\n{legacy}"),
+    )
+    .unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
+    let checked = ok(Command::new("awk")
+        .arg("-f")
+        .arg(script)
+        .arg(path("changes"))
+        .arg(path("traces")));
+    assert_eq!(stdout(&checked), "legacy\t1\tmissing list control trace");
 }
 
 #[rstest]

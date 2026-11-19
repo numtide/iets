@@ -28,7 +28,7 @@ fn main() -> ExitCode {
 mod ab {
     use std::env;
     use std::fs::{self, File};
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::{self, BufRead, BufReader, Read};
     use std::mem::MaybeUninit;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
@@ -291,43 +291,71 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
-    fn kill_leftovers() {
-        let me = process::id();
-        let kids = fs::read_to_string(format!("/proc/{me}/task/{me}/children")).unwrap_or_default();
-        for pid in kids
-            .split_whitespace()
-            .filter_map(|p| p.parse::<libc::pid_t>().ok())
-        {
-            // SAFETY: a signal to a process this one adopted.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+    fn enable_subreaper() -> io::Result<()> {
+        // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag.
+        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
+            return Err(io::Error::last_os_error());
         }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_leftovers() -> io::Result<()> {
+        if fs::read_link("/proc/self")? != Path::new(&process::id().to_string()) {
+            return Err(io::Error::other("/proc uses a different PID namespace"));
+        }
+        // The per-thread children file is optional in Linux. At the deadline
+        // enumerate process IDs, then let waitpid verify our ownership.
+        for entry in fs::read_dir("/proc")? {
+            let name = entry?.file_name();
+            let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) else {
+                continue;
+            };
+            // SAFETY: only a live child returns zero. This is the sole reaper,
+            // so an exit between the check and kill cannot recycle its PID.
+            if pid > 0 && unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) } == 0 {
+                // SAFETY: the PID above names our child in this namespace.
+                if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
+                    let e = io::Error::last_os_error();
+                    if e.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn kill_leftovers() {}
+    fn kill_leftovers() -> io::Result<()> {
+        Ok(())
+    }
 
     /// Processes the run left behind, which are ours as the subreaper. False
     /// when they had to be killed.
-    fn reap_leftovers(limit: Duration) -> bool {
+    fn reap_leftovers(limit: Duration) -> io::Result<bool> {
         let until = Instant::now() + limit;
+        let mut clean = true;
         loop {
             // SAFETY: waitpid with a null status pointer is allowed.
             match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
-                0 if Instant::now() < until => thread::sleep(Duration::from_millis(10)),
                 0 => {
-                    // a killed process's own children come to us in turn
-                    loop {
-                        kill_leftovers();
-                        // SAFETY: as above.
-                        match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
-                            0 => thread::sleep(Duration::from_millis(10)),
-                            p if p > 0 => {}
-                            _ => return false,
-                        }
+                    if Instant::now() >= until {
+                        clean = false;
+                        // A killed process's children come to us in turn.
+                        kill_leftovers()?;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                -1 => {
+                    let e = io::Error::last_os_error();
+                    match e.raw_os_error() {
+                        Some(libc::EINTR) => continue,
+                        Some(libc::ECHILD) => return Ok(clean),
+                        _ => return Err(e),
                     }
                 }
-                p if p > 0 => {}
-                _ => return true,
+                _ => {}
             }
         }
     }
@@ -373,7 +401,8 @@ mod ab {
             ru.assume_init()
         };
         let wall = t0.elapsed().as_secs_f64();
-        let clean = reap_leftovers(LEFTOVER_LIMIT);
+        let clean = reap_leftovers(LEFTOVER_LIMIT)
+            .map_err(|e| format!("reaping leftover processes: {e}"))?;
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -690,9 +719,9 @@ mod ab {
             }
         }
         #[cfg(target_os = "linux")]
-        // SAFETY: a prctl that takes an integer.
-        unsafe {
-            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
+        if let Err(e) = enable_subreaper() {
+            eprintln!("ab: cannot track leftover processes: {e}");
+            return ExitCode::FAILURE;
         }
         #[cfg(target_os = "linux")]
         if counters::open().is_none() {
@@ -868,16 +897,22 @@ mod ab {
         #[cfg(target_os = "linux")]
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
-            // SAFETY: a prctl that takes an integer.
-            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+            enable_subreaper().unwrap();
             let t = Instant::now();
+            // This direct child belongs to the test thread. Orphans that sh
+            // leaves behind can belong to the process leader instead.
+            let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
             Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
                 .args(["-c", "(sleep 30 & wait) &"])
                 .status()
                 .unwrap();
-            assert!(!reap_leftovers(Duration::from_secs(1)));
+            assert!(!reap_leftovers(Duration::from_secs(1)).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
+            assert_eq!(
+                direct.wait().unwrap_err().raw_os_error(),
+                Some(libc::ECHILD)
+            );
         }
 
         #[test]

@@ -446,13 +446,17 @@ impl Config {
     /// The configuration a file at `w` is compiled under: every level
     /// replaced by its `site_level`.
     pub fn for_where(&self, w: Where) -> Config {
-        let mut c = self.clone();
-        if w != Where::Root && self.scoped() {
-            for d in LINTS {
-                c.levels[d.id as usize] = self.site_level(d.id, w);
-            }
+        Config {
+            levels: self.levels_for_where(w),
+            ..self.clone()
         }
-        c
+    }
+
+    fn levels_for_where(&self, w: Where) -> [Level; N] {
+        if w == Where::Root || !self.scoped() {
+            return self.levels;
+        }
+        std::array::from_fn(|i| self.site_level(LINTS[i].id, w))
     }
 
     fn apply_inputs(&mut self, t: &toml::Table, origin: &str) -> Result<(), String> {
@@ -974,11 +978,28 @@ impl Evaluator {
 
     /// The lint configuration the file `path` is compiled under.
     pub fn config_for_file(&self, path: &[u8]) -> Config {
-        if !self.lint_config().scoped() {
-            return self.lint_config().clone();
+        self.lint_config().for_where(self.compile_where(path))
+    }
+
+    /// The compiler sees one file. Its levels already include all scope and
+    /// input rules, so it needs neither the roots nor the input overrides.
+    pub(crate) fn compile_lints(&self, path: &[u8]) -> Config {
+        let config = self.lint_config();
+        Config {
+            levels: config.levels_for_where(self.compile_where(path)),
+            max_bytes: config.max_bytes,
+            scope: Scope::All,
+            roots: Vec::new(),
+            inputs: Vec::new(),
         }
-        let w = self.where_of_path(path);
-        self.lint_config().for_where(w)
+    }
+
+    fn compile_where(&self, path: &[u8]) -> Where {
+        if self.lint_config().scoped() {
+            self.where_of_path(path)
+        } else {
+            Where::Root
+        }
     }
 
     /// The lock node name of the flake root or locked input whose tree

@@ -141,6 +141,8 @@ mod kind {
     pub const PLAIN: u8 = 3;
     /// A set its parent holds as a value: no force of its own.
     pub const EAGER: u8 = 4;
+    /// A query whose value has no children with omitted metadata.
+    pub const SCALAR_QUERY: u8 = 5;
 }
 
 /// One observation.
@@ -149,6 +151,8 @@ enum O {
     Region(u32),
     Key(u32, Sym),
     All(u32),
+    /// A builtin inspected metadata absent from a set fingerprint.
+    Introspection,
     /// A position at a byte offset of a file reached a value.
     Pos(Arc<[u8]>, u32),
     /// What the tracing cache records, as a line of the output.
@@ -539,14 +543,17 @@ impl State {
                 _ => match fingerprint(names, v) {
                     Some(h) => {
                         self.fps[i] = Some(h);
-                        kind::QUERY
+                        match v.view() {
+                            Value::Attrs(_) | Value::List(_) => kind::QUERY,
+                            _ => kind::SCALAR_QUERY,
+                        }
                     }
                     None => kind::PLAIN,
                 },
             };
         }
         match self.kind[i] {
-            kind::QUERY => self.query(p, t),
+            kind::QUERY | kind::SCALAR_QUERY => self.query(p, t),
             k => {
                 if t != 0 {
                     self.edge(t);
@@ -928,6 +935,12 @@ pub fn all(a: &AttrsObj, at: &'static Location<'static>) {
 /// A position at byte `off` of `path` reached a value.
 pub fn position(path: &[u8], off: u32) {
     with(|s| s.record(O::Pos(path.into(), off)));
+}
+
+pub fn introspection() {
+    if on() {
+        with(|s| s.record(O::Introspection));
+    }
 }
 
 /// What the tracing cache records.
@@ -1507,6 +1520,7 @@ impl State {
             O::Region(r) => self.region_line(*r),
             O::Key(p, k) => format!("K\t{p}\t{}", ev.interner.name_str(*k)),
             O::All(p) => self.all_line(ev, *p),
+            O::Introspection => "M".into(),
             O::Pos(f, off) => format!("X\t{}\t{off}", lossy(f)),
             O::Out(l) => l.clone(),
         }
@@ -1527,6 +1541,7 @@ impl State {
                 O::Region(r) => regions.push(*r),
                 O::Key(p, k) => keys.push((*p, *k)),
                 O::All(p) => alls.push(*p),
+                O::Introspection => out.push_str("M\n"),
                 O::Pos(f, off) => {
                     let o = pos.entry(f).or_insert(*off);
                     *o = (*o).max(*off);
@@ -1593,6 +1608,11 @@ impl State {
             // a name may hold a newline, and a line is an id
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
+        }
+        // Its presence also distinguishes graphs that recorded introspection
+        // from older ones. No trace references this extra row.
+        if !self.obs_ids.contains_key(&O::Introspection) {
+            o.push_str("M\n");
         }
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
@@ -1988,6 +2008,8 @@ struct Graph {
     index: ObsIndex,
     words: Vec<u32>,
     roots: Vec<u32>,
+    /// Jobs that read metadata omitted by a query fingerprint.
+    introspects: Vec<bool>,
     paths: Vec<GPath>,
     /// By key, its path, or `NO_PATH`.
     by_key: Vec<u32>,
@@ -2022,6 +2044,7 @@ struct Graph {
 #[derive(Default)]
 struct ObsIndex {
     n: usize,
+    introspection: Option<u32>,
     every: Vec<u32>,
     regions: FxHashMap<String, Vec<u32>>,
     region_files: FxHashMap<String, Vec<u32>>,
@@ -2054,6 +2077,7 @@ impl ObsIndex {
                 f.next().unwrap_or(""),
             );
             match kind {
+                "M" => x.introspection = Some(i),
                 "R" if a == "?" => x.every.push(i),
                 "R" => {
                     // the file and the region path are next to each other in the line
@@ -2271,6 +2295,7 @@ impl Graph {
             index,
             words,
             roots,
+            introspects: Vec::new(),
             by_key,
             paths,
             rings,
@@ -2311,6 +2336,9 @@ impl Graph {
         let mut edges = Pairs(vec![0; parts], Vec::new());
         let mut read = Pairs(vec![0; self.paths.len()], Vec::new());
         let mut heads = Pairs(vec![0; self.paths.len()], Vec::new());
+        // A trace follows its inputs. Propagate the marker during the index
+        // walk, including through shared thunks and copied sets.
+        let mut metadata = vec![0u64; words.len().div_ceil(64)];
         let mut at = 2;
         while at < words.len() {
             let b = (at >> BLOCK) as u32;
@@ -2320,11 +2348,13 @@ impl Graph {
             words[at] = 0;
             let n = words[at + 1] as usize;
             let mut k = at + 2;
+            let mut inspects = false;
             while k < at + 2 + n {
                 let w = words[k];
                 k += 1;
                 if w & EDGE == 0 {
                     obs.add(w, b);
+                    inspects |= self.index.introspection == Some(w);
                     continue;
                 }
                 if w & QUERY != 0 {
@@ -2341,12 +2371,24 @@ impl Graph {
                     }
                 }
                 let t = w & !(EDGE | QUERY);
+                inspects |= metadata[t as usize / 64] & (1 << (t % 64)) != 0;
                 if t != 0 && t >> BLOCK != b {
                     edges.add(t >> PART, b);
                 }
             }
+            if inspects {
+                metadata[at / 64] |= 1 << (at % 64);
+            }
             at += 2 + n;
         }
+        self.introspects = self
+            .roots
+            .iter()
+            .map(|&t| {
+                self.index.introspection.is_none()
+                    || metadata[t as usize / 64] & (1 << (t % 64)) != 0
+            })
+            .collect();
         read.1.clear();
         self.by_obs = Lists::new(self.index.n, &obs.1);
         self.readers = Lists::new(parts, &edges.1);
@@ -2361,11 +2403,24 @@ impl Graph {
             .filter(|p| *p != NO_PATH)
     }
 
-    fn status(&self, t: u32) -> Option<(bool, u32)> {
-        match self.words[t as usize] {
-            0 => None,
-            k => Some(self.stat[k as usize - 1]),
+    fn job_status(&self, t: u32, introspects: bool) -> Option<St> {
+        let i = self.words[t as usize].checked_sub(1)?;
+        let st = self.stat[i as usize];
+        // An equal shallow fingerprint cannot prove that a selected function's
+        // formals or a binding's source position stayed equal. A scalar
+        // fingerprint from this revision still covers the entire value.
+        if introspects && !st.0 {
+            for &key in self.sets.get(st.1) {
+                let scalar = self.path_of(key).is_some_and(|p| {
+                    self.paths[p as usize].kind == kind::SCALAR_QUERY
+                        && self.mine[p as usize] & LOCAL != 0
+                });
+                if !scalar {
+                    return Some(HARD);
+                }
+            }
         }
+        Some(st)
     }
 
     fn ring(&self, h: u32) -> impl Iterator<Item = u32> + '_ {
@@ -2636,7 +2691,8 @@ impl Server {
             .map(|g| {
                 g.roots
                     .iter()
-                    .map(|t| if *t == 0 { None } else { g.status(*t) })
+                    .zip(&g.introspects)
+                    .map(|(&t, &introspects)| g.job_status(t, introspects))
                     .collect()
             })
             .collect()

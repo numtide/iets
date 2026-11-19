@@ -401,12 +401,12 @@ pub struct Evaluator {
 }
 
 /// A position in a record, `file:line:column`, the way an error names one.
-pub enum At {
-    Known(&'static [u8], u32, u32),
+pub enum At<'a> {
+    Known(&'a [u8], u32, u32),
     None,
 }
 
-impl Field for At {
+impl Field for At<'_> {
     fn write(self, out: &mut Vec<u8>) {
         let start = out.len();
         match self {
@@ -901,7 +901,7 @@ impl Evaluator {
     }
 
     /// The file holding `pos` and the offset inside it.
-    pub fn file_of(&self, pos: Pos) -> Option<(&'static FileInfo, u32)> {
+    pub fn file_of(&self, pos: Pos) -> Option<(&FileInfo, u32)> {
         self.files.file_of(pos)
     }
 
@@ -3173,6 +3173,7 @@ impl Evaluator {
         a.set_flags(fa);
         b.set_flags(fb);
         let file = self
+            .files
             .file_of(pos)
             .map(|(f, _)| (f as *const FileInfo as usize, &f.path[..]));
         let bytes = (self.arena.bytes_allocated - bytes) as u64;
@@ -3421,7 +3422,7 @@ impl Evaluator {
 
     /// `pos` as a record field, without the `String` [`Self::describe_pos`]
     /// builds.
-    pub fn at(&self, pos: Pos) -> At {
+    pub fn at(&self, pos: Pos) -> At<'_> {
         match self.file_of(pos) {
             Some((f, off)) => {
                 let (line, col) = f.line_col(off);

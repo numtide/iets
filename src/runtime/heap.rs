@@ -24,7 +24,7 @@ pub struct Heap {
 #[derive(Default)]
 struct Inner {
     chunks: Vec<(usize, usize)>,
-    /// Rust values handed out as `&'static`, dropped before the chunks go.
+    /// Boxed values with stable addresses, dropped before the chunks go.
     kept: Vec<Box<dyn Send>>,
     /// Bump state of the current name block.
     next: usize,
@@ -63,7 +63,7 @@ impl Heap {
     }
 
     /// `v`, owned by the session and dropped when it is released.
-    pub(crate) fn keep<T: Send + Sync + 'static>(&self, v: T) -> &'static T {
+    pub(crate) fn keep<T: Send + Sync + 'static>(&self, v: T) -> &T {
         let b = Box::new(v);
         let r: *const T = &*b;
         self.inner.lock().unwrap().kept.push(b);

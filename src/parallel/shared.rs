@@ -128,7 +128,7 @@ impl FilesInner {
         FileId(n as u32)
     }
 
-    fn get(&self, i: usize) -> Option<&'static FileInfo> {
+    fn get(&self, i: usize) -> Option<&FileInfo> {
         if i >= self.len.load(Ordering::Acquire) {
             return None;
         }
@@ -193,12 +193,22 @@ impl Files {
             .push(&mut self.0.adder.lock().unwrap(), info, src.len())
     }
 
-    pub fn get(&self, i: usize) -> Option<&'static FileInfo> {
+    /// Borrows a file from this table.
+    ///
+    /// ```compile_fail,E0515
+    /// use iets::eval::FileInfo;
+    /// use iets::parallel::shared::Files;
+    ///
+    /// fn retain(files: Files) -> &'static FileInfo {
+    ///     files.get(0).unwrap()
+    /// }
+    /// ```
+    pub fn get(&self, i: usize) -> Option<&FileInfo> {
         self.0.get(i)
     }
 
     /// The file whose base range holds `pos`, and the offset inside it.
-    pub fn file_of(&self, pos: Pos) -> Option<(&'static FileInfo, u32)> {
+    pub fn file_of(&self, pos: Pos) -> Option<(&FileInfo, u32)> {
         if pos.is_none() {
             return None;
         }

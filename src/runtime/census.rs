@@ -97,7 +97,7 @@ pub struct Upd {
     /// Each new result: chain length, uses as left and as right operand.
     pub results: HashMap<*const AttrsObj, (u32, u32, u32)>,
     /// By the file of the `//`: path, count, bytes.
-    pub by_file: HashMap<usize, (&'static [u8], u64, u64)>,
+    pub by_file: HashMap<usize, (Box<[u8]>, u64, u64)>,
 }
 
 /// The branch `update_attrs` takes; read before the update, which may
@@ -289,7 +289,7 @@ impl Census {
         b: &'static AttrsObj,
         out: Word,
         bytes: u64,
-        file: Option<(usize, &'static [u8])>,
+        file: Option<(usize, &[u8])>,
     ) {
         let u = &mut self.upd;
         let (la, lb) = (a.len_unmarked(), b.len_unmarked());
@@ -328,7 +328,7 @@ impl Census {
             u.results.insert(o, (chain, 0, 0));
         }
         if let Some((key, name)) = file {
-            let f = u.by_file.entry(key).or_insert((name, 0, 0));
+            let f = u.by_file.entry(key).or_insert_with(|| (name.into(), 0, 0));
             f.1 += 1;
             f.2 += bytes;
         }

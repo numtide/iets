@@ -479,6 +479,7 @@ dependencies = [
 name = "iets"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "blake3",
  "bzip2",
  "crc32fast",

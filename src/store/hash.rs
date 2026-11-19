@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use std::io::{self, Write};
 use std::{error, fmt};
 
@@ -126,7 +128,7 @@ impl Hash {
         match format {
             HashFormat::Base16 => base16_encode_into(s, self.bytes()),
             HashFormat::Nix32 => nix32_encode_into(s, self.bytes()),
-            HashFormat::Base64 | HashFormat::Sri => s.push_str(&base64_encode(self.bytes())),
+            HashFormat::Base64 | HashFormat::Sri => STANDARD.encode_string(self.bytes(), s),
         }
     }
 
@@ -457,21 +459,7 @@ pub fn base64_encoded_len(n: usize) -> usize {
 
 /// Mirrors base-n.cc:base64::encode.
 pub fn base64_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(base64_encoded_len(bytes.len()));
-    for chunk in bytes.chunks(3) {
-        let mut n: u32 = 0;
-        for (k, b) in chunk.iter().enumerate() {
-            n |= (*b as u32) << (16 - 8 * k);
-        }
-        for k in 0..4 {
-            if k <= chunk.len() {
-                s.push(BASE64_CHARS[((n >> (18 - 6 * k)) & 0x3f) as usize] as char);
-            } else {
-                s.push('=');
-            }
-        }
-    }
-    s
+    STANDARD.encode(bytes)
 }
 
 /// Mirrors base-n.cc:base64::decode (stops at '=', skips '\n').

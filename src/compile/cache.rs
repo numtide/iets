@@ -917,8 +917,8 @@ impl<'a> De<'a, '_> {
     /// budget, so a corrupt count cannot reserve gigabytes and a chain of
     /// them cannot do it one level at a time.
     fn count(&mut self) -> usize {
-        let n = (self.u32() as usize).min(self.data.len() - self.at.min(self.data.len()));
-        if n > self.budget {
+        let n = self.u32() as usize;
+        if n > self.budget || n > self.data.len().saturating_sub(self.at) {
             self.ok = false;
             return 0;
         }
@@ -1557,6 +1557,9 @@ mod tests {
         ] {
             assert_eq!(loads(&[MAGIC.as_slice(), count, body].concat()), expected);
         }
+
+        // The final allow-line count declares one item, but no bytes follow.
+        assert!(!loads(&[MAGIC.as_slice(), &[0, 0, 0, 1, 0, 1]].concat()));
 
         for n in 0..bytes.len() {
             assert!(!loads(&bytes[..n]), "{n} bytes of {} load", bytes.len());

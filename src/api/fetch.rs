@@ -28,11 +28,11 @@ pub fn url_hash(url: &str, unpack: bool, algo: HashAlgo) -> Result<Hash> {
     let limits = Limits::new(&cfg)?;
     let mut h = Hasher::new(algo);
     if !unpack {
-        http::get(url, &[], limits, false, &mut h)?;
+        http::get_or_read(url, &[], limits, false, &mut h)?;
         return Ok(h.finish());
     }
     let mut spool = spool::Spool::scratch()?;
-    http::get(url, &[], limits, true, &mut spool)?;
+    http::get_or_read(url, &[], limits, true, &mut spool)?;
     Tree::index(spool, limits.max_size)?
         .dump(&mut h)
         .map_err(|e| Error::io("cannot hash the unpacked tree", e))?;

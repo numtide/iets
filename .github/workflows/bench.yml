@@ -1,0 +1,48 @@
+name: bench
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # into the same target directory, so both share the cached dependencies
+      - name: Build the base
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "$BASE"
+          cargo build --release --locked --bin iets \
+            --manifest-path "$RUNNER_TEMP/base/Cargo.toml" --target-dir target
+          cp target/release/iets "$RUNNER_TEMP/iets-base"
+      - name: Build the pull request
+        run: cargo build --release --locked --bin iets --example ab
+      # Ubuntu forbids perf counters to users by default
+      - run: sudo sysctl kernel.perf_event_paranoid=2
+      # shared runners vary by about 1 %, and only scenarios that take
+      # milliseconds by more
+      - name: Compare
+        run: |
+          ./target/release/examples/ab "$RUNNER_TEMP/iets-base" \
+            target/release/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ab
+          path: ab.json

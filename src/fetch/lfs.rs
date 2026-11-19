@@ -411,6 +411,35 @@ mod tests {
         assert_eq!(cached(cache.path(), &p).as_deref(), Some(&good[..]));
     }
 
+    /// The LFS server chooses the download URL. A `file://` URL from it is
+    /// refused, even when the local file has the expected content.
+    #[test]
+    fn an_href_to_a_local_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"object";
+        let local = dir.path().join("o");
+        fs::write(&local, bytes).unwrap();
+        let d = Download {
+            pointer: Pointer {
+                oid: hash_bytes(HashAlgo::Sha256, bytes).to_base16(),
+                size: bytes.len() as u64,
+            },
+            href: format!("file://{}", local.display()),
+            headers: Vec::new(),
+        };
+        let e = download(
+            dir.path(),
+            &d,
+            Limits {
+                connect: None,
+                stall: None,
+                max_size: 1 << 20,
+            },
+        )
+        .unwrap_err();
+        assert!(e.contains("unsupported scheme 'file'"), "{e}");
+    }
+
     #[test]
     fn a_host_is_never_an_ssh_option() {
         let e = authenticate("-oFoo/o/r").unwrap_err();

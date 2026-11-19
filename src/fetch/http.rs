@@ -1,10 +1,10 @@
 //! The one HTTP client iets has: a streaming GET, for the fetch builtins
 //! (`builtins::fetch`). hyper over tokio-rustls, the stack tonic already
 //! brings; no libcurl. Redirects are followed like
-//! filetransfer.cc (`CURLOPT_FOLLOWLOCATION`, `CURLOPT_MAXREDIRS` 10) and
-//! `file://` reads the local file, as libcurl does for the `tarball` inputs
-//! `nix flake lock` writes with that scheme. Credentials follow a redirect only
-//! as libcurl lets them: see `redirect`.
+//! filetransfer.cc (`CURLOPT_FOLLOWLOCATION`, `CURLOPT_MAXREDIRS` 10).
+//! Credentials follow a redirect only as libcurl lets them: see `redirect`.
+//! A `file://` URL is no download. [`get_or_read`] reads it, for a URL the
+//! user named.
 //!
 //! The body is never held whole: hyper runs on a thread of its own and hands
 //! its frames to a bounded queue, the caller's thread reads that queue through
@@ -363,8 +363,9 @@ fn tls() -> Result<Arc<rustls::ClientConfig>> {
 }
 
 /// `GET url` with `headers`, following redirects, with the body decompressed
-/// into `sink` as it arrives; the number of bytes written. A `file://` URL is
-/// read from the file system instead. Nothing buffers the whole body.
+/// into `sink` as it arrives; the number of bytes written. Nothing buffers
+/// the whole body. Only `http` and `https`, so a URL a server named never
+/// reads a file on this machine.
 /// `headers` are credentials: they go only where `redirect` lets them.
 /// `IETS_OFFLINE=1` makes any download an error that names the URL.
 pub fn get_decompressed(
@@ -393,14 +394,39 @@ pub fn put(
     decompress: bool,
     sink: &mut dyn Write,
 ) -> Result<u64> {
+    read(
+        url,
+        Box::new(io::Cursor::new(bytes)),
+        limits,
+        decompress,
+        sink,
+    )
+}
+
+fn read(
+    url: &str,
+    raw: Box<dyn Read>,
+    limits: Limits,
+    decompress: bool,
+    sink: &mut dyn Write,
+) -> Result<u64> {
     let read_in = Rc::new(Cell::new(0));
-    let raw: Box<dyn Read> = Box::new(Counted(Box::new(io::Cursor::new(bytes)), read_in.clone()));
+    let raw: Box<dyn Read> = Box::new(Counted(raw, read_in.clone()));
     let read = if decompress {
         decompress_reader(raw, layers_budget(limits.max_size))?
     } else {
         raw
     };
     drain(url, read, &read_in, limits, sink)
+}
+
+fn offline(url: &str) -> Result<()> {
+    if Session::current().settings().offline {
+        return Err(Error::Usage(format!(
+            "cannot fetch '{url}': IETS_OFFLINE is set"
+        )));
+    }
+    Ok(())
 }
 
 /// [`get_decompressed`], with the decompression optional: `iets prefetch`
@@ -415,11 +441,30 @@ pub fn get(
     request(url, headers, None, limits, decompress, sink)
 }
 
+/// [`get`] of a URL the user named, which may be a `file:` URL that libcurl
+/// reads, such as a `tarball` input `nix flake lock` wrote. A pure evaluation
+/// reads it through its accessor instead (`source::remote`).
+pub fn get_or_read(
+    url: &str,
+    headers: &[(String, String)],
+    limits: Limits,
+    decompress: bool,
+    sink: &mut dyn Write,
+) -> Result<u64> {
+    let Some(path) = local_path(url) else {
+        return get(url, headers, limits, decompress, sink);
+    };
+    offline(url)?;
+    let file = File::open(sys::path_from_internal(path.as_bytes()))
+        .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
+    read(url, Box::new(file), limits, decompress, sink)
+}
+
 /// GETs to one origin over one connection that stays open between them, for
 /// many small bodies such as a binary cache's narinfos, where a new
 /// connection per request costs more than the request. Anything but a 200 on
-/// the kept connection is left to [`get`], which follows redirects, retries
-/// and reads `file:` URLs.
+/// the kept connection is left to [`get_or_read`], which follows redirects,
+/// retries and reads the `file:` URL of a local cache.
 pub struct Kept {
     rt: tokio::runtime::Runtime,
     conn: Option<(String, Sender, Driver)>,
@@ -444,7 +489,7 @@ impl Kept {
             }
         }
         let mut body = Vec::new();
-        get(url, &[], limits, false, &mut body)?;
+        get_or_read(url, &[], limits, false, &mut body)?;
         Ok(body)
     }
 
@@ -542,18 +587,8 @@ fn request(
             Ok(r)
         }
     };
-    if Session::current().settings().offline {
-        return Err(Error::Usage(format!(
-            "cannot fetch '{url}': IETS_OFFLINE is set"
-        )));
-    }
+    offline(url)?;
     let read_in = Rc::new(Cell::new(0));
-    if let Some(path) = local_path(url).filter(|_| body.is_none()) {
-        let file = File::open(sys::path_from_internal(path.as_bytes()))
-            .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
-        let raw = Counted(Box::new(file), read_in.clone());
-        return drain(url, undo(Box::new(raw))?, &read_in, limits, sink);
-    }
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
     let target = url.to_string();
     let sent = headers.to_vec();
@@ -1297,6 +1332,17 @@ mod tests {
     }
 
     #[test]
+    fn a_file_url_is_read_only_when_the_user_named_it() {
+        let d = tempdir().unwrap();
+        let url = file_url(d.path(), "f", b"local");
+        let e = get(&url, &[], limits(), false, &mut Vec::new()).unwrap_err();
+        assert!(e.to_string().contains("unsupported scheme 'file'"), "{e}");
+        let mut out = Vec::new();
+        get_or_read(&url, &[], limits(), false, &mut out).unwrap();
+        assert_eq!(out, b"local");
+    }
+
+    #[test]
     fn downloads_stop_at_the_size_limit() {
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
         gz.write_all(&vec![0; 4 << 20]).unwrap();
@@ -1306,10 +1352,10 @@ mod tests {
             max_size: 1 << 20,
             ..limits()
         };
-        let e = get_decompressed(&url, &[], small, &mut Vec::new()).unwrap_err();
+        let e = get_or_read(&url, &[], small, true, &mut Vec::new()).unwrap_err();
         assert!(e.to_string().contains("fetch-max-size"), "{e}");
         assert_eq!(
-            get_decompressed(&url, &[], limits(), &mut std::io::sink()).unwrap(),
+            get_or_read(&url, &[], limits(), true, &mut io::sink()).unwrap(),
             4 << 20
         );
     }
@@ -1374,7 +1420,7 @@ mod tests {
         let bomb = zstd::encode_all(&vec![0u8; 64 << 20][..], 19).unwrap();
         let d = tempdir().unwrap();
         let url = file_url(d.path(), "bomb.zst", &bomb);
-        let e = get_decompressed(&url, &[], limits(), &mut io::sink()).unwrap_err();
+        let e = get_or_read(&url, &[], limits(), true, &mut io::sink()).unwrap_err();
         assert!(e.to_string().contains("times its size"), "{e}");
     }
 

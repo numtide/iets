@@ -142,8 +142,8 @@ impl FilesInner {
     }
 }
 
-/// Append-only table of loaded files: path, global base offset and line
-/// table only, never the source text. The table owns its entries.
+/// Append-only table owning each file's path, global base offset and line
+/// table. Lint reporting can also cache the source and its parsed tree.
 #[derive(Clone)]
 pub struct Files(Arc<FilesInner>);
 

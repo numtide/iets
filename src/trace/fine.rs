@@ -50,6 +50,10 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+// The second word was reserved. Old graphs cannot tell which jobs observed
+// symbol order, so require them to be recorded again.
+const TRACE_FORMAT: u32 = u32::from_le_bytes(*b"FTR1");
+const ATTR_ORDER_SEEN: u32 = 1 << 31;
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -149,6 +153,7 @@ enum O {
     Region(u32),
     Key(u32, Sym),
     All(u32),
+    AttrOrder,
     /// A position at a byte offset of a file reached a value.
     Pos(Arc<[u8]>, u32),
     /// What the tracing cache records, as a line of the output.
@@ -188,7 +193,7 @@ pub fn init() {
 fn start(out: Option<PathBuf>) {
     let mut s = State {
         out,
-        nodes: vec![0, 0],
+        nodes: vec![0, TRACE_FORMAT],
         serial: 1,
         ..State::default()
     };
@@ -678,6 +683,29 @@ pub fn apply(f: Word) {
                     }
                 }
             }
+        });
+    }
+}
+
+/// A multi-field equality walk may force a throwing field before discovering a
+/// mismatch. Even another import can change the order by interning a name
+/// first. File-local normalized region hashes cannot validate this read.
+#[cold]
+pub fn attr_order(x: &AttrsObj, y: &AttrsObj, fixed: usize) {
+    // Eager scalar cells have no computation to force during the walk. A
+    // change to code that produces those words is already a dependency of
+    // constructing the set. Split literal bindings remain region thunks.
+    let may_force = |a: &AttrsObj| {
+        a.iter_raw().any(|attr| {
+            let w = attr.cell.get();
+            attr.sym.0 as usize >= fixed
+                && (w.is_thunk() || matches!(w.view(), Value::Attrs(_) | Value::List(_)))
+        })
+    };
+    if may_force(x) || may_force(y) {
+        with(|s| {
+            s.nodes[1] |= ATTR_ORDER_SEEN;
+            s.record(O::AttrOrder);
         });
     }
 }
@@ -1507,6 +1535,7 @@ impl State {
             O::Region(r) => self.region_line(*r),
             O::Key(p, k) => format!("K\t{p}\t{}", ev.interner.name_str(*k)),
             O::All(p) => self.all_line(ev, *p),
+            O::AttrOrder => "AttrOrder".into(),
             O::Pos(f, off) => format!("X\t{}\t{off}", lossy(f)),
             O::Out(l) => l.clone(),
         }
@@ -1516,7 +1545,7 @@ impl State {
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
     fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
-        let mut out = String::new();
+        let mut out = String::from("V\tattr-order-1\n");
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1527,6 +1556,7 @@ impl State {
                 O::Region(r) => regions.push(*r),
                 O::Key(p, k) => keys.push((*p, *k)),
                 O::All(p) => alls.push(*p),
+                O::AttrOrder => out.push_str("AttrOrder\n"),
                 O::Pos(f, off) => {
                     let o = pos.entry(f).or_insert(*off);
                     *o = (*o).max(*off);
@@ -1849,8 +1879,35 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
+fn header(bytes: &[u8]) -> std::io::Result<u32> {
+    if let Some(word) = bytes.get(4..8) {
+        let flags = u32::from_le_bytes(word.try_into().unwrap());
+        if flags & !ATTR_ORDER_SEEN == TRACE_FORMAT {
+            return Ok(flags);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "incompatible fine trace, record the graph again",
+    ))
+}
+
+fn require_stable_attr_order(dir: &str) -> std::io::Result<()> {
+    use std::io::Read;
+    let mut bytes = [0; 8];
+    std::fs::File::open(std::path::Path::new(dir).join("nodes"))?.read_exact(&mut bytes)?;
+    if header(&bytes)? & ATTR_ORDER_SEEN != 0 {
+        return Err(std::io::Error::other(
+            "attribute comparison can depend on earlier jobs, evaluate the original batch in order",
+        ));
+    }
+    Ok(())
+}
+
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+    let bytes = std::fs::read(path)?;
+    header(&bytes)?;
+    Ok(bytes
         .as_chunks::<4>()
         .0
         .iter()
@@ -2054,6 +2111,7 @@ impl ObsIndex {
                 f.next().unwrap_or(""),
             );
             match kind {
+                "AttrOrder" => x.every.push(i),
                 "R" if a == "?" => x.every.push(i),
                 "R" => {
                     // the file and the region path are next to each other in the line
@@ -2928,6 +2986,17 @@ fn serve() -> i32 {
 /// `--serve` keeps graphs for many checks (`serve`), `--job N DAG` prints
 /// what job N of a graph observed.
 pub fn check_main(argv: &[String]) -> i32 {
+    if let [flag, dirs @ ..] = argv
+        && flag == "--require-stable-attr-order"
+    {
+        for dir in dirs {
+            if let Err(e) = require_stable_attr_order(dir) {
+                errln!("{dir}: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
     if let [flag] = argv
         && flag == "--serve"
     {

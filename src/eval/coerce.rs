@@ -278,10 +278,23 @@ impl Evaluator {
                         return self.eq_cells(&i.cell, &j.cell, pos);
                     }
                 }
-                if x.len() != y.len() {
+                let len = x.len();
+                if len != y.len() {
                     return Ok(false);
                 }
-                for (ax, ay) in x.iter().zip(y.iter()) {
+                // A mismatch while either side still has a preallocated Nix
+                // symbol cannot depend on how later names were interned.
+                let mut check_order = fine::on() && len > 1;
+                for (i, (ax, ay)) in x.iter().zip(y.iter()).enumerate() {
+                    if check_order
+                        && ax.sym.0 as usize >= super::NIX_STATIC_SYMBOLS.len()
+                        && ay.sym.0 as usize >= super::NIX_STATIC_SYMBOLS.len()
+                    {
+                        if i + 1 < len {
+                            fine::attr_order(x, y, super::NIX_STATIC_SYMBOLS.len());
+                        }
+                        check_order = false;
+                    }
                     if ax.sym != ay.sym || !self.eq_cells(&ax.cell, &ay.cell, pos)? {
                         return Ok(false);
                     }

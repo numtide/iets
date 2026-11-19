@@ -54,7 +54,11 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         } else if json {
             // nix eval --json forces the whole value, --strict or not (eval.cc)
             let mut ctx = Vec::new();
-            print::print_json(ev, v, &mut out, &mut ctx, true, Pos::NONE)?;
+            let jobs = crate::trace::fine::on();
+            if jobs {
+                crate::trace::fine::begin_json_output();
+            }
+            print::print_json_output(ev, v, &mut out, &mut ctx, true, Pos::NONE, jobs)?;
         } else {
             let v = if strict {
                 ev.force_deep(v)?

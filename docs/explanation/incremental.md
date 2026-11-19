@@ -69,6 +69,14 @@ of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
 
+For JSON output each element's trace covers its serialization, including
+attributes selected through `outPath`, calls to `__toString`, and path
+copies. These dependencies can arise after forcing the element itself.
+The text printer can display a reference to a previously printed container.
+For text output, a list or set element, or an element still unforced, is
+therefore checked again on each change. Scalar jobs continue to use their
+own traces. Regenerate graphs recorded before output demands were tracked.
+
 ## Results
 
 All measurements are on bld1 (32 cores, 125 GB), at one worker per process,

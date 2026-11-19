@@ -80,6 +80,8 @@ struct State {
     rev: Option<FxHashMap<u64, Sym>>,
     obs: Vec<O>,
     obs_ids: FxHashMap<O, u32>,
+    /// What serializing each element of the last JSON result demanded.
+    json_elements: Vec<u32>,
     /// The frame that last recorded each observation and each trace.
     obs_stamp: Vec<u32>,
     /// Traces: a stamp, a length, then the entries; a trace id is the
@@ -239,8 +241,8 @@ impl State {
         self.frames.last().map_or(0, |f| f.1)
     }
 
-    fn record(&mut self, o: O) {
-        let id = match self.obs_ids.get(&o) {
+    fn obs_id(&mut self, o: O) -> u32 {
+        match self.obs_ids.get(&o) {
             Some(id) => *id,
             None => {
                 let id = self.obs.len() as u32;
@@ -249,7 +251,11 @@ impl State {
                 self.obs_stamp.push(0);
                 id
             }
-        };
+        }
+    }
+
+    fn record(&mut self, o: O) {
+        let id = self.obs_id(o);
         let st = self.stamp();
         if self.obs_stamp[id as usize] != st {
             self.obs_stamp[id as usize] = st;
@@ -1594,6 +1600,9 @@ impl State {
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
+        // Unreachable as an observation. An older writer also overwrites
+        // this file when it records into a previously used directory.
+        o.push_str(OUTPUT_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
@@ -1628,8 +1637,37 @@ impl State {
     }
 }
 
-/// The trace of each element of `v` when it is a list, 0 for none.
-fn roots(v: Word) -> Vec<u32> {
+pub fn begin_json_output() {
+    with(|s| s.json_elements.clear());
+}
+
+/// JSON can force descendants, copy a path, or run a set's custom coercion
+/// after the element's own thunk has returned.
+pub fn json_element(
+    w: Word,
+    render: impl FnOnce() -> crate::eval::EvalResult<()>,
+) -> crate::eval::EvalResult<()> {
+    push();
+    let result = render();
+    if result.is_ok() {
+        // Keep the direct dependency on the element's force even when its
+        // use inside the renderer went through a fingerprinted query.
+        if w.is_thunk() {
+            let st = w.thunk_state_cell().get();
+            if st.is_traced() {
+                edge(st.traced_id());
+            }
+        }
+        let t = pop();
+        with(|s| s.json_elements.push(t));
+    } else {
+        pop_failed();
+    }
+    result
+}
+
+/// The trace of each element of `v` when it is a list.
+fn roots(s: &mut State, v: Word) -> Vec<u32> {
     let mut v = v;
     if v.is_thunk() {
         let st = v.thunk_state_cell().get();
@@ -1641,10 +1679,25 @@ fn roots(v: Word) -> Vec<u32> {
     let Some(l) = v.as_list() else {
         return Vec::new();
     };
+    if s.json_elements.len() == l.len as usize {
+        return std::mem::take(&mut s.json_elements);
+    }
+    let mut fallback = None;
     l.cells()
         .iter()
         .map(|c| {
             let w = c.get();
+            // Text rendering can visit children after the element's force
+            // and can print a reference to an object seen in another job.
+            // Only scalar terminal values have a complete WHNF trace here.
+            if forced(w).is_none_or(|v| matches!(v.view(), Value::Attrs(_) | Value::List(_))) {
+                return *fallback.get_or_insert_with(|| {
+                    let id = s.obs_id(O::Out("R\t?\tjob-output\t".into()));
+                    let t = s.nodes.len() as u32;
+                    s.nodes.extend([0, 1, id]);
+                    t
+                });
+            }
             let st = if w.is_thunk() {
                 w.thunk_state_cell().get()
             } else {
@@ -1666,7 +1719,7 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
-        let roots = v.map(roots).unwrap_or_default();
+        let roots = v.map(|v| roots(s, v)).unwrap_or_default();
         if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
                 let obs = if *t == 0 {
@@ -1858,6 +1911,20 @@ fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
+const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
+
+fn read_observations(dir: &std::path::Path) -> std::io::Result<String> {
+    let mut obs = std::fs::read_to_string(dir.join("obs"))?;
+    if !obs.ends_with(OUTPUT_VERSION) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "regenerate the fine graph to record job output demands",
+        ));
+    }
+    obs.truncate(obs.len() - OUTPUT_VERSION.len());
+    Ok(obs)
+}
+
 /// The steps each job of the trace graph in `dir` must be evaluated again
 /// for, with every query read as the trace of its force: `(job, mask)`.
 fn check_dag(
@@ -1871,7 +1938,7 @@ fn check_dag(
         u128::MAX >> (128 - c.steps.len())
     };
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let obs = ObsIndex::new(&read_observations(dir)?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -2257,7 +2324,7 @@ impl Graph {
         }
         let (provs, index, words, roots) = (
             std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            ObsIndex::new(&read_observations(d)?, None),
             read_words(&d.join("nodes"))?,
             std::fs::read_to_string(d.join("roots"))?
                 .lines()
@@ -2994,10 +3061,7 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
-        .lines()
-        .map(String::from)
-        .collect();
+    let obs: Vec<String> = read_observations(dir)?.lines().map(String::from).collect();
     let words = read_words(&dir.join("nodes"))?;
     let roots = std::fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots

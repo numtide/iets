@@ -21,8 +21,10 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, Write as _};
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
@@ -1607,7 +1609,7 @@ impl State {
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         // Invalidate a previous capture before replacing any graph components.
-        let mut roots_file = std::fs::File::create(dir.join("roots"))?;
+        let mut roots_file = File::create(dir.join("roots"))?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
             // a name may hold a newline, and a line is an id
@@ -1645,7 +1647,7 @@ impl State {
         std::fs::write(dir.join("queries"), q)?;
         let mut r: String = roots.iter().map(|t| format!("{t}\n")).collect();
         r.push_str(ROOTS_FOOTER);
-        std::io::Write::write_all(&mut roots_file, r.as_bytes())
+        roots_file.write_all(r.as_bytes())
     }
 }
 
@@ -1901,19 +1903,18 @@ fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
-fn read_roots(dir: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    use std::io::{Error, ErrorKind};
-    let text = std::fs::read_to_string(dir.join("roots"))?;
+fn read_roots(dir: &Path) -> io::Result<Vec<u32>> {
+    let text = fs::read_to_string(dir.join("roots"))?;
     let ids = text.strip_suffix(ROOTS_FOOTER).ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidData,
+        io::Error::new(
+            io::ErrorKind::InvalidData,
             "missing list-control traces; record the graph again",
         )
     })?;
     ids.lines()
         .map(|line| {
             line.parse()
-                .map_err(|e| Error::new(ErrorKind::InvalidData, e))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })
         .collect()
 }

@@ -4,12 +4,13 @@
 mod hermetic;
 
 use hermetic::{Iets, bin, ok, stderr, stdout};
+use iets::sys::{path_to_internal, temp_dir};
 
 use rstest::rstest;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::{env, fs};
-use tempfile::tempdir;
+use tempfile::{tempdir, tempdir_in};
 
 fn run(bin: &Iets, args: &[&str]) -> Output {
     bin.cmd().args(args).output().expect("run iets")
@@ -17,7 +18,7 @@ fn run(bin: &Iets, args: &[&str]) -> Output {
 
 #[rstest]
 fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
-    let dir = tempfile::tempdir_in(iets::sys::temp_dir()).unwrap();
+    let dir = tempdir_in(temp_dir()).unwrap();
     let path = |name: &str| dir.path().join(name);
     for (name, value) in [
         ("guard", "true"),
@@ -55,7 +56,7 @@ fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
     let changes: String = ["guard", "left", "right", "other"]
         .iter()
         .map(|name| {
-            let file = String::from_utf8(iets::sys::path_to_internal(&path(name))).unwrap();
+            let file = String::from_utf8(path_to_internal(&path(name))).unwrap();
             format!("{name}\tV\t2\n{name}\tCR\t{file}\t\n")
         })
         .collect();

@@ -303,13 +303,30 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers() -> io::Result<()> {
-        if fs::read_link("/proc/self")? != Path::new(&process::id().to_string()) {
+        kill_leftovers_in(Path::new("/proc"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_leftovers_in(procfs: &Path) -> io::Result<()> {
+        if fs::read_link(procfs.join("self"))? != Path::new(&process::id().to_string()) {
             return Err(io::Error::other("/proc uses a different PID namespace"));
         }
-        // The per-thread children file is optional in Linux. At the deadline
-        // enumerate process IDs, then let waitpid verify our ownership.
+        // Some kernels omit the per-thread children files, while hidepid can
+        // hide a child from the top-level listing. Check both sources.
+        let mut candidates = Vec::new();
+        if let Ok(threads) = fs::read_dir(procfs.join("self/task")) {
+            for task in threads.flatten() {
+                if let Ok(children) = fs::read_to_string(task.path().join("children")) {
+                    candidates.extend(
+                        children
+                            .split_whitespace()
+                            .filter_map(|s| s.parse::<libc::pid_t>().ok()),
+                    );
+                }
+            }
+        }
         let mut result = Ok(());
-        for entry in fs::read_dir("/proc")? {
+        for entry in fs::read_dir(procfs)? {
             let name = match entry {
                 Ok(entry) => entry.file_name(),
                 Err(e) => {
@@ -317,9 +334,11 @@ mod ab {
                     continue;
                 }
             };
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) else {
-                continue;
-            };
+            if let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) {
+                candidates.push(pid);
+            }
+        }
+        for pid in candidates {
             // SAFETY: only a live child returns zero. This is the sole reaper,
             // so an exit between the check and kill cannot recycle its PID.
             if pid > 0 && unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) } == 0 {
@@ -351,6 +370,9 @@ mod ab {
         let mut clean = true;
         let mut cleanup_until = None;
         let mut sweep_error = None;
+        // Drain exits already pending at the deadline, even if several arrived
+        // between polls. Bound the work if descendants keep producing exits.
+        let mut final_polls = 256;
         loop {
             // SAFETY: waitpid with a null status pointer is allowed.
             let pid = unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) };
@@ -366,6 +388,10 @@ mod ab {
             if now >= until {
                 let end = cleanup_until.get_or_insert(now + grace);
                 if now >= *end {
+                    if pid != 0 && final_polls > 0 {
+                        final_polls -= 1;
+                        continue;
+                    }
                     if pid != 0 {
                         // An exit or EINTR leaves the remaining count unknown.
                         // Check without consuming another exit or extending grace.
@@ -959,6 +985,11 @@ mod ab {
 
     #[cfg(test)]
     mod tests {
+        #[cfg(target_os = "linux")]
+        use std::os::unix::fs::symlink;
+        #[cfg(target_os = "linux")]
+        use std::str;
+
         use super::*;
 
         #[test]
@@ -976,36 +1007,71 @@ mod ab {
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
             enable_subreaper().unwrap();
-            // Make the last child waitable after grace expires, before the next poll.
-            let mut last = Command::new("sleep").arg("30").spawn().unwrap();
+            // Make two children waitable after grace expires, before the next poll.
+            let mut last = [(); 2].map(|_| Command::new("sleep").arg("30").spawn().unwrap());
             let clean = reap_leftovers(Duration::ZERO, Duration::from_millis(1), || {
                 thread::sleep(Duration::from_millis(1));
-                last.kill().unwrap();
-                let mut info = MaybeUninit::uninit();
-                // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
-                let observed = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        last.id(),
-                        info.as_mut_ptr(),
-                        libc::WEXITED | libc::WNOWAIT,
-                    )
-                };
-                assert_eq!(observed, 0);
+                for child in &mut last {
+                    child.kill().unwrap();
+                    let mut info = MaybeUninit::uninit();
+                    // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
+                    let observed = unsafe {
+                        libc::waitid(
+                            libc::P_PID,
+                            child.id(),
+                            info.as_mut_ptr(),
+                            libc::WEXITED | libc::WNOWAIT,
+                        )
+                    };
+                    assert_eq!(observed, 0);
+                }
                 Ok(())
             })
             .unwrap();
             assert!(!clean);
-            assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            for mut child in last {
+                assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
+            // Model a procfs listing that omits a live child PID.
+            let procfs = tempfile::tempdir().unwrap();
+            let own_pid = process::id().to_string();
+            symlink(&own_pid, procfs.path().join("self")).unwrap();
+            let task = procfs.path().join(own_pid).join("task/1");
+            fs::create_dir_all(&task).unwrap();
+            let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
+            fs::write(task.join("children"), hidden.id().to_string()).unwrap();
+            assert!(
+                !reap_leftovers(Duration::ZERO, CLEANUP_GRACE, || kill_leftovers_in(
+                    procfs.path()
+                ))
+                .unwrap()
+            );
+            assert_eq!(
+                hidden.wait().unwrap_err().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+
             let t = Instant::now();
             // This direct child belongs to the test thread. Orphans that sh
             // leaves behind can belong to the process leader instead.
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
-            Command::new("sh")
+            let shell = Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
-                .args(["-c", "(sleep 30 & wait) &"])
-                .status()
+                .args(["-c", "(sleep 30 & wait) >/dev/null 2>&1 & echo $!"])
+                .output()
                 .unwrap();
+            assert!(shell.status.success());
+            let adopted: libc::pid_t = str::from_utf8(&shell.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(adopted > 0);
+            // SAFETY: a null status pointer is allowed. Zero proves this live PID is ours.
+            assert_eq!(
+                unsafe { libc::waitpid(adopted, ptr::null_mut(), libc::WNOHANG) },
+                0
+            );
             // A sweep may see no children, or fail to signal one it sees.
             // Neither case permits the benchmark to continue measuring.
             for error in [None, Some(io::ErrorKind::PermissionDenied)] {

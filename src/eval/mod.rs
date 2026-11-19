@@ -1393,7 +1393,7 @@ impl Evaluator {
     #[inline]
     pub fn maybe_thunk(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
         match ir {
-            Ir::Const(w) => *w,
+            Ir::Const(w, _) => *w,
             Ir::Local { depth, idx } => {
                 let mut e = env;
                 for _ in 0..*depth {
@@ -1497,7 +1497,7 @@ impl Evaluator {
     #[inline]
     fn peek(env: &'static EnvObj, ir: IrRef) -> Option<Word> {
         match ir {
-            Ir::Const(w) => Some(*w),
+            Ir::Const(w, _) => Some(*w),
             Ir::Local { depth, idx } => {
                 let mut e = env;
                 for _ in 0..*depth {
@@ -2178,7 +2178,7 @@ impl Evaluator {
     #[inline(always)]
     fn eval_fast(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
-            Ir::Const(w) => return Ok(*w),
+            Ir::Const(w, _) => return Ok(*w),
             Ir::Local { depth, idx } => {
                 let mut e = env;
                 for _ in 0..*depth {
@@ -2200,7 +2200,7 @@ impl Evaluator {
     /// for its own kind's frame, not for the largest arm's.
     pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
-            Ir::Const(w) => Ok(*w),
+            Ir::Const(w, _) => Ok(*w),
             Ir::Local { .. } => self.eval_k_local(env, ir),
             Ir::WithVar { .. } => self.eval_k_with_var(env, ir),
             Ir::CurPos(..) => self.eval_k_cur_pos(env, ir),
@@ -3318,7 +3318,7 @@ pub fn ir_pos(ir: &Ir) -> Pos {
         Ir::Lambda(l) => l.pos,
         Ir::Select(s) | Ir::SelectCount(s) => s.pos,
         Ir::Let(l) => ir_pos(l.body),
-        Ir::Const(_) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => Pos::NONE,
+        Ir::Const(..) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => Pos::NONE,
     }
 }
 

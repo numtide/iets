@@ -281,6 +281,30 @@ fn a_copy_in_place_misses(work: Work) {
     assert!(c2.status.contains("miss ("), "{}", c2.status);
 }
 
+#[rstest]
+fn ir_cache_rebinds_nix_path_and_preserves_literal_lists(work: Work) {
+    let file = work.write(
+        "path.nix",
+        "map builtins.length [ builtins.nixPath __nixPath [] (let __nixPath = []; in __nixPath) ]",
+    );
+    let eval = |search: &[&str], event: &str, expected: &str| {
+        let mut cmd = work.iets();
+        cmd.env("IETS_IR_MIN", "0")
+            .env("IETS_IR_STATS", "1")
+            .args(["eval", "--impure", "--json", "--no-tracing-cache"])
+            .args(search)
+            .arg("-f")
+            .arg(&file);
+        let output = hermetic::ok(&mut cmd);
+        let err = stderr(&output);
+        assert!(err.contains(&format!("ir-cache {event} {file} ")), "{err}");
+        assert_eq!(stdout(&output), expected);
+    };
+    eval(&[], "store", "[0,0,0,0]");
+    eval(&["-I", &work.s(".")], "load", "[1,1,0,0]");
+    eval(&[], "load", "[0,0,0,0]");
+}
+
 /// The compiled-file cache folds `builtins.currentSystem` into an entry, and
 /// `--pure-eval` removes that name, so an impure run must not answer a pure one.
 #[rstest]

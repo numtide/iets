@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use super::ir::{
-    AttrElemIr, AttrsIr, BindIr, BindScope, DynBindIr, FormalIr, Ir, IrRef, LambdaIr, LetIr,
-    ParamIr, SelectIr,
+    AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, DynBindIr, FormalIr, Ir, IrRef, LambdaIr,
+    LetIr, ParamIr, SelectIr,
 };
 use crate::cachefs::{self, Shape};
 use crate::eval::{Evaluator, Pos};
@@ -182,13 +182,9 @@ impl IrCache {
         &self.root
     }
 
-    /// Everything the compiler folds out of the evaluator's configuration is
-    /// here, or the entry of one configuration answers another one. The folds
-    /// store a constant by content, so `system`, `store_dir` and `pure` (which
-    /// removes the `impureOnly` names) are in the key; `nixVersion` and
-    /// `langVersion` follow the build id. Every other constant is looked up by name
-    /// on load, and a `~/` literal is never cached. `lint_key` is
-    /// `lint::Config::compile_key`, whose warnings the entry carries.
+    /// The key includes the evaluator configuration and compile-time lint
+    /// levels. Purity controls which global names the compiler can fold.
+    /// Folded names are rebound on load. A `~/` literal is never cached.
     pub fn key(
         &self,
         path: &[u8],
@@ -300,8 +296,6 @@ struct Ser {
     syms: FxHashMap<Sym, u32>,
     names: Vec<Sym>,
     base: u32,
-    /// Heap constant word -> (is a global, its name); built from the live tables.
-    rev: FxHashMap<u64, (bool, Sym)>,
     ok: bool,
 }
 
@@ -314,21 +308,11 @@ pub fn serialize(
     diags: &[Diag],
     allows: &Allows,
 ) -> Option<Vec<u8>> {
-    let mut rev = FxHashMap::default();
-    if let Some(b) = ev.globals.builtins {
-        for a in b.iter() {
-            rev.insert(a.cell.get().bits(), (false, a.sym));
-        }
-    }
-    for (sym, w) in &ev.globals.table {
-        rev.insert(w.bits(), (true, *sym));
-    }
     let mut s = Ser {
         out: Vec::with_capacity(1 << 16),
         syms: FxHashMap::default(),
         names: Vec::new(),
         base,
-        rev,
         ok: true,
     };
     s.node(ir);
@@ -418,7 +402,7 @@ impl Ser {
         }
     }
 
-    fn word(&mut self, w: Word) {
+    fn literal(&mut self, w: Word) {
         if w.is_ptr() {
             match w.heap_kind() {
                 Some(Kind::String) => {
@@ -471,17 +455,7 @@ impl Ser {
             put_u64(&mut self.out, w.bits());
             return;
         }
-        match self.rev.get(&w.bits()) {
-            Some(&(global, sym)) => {
-                self.tag(if global {
-                    ConstTag::Global
-                } else {
-                    ConstTag::Builtin
-                });
-                self.sym(sym);
-            }
-            None => self.ok = false,
-        }
+        self.ok = false;
     }
 
     /// A binding frame: the headers, the `from` count, then the values and
@@ -512,9 +486,19 @@ impl Ser {
             return;
         }
         match ir {
-            Ir::Const(w) => {
+            Ir::Const(w, origin) => {
                 self.tag(IrTag::Const);
-                self.word(*w);
+                match origin {
+                    ConstOrigin::Literal => self.literal(*w),
+                    ConstOrigin::Global(sym) => {
+                        self.tag(ConstTag::Global);
+                        self.sym(*sym);
+                    }
+                    ConstOrigin::Builtin(sym) => {
+                        self.tag(ConstTag::Builtin);
+                        self.sym(*sym);
+                    }
+                }
             }
             Ir::Local { depth, idx } => {
                 self.tag(IrTag::Local);
@@ -990,8 +974,8 @@ impl<'a> De<'a, '_> {
         Some(b)
     }
 
-    fn word(&mut self) -> Word {
-        match ConstTag::from_u8(self.u8()) {
+    fn constant(&mut self) -> Ir {
+        let w = match ConstTag::from_u8(self.u8()) {
             Some(ConstTag::Imm) => match Word::imm_from_bits(self.u64()) {
                 Some(w) => w,
                 None => {
@@ -1028,7 +1012,7 @@ impl<'a> De<'a, '_> {
             Some(ConstTag::Global) => {
                 let s = self.sym();
                 match self.ev.globals.table.get(&s) {
-                    Some(w) => *w,
+                    Some(w) => return Ir::Const(*w, ConstOrigin::Global(s)),
                     None => {
                         self.ok = false;
                         Word::NULL
@@ -1038,7 +1022,7 @@ impl<'a> De<'a, '_> {
             Some(ConstTag::Builtin) => {
                 let s = self.sym();
                 match self.ev.globals.builtins.and_then(|b| b.get(s)) {
-                    Some(a) => a.cell.get(),
+                    Some(a) => return Ir::Const(a.cell.get(), ConstOrigin::Builtin(s)),
                     None => {
                         self.ok = false;
                         Word::NULL
@@ -1049,7 +1033,8 @@ impl<'a> De<'a, '_> {
                 self.ok = false;
                 Word::NULL
             }
-        }
+        };
+        Ir::literal(w)
     }
 
     /// A frame pushed with no permutation and no slots of its own to name.
@@ -1154,7 +1139,7 @@ impl<'a> De<'a, '_> {
         };
         let out = self.fill(n, |_| BindIr {
             sym: Sym(0),
-            value: &Ir::Const(Word::NULL),
+            value: &Ir::Const(Word::NULL, ConstOrigin::Literal),
             pos: Pos::NONE,
             scope: BindScope::Own,
         });
@@ -1206,15 +1191,15 @@ impl<'a> De<'a, '_> {
         let body_of = self.body_of.take();
         if !self.ok || self.nest >= MAX_NEST {
             self.ok &= self.nest < MAX_NEST;
-            return &Ir::Const(Word::NULL);
+            return &Ir::Const(Word::NULL, ConstOrigin::Literal);
         }
         let Some(tag) = IrTag::from_u8(self.u8()) else {
             self.ok = false;
-            return &Ir::Const(Word::NULL);
+            return &Ir::Const(Word::NULL, ConstOrigin::Literal);
         };
         self.nest += 1;
         let ir = match tag {
-            IrTag::Const => Ir::Const(self.word()),
+            IrTag::Const => self.constant(),
             IrTag::Local => {
                 let depth = self.u32();
                 let idx = self.u32();
@@ -1232,7 +1217,7 @@ impl<'a> De<'a, '_> {
                     Some(idx) => Ir::Local { depth, idx },
                     None => {
                         self.ok = false;
-                        Ir::Const(Word::NULL)
+                        Ir::Const(Word::NULL, ConstOrigin::Literal)
                     }
                 }
             }

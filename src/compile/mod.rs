@@ -14,8 +14,8 @@ use crate::syntax::ast::{
 use crate::syntax::symbol::{FxHashMap, Interner, Sym};
 use crate::sys;
 use ir::{
-    AttrElemIr, AttrsIr, BindIr, BindScope, DynBindIr, FormalIr, Ir, IrRef, LambdaIr, LetIr,
-    ParamIr, SelectIr,
+    AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, DynBindIr, FormalIr, Ir, IrRef, LambdaIr,
+    LetIr, ParamIr, SelectIr,
 };
 
 use std::cell::Cell;
@@ -331,7 +331,7 @@ impl<'a> Compiler<'a> {
         // Globals live in Nix's static base env, a lexical scope, so they
         // beat any enclosing `with` (`with { true = 1; }; true` is `true`).
         if let Some(w) = self.globals.table.get(&sym) {
-            return Some(Ir::Const(*w));
+            return Some(Ir::Const(*w, ConstOrigin::Global(sym)));
         }
         if withs.is_empty() {
             return None;
@@ -355,8 +355,8 @@ impl<'a> Compiler<'a> {
         let pos = self.pos(id);
         let ast: &'a Ast = self.ast;
         Ok(match ast.expr(id) {
-            Expr::Int(i) => Ir::Const(self.arena.mk_int(*i)),
-            Expr::Float(f) => Ir::Const(self.arena.mk_float(*f)),
+            Expr::Int(i) => Ir::literal(self.arena.mk_int(*i)),
+            Expr::Float(f) => Ir::literal(self.arena.mk_float(*f)),
             Expr::Str(parts) => self.string(ast.parts(*parts), pos)?,
             Expr::Path(p) => self.path(p.kind, ast.parts(p.parts), pos)?,
             Expr::Var(sym) => {
@@ -369,7 +369,7 @@ impl<'a> Compiler<'a> {
                 match self.resolve(sym) {
                     Some(Ir::WithVar { sym, withs, .. }) => Ir::WithVar { sym, withs, pos },
                     Some(ir) => {
-                        if matches!(ir, Ir::Const(_)) {
+                        if matches!(ir, Ir::Const(..)) {
                             self.global_ref(self.interner.name(sym), pos)?;
                         }
                         ir
@@ -416,7 +416,7 @@ impl<'a> Compiler<'a> {
                 let merged = self.merge_binds(*rec, ast.binds(*binds), pos)?;
                 // `{ }` too is a value already
                 if merged.statics.is_empty() && merged.dynamics.is_empty() {
-                    return Ok(Ir::Const(self.arena.mk_attrs_sorted(&[])));
+                    return Ok(Ir::literal(self.arena.mk_attrs_sorted(&[])));
                 }
                 let a = self.lower_attrs(merged)?;
                 Ir::Attrs(a)
@@ -425,7 +425,7 @@ impl<'a> Compiler<'a> {
                 let items = ast.ids(*items);
                 // `[ ]` is a value already: no thunk and no list per evaluation
                 if items.is_empty() {
-                    return Ok(Ir::Const(self.arena.mk_list(&[])));
+                    return Ok(Ir::literal(self.arena.mk_list(&[])));
                 }
                 let mut v = Vec::with_capacity(items.len());
                 for i in items {
@@ -473,14 +473,14 @@ impl<'a> Compiler<'a> {
                 match op {
                     UnOp::Not => Ir::Not(e, pos),
                     UnOp::Neg => {
-                        let zero = Ir::Const(self.arena.mk_int(0));
+                        let zero = Ir::literal(self.arena.mk_int(0));
                         let zero = self.alloc(zero);
                         match (self.rebound(b"__sub", [zero, e], pos)?, ast.expr(*expr)) {
                             (Some(call), _) => call,
                             (None, Expr::Int(i)) => {
-                                Ir::Const(self.arena.mk_int(0i64.wrapping_sub(*i)))
+                                Ir::literal(self.arena.mk_int(0i64.wrapping_sub(*i)))
                             }
-                            (None, Expr::Float(f)) => Ir::Const(self.arena.mk_float(0.0 - f)),
+                            (None, Expr::Float(f)) => Ir::literal(self.arena.mk_float(0.0 - f)),
                             (None, _) => Ir::Neg(e, pos),
                         }
                     }
@@ -586,13 +586,13 @@ impl<'a> Compiler<'a> {
             return None;
         }
         if path.len() == 1 {
-            return Some(Ir::Const(w));
+            return Some(Ir::Const(w, ConstOrigin::Builtin(*first)));
         }
         if !strict {
             return None;
         }
         let rest = self.attr_path(&path[1..]).ok()?;
-        let subject = self.alloc(Ir::Const(w));
+        let subject = self.alloc(Ir::Const(w, ConstOrigin::Builtin(*first)));
         let pos = self.pos(subject_pos_hack(path));
         Some(self.mk_select(subject, rest, None, pos))
     }
@@ -671,7 +671,7 @@ impl<'a> Compiler<'a> {
         Ok(match p {
             StrPart::Lit(l) => {
                 let w = self.arena.mk_string(self.ast.bytes(*l));
-                self.alloc(Ir::Const(w))
+                self.alloc(Ir::literal(w))
             }
             StrPart::Interp(e) => self.expr(*e)?,
         })
@@ -680,7 +680,7 @@ impl<'a> Compiler<'a> {
     fn string(&mut self, parts: &[StrPart], pos: Pos) -> CResult<Ir> {
         let ast: &'a Ast = self.ast;
         if let [StrPart::Lit(l)] = parts {
-            return Ok(Ir::Const(self.arena.mk_string(ast.bytes(*l))));
+            return Ok(Ir::literal(self.arena.mk_string(ast.bytes(*l))));
         }
         if parts.iter().all(|p| matches!(p, StrPart::Lit(_))) {
             let mut bytes = Vec::new();
@@ -689,7 +689,7 @@ impl<'a> Compiler<'a> {
                     bytes.extend_from_slice(ast.bytes(*l));
                 }
             }
-            return Ok(Ir::Const(self.arena.mk_string(&bytes)));
+            return Ok(Ir::literal(self.arena.mk_string(&bytes)));
         }
         let mut v = Vec::with_capacity(parts.len());
         for p in parts {
@@ -773,10 +773,10 @@ impl<'a> Compiler<'a> {
         }
         let first = self.arena.mk_path(&resolved);
         if all_lit {
-            return Ok(Ir::Const(first));
+            return Ok(Ir::literal(first));
         }
         let mut v = Vec::with_capacity(parts.len());
-        v.push(self.alloc(Ir::Const(first)));
+        v.push(self.alloc(Ir::literal(first)));
         let rest = if matches!(parts.first(), Some(StrPart::Lit(_))) {
             &parts[1..]
         } else {
@@ -1027,7 +1027,7 @@ impl<'a> Compiler<'a> {
                     // placeholder, patched below
                     binds.push(BindIr {
                         sym,
-                        value: self.alloc(Ir::Const(Word::NULL)),
+                        value: self.alloc(Ir::literal(Word::NULL)),
                         pos: bpos,
                         scope: BindScope::From,
                     });
@@ -1182,7 +1182,7 @@ impl<'a> Compiler<'a> {
         match self.resolve(var) {
             Some(Ir::WithVar { sym, withs, .. }) => Ok(self.alloc(Ir::WithVar { sym, withs, pos })),
             Some(ir) => {
-                if matches!(ir, Ir::Const(_)) {
+                if matches!(ir, Ir::Const(..)) {
                     self.global_ref(self.interner.name(var), pos)?;
                 }
                 Ok(self.alloc(ir))

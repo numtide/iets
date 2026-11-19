@@ -337,7 +337,7 @@ impl Profile {
                 | Ir::Sub(a, b, _)
                 | Ir::Mul(a, b, _)
                 | Ir::Div(a, b, _) => todo.extend([*a, *b]),
-                Ir::Const(_) | Ir::Local { .. } | Ir::WithVar { .. } | Ir::CurPos(_) => {}
+                Ir::Const(..) | Ir::Local { .. } | Ir::WithVar { .. } | Ir::CurPos(_) => {}
             }
         }
         if let Ok(mut g) = self.binds.lock() {
@@ -544,7 +544,7 @@ mod tests {
     }
 
     fn konst() -> IrRef {
-        leak(Ir::Const(Word::NULL))
+        leak(Ir::literal(Word::NULL))
     }
 
     fn bind(sym: u32, value: IrRef, pos: u32) -> BindIr {

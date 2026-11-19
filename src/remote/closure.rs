@@ -371,6 +371,10 @@ mod tests {
     #[case("https://nars.example/x.nar", "https://nars.example/x.nar")]
     #[case("//nars.example/x.nar", "https://nars.example/x.nar")]
     #[case("file:/tmp/x.nar", "file:/tmp/x.nar")]
+    #[case("nar//x.nar", "https://cache.example/sub/nar//x.nar")]
+    #[case("nar/x.", "https://cache.example/sub/nar/x.")]
+    #[case("?download=1", "https://cache.example/sub/?download=1")]
+    #[case("#nar", "https://cache.example/sub/#nar")]
     fn a_nar_url_resolves_against_the_cache(#[case] url: &str, #[case] want: &str) {
         assert_eq!(nar_url(&fetched("https://cache.example/sub", url)), want);
     }

@@ -312,17 +312,22 @@ fn has_scheme(location: &str) -> bool {
 /// (RFC 3986:5.2.4). A `..` at the top removes nothing.
 fn normalise(path: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
+    let root = usize::from(path.starts_with('/'));
     for seg in path.split('/') {
         match seg {
-            "" | "." => {}
+            "." => {}
             ".." => {
-                out.pop();
+                if out.len() > root {
+                    out.pop();
+                }
             }
             s => out.push(s),
         }
     }
-    let slash = path.ends_with(['/', '.']) && !out.is_empty();
-    format!("/{}{}", out.join("/"), if slash { "/" } else { "" })
+    if path.ends_with("/.") || path.ends_with("/..") {
+        out.push("");
+    }
+    out.join("/")
 }
 
 /// `location` against `base`: absolute, host-relative or path-relative, as
@@ -330,6 +335,14 @@ fn normalise(path: &str) -> String {
 pub fn resolve(base: &str, location: &str) -> String {
     if has_scheme(location) {
         return location.to_string();
+    }
+    if location.is_empty() || location.starts_with('#') {
+        let base = base.split('#').next().unwrap_or(base);
+        return format!("{base}{location}");
+    }
+    if location.starts_with('?') {
+        let base = base.split(['?', '#']).next().unwrap_or(base);
+        return format!("{base}{location}");
     }
     let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
     if location.starts_with("//") {
@@ -1041,6 +1054,7 @@ pub fn decompress(bytes: Vec<u8>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use tempfile::tempdir;
 
     use std::fs;
@@ -1110,6 +1124,56 @@ mod tests {
             resolve("https://x.example/a/b", "./d/"),
             "https://x.example/a/d/"
         );
+    }
+
+    /// Relative-reference examples from RFC 3986 sections 5.4.1–5.4.2,
+    /// plus significant empty path segments.
+    #[rstest]
+    #[case("g:h", "g:h")]
+    #[case("g", "http://a/b/c/g")]
+    #[case("./g", "http://a/b/c/g")]
+    #[case("g/", "http://a/b/c/g/")]
+    #[case("/g", "http://a/g")]
+    #[case("//g", "http://g")]
+    #[case("?y", "http://a/b/c/d;p?y")]
+    #[case("g?y", "http://a/b/c/g?y")]
+    #[case("#s", "http://a/b/c/d;p?q#s")]
+    #[case("g#s", "http://a/b/c/g#s")]
+    #[case("g?y#s", "http://a/b/c/g?y#s")]
+    #[case(";x", "http://a/b/c/;x")]
+    #[case("g;x", "http://a/b/c/g;x")]
+    #[case("g;x?y#s", "http://a/b/c/g;x?y#s")]
+    #[case("", "http://a/b/c/d;p?q")]
+    #[case(".", "http://a/b/c/")]
+    #[case("./", "http://a/b/c/")]
+    #[case("..", "http://a/b/")]
+    #[case("../", "http://a/b/")]
+    #[case("../g", "http://a/b/g")]
+    #[case("../..", "http://a/")]
+    #[case("../../", "http://a/")]
+    #[case("../../g", "http://a/g")]
+    #[case("../../../g", "http://a/g")]
+    #[case("../../../../g", "http://a/g")]
+    #[case("/./g", "http://a/g")]
+    #[case("/../g", "http://a/g")]
+    #[case("g.", "http://a/b/c/g.")]
+    #[case(".g", "http://a/b/c/.g")]
+    #[case("g..", "http://a/b/c/g..")]
+    #[case("..g", "http://a/b/c/..g")]
+    #[case("./../g", "http://a/b/g")]
+    #[case("./g/.", "http://a/b/c/g/")]
+    #[case("g/./h", "http://a/b/c/g/h")]
+    #[case("g/../h", "http://a/b/c/h")]
+    #[case("g;x=1/./y", "http://a/b/c/g;x=1/y")]
+    #[case("g;x=1/../y", "http://a/b/c/y")]
+    #[case("g?y/./x", "http://a/b/c/g?y/./x")]
+    #[case("g?y/../x", "http://a/b/c/g?y/../x")]
+    #[case("g#s/./x", "http://a/b/c/g#s/./x")]
+    #[case("g#s/../x", "http://a/b/c/g#s/../x")]
+    #[case("g//h", "http://a/b/c/g//h")]
+    #[case("g//../h", "http://a/b/c/g/h")]
+    fn relative_reference_examples(#[case] location: &str, #[case] want: &str) {
+        assert_eq!(resolve("http://a/b/c/d;p?q", location), want);
     }
 
     /// libcurl reads `file:/p`, `file:///p` and `file://localhost/p` alike.

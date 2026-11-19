@@ -344,23 +344,29 @@ pub fn resolve(base: &str, location: &str) -> String {
         let base = base.split(['?', '#']).next().unwrap_or(base);
         return format!("{base}{location}");
     }
-    let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
-    if location.starts_with("//") {
-        return format!("{scheme}:{location}");
-    }
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let joined = if location.starts_with('/') {
-        location.to_string()
+    let (scheme, rest) = base.split_once(':').unwrap_or(("https", base));
+    let (slashes, rest) = rest.strip_prefix("//").map_or(("", rest), |r| ("//", r));
+    let authority = if slashes.is_empty() {
+        ""
+    } else {
+        rest.split(['/', '?', '#']).next().unwrap_or(rest)
+    };
+    let (slashes, authority, joined) = if let Some(rest) = location.strip_prefix("//") {
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        ("//", &rest[..end], rest[end..].to_string())
+    } else if location.starts_with('/') {
+        (slashes, authority, location.to_string())
     } else {
         let path = &rest[authority.len()..];
         let path = path.split(['?', '#']).next().unwrap_or(path);
-        format!(
+        let joined = format!(
             "{}/{location}",
             path.rsplit_once('/').map_or("", |(d, _)| d)
-        )
+        );
+        (slashes, authority, joined)
     };
     let (path, tail) = joined.split_at(joined.find(['?', '#']).unwrap_or(joined.len()));
-    format!("{scheme}://{authority}{}{tail}", normalise(path))
+    format!("{scheme}:{slashes}{authority}{}{tail}", normalise(path))
 }
 
 /// Process-wide on purpose: it is immutable, costly to build, and holds no
@@ -1172,6 +1178,9 @@ mod tests {
     #[case("g#s/../x", "http://a/b/c/g#s/../x")]
     #[case("g//h", "http://a/b/c/g//h")]
     #[case("g//../h", "http://a/b/c/g/h")]
+    #[case("//g/a/../b", "http://g/b")]
+    #[case("//g/a//b.", "http://g/a//b.")]
+    #[case("//g?y#s", "http://g?y#s")]
     fn relative_reference_examples(#[case] location: &str, #[case] want: &str) {
         assert_eq!(resolve("http://a/b/c/d;p?q", location), want);
     }

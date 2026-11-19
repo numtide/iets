@@ -379,6 +379,13 @@ mod tests {
         assert_eq!(nar_url(&fetched("https://cache.example/sub", url)), want);
     }
 
+    #[rstest]
+    #[case("file:/cache/sub", "file:/cache/sub/nar//x.")]
+    #[case("file:///cache/sub", "file:///cache/sub/nar//x.")]
+    fn a_local_cache_resolves_a_relative_nar_url(#[case] store: &str, #[case] want: &str) {
+        assert_eq!(nar_url(&fetched(store, "nar//x.")), want);
+    }
+
     #[test]
     fn a_local_cache_can_name_an_absolute_file_url_without_authority() {
         let mut file = NamedTempFile::new().unwrap();

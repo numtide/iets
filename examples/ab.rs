@@ -366,6 +366,27 @@ mod ab {
             if now >= until {
                 let end = cleanup_until.get_or_insert(now + grace);
                 if now >= *end {
+                    if pid != 0 {
+                        // An exit or EINTR leaves the remaining count unknown.
+                        // Check without consuming another exit or extending grace.
+                        let mut info = MaybeUninit::uninit();
+                        // SAFETY: info is writable and its contents are discarded.
+                        if unsafe {
+                            libc::waitid(
+                                libc::P_ALL,
+                                0,
+                                info.as_mut_ptr(),
+                                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                            )
+                        } == -1
+                        {
+                            let e = io::Error::last_os_error();
+                            if e.raw_os_error() == Some(libc::ECHILD) {
+                                return Ok(clean);
+                            }
+                            return Err(e);
+                        }
+                    }
                     return Err(sweep_error.unwrap_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::TimedOut,
@@ -955,6 +976,27 @@ mod ab {
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
             enable_subreaper().unwrap();
+            // Make the last child waitable after grace expires, before the next poll.
+            let mut last = Command::new("sleep").arg("30").spawn().unwrap();
+            let clean = reap_leftovers(Duration::ZERO, Duration::from_millis(1), || {
+                thread::sleep(Duration::from_millis(1));
+                last.kill().unwrap();
+                let mut info = MaybeUninit::uninit();
+                // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
+                let observed = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        last.id(),
+                        info.as_mut_ptr(),
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                };
+                assert_eq!(observed, 0);
+                Ok(())
+            })
+            .unwrap();
+            assert!(!clean);
+            assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             let t = Instant::now();
             // This direct child belongs to the test thread. Orphans that sh
             // leaves behind can belong to the process leader instead.

@@ -21,7 +21,10 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs;
+use std::io::{self, ErrorKind};
 use std::panic::Location;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
@@ -930,6 +933,11 @@ pub fn position(path: &[u8], off: u32) {
     with(|s| s.record(O::Pos(path.into(), off)));
 }
 
+/// A force whose outside input cannot be validated on a later run.
+pub fn volatile() {
+    with(|s| s.record(O::Out("R\t?\tvolatile\t".into())));
+}
+
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
     let line = match o {
@@ -1575,6 +1583,7 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
+        out.push_str(VOLATILE_VERSION);
         out
     }
 
@@ -1594,6 +1603,7 @@ impl State {
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
+        o.push_str(VOLATILE_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
@@ -1849,6 +1859,20 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
+const VOLATILE_VERSION: &str = "V\tvolatile-v1\n";
+
+fn read_observations(dir: &Path) -> io::Result<String> {
+    let mut observations = fs::read_to_string(dir.join("obs"))?;
+    if !observations.ends_with(VOLATILE_VERSION) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "regenerate the fine graph to record uncacheable forces",
+        ));
+    }
+    observations.truncate(observations.len() - VOLATILE_VERSION.len());
+    Ok(observations)
+}
+
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     Ok(std::fs::read(path)?
         .as_chunks::<4>()
@@ -1871,7 +1895,7 @@ fn check_dag(
         u128::MAX >> (128 - c.steps.len())
     };
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let obs = ObsIndex::new(&read_observations(dir)?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -2257,7 +2281,7 @@ impl Graph {
         }
         let (provs, index, words, roots) = (
             std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            ObsIndex::new(&read_observations(d)?, None),
             read_words(&d.join("nodes"))?,
             std::fs::read_to_string(d.join("roots"))?
                 .lines()
@@ -2994,10 +3018,7 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
-        .lines()
-        .map(String::from)
-        .collect();
+    let obs: Vec<String> = read_observations(dir)?.lines().map(String::from).collect();
     let words = read_words(&dir.join("nodes"))?;
     let roots = std::fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots

@@ -600,8 +600,12 @@ mod tests {
     use rstest::rstest;
     use tempfile::tempdir;
 
+    use crate::env::Env;
+    use crate::eval::EvalConfig;
     use crate::store::hash::{HashAlgo, hash_bytes};
     use crate::store::nar::dump_string;
+    use crate::store::source::SrcPath;
+    use crate::trace::validate::validate;
 
     #[test]
     fn a_staged_directory_goes_when_it_is_dropped() {
@@ -785,19 +789,19 @@ mod tests {
     #[test]
     fn evaluators_sharing_a_session_each_record_the_stored_input() {
         let dir = tempdir().unwrap();
-        let session = Session::with_env(crate::env::Env::isolated());
+        let session = Session::with_env(Env::isolated());
         let _entered = session.enter();
         session.set_cache_dir(dir.path().to_str().unwrap());
         let root = root().unwrap();
         let name = put_in(&root, &[("a", b"one")]);
-        let source = crate::store::source::SrcPath::spool(&name, b"a");
+        let source = SrcPath::spool(&name, b"a");
         let expected = Obs::Input {
             entry: name.as_bytes().to_vec(),
             version: spool::INDEX_VERSION,
         };
         let mut recorded = Vec::new();
         for _ in 0..2 {
-            let ev = crate::eval::EvalConfig::new()
+            let ev = EvalConfig::new()
                 .session(session.clone())
                 .trace(true)
                 .build();
@@ -810,7 +814,7 @@ mod tests {
         }
         fs::remove_file(root.join(name)).unwrap();
         for mut obs in recorded {
-            assert!(crate::trace::validate::validate(&mut obs, 1).is_err());
+            assert!(validate(&mut obs, 1).is_err());
         }
     }
 

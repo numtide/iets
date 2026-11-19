@@ -69,6 +69,12 @@ of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
 
+Each job also observes the work that selected the result list. Changing a
+guard that chose the list invalidates every existing position. A change
+read only while forcing one element invalidates that element. The last line
+of `roots`, `# list-control-v1`, marks graphs that recorded the list
+selection. Record older graphs again before using them with this checker.
+
 ## Results
 
 All measurements are on bld1 (32 cores, 125 GB), at one worker per process,

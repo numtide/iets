@@ -50,6 +50,8 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+/// A complete roots file whose job traces include the choice of result list.
+const ROOTS_FOOTER: &str = "# list-control-v1\n";
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -1604,6 +1606,8 @@ impl State {
         roots: &[u32],
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
+        // Invalidate a previous capture before replacing any graph components.
+        let mut roots_file = std::fs::File::create(dir.join("roots"))?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
             // a name may hold a newline, and a line is an id
@@ -1639,8 +1643,9 @@ impl State {
             );
         }
         std::fs::write(dir.join("queries"), q)?;
-        let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        let mut r: String = roots.iter().map(|t| format!("{t}\n")).collect();
+        r.push_str(ROOTS_FOOTER);
+        std::io::Write::write_all(&mut roots_file, r.as_bytes())
     }
 }
 
@@ -1894,6 +1899,23 @@ fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
+fn read_roots(dir: &std::path::Path) -> std::io::Result<Vec<u32>> {
+    use std::io::{Error, ErrorKind};
+    let text = std::fs::read_to_string(dir.join("roots"))?;
+    let ids = text.strip_suffix(ROOTS_FOOTER).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "missing list-control traces; record the graph again",
+        )
+    })?;
+    ids.lines()
+        .map(|line| {
+            line.parse()
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e))
+        })
+        .collect()
+}
+
 /// The steps each job of the trace graph in `dir` must be evaluated again
 /// for, with every query read as the trace of its force: `(job, mask)`.
 fn check_dag(
@@ -1906,6 +1928,7 @@ fn check_dag(
     } else {
         u128::MAX >> (128 - c.steps.len())
     };
+    let roots = read_roots(dir)?;
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
     let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
@@ -1935,11 +1958,8 @@ fn check_dag(
         at += 2 + n;
     }
     let mut out = Vec::new();
-    for (i, line) in std::fs::read_to_string(dir.join("roots"))?
-        .lines()
-        .enumerate()
-    {
-        let t: usize = line.parse().unwrap_or(0);
+    for (i, root) in roots.into_iter().enumerate() {
+        let t = root as usize;
         let m = match t {
             0 => 0,
             t if t >= words.len() => every,
@@ -2295,10 +2315,7 @@ impl Graph {
             std::fs::read_to_string(d.join("provs"))?,
             ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
             read_words(&d.join("nodes"))?,
-            std::fs::read_to_string(d.join("roots"))?
-                .lines()
-                .map(|l| l.parse().unwrap_or(0))
-                .collect(),
+            read_roots(d)?,
         );
         let mut g = Graph {
             dir,
@@ -3035,12 +3052,8 @@ fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
         .map(String::from)
         .collect();
     let words = read_words(&dir.join("nodes"))?;
-    let roots = std::fs::read_to_string(dir.join("roots"))?;
-    let t: u32 = roots
-        .lines()
-        .nth(job)
-        .and_then(|l| l.parse().ok())
-        .unwrap_or(0);
+    let roots = read_roots(dir)?;
+    let t = roots.get(job).copied().unwrap_or(0);
     let mut seen = FxHashSet::default();
     let mut ids = FxHashSet::default();
     let mut stack = vec![t];

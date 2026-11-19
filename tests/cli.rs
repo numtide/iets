@@ -54,7 +54,7 @@ fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
     // Model four revisions, each editing the root region of one imported file.
     let changes: String = ["guard", "left", "right", "other"]
         .iter()
-        .map(|name| format!("{name}\tCR\t{}\t\n", path(name).display()))
+        .map(|name| format!("{name}\tV\t2\n{name}\tCR\t{}\t\n", path(name).display()))
         .collect();
     fs::write(path("changes"), changes).unwrap();
     let checked = ok(bin
@@ -65,6 +65,45 @@ fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
         stdout(&checked),
         "dag\t0\tguard\ndag\t0\tleft\ndag\t1\tguard\ndag\t1\tright\ndag\t2\tguard"
     );
+}
+
+#[rstest]
+fn fine_check_rejects_graphs_without_list_control_traces(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_DAG", "dag")
+        .args([
+            "eval",
+            "--strict",
+            "--no-cache",
+            "--workers",
+            "1",
+            "-E",
+            "[ 0 ]",
+        ]));
+    // The old format for an immediate element with no cell trace.
+    fs::write(path("dag/roots"), "0\n").unwrap();
+    fs::write(path("changes"), "1\tV\t2\n").unwrap();
+    let checked = bin
+        .cmd()
+        .current_dir(dir.path())
+        .args(["fine-check", "changes", "dag"])
+        .output()
+        .unwrap();
+    assert!(!checked.status.success());
+    assert!(stderr(&checked).contains("record the graph again"));
+    fs::write(path("commands"), "load dag 0\ncheck changes checked\n").unwrap();
+    let served = ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .args(["fine-check", "--serve"])
+        .stdin(fs::File::open(path("commands")).unwrap()));
+    assert!(stdout(&served).contains("error dag: missing list-control traces"));
+    assert!(!path("checked").exists());
 }
 
 fn run_complete(mut c: Command, words: &[&str]) -> String {

@@ -2,7 +2,7 @@
 # fchg.all holds "step\tchange" lines; TRACES holds "J\tjob" and then the job's trace.
 # skip drops the whole reads (A) whose Nix call or stack matches it: what a fix at those sites would give.
 BEGIN { FS = OFS = "\t" }
-NR == FNR {
+FILENAME == ARGV[1] {
   s = $1
   steps[s] = 1
   if ($2 == "CR") cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
@@ -23,8 +23,17 @@ function entries(e, name, why,    n, x, i, y) {
     if (name == "" || y[2] == "*" || index(" " y[2] " ", " " name " ")) mark(y[1], why)
   }
 }
-function flush(   s) { if (job != "") for (s in inv) print job, s, inv[s]; delete inv; delete pc }
+function flush(   s) {
+  if (job != "") {
+    if (!output_version) {
+      print "regenerate the fine job trace for " job " to record job output demands" > "/dev/stderr"
+      failed = 1
+    } else for (s in inv) print job, s, inv[s]
+  }
+  delete inv; delete pc; output_version = 0
+}
 $1 == "J" { flush(); job = $2; next }
+$0 == "V\tjob-output-v1" { output_version = 1; next }
 $1 == "R" && $2 == "?" { for (s in steps) inv[s] = "untracked " $3; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
@@ -42,4 +51,4 @@ $1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }
-END { flush() }
+END { flush(); if (failed) exit 1 }

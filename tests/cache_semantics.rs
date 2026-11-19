@@ -77,9 +77,12 @@ impl Work {
 
     fn trace_jobs(&self, mode: &str, expr: &str) -> std::process::Output {
         let file = self.write("root.nix", expr);
+        let jobs = self.path("jobs");
+        fs::create_dir(&jobs).unwrap();
         self.iets()
             .env("IETS_FINE_TRACE", "")
             .env("IETS_FINE_DAG", self.path("dag"))
+            .env("IETS_FINE_JOBS", jobs)
             .args([
                 "eval",
                 "--no-tracing-cache",
@@ -655,6 +658,10 @@ fn json_jobs_share_a_path_copy_trace(work: Work) {
     work.write("payload/file", "hello");
     let run = work.trace_jobs("--json", "[ ./payload { nested = ./payload; } 42 ]");
     assert!(run.status.success(), "{}", stderr(&run));
+    for i in 0..3 {
+        let trace = fs::read_to_string(work.path(&format!("jobs/{i}"))).unwrap();
+        assert!(trace.ends_with("V\tjob-output-v1\n"), "{trace}");
+    }
     let output: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert!(output[0].as_str().unwrap().ends_with("-payload"));
     assert_eq!(output[0], output[1]["nested"]);

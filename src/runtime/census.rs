@@ -13,7 +13,14 @@ use super::value::{
 use super::word::Word;
 use crate::syntax::symbol::fx_bytes;
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// A census can outlive a replaced file table, including all its addresses.
+pub(crate) fn next_file_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .expect("file census IDs exhausted")
+}
 
 pub const SIZE_BUCKETS: [&str; 11] = [
     "0", "1", "2", "3-4", "5-8", "9-16", "17-32", "33-64", "65-128", "129-256", "257+",

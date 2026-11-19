@@ -69,6 +69,8 @@ enum Origin {
 }
 
 pub struct FileInfo {
+    #[cfg(feature = "stats2")]
+    census_id: usize,
     pub path: Vec<u8>,
     pub base: u32,
     pub line_starts: Vec<u32>,
@@ -84,6 +86,8 @@ impl FileInfo {
     pub(crate) fn new(path: Vec<u8>, src: &[u8], base: u32) -> FileInfo {
         let line_starts = newline_starts(src).unwrap_or_else(|| syntax::line_starts(src));
         FileInfo {
+            #[cfg(feature = "stats2")]
+            census_id: census::next_file_id(),
             path,
             base,
             line_starts,
@@ -3175,7 +3179,7 @@ impl Evaluator {
         let file = self
             .files
             .file_of(pos)
-            .map(|(f, _)| (f as *const FileInfo as usize, &f.path[..]));
+            .map(|(f, _)| (f.census_id, &f.path[..]));
         let bytes = (self.arena.bytes_allocated - bytes) as u64;
         let census = &mut self.arena.stats.census;
         census.upd.nested_right += nested as u64;

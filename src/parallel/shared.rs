@@ -398,6 +398,8 @@ impl Totals {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
     use super::*;
 
     #[test]
@@ -406,7 +408,7 @@ mod tests {
         let first = files.add(b"first", b"a\nb");
         let retained = files.clone();
         let first_file = &retained[first.0 as usize];
-        std::thread::scope(|scope| {
+        thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {
                     for _ in 0..64 {

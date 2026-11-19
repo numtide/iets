@@ -237,12 +237,15 @@ impl Url {
         if host.is_empty() {
             return Err(bad(url, "no host"));
         }
+        let path = path.split_once('#').map_or(path, |(path, _)| path);
         Ok(Url {
             https,
             host: host.to_string(),
             port,
             target: if path.is_empty() {
                 "/".to_string()
+            } else if path.starts_with('?') {
+                format!("/{path}")
             } else {
                 path.to_string()
             },
@@ -1311,6 +1314,34 @@ mod tests {
             connect: None,
             stall: None,
             max_size: 1 << 30,
+        }
+    }
+
+    #[rstest]
+    #[case("?download=1", "/?download=1")]
+    #[case("#ignored", "/")]
+    #[case("/archive?download=1#ignored", "/archive?download=1")]
+    fn redirects_from_a_pathless_url_send_an_origin_form_target(
+        #[case] location: &'static str,
+        #[case] target: &str,
+    ) {
+        let requests = AtomicUsize::new(0);
+        let (port, seen) = serve(2, move |_, c| {
+            if requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                respond(c, "302 Found", &format!("location: {location}\r\n"), b"");
+            } else {
+                respond(c, "200 OK", "", b"payload");
+            }
+        });
+        let mut out = Vec::new();
+        get_decompressed(&format!("http://127.0.0.1:{port}"), &[], limits(), &mut out).unwrap();
+        assert_eq!(out, b"payload");
+        for target in ["/", target] {
+            assert!(
+                seen.recv()
+                    .unwrap()
+                    .starts_with(&format!("get {target} http/1.1\r\n"))
+            );
         }
     }
 

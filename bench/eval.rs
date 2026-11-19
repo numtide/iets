@@ -107,18 +107,21 @@ fn check_parse() {
 }
 
 fn check_ast() {
-    let ast: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
-    assert_eq!(ast["file"], "component.nix");
-    assert_eq!(ast["root"]["kind"], "let");
-    let binds = ast["root"]["binds"][0]["value"]["binds"]
-        .as_array()
-        .unwrap();
-    assert_eq!(binds.len(), 2_000);
-    for (n, bind) in binds.iter().enumerate() {
-        assert_eq!(bind["path"][0], format!("key{n}"));
-        assert_eq!(bind["value"]["kind"], "attrs");
-        assert_eq!(bind["value"]["binds"][1]["value"]["items"][0]["value"], n);
-    }
+    let mut ast: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
+    ast.sort_all_objects();
+    // Snapshot the fixture's full tree, including source spans. To refresh after
+    // an intentional fixture or schema change, inspect a known-good parse --json
+    // of component.nix and take FNV-1a of its compact, key-sorted JSON (no LF).
+    let hash = serde_json::to_vec(&ast)
+        .unwrap()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    assert_eq!(
+        hash, 0x2229_1a7b_f5ec_e9a7,
+        "component AST snapshot changed"
+    );
 }
 
 fn check_json() {

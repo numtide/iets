@@ -33,6 +33,7 @@ use std::sync::Arc;
 use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::{LintId, purity};
+use crate::parallel::force::require_demand;
 use crate::source::scm;
 use crate::store::hash::{HashAlgo, Hasher};
 use crate::store::nar::{FileType, PathFilter, dump_path, dump_string, nar_hash_filtered};
@@ -692,6 +693,9 @@ pub fn copy_path_to_store(
                 && !ev.is_store_path_text(path)
                 && ev.trace().stat_now(local.as_os_str().as_bytes(), true) == Kind::Directory
             {
+                // Only the first successful copy reports its findings. A helper
+                // publishing this cache entry would choose the reporting site.
+                require_demand(ev)?;
                 purity::dir_copy_unfiltered(ev, path, pos)?;
             }
             let git_lint = ev.lint_on(LintId::GitInSource);
@@ -715,6 +719,11 @@ pub fn copy_path_to_store(
                 accepted.as_deref(),
                 fp,
             );
+            if saw_git
+                || (ev.lint_on(LintId::LargeSourceCopy) && nar_size > ev.lint_config().max_bytes)
+            {
+                require_demand(ev)?;
+            }
             if saw_git {
                 purity::git_in_source(ev, path, pos)?;
             }

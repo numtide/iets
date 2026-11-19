@@ -5,6 +5,7 @@ use super::*;
 use crate::api::testkit::eval;
 use crate::api::{EvalArgs, Input};
 use crate::env::Env;
+use tempfile::tempdir;
 
 const URL_WARN: &str = "warning: [url-literal] URL literals are discouraged. Consider using a string literal \"http://example.com\" instead";
 
@@ -41,6 +42,7 @@ fn run_with(file: &str, strict: bool, env: &Env, flags: &[&str]) -> Out {
                 let (n, l) = it.next().unwrap().split_once('=').unwrap();
                 a.lints.push((n.into(), Level::parse(l).unwrap()));
             }
+            "--workers" => a.workers = it.next().unwrap().parse().unwrap(),
             "--lint-scope" => a.lint_scope = Some(Scope::parse(it.next().unwrap()).unwrap()),
             "--lint-root" => a
                 .lint_roots
@@ -56,6 +58,52 @@ fn run_with(file: &str, strict: bool, env: &Env, flags: &[&str]) -> Out {
 
 fn count(err: &str, prefix: &str) -> usize {
     err.lines().filter(|l| l.starts_with(prefix)).count()
+}
+
+#[test]
+fn shared_source_copy_reports_at_each_paths_first_demand() {
+    let d = tempdir().unwrap();
+    for tree in ["a/tree", "b/tree"] {
+        fs::create_dir_all(d.path().join(tree).join(".git")).unwrap();
+    }
+    fs::write(
+        d.path().join("iets.toml"),
+        "[lint]\nlarge-source-copy = { max-bytes = 64 }\n",
+    )
+    .unwrap();
+    let file = d.path().join("copies.nix");
+    let copies = "  \"${./a/tree}\"\n  \"${./b/tree}\"\n".repeat(48);
+    fs::write(&file, format!("[\n{copies}]")).unwrap();
+    for lint in ["dir-copy-unfiltered", "git-in-source", "large-source-copy"] {
+        let setting = format!("{lint}=warn");
+        let check = |workers| {
+            run(
+                file.to_str().unwrap(),
+                true,
+                &[
+                    "--lint",
+                    "all=off",
+                    "--lint",
+                    &setting,
+                    "--workers",
+                    workers,
+                ],
+            )
+        };
+        let serial = check("1");
+        assert_eq!(serial.rc, 0, "{}", serial.err);
+        assert_eq!(count(&serial.err, &format!("warning: [{lint}]")), 2);
+        assert!(
+            serial.err.contains("copies.nix:2:3") && serial.err.contains("copies.nix:3:3"),
+            "{}",
+            serial.err
+        );
+        let parallel = check("8");
+        assert_eq!(
+            (parallel.rc, parallel.out, parallel.err),
+            (serial.rc, serial.out, serial.err)
+        );
+    }
 }
 
 #[test]

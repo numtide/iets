@@ -375,6 +375,15 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
+/// Stop a helper before an effect whose first demanded site decides its outcome.
+pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
+    if journal(ev) {
+        Err(cancelled())
+    } else {
+        Ok(())
+    }
+}
+
 pub static EFFECT_BAILS: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;

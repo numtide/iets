@@ -9,8 +9,9 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
@@ -585,9 +586,6 @@ fn search_uses_the_cache(work: Work) {
 
 #[rstest]
 fn fine_cutoffs_preserve_introspection(work: Work) {
-    use std::io::Write;
-    use std::process::Stdio;
-
     let switch = work.write("switch.nix", "true");
     work.write(
         "pkgs.nix",

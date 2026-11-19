@@ -535,12 +535,13 @@ use crate::sys;
 pub(crate) use bail;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::{
-    uint8x16_t, vandq_u8, vceqq_u8, vdupq_n_u8, vgetq_lane_u64, vld1q_u8, vld1q_u8_x4, vmaxvq_u8, vorrq_u8, vpaddq_u8,
-    vreinterpretq_u64_u8,
+    uint8x16_t, vandq_u8, vceqq_u8, vdupq_n_u8, vgetq_lane_u64, vld1q_u8, vld1q_u8_x4, vmaxvq_u8,
+    vorrq_u8, vpaddq_u8, vreinterpretq_u64_u8,
 };
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
-    __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8, _mm_setzero_si128,
+    __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8,
+    _mm_setzero_si128,
 };
 use std::hint;
 

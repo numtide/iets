@@ -28,7 +28,7 @@ use crate::lint::{Diag, LintId};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
 use crate::runtime::{self, Kind, Word};
 use crate::session::Session;
-use crate::syntax::symbol::{FxHashMap, Sym};
+use crate::syntax::symbol::{FileSymbols, FxHashMap, Sym};
 use crate::trace::key::BUILD_ID;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -297,8 +297,7 @@ fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
 
 struct Ser {
     out: Vec<u8>,
-    syms: FxHashMap<Sym, u32>,
-    names: Vec<Sym>,
+    symbols: FileSymbols,
     base: u32,
     /// Heap constant word -> (is a global, its name); built from the live tables.
     rev: FxHashMap<u64, (bool, Sym)>,
@@ -314,6 +313,19 @@ pub fn serialize(
     diags: &[Diag],
     allows: &Allows,
 ) -> Option<Vec<u8>> {
+    serialize_file(ev, ir, base, diags, allows, FileSymbols::default())
+}
+
+/// Include names the parser or compiler saw even when folding removed
+/// their IR. Interning the name table then replays the source order on load.
+pub(crate) fn serialize_file(
+    ev: &Evaluator,
+    ir: IrRef,
+    base: u32,
+    diags: &[Diag],
+    allows: &Allows,
+    symbols: FileSymbols,
+) -> Option<Vec<u8>> {
     let mut rev = FxHashMap::default();
     if let Some(b) = ev.globals.builtins {
         for a in b.iter() {
@@ -325,8 +337,7 @@ pub fn serialize(
     }
     let mut s = Ser {
         out: Vec::with_capacity(1 << 16),
-        syms: FxHashMap::default(),
-        names: Vec::new(),
+        symbols,
         base,
         rev,
         ok: true,
@@ -347,10 +358,10 @@ pub fn serialize(
         put_u32(&mut s.out, l.end);
         put_u64(&mut s.out, l.mask);
     }
-    let mut file = Vec::with_capacity(s.out.len() + 16 * s.names.len() + 16);
+    let mut file = Vec::with_capacity(s.out.len() + 16 * s.symbols.order.len() + 16);
     file.extend_from_slice(MAGIC);
-    put_u32(&mut file, s.names.len() as u32);
-    for sym in &s.names {
+    put_u32(&mut file, s.symbols.order.len() as u32);
+    for sym in &s.symbols.order {
         put_bytes(&mut file, ev.interner.name(*sym));
     }
     file.extend_from_slice(&s.out);
@@ -359,11 +370,7 @@ pub fn serialize(
 
 impl Ser {
     fn sym(&mut self, s: Sym) {
-        let n = self.names.len() as u32;
-        let id = *self.syms.entry(s).or_insert_with(|| {
-            self.names.push(s);
-            n
-        });
+        let id = self.symbols.id(s);
         put_u32(&mut self.out, id);
     }
 

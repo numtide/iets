@@ -318,6 +318,8 @@ pub struct WellKnown {
 pub struct Evaluator {
     pub(crate) arena: Arena,
     pub interner: Interner,
+    /// The symbol prefix every evaluator with these builtins starts with.
+    initial_symbols: usize,
     pub files: Files,
     pub globals: Globals,
     pub root_env: &'static EnvObj,
@@ -755,6 +757,7 @@ impl EvalConfig {
         let mut ev = Evaluator {
             arena,
             interner,
+            initial_symbols: 0,
             files: Files::in_heap(self.session.heap.clone()),
             globals: Globals {
                 table: FxHashMap::default(),
@@ -810,6 +813,7 @@ impl EvalConfig {
             session: self.session,
         };
         builtins::install(&mut ev);
+        ev.initial_symbols = ev.interner.len();
         if ev.session.profile.on() {
             ev.prof = Stack::sampling();
             ev.session.profile.names(&ev.files, &ev.interner);
@@ -947,8 +951,8 @@ impl Evaluator {
             .map(|(ir, _, _)| ir)
     }
 
-    /// `compile_source` plus whether a `~/` path literal was compiled and
-    /// the lint diagnostics, already reported.
+    /// `compile_source` plus whether the IR can be cached and the lint
+    /// diagnostics, already reported.
     fn compile_source_inner(
         &mut self,
         path: &[u8],
@@ -964,6 +968,11 @@ impl Evaluator {
         let base = self.files[file.0 as usize].base;
         let ast = syntax::parse(&src, file, &mut self.interner)
             .map_err(|e| Error::boxed(ErrorKind::Parse, e.msg, Pos(base + e.span.start)))?;
+        let parsed = self
+            .interner
+            .file_symbols
+            .as_ref()
+            .map_or(0, |s| s.order.len());
         self.files[file.0 as usize].set_allows(ast.allows.clone());
         let t0 = Instant::now();
         let before = self.arena.bytes_allocated;
@@ -998,7 +1007,16 @@ impl Evaluator {
             self.session.profile.note_ir(ir);
         }
         self.report_diags(&diags);
-        Ok((ir, used_home, diags))
+        // Recursive bindings and formal defaults compile in symbol order.
+        // If folding them interns a name the parser never saw, which name
+        // comes first can depend on the imports preceding this file.
+        let cacheable = !used_home
+            && self.interner.file_symbols.as_ref().is_none_or(|symbols| {
+                symbols.order[parsed..]
+                    .iter()
+                    .all(|s| (s.0 as usize) < self.initial_symbols)
+            });
+        Ok((ir, cacheable, diags))
     }
 
     /// `compile_source` for an imported file, through the IR cache when it is on.
@@ -1061,11 +1079,15 @@ impl Evaluator {
                 return Ok(ir);
             }
         }
-        let (ir, used_home, diags) =
-            self.compile_source_inner(path, src, base_dir, None, Origin::File)?;
+        self.interner.file_symbols = Some(Box::default());
+        let result = self.compile_source_inner(path, src, base_dir, None, Origin::File);
+        let symbols = self.interner.file_symbols.take().expect("compiling a file");
+        let (ir, cacheable, diags) = result?;
         let t1 = Instant::now();
         let allows = self.files[file.0 as usize].allows();
-        if !used_home && let Some(bytes) = cache::serialize(self, ir, base, &diags, allows) {
+        if cacheable
+            && let Some(bytes) = cache::serialize_file(self, ir, base, &diags, allows, *symbols)
+        {
             cache.write(&key, &bytes);
         }
         if cache.stats {

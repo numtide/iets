@@ -117,6 +117,13 @@ Only `import` uses it. `scopedImport`, `-E` and a file with a `~/` path
 literal compile from source, and small files (`IETS_IR_MIN`) aren't cached, because
 the load costs what the compile costs.
 
+The entry's name table preserves the order in which parsing first encountered
+each symbol, including names in expressions the compiler folded away. This
+matters when a later attribute-set comparison can reach either a mismatch or
+an error. If compiling the file introduces a non-builtin symbol the parser
+did not encounter, the file compiles from source. The compiler visits recursive
+bindings in the current evaluator's symbol order.
+
 The key holds the build id, so a new binary never reads an old entry. It
 also holds everything the compiler folds out of the evaluator's
 configuration, because a folded constant is stored by content: the system,

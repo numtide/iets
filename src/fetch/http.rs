@@ -335,7 +335,7 @@ fn normalise(path: &str) -> String {
 
 /// `location` against `base`: absolute, host-relative or path-relative, as
 /// libcurl resolves a redirect and Nix a narinfo's `URL`.
-pub fn resolve(base: &str, location: &str) -> String {
+pub(crate) fn resolve(base: &str, location: &str) -> String {
     if has_scheme(location) {
         return location.to_string();
     }

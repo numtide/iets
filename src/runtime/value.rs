@@ -354,14 +354,11 @@ pub struct ThunkApp2Obj {
     pub state: Cell,
 }
 
-/// One per `mapAttrs` call. Entry `i` of `out` starts as the map word
-/// `(desc, i)`: a thunk with no object of its own. Its `code` word is the
-/// cell of that entry (the map word, then the value). Its state is
-/// `states[i]` (NULL, BLACKHOLE, then a forced-state marker or the function
-/// itself). A demanded function keeps the original map word in its entry
-/// so aliases retain its identity. A force applies `f` to the name
-/// and to entry `i` of `src`. Attr cells never hold a BLACKHOLE, so
-/// readers of `attr.cell` need no special case.
+/// One descriptor per `mapAttrs` call. Each output entry starts as a map
+/// word identifying its descriptor and index. Its separate state cell
+/// holds the claim, so readers never see a BLACKHOLE in the set. For a
+/// demanded function the state cell holds the result, leaving the entry's
+/// identity available to aliases. Other results overwrite the map word.
 #[repr(C)]
 pub struct MapDesc {
     pub f: Word,

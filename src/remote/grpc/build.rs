@@ -881,6 +881,32 @@ mod tests {
     use crate::build::backend::tests::every_timing;
 
     #[test]
+    fn upload_chunks_always_request_signature_checks() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let sent = Arc::new(AtomicU64::new(0));
+        let mut ship = ChunkShip {
+            tx,
+            buf: Vec::new(),
+            sent: Arc::clone(&sent),
+        };
+        ship.flush().unwrap();
+        assert!(rx.try_recv().is_err());
+        let full = vec![7; CHUNK];
+        ship.write_all(&full).unwrap();
+        ship.write_all(b"tail").unwrap();
+        ship.flush().unwrap();
+        drop(ship);
+        for expected in [&full[..], &b"tail"[..]] {
+            let chunk = rx.blocking_recv().unwrap();
+            assert!(chunk.check_sigs);
+            assert!(!chunk.repair);
+            assert_eq!(chunk.data, expected);
+        }
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(sent.load(Ordering::Relaxed), (CHUNK + 4) as u64);
+    }
+
+    #[test]
     fn the_request_carries_the_build_limits() {
         let drv_path = StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x.drv").unwrap();
         let limits = Limits {

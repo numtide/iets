@@ -369,19 +369,43 @@ mod tests {
     #[rstest]
     #[case("nar/x.nar", "https://cache.example/sub/nar/x.nar")]
     #[case("https://nars.example/x.nar", "https://nars.example/x.nar")]
+    #[case("//nars.example/x.nar", "https://nars.example/x.nar")]
+    #[case("file:/tmp/x.nar", "file:/tmp/x.nar")]
     fn a_nar_url_resolves_against_the_cache(#[case] url: &str, #[case] want: &str) {
         assert_eq!(nar_url(&fetched("https://cache.example/sub", url)), want);
     }
 
     #[test]
-    fn a_remote_cache_cannot_name_a_local_file() {
+    fn a_local_cache_can_name_an_absolute_file_url_without_authority() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"nar bytes").unwrap();
+        let url = format!("file:{}", file.path().display());
+        let f = fetched("file:///unused-cache", &url);
         let limits = Limits {
             connect: None,
             stall: None,
             max_size: 1 << 20,
         };
-        let f = fetched("https://cache.example", "file:///etc/hostname");
+        let mut bytes = Vec::new();
+        assert_eq!(get_nar(&f, limits, &mut bytes).unwrap(), 9);
+        assert_eq!(bytes, b"nar bytes");
+    }
+
+    #[rstest]
+    #[case("file:///etc/hostname")]
+    #[case("file:/etc/hostname")]
+    fn a_remote_cache_cannot_name_a_local_file(#[case] url: &str) {
+        let limits = Limits {
+            connect: None,
+            stall: None,
+            max_size: 1 << 20,
+        };
+        let f = fetched("https://cache.example", url);
         let e = get_nar(&f, limits, &mut Vec::new()).unwrap_err();
-        assert!(e.to_string().contains("unsupported scheme 'file'"), "{e}");
+        assert!(
+            e.to_string().contains("unsupported scheme 'file'")
+                || e.to_string().contains("no scheme"),
+            "{e}"
+        );
     }
 }

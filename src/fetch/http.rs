@@ -298,9 +298,9 @@ fn file_path(url: &str) -> Option<&str> {
 }
 
 /// Whether `location` starts with a scheme, and so is absolute. What comes
-/// before `://` must be a scheme (RFC 3986): a `://` in a query is not one.
+/// before `:` must be a scheme (RFC 3986): a `:` in a path or query is not one.
 fn has_scheme(location: &str) -> bool {
-    let Some((s, _)) = location.split_once("://") else {
+    let Some((s, _)) = location.split_once(':') else {
         return false;
     };
     s.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -332,6 +332,9 @@ pub fn resolve(base: &str, location: &str) -> String {
         return location.to_string();
     }
     let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
+    if location.starts_with("//") {
+        return format!("{scheme}:{location}");
+    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let joined = if location.starts_with('/') {
         location.to_string()

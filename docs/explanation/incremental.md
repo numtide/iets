@@ -69,6 +69,13 @@ of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
 
+Each validation step rechecks jobs that read the process environment, ask
+an SCM about its working tree, use a fetched input's local store entry, or
+observe the latest mtime of a source tree. A Git diff supplies none of
+those values. The graph and each text job trace carry a version record for
+these reads. Record old graphs again so each reader of an open input has
+its own evidence. The flat-text checker marks older jobs dirty.
+
 ## Results
 
 All measurements are on bld1 (32 cores, 125 GB), at one worker per process,

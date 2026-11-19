@@ -22,9 +22,10 @@
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{fs, io};
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -50,6 +51,7 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+const EXTERNAL_READS: &str = "V\texternal-reads-v1\n";
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -945,6 +947,14 @@ pub fn outside(o: &Obs) {
     with(|s| s.record(O::Out(line)));
 }
 
+/// A source tree's newest mtime is observable as `lastModified`. A Git
+/// change list cannot say whether a checkout preserved that time.
+pub(crate) fn tree_mtime() {
+    if on() {
+        with(|s| s.record(O::Out("TreeMtime".into())));
+    }
+}
+
 /// After the compile of `path` with `root` as its IR: the regions and the
 /// literals of the file.
 pub fn compiled(ev: &Evaluator, path: &[u8], root: IrRef, base: u32) {
@@ -1594,7 +1604,8 @@ impl State {
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
-        std::fs::write(dir.join("obs"), o)?;
+        o.push_str(EXTERNAL_READS);
+        fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
             p.push_str(&self.prov_line(ev, i).replace('\n', "\\n"));
@@ -1675,7 +1686,9 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                     s.flatten(&[EDGE | t])
                 };
                 let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+                let mut text = s.text(ev, &obs);
+                text.push_str(EXTERNAL_READS);
+                if let Err(e) = fs::write(&p, text) {
                     errln!("fine trace: writing {}: {e}", p.display());
                 }
             }
@@ -1849,6 +1862,22 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
+fn read_observations(dir: &Path) -> io::Result<String> {
+    let text = fs::read_to_string(dir.join("obs"))?;
+    if !text
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("V\t"))
+        .any(|l| l == EXTERNAL_READS.trim_end())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing external read evidence; record the graph again",
+        ));
+    }
+    Ok(text)
+}
+
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     Ok(std::fs::read(path)?
         .as_chunks::<4>()
@@ -1871,7 +1900,7 @@ fn check_dag(
         u128::MAX >> (128 - c.steps.len())
     };
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let obs = ObsIndex::new(&read_observations(dir)?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -2072,6 +2101,9 @@ impl ObsIndex {
                     .entry(a.to_string())
                     .or_default()
                     .push((i, b.parse().unwrap_or(0))),
+                // Revision deltas carry no environment, SCM command results,
+                // input-store presence, or checkout timestamps.
+                "E" | "Q" | "I" | "TreeMtime" => x.every.push(i),
                 "F" | "C" => push(&mut x.files, a, i),
                 "T" => push(&mut x.trees, a, i),
                 "S" => push(&mut x.stats, a, i),
@@ -2257,7 +2289,7 @@ impl Graph {
         }
         let (provs, index, words, roots) = (
             std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            ObsIndex::new(&read_observations(d)?, None),
             read_words(&d.join("nodes"))?,
             std::fs::read_to_string(d.join("roots"))?
                 .lines()
@@ -2994,10 +3026,7 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
-        .lines()
-        .map(String::from)
-        .collect();
+    let obs: Vec<String> = read_observations(dir)?.lines().map(String::from).collect();
     let words = read_words(&dir.join("nodes"))?;
     let roots = std::fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots

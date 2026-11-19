@@ -4,6 +4,7 @@
 BEGIN { FS = OFS = "\t" }
 NR == FNR {
   s = $1
+  steps[s] = 1
   if ($2 == "CR") cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
   else if ($2 == "CF") cf[$3] = cf[$3] " " s
   else if ($2 == "CL") { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
@@ -22,8 +23,15 @@ function entries(e, name, why,    n, x, i, y) {
     if (name == "" || y[2] == "*" || index(" " y[2] " ", " " name " ")) mark(y[1], why)
   }
 }
-function flush(   s) { if (job != "") for (s in inv) print job, s, inv[s]; delete inv; delete pc }
+function flush(   s) {
+  if (job != "" && !external_version) for (s in steps) inv[s] = "missing external read evidence"
+  external_version = 0
+  if (job != "") for (s in inv) print job, s, inv[s]
+  delete inv; delete pc
+}
 $1 == "J" { flush(); job = $2; next }
+$1 == "V" && $2 == "external-reads-v1" { external_version = 1; next }
+$1 == "E" || $1 == "Q" || $1 == "I" || $1 == "TreeMtime" { for (s in steps) inv[s] = "external read " $1; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
   if ($3 == "lit") pc[$2] = cl[$4 "\t" $5 "\t" $6]

@@ -37,7 +37,8 @@ pub fn parse(src: &[u8], file: FileId, interner: &mut Interner) -> Result<Ast, P
 /// Nix does.
 pub fn line_col(src: &[u8], offset: u32) -> (u32, u32) {
     let offset = offset.min(src.len() as u32);
-    let starts = line_starts(src);
+    // Include the byte at the offset so a CR immediately before it can see its LF.
+    let starts = line_starts(src.get(..=offset as usize).unwrap_or(src));
     let line = starts.partition_point(|&s| s <= offset);
     (line as u32, offset - starts[line - 1] + 1)
 }

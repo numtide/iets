@@ -260,7 +260,11 @@ fn hits_and_misses(work: Work) {
 
 #[rstest]
 fn import_starts_following_a_link(work: Work) {
-    let main = work.write("main.nix", "import ./entry.nix");
+    let main = work.write(
+        "main.nix",
+        "builtins.seq (builtins.readFile ./entry.nix) (import ./entry.nix)",
+    );
+    let reader = work.write("read.nix", "builtins.readFile ./entry.nix");
     let src = "import ./value.nix";
     let entry = work.write("entry.nix", src);
     work.write("value.nix", "1");
@@ -269,12 +273,24 @@ fn import_starts_following_a_link(work: Work) {
 
     assert_eq!(work.eval(&[&main]).out.trim(), "1");
     assert!(work.eval(&[&main]).status.contains("cache: hit"));
+    touch(946_684_800, &[&entry]);
+    let refreshed = work.eval(&[&main]);
+    assert!(
+        refreshed.status.contains("cache: hit") && refreshed.status.contains(" 1 rehashed"),
+        "{}",
+        refreshed.status
+    );
+    let read = work.eval(&[&reader]).out;
     fs::remove_file(&entry).unwrap();
     std::os::unix::fs::symlink("other/entry.nix", &entry).unwrap();
     let r = work.eval(&[&main]);
     assert_eq!(r.out.trim(), "2");
     assert!(r.status.contains("cache: miss"), "{}", r.status);
     assert!(work.eval(&[&main]).status.contains("cache: hit"));
+    // Reading only the bytes still follows the link.
+    let r = work.eval(&[&reader]);
+    assert_eq!(r.out, read);
+    assert!(r.status.contains("cache: hit"), "{}", r.status);
 }
 
 #[rstest]

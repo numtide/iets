@@ -162,6 +162,7 @@ fn put_obs(e: &mut Enc, o: &Obs) {
     match o {
         Obs::File {
             path,
+            follow,
             size,
             mtime_ns,
             ctime_ns,
@@ -169,7 +170,7 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             ino,
             hash,
         } => {
-            e.u8(0);
+            e.u8(if *follow { 0 } else { 9 });
             e.bytes(path);
             e.u64(*size);
             e.i64(*mtime_ns);
@@ -259,8 +260,9 @@ fn put_obs(e: &mut Enc, o: &Obs) {
 
 fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
     Ok(match d.u8()? {
-        0 => Obs::File {
+        tag @ (0 | 9) => Obs::File {
             path: d.vec()?,
+            follow: tag == 0,
             size: d.u64()?,
             mtime_ns: d.i64()?,
             ctime_ns: d.i64()?,
@@ -629,6 +631,7 @@ mod tests {
         let obs = vec![
             Obs::File {
                 path: b"/a".to_vec(),
+                follow: true,
                 size: 3,
                 mtime_ns: -5,
                 ctime_ns: -4,

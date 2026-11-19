@@ -108,6 +108,8 @@ pub struct Filtered {
 pub enum Obs {
     File {
         path: Vec<u8>,
+        /// False when the run also observed this final component as a regular file.
+        follow: bool,
         size: u64,
         mtime_ns: i64,
         /// Changes on every write, and no user program can set it: without
@@ -600,6 +602,10 @@ const RACY_NS: i64 = 2_000_000_000;
 const UNTRUSTED_MTIME: i64 = i64::MIN;
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
+    observed_file(path, meta, hash, true)
+}
+
+fn observed_file(path: &[u8], meta: &fs::Metadata, hash: Digest32, follow: bool) -> Obs {
     let at = sys::path_from_internal(path);
     let (dev, ino) = file_id(&at, meta);
     let mtime = mtime_ns(meta);
@@ -609,6 +615,7 @@ pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
     let racy = mtime > now.saturating_sub(RACY_NS);
     Obs::File {
         path: path.to_vec(),
+        follow,
         size: meta.len(),
         mtime_ns: if racy { UNTRUSTED_MTIME } else { mtime },
         ctime_ns: ctime_ns(&at, meta),

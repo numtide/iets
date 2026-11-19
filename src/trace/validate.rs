@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{fs, thread};
 
 use super::{
-    Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_kind, tree_fingerprint, tree_rehash,
+    Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, hash_to_digest, mtime_ns,
+    observed_file, run_query, stat_kind, tree_fingerprint, tree_rehash,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -86,6 +86,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
     match o {
         Obs::File {
             path,
+            follow,
             size,
             mtime_ns: mt,
             ctime_ns: ct,
@@ -93,7 +94,12 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             ino,
             hash,
         } => {
-            let m = match fs::metadata(os(path)) {
+            let metadata = if *follow {
+                fs::metadata(os(path))
+            } else {
+                fs::symlink_metadata(os(path))
+            };
+            let m = match metadata {
                 Ok(m) => m,
                 Err(e) => return unreadable(path, &e),
             };
@@ -119,7 +125,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             if now != *hash {
                 return Outcome::Changed(format!("{} changed", lossy(path)));
             }
-            Outcome::Refresh(file_obs(path, &m, *hash))
+            Outcome::Refresh(observed_file(path, &m, *hash, *follow))
         }
         Obs::Dir { path, hash } => match dir_hash(&os(path), dirs) {
             Ok(now) => {

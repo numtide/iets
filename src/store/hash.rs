@@ -237,9 +237,13 @@ impl Hash {
 
 /// Mirrors hash.cc:hashString.
 pub fn hash_bytes(algo: HashAlgo, data: &[u8]) -> Hash {
-    let mut h = Hasher::new(algo);
-    h.update(data);
-    h.finish()
+    match algo {
+        HashAlgo::Md5 => Hash::raw(algo, &md5::Md5::digest(data)),
+        HashAlgo::Sha1 => Hash::raw(algo, &sha1::Sha1::digest(data)),
+        HashAlgo::Sha256 => Hash::raw(algo, &sha2::Sha256::digest(data)),
+        HashAlgo::Sha512 => Hash::raw(algo, &sha2::Sha512::digest(data)),
+        HashAlgo::Blake3 => Hash::raw(algo, blake3::hash(data).as_bytes()),
+    }
 }
 
 /// Mirrors hash.cc:compressHash.

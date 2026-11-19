@@ -238,6 +238,8 @@ mod ab {
     /// How long processes a run left behind may go on before they are killed.
     const LEFTOVER_LIMIT: Duration = Duration::from_secs(60);
 
+    const CLEANUP_GRACE: Duration = Duration::from_secs(2);
+
     const COUNTERS: [&str; 5] = [
         "instructions",
         "cycles",
@@ -306,8 +308,15 @@ mod ab {
         }
         // The per-thread children file is optional in Linux. At the deadline
         // enumerate process IDs, then let waitpid verify our ownership.
+        let mut result = Ok(());
         for entry in fs::read_dir("/proc")? {
-            let name = entry?.file_name();
+            let name = match entry {
+                Ok(entry) => entry.file_name(),
+                Err(e) => {
+                    result = Err(e);
+                    continue;
+                }
+            };
             let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) else {
                 continue;
             };
@@ -318,12 +327,12 @@ mod ab {
                 if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
                     let e = io::Error::last_os_error();
                     if e.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(e);
+                        result = Err(e);
                     }
                 }
             }
         }
-        Ok(())
+        result
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -333,34 +342,64 @@ mod ab {
 
     /// Processes the run left behind, which are ours as the subreaper. False
     /// when they had to be killed.
-    fn reap_leftovers(limit: Duration) -> io::Result<bool> {
+    fn reap_leftovers(
+        limit: Duration,
+        grace: Duration,
+        mut sweep: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
         let until = Instant::now() + limit;
         let mut clean = true;
+        let mut cleanup_until = None;
+        let mut sweep_error = None;
         loop {
             // SAFETY: waitpid with a null status pointer is allowed.
-            match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
-                0 => {
-                    if Instant::now() >= until {
-                        clean = false;
-                        // A killed process's children come to us in turn.
-                        kill_leftovers()?;
-                    }
-                    thread::sleep(Duration::from_millis(10));
+            let pid = unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) };
+            if pid == -1 {
+                let e = io::Error::last_os_error();
+                match e.raw_os_error() {
+                    Some(libc::ECHILD) => return Ok(clean),
+                    Some(libc::EINTR) => {}
+                    _ => return Err(e),
                 }
-                -1 => {
-                    let e = io::Error::last_os_error();
-                    match e.raw_os_error() {
-                        Some(libc::EINTR) => continue,
-                        Some(libc::ECHILD) => return Ok(clean),
-                        _ => return Err(e),
+            }
+            let now = Instant::now();
+            if now >= until {
+                let end = cleanup_until.get_or_insert(now + grace);
+                if now >= *end {
+                    return Err(sweep_error.unwrap_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "children remain after the cleanup deadline",
+                        )
+                    }));
+                }
+                if pid == 0 {
+                    clean = false;
+                    // A killed process's children come to us in turn.
+                    if let Err(e) = sweep() {
+                        sweep_error = Some(e);
                     }
                 }
-                _ => {}
+            }
+            if pid == 0 {
+                thread::sleep(Duration::from_millis(10));
             }
         }
     }
 
-    fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, String> {
+    #[derive(Debug)]
+    enum RunError {
+        Scenario(String),
+        Cleanup(io::Error),
+    }
+
+    impl From<String> for RunError {
+        fn from(message: String) -> Self {
+            Self::Scenario(message)
+        }
+    }
+
+    fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
         // a thread of its own, so the counters it opens cover only the run
         thread::scope(|s| {
             s.spawn(|| run(bin, args, cache, stderr))
@@ -369,7 +408,7 @@ mod ab {
         })
     }
 
-    fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, String> {
+    fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
         let mut cmd = Command::new(bin);
         cmd.arg(&args[0])
             .arg("--cache-dir")
@@ -394,15 +433,23 @@ mod ab {
         let out = child.stdout.take().expect("piped");
         let hasher = thread::spawn(move || hash_output(out));
         let mut status = 0;
-        let mut ru = MaybeUninit::<libc::rusage>::zeroed();
-        // SAFETY: the pid is our child, and wait4 fills the struct it is given.
-        let ru = unsafe {
-            libc::wait4(pid, &mut status, 0, ru.as_mut_ptr());
-            ru.assume_init()
+        let mut ru = MaybeUninit::<libc::rusage>::uninit();
+        let ru = loop {
+            // SAFETY: pid is our child; a successful wait4 initializes status and ru.
+            if unsafe { libc::wait4(pid, &mut status, 0, ru.as_mut_ptr()) } == pid {
+                // SAFETY: wait4 filled ru for this child.
+                break unsafe { ru.assume_init() };
+            }
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::Interrupted {
+                return Err(RunError::Cleanup(e));
+            }
         };
         let wall = t0.elapsed().as_secs_f64();
-        let clean = reap_leftovers(LEFTOVER_LIMIT)
-            .map_err(|e| format!("reaping leftover processes: {e}"))?;
+        // A surviving writer may keep the pipe open. On incomplete cleanup the
+        // whole invocation exits; joining its stdout reader here could hang.
+        let clean = reap_leftovers(LEFTOVER_LIMIT, CLEANUP_GRACE, kill_leftovers)
+            .map_err(RunError::Cleanup)?;
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -413,13 +460,14 @@ mod ab {
             let err = fs::read_to_string(stderr).unwrap_or_default();
             let tail: Vec<&str> = err.lines().rev().take(5).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            return Err(format!("exit status {status}:\n{}", tail.join("\n")));
+            return Err(format!("exit status {status}:\n{}", tail.join("\n")).into());
         }
         if !clean {
             return Err(format!(
                 "processes still ran {}s after it exited, and were killed",
                 LEFTOVER_LIMIT.as_secs()
-            ));
+            )
+            .into());
         }
         let kb = if cfg!(target_os = "macos") {
             1.0
@@ -579,7 +627,7 @@ mod ab {
         status: String,
     }
 
-    fn measure(c: &Ctx, sc: &Scenario, o: &Opts) -> Row {
+    fn measure(c: &Ctx, sc: &Scenario, o: &Opts) -> io::Result<Row> {
         let bins = [&o.before, &o.after];
         let mut row = Row {
             id: sc.id,
@@ -591,7 +639,7 @@ mod ab {
         let original = fs::read(Path::new(&c.np).join(EDIT_FILE)).unwrap_or_default();
         let fresh = || tempfile::tempdir_in(&c.work).expect("a cache directory");
         let kept = [fresh(), fresh()];
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<(), RunError> {
             if sc.cache == Cache::Edit {
                 fs::write(&edit_at, &original).map_err(|e| e.to_string())?;
             }
@@ -630,8 +678,10 @@ mod ab {
                     } else {
                         kept[i].path()
                     };
-                    let r = run_once(bins[i], &sc.args, cache, &err)
-                        .map_err(|e| format!("{}: {e}", bins[i].display()))?;
+                    let r = run_once(bins[i], &sc.args, cache, &err).map_err(|e| match e {
+                        RunError::Scenario(msg) => format!("{}: {msg}", bins[i].display()).into(),
+                        fatal => fatal,
+                    })?;
                     row.runs[i].push(r);
                 }
             }
@@ -641,10 +691,11 @@ mod ab {
             let _ = fs::write(&edit_at, &original);
         }
         row.status = match result {
-            Err(e) => format!("FAILED: {e}"),
+            Err(RunError::Cleanup(e)) => return Err(e),
+            Err(RunError::Scenario(e)) => format!("FAILED: {e}"),
             Ok(()) => check_output(sc, &row.runs),
         };
-        row
+        Ok(row)
     }
 
     fn check_output(sc: &Scenario, runs: &[Vec<Run>; 2]) -> String {
@@ -774,7 +825,13 @@ mod ab {
         let mut rows = Vec::new();
         for sc in &todo {
             eprintln!("ab: {}", sc.id);
-            rows.push(measure(&c, sc, &o));
+            match measure(&c, sc, &o) {
+                Ok(row) => rows.push(row),
+                Err(e) => {
+                    eprintln!("ab: stopping after incomplete process cleanup: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
         }
 
         let mut failed = false;
@@ -907,7 +964,18 @@ mod ab {
                 .args(["-c", "(sleep 30 & wait) &"])
                 .status()
                 .unwrap();
-            assert!(!reap_leftovers(Duration::from_secs(1)).unwrap());
+            // A sweep may see no children, or fail to signal one it sees.
+            // Neither case permits the benchmark to continue measuring.
+            for error in [None, Some(io::ErrorKind::PermissionDenied)] {
+                let failure = reap_leftovers(Duration::ZERO, Duration::from_millis(30), || {
+                    error.map_or(Ok(()), |e| Err(io::Error::from(e)))
+                })
+                .unwrap_err();
+                assert_eq!(failure.kind(), error.unwrap_or(io::ErrorKind::TimedOut));
+            }
+            assert!(
+                !reap_leftovers(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap()
+            );
             assert!(t.elapsed() < Duration::from_secs(10));
             assert_eq!(
                 direct.wait().unwrap_err().raw_os_error(),

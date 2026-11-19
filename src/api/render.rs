@@ -43,7 +43,7 @@ impl Missing {
             let base = path.rsplit('/').next().unwrap_or(path);
             (base.get(HASH_PART_LEN + 1..).unwrap_or(base), path)
         }
-        will_substitute.sort_by(|a, b| key(a).cmp(&key(b)));
+        will_substitute.sort_unstable_by(|a, b| key(a).cmp(&key(b)));
         Missing {
             will_build,
             will_substitute,

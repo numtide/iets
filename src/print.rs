@@ -7,6 +7,7 @@ use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::{self, thunk};
 use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
 use crate::syntax::symbol::FxHashSet;
+use crate::trace::fine;
 
 /// C's `%g` with precision 6, as `std::ostream << double` prints.
 pub fn format_g(f: f64) -> String {
@@ -458,7 +459,7 @@ fn print_json_inner(
                 let w = c.get();
                 let mut write = || print_json(ev, w, out, ctx, strict, pos);
                 let result = if jobs {
-                    crate::trace::fine::json_element(w, write)
+                    fine::json_element(w, write)
                 } else {
                     write()
                 };

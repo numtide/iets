@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::cli::{self, EvalArgs, render, report, run_for};
 use crate::eval::{Evaluator, Pos};
+use crate::trace::fine;
 use crate::trace::run::Cache;
 use crate::trace::store::Part;
 use crate::{print, treestore};
@@ -54,9 +55,9 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         } else if json {
             // nix eval --json forces the whole value, --strict or not (eval.cc)
             let mut ctx = Vec::new();
-            let jobs = crate::trace::fine::on();
+            let jobs = fine::on();
             if jobs {
-                crate::trace::fine::begin_json_output();
+                fine::begin_json_output();
             }
             print::print_json_output(ev, v, &mut out, &mut ctx, true, Pos::NONE, jobs)?;
         } else {

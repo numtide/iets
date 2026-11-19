@@ -10,7 +10,7 @@ use rstest::{fixture, rstest};
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
@@ -75,7 +75,7 @@ impl Work {
         run(c)
     }
 
-    fn trace_jobs(&self, mode: &str, expr: &str) -> std::process::Output {
+    fn trace_jobs(&self, mode: &str, expr: &str) -> Output {
         let file = self.write("root.nix", expr);
         let jobs = self.path("jobs");
         fs::create_dir(&jobs).unwrap();

@@ -426,13 +426,17 @@ fn find_file(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 /// `builtins.fineRoot set`: names the cells of `set` as queries for the fine
 /// trace (`trace::fine`), and returns `set`.
 fn fine_root(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
-    let a = ev.force_attrs(
-        args[0],
-        pos,
-        "while evaluating the argument passed to builtins.fineRoot",
-    )?;
+    let value = ev.force(args[0])?;
+    let Some(a) = value.as_attrs() else {
+        return ev.type_error(
+            "a set",
+            value,
+            pos,
+            "while evaluating the argument passed to builtins.fineRoot",
+        );
+    };
     crate::trace::fine::root(a);
-    Ok(args[0])
+    Ok(value)
 }
 
 /// `builtins.fineQuery value`: the fingerprint the fine trace records for

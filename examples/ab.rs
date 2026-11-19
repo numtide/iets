@@ -1023,6 +1023,17 @@ mod ab {
                 direct.wait().unwrap_err().raw_os_error(),
                 Some(libc::ECHILD)
             );
+            // The adopted shell and its nested sleep must also be gone, not
+            // only the direct child. No live or waitable children may remain.
+            // SAFETY: a null status pointer is allowed with nonblocking waitpid.
+            assert_eq!(
+                unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
         }
 
         #[test]

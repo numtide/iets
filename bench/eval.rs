@@ -1,12 +1,15 @@
 //! Executable benchmarks measure the CLI and retain its production allocator.
 //! `nix run .#bench-callgrind -- --help` lists the runner's options.
-use gungraun::prelude::*;
-use gungraun::{Callgrind, EventKind, FlamegraphConfig, FlamegraphKind, Sandbox, Stdio};
+use gungraun::{
+    BinaryBenchmarkConfig, Callgrind, Command, EventKind, FlamegraphConfig, FlamegraphKind,
+    Sandbox, Stdio, binary_benchmark, binary_benchmark_group, main,
+};
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::{env, fs};
 
 fn command() -> Command {
-    let binary = std::env::var_os("IETS_BENCH_BIN")
+    let binary = env::var_os("IETS_BENCH_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/release/iets")
@@ -24,7 +27,7 @@ fn command() -> Command {
 #[bench::attrs(args = ("attrs.nix"), teardown = check_scalar(2_003))]
 #[bench::derivations(args = ("derivations.nix"), teardown = check_derivations())]
 fn evaluate(fixture: &str) -> Command {
-    let workloads = std::env::var_os("IETS_BENCH_WORKLOADS")
+    let workloads = env::var_os("IETS_BENCH_WORKLOADS")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("workloads"));
     command()
@@ -49,7 +52,7 @@ fn setup_components() {
         .unwrap();
     }
     source.push_str("}; in assert builtins.length (builtins.attrNames value) == 2000; value\n");
-    std::fs::write("component.nix", source).unwrap();
+    fs::write("component.nix", source).unwrap();
 }
 
 #[binary_benchmark(setup = setup_components())]
@@ -82,14 +85,12 @@ fn render(format: &str) -> Command {
 
 // Teardown validates output after every tool run, outside the measurement.
 fn check_scalar(expected: u64) {
-    let actual: serde_json::Value =
-        serde_json::from_slice(&std::fs::read("output").unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
     assert_eq!(actual, expected);
 }
 
 fn check_derivations() {
-    let actual: serde_json::Value =
-        serde_json::from_slice(&std::fs::read("output").unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
     assert_eq!(
         actual,
         serde_json::json!({
@@ -100,13 +101,13 @@ fn check_derivations() {
 }
 
 fn check_parse() {
-    let errors = std::fs::read_to_string("errors").unwrap();
+    let errors = fs::read_to_string("errors").unwrap();
     assert!(errors.starts_with("1 files, ") && errors.contains(", 0 errors, "));
-    assert!(std::fs::read("output").unwrap().is_empty());
+    assert!(fs::read("output").unwrap().is_empty());
 }
 
 fn check_ast() {
-    let ast: serde_json::Value = serde_json::from_slice(&std::fs::read("output").unwrap()).unwrap();
+    let ast: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
     assert_eq!(ast["file"], "component.nix");
     assert_eq!(ast["root"]["kind"], "let");
     let binds = ast["root"]["binds"][0]["value"]["binds"]
@@ -121,8 +122,7 @@ fn check_ast() {
 }
 
 fn check_json() {
-    let value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read("output").unwrap()).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
     assert_eq!(value.as_object().unwrap().len(), 2_000);
     for n in 0..2_000 {
         assert_eq!(
@@ -148,7 +148,7 @@ fn check_nix() {
         .unwrap();
     }
     expected.push_str("}\n");
-    assert_eq!(std::fs::read_to_string("output").unwrap(), expected);
+    assert_eq!(fs::read_to_string("output").unwrap(), expected);
 }
 
 binary_benchmark_group!(name = evaluation; benchmarks = evaluate);
@@ -158,7 +158,7 @@ fn config() -> BinaryBenchmarkConfig {
     config.sandbox(Sandbox::new(true));
     // Expanding recursive call graphs into differential SVGs can consume a lot
     // of memory. Counts and raw profiles are always collected; SVGs are opt-in.
-    if std::env::var("IETS_BENCH_FLAMEGRAPHS").as_deref() == Ok("1") {
+    if env::var("IETS_BENCH_FLAMEGRAPHS").as_deref() == Ok("1") {
         config.tool(
             Callgrind::default().flamegraph(
                 FlamegraphConfig::default()

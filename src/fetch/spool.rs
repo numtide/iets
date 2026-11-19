@@ -29,7 +29,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use crate::sys::fs as sysfs;
 use crate::sys::vm::FileMap;
 use crate::sys::{OsStrExt, OsStringExt};
-use crate::varint::put_u64;
+use crate::varint::{put_u64, read_u64};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{result, str};
@@ -839,7 +839,7 @@ impl Idx<'_> {
     }
 
     fn u64(&mut self) -> Option<u64> {
-        crate::varint::read_u64(self.b, &mut self.i)
+        read_u64(self.b, &mut self.i)
     }
 
     fn bytes(&mut self) -> Option<Vec<u8>> {

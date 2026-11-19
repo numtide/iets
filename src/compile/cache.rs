@@ -30,7 +30,7 @@ use crate::runtime::{self, Kind, Word};
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, Sym};
 use crate::trace::key::BUILD_ID;
-use crate::varint::put_u64;
+use crate::varint::{put_u64, read_u64};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -849,7 +849,7 @@ impl<'a> De<'a, '_> {
     }
 
     fn u64(&mut self) -> u64 {
-        crate::varint::read_u64(self.data, &mut self.at).unwrap_or_else(|| {
+        read_u64(self.data, &mut self.at).unwrap_or_else(|| {
             self.ok = false;
             0
         })

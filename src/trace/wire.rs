@@ -13,6 +13,7 @@ use crate::store::narinfo::{Fetched, NarInfo};
 use crate::store::path::StorePath;
 use crate::store::source::{Accepted, SourceKind, SourceOrigin, Src, SrcPath};
 use crate::syntax::symbol::FxHashMap;
+use crate::varint::{put_u64, read_u64};
 
 const VERSION: u8 = 7;
 
@@ -30,7 +31,7 @@ impl Enc {
     }
 
     fn u64(&mut self, n: u64) {
-        crate::varint::put_u64(&mut self.0, n);
+        put_u64(&mut self.0, n);
     }
 
     fn i64(&mut self, n: i64) {
@@ -91,7 +92,7 @@ impl<'a> Dec<'a> {
     }
 
     fn u64(&mut self) -> R<u64> {
-        crate::varint::read_u64(self.b, &mut self.i).ok_or(())
+        read_u64(self.b, &mut self.i).ok_or(())
     }
 
     fn count(&mut self) -> R<usize> {

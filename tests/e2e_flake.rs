@@ -508,6 +508,18 @@ fn a_git_working_tree() {
     );
     git(&repo, &["worktree", "remove", "--force", &fresh]);
 
+    // a depth-1 clone pinned with `shallow=1`, as CI checks out a commit
+    let shallow = f.w("shallow");
+    git(
+        &w,
+        &["clone", "-q", "--depth=1", &format!("file://{r}"), &shallow],
+    );
+    let rev = stdout(&git(Path::new(&shallow), &["rev-parse", "HEAD"]));
+    let pinned = format!(
+        "git+file://{shallow}?ref=HEAD&rev={rev}&shallow=1#packages.x86_64-linux.default.drvPath"
+    );
+    f.check("shallow clone: pinned by rev with shallow=1", &pinned, &[]);
+
     f.check("scratch: clean tree", &drv, &[]);
     f.check(
         "scratch: tree metadata strings have no context",

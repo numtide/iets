@@ -2,6 +2,11 @@ id: no-allow-dead-code
 message: delete the dead code instead of silencing the lint
 severity: error
 language: rust
+# Each tests/*.rs is its own crate and uses only part of these shared modules.
+ignores:
+  - tests/*/mod.rs
 rule:
-  kind: attribute_item
+  any:
+    - kind: attribute_item
+    - kind: inner_attribute_item
   regex: '^#!?\[allow\((dead_code|unused)'

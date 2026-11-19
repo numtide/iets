@@ -103,7 +103,7 @@ fn changed_literal_keys_reach_only_their_lookups(bin: Iets) {
     let jobs = r#"let p = import ./defs.nix; in [
         (p ? "a b") (p ? "a\tb") (p ? "a\nb") (p ? "") (p ? "*")
         (p ? "~") (p ? "a") (p ? "b") (p ? "a\\nb") ]"#;
-    let f = Fixture::new(&bin, jobs, &format!("{{ {PADDING} }}"));
+    let f = Fixture::new(&bin, jobs, format!("{{ {PADDING} }}"));
     for (job, name) in [
         r#""a b""#,
         r#""a\tb""#,
@@ -119,7 +119,7 @@ fn changed_literal_keys_reach_only_their_lookups(bin: Iets) {
     .enumerate()
     {
         assert_eq!(
-            f.check(&bin, &format!("{{ {PADDING} {name}=0; }}")),
+            f.check(&bin, format!("{{ {PADDING} {name}=0; }}")),
             [job],
             "{name}"
         );
@@ -133,10 +133,10 @@ fn nested_and_slash_containing_regions_are_distinct(bin: Iets) {
     let f = Fixture::new(
         &bin,
         r#"let p = import ./defs.nix; in [ (p."a/0.x" + 0) (p.a.x + 0) ]"#,
-        &source(1, 2),
+        source(1, 2),
     );
-    assert_eq!(f.check(&bin, &source(3, 2)), [1]);
-    assert_eq!(f.check(&bin, &source(1, 4)), [0]);
+    assert_eq!(f.check(&bin, source(3, 2)), [1]);
+    assert_eq!(f.check(&bin, source(1, 4)), [0]);
 
     let changes = f.dir.path().join("changes");
     fs::write(&changes, "1\tCF\tdefs.nix\n").unwrap();

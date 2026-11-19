@@ -88,7 +88,7 @@ struct FilesInner {
     list: *mut AtomicPtr<FileInfo>,
     len: AtomicUsize,
     adder: Mutex<Adder>,
-    /// Owns the entries, so references to them outlive the table.
+    /// Keeps the entries alive for the lifetime of the table.
     heap: Arc<Heap>,
 }
 
@@ -196,10 +196,7 @@ impl Files {
     /// Borrows a file from this table.
     ///
     /// ```compile_fail,E0515
-    /// use iets::eval::FileInfo;
-    /// use iets::parallel::shared::Files;
-    ///
-    /// fn retain(files: Files) -> &'static FileInfo {
+    /// fn retain(files: iets::parallel::shared::Files) -> &'static iets::eval::FileInfo {
     ///     files.get(0).unwrap()
     /// }
     /// ```

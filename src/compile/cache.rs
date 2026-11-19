@@ -30,6 +30,7 @@ use crate::runtime::{self, Kind, Word};
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, Sym};
 use crate::trace::key::BUILD_ID;
+use crate::varint::put_u64;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -274,20 +275,8 @@ impl IrCache {
     }
 }
 
-fn put_u32(out: &mut Vec<u8>, mut v: u32) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-fn put_u64(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    put_u64(out, u64::from(value));
 }
 
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
@@ -860,20 +849,17 @@ impl<'a> De<'a, '_> {
     }
 
     fn u64(&mut self) -> u64 {
-        let mut v = 0u64;
-        let mut shift = 0;
-        loop {
-            let b = self.u8();
-            v |= u64::from(b & 0x7f) << shift;
-            if b < 0x80 || !self.ok || shift >= 63 {
-                return v;
-            }
-            shift += 7;
-        }
+        crate::varint::read_u64(self.data, &mut self.at).unwrap_or_else(|| {
+            self.ok = false;
+            0
+        })
     }
 
     fn u32(&mut self) -> u32 {
-        self.u64() as u32
+        u32::try_from(self.u64()).unwrap_or_else(|_| {
+            self.ok = false;
+            0
+        })
     }
 
     fn bytes(&mut self) -> &[u8] {
@@ -1560,6 +1546,17 @@ mod tests {
         let (mut ev, bytes, base, span) = entry();
         let mut loads = |b: &[u8]| deserialize(&mut ev, b, base, span, false).is_some();
         assert!(loads(&bytes), "the entry it made loads");
+
+        // An overlong zero name count is valid. Overflowing the u32 count
+        // or continuing an integer past byte ten makes the entry a miss.
+        let body = &[0, 0, 1, 0, 0];
+        for (count, expected) in [
+            (&[0x80, 0][..], true),
+            (&[0x80, 0x80, 0x80, 0x80, 0x10][..], false),
+            (&[0x80; 10][..], false),
+        ] {
+            assert_eq!(loads(&[MAGIC.as_slice(), count, body].concat()), expected);
+        }
 
         for n in 0..bytes.len() {
             assert!(!loads(&bytes[..n]), "{n} bytes of {} load", bytes.len());

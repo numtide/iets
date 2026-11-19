@@ -388,6 +388,21 @@ impl Config {
         self.levels[id as usize]
     }
 
+    /// Whether each lint can report in the root or any configured input.
+    pub(crate) fn enabled_anywhere(&self) -> allow::Mask {
+        let mut mask = 0;
+        for d in LINTS {
+            if self.level(d.id) != Level::Off
+                || self.inputs.iter().any(|(_, levels)| {
+                    matches!(levels[d.id as usize], Some(Level::Warn | Level::Error))
+                })
+            {
+                mask |= allow::bit(d.id);
+            }
+        }
+        mask
+    }
+
     /// One selector as a source of its own: `all`, `family:NAME`, a lint
     /// name, or a Nix alias.
     pub fn set(&mut self, selector: &str, level: Level) -> Result<(), String> {
@@ -867,7 +882,7 @@ pub fn error(id: LintId, pos: Pos, msg: &str) -> Box<Error> {
 impl Evaluator {
     #[inline]
     pub fn lint_on(&self, id: LintId) -> bool {
-        self.lint_config().level(id) != Level::Off
+        self.lint_enabled & allow::bit(id) != 0
     }
 
     /// Reports a lint site: nothing at `off`, outside the scope, or on a
@@ -875,7 +890,7 @@ impl Evaluator {
     /// (lint, pos) at `warn`, an error `tryEval` does not catch at `error`.
     #[inline]
     pub fn lint(&mut self, id: LintId, pos: Pos, msg: impl FnOnce() -> String) -> EvalResult<()> {
-        if self.lint_config().level(id) == Level::Off {
+        if !self.lint_on(id) {
             return Ok(());
         }
         self.lint_site(id, pos, None, None, msg)

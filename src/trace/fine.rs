@@ -19,13 +19,18 @@
 //! which its state word holds (`Word::traced`). So one evaluation of many
 //! jobs that share thunks still gives each job all that it depends on.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs;
+use std::io::{self, Write as _};
 use std::panic::Location;
 use std::path::PathBuf;
+use std::str::from_utf8;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
+use crate::argv;
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
 };
@@ -1426,23 +1431,23 @@ fn hex(b: &[u8]) -> String {
 /// Fields are byte strings. Common identifiers and paths stay readable; a
 /// leading '~' introduces hex, including the empty name (just '~'). A slash
 /// is structural only in region paths, so it must be escaped inside a name.
-fn field(bytes: &[u8], allow_slash: bool) -> std::borrow::Cow<'_, str> {
+fn field(bytes: &[u8], allow_slash: bool) -> Cow<'_, str> {
     if !bytes.is_empty()
         && bytes.iter().all(|&c| {
             c.is_ascii_alphanumeric() || b"._+-".contains(&c) || (allow_slash && c == b'/')
         })
     {
-        std::borrow::Cow::Borrowed(std::str::from_utf8(bytes).expect("ASCII field"))
+        Cow::Borrowed(from_utf8(bytes).expect("ASCII field"))
     } else {
-        std::borrow::Cow::Owned(format!("~{}", hex(bytes)))
+        Cow::Owned(format!("~{}", hex(bytes)))
     }
 }
 
-fn path_field(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+fn path_field(bytes: &[u8]) -> Cow<'_, str> {
     field(bytes, true)
 }
 
-fn name_field(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+fn name_field(bytes: &[u8]) -> Cow<'_, str> {
     field(bytes, false)
 }
 
@@ -1629,7 +1634,7 @@ impl State {
         }
         std::fs::write(dir.join("provs"), p)?;
         let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("nodes"))?);
-        std::io::Write::write_all(&mut w, &NAME_FORMAT.to_le_bytes())?;
+        w.write_all(&NAME_FORMAT.to_le_bytes())?;
         for x in &self.nodes[1..] {
             std::io::Write::write_all(&mut w, &x.to_le_bytes())?;
         }
@@ -1742,10 +1747,10 @@ pub fn regions_main(argv: &[String]) -> i32 {
     println!("V\t2");
     for arg in argv {
         let (f, at) = arg.split_once('=').unwrap_or((arg, arg));
-        let at_bytes = crate::argv::bytes(at);
+        let at_bytes = argv::bytes(at);
         let path = crate::compile::canon_path(&at_bytes);
         let at = path_field(&at_bytes);
-        let src = match std::fs::read(crate::argv::os(f)) {
+        let src = match std::fs::read(argv::os(f)) {
             Ok(s) => s,
             Err(e) => {
                 errln!("{f}: {e}");
@@ -1809,8 +1814,8 @@ fn bit(s: u8) -> u128 {
 
 impl Changes {
     /// `step\tCHANGE...` lines, as `fchg.sh` writes them.
-    fn read(file: &str) -> std::io::Result<Changes> {
-        let text = std::fs::read_to_string(file)?;
+    fn read(file: &str) -> io::Result<Changes> {
+        let text = fs::read_to_string(file)?;
         let mut c = Changes::default();
         let mut idx: FxHashMap<String, u8> = FxHashMap::default();
         let mut versioned = FxHashSet::default();
@@ -1844,8 +1849,8 @@ impl Changes {
                     versioned.insert(s);
                 }
                 ("V", _) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
                         "unsupported name format; regenerate the changes",
                     ));
                 }
@@ -1873,8 +1878,8 @@ impl Changes {
             }
         }
         if idx.len() != versioned.len() || versioned.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
                 "missing name format; regenerate the changes",
             ));
         }
@@ -1906,8 +1911,8 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     let bytes = std::fs::read(path)?;
     if !bytes.starts_with(&NAME_FORMAT.to_le_bytes()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             "incompatible fine trace name format; regenerate the trace",
         ));
     }

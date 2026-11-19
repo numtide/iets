@@ -89,6 +89,8 @@ struct State {
     log: Vec<u32>,
     /// Each open frame: where its entries start in `log`, and its stamp.
     frames: Vec<(usize, u32)>,
+    /// Evaluating the input and selecting the last result, before printing it.
+    selected: u32,
     /// The trace of each path copied to the store, for the cache hits.
     copies: FxHashMap<Vec<u8>, u32>,
     serial: u32,
@@ -278,6 +280,20 @@ pub fn push() -> bool {
         s.frames.push((s.log.len(), st));
     });
     true
+}
+
+/// Collect just the observations made by `f`. Pop also records the trace in
+/// its parent, so the whole-run trace still includes them.
+pub(crate) fn capture<T>(f: impl FnOnce() -> T) -> (T, u32) {
+    let tracing = push();
+    let value = f();
+    (value, if tracing { pop() } else { 0 })
+}
+
+pub(crate) fn selected(trace: u32) {
+    if on() {
+        with(|s| s.selected = trace);
+    }
 }
 
 impl State {
@@ -1628,13 +1644,30 @@ impl State {
     }
 }
 
-/// The trace of each element of `v` when it is a list, 0 for none.
-fn roots(v: Word) -> Vec<u32> {
+/// Both traces must remain valid. Keep a single shared edge to the work
+/// of choosing the list instead of copying its observations into every job.
+fn join(nodes: &mut Vec<u32>, a: u32, b: u32) -> u32 {
+    if a == 0 || a == b {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let t = nodes.len() as u32;
+    nodes.extend([0, 2, EDGE | a, EDGE | b]);
+    t
+}
+
+/// The trace that chose the result list, plus each element's own trace.
+fn roots(v: Word, mut parent: u32, nodes: &mut Vec<u32>) -> Vec<u32> {
     let mut v = v;
     if v.is_thunk() {
         let st = v.thunk_state_cell().get();
         if v.thunk_unforced(st) || st.is_blackhole() {
             return Vec::new();
+        }
+        if st.is_traced() {
+            parent = join(nodes, parent, st.traced_id());
         }
         v = v.thunk_value(st);
     }
@@ -1650,7 +1683,8 @@ fn roots(v: Word) -> Vec<u32> {
             } else {
                 Word::EMPTY
             };
-            if st.is_traced() { st.traced_id() } else { 0 }
+            let cell = if st.is_traced() { st.traced_id() } else { 0 };
+            join(nodes, parent, cell)
         })
         .collect()
 }
@@ -1666,7 +1700,9 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
-        let roots = v.map(roots).unwrap_or_default();
+        let roots = v
+            .map(|v| roots(v, s.selected, &mut s.nodes))
+            .unwrap_or_default();
         if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
                 let obs = if *t == 0 {

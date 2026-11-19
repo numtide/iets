@@ -3,7 +3,7 @@
 
 mod hermetic;
 
-use hermetic::{Iets, bin, stderr, stdout};
+use hermetic::{Iets, bin, ok, stderr, stdout};
 
 use rstest::rstest;
 use std::path::Path;
@@ -13,6 +13,58 @@ use tempfile::tempdir;
 
 fn run(bin: &Iets, args: &[&str]) -> Output {
     bin.cmd().args(args).output().expect("run iets")
+}
+
+#[rstest]
+fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    for (name, value) in [
+        ("guard", "true"),
+        ("left", "1"),
+        ("right", "2"),
+        ("other", "3"),
+    ] {
+        fs::write(path(name), value).unwrap();
+    }
+    fs::write(
+        path("jobs.nix"),
+        "if import ./guard then [ (import ./left) (import ./right) 0 ] else [ (import ./other) 4 5 ]",
+    )
+    .unwrap();
+    let eval = || {
+        let mut cmd = bin.cmd();
+        cmd.current_dir(dir.path()).args([
+            "eval",
+            "--strict",
+            "--no-cache",
+            "--workers",
+            "1",
+            "jobs.nix",
+        ]);
+        cmd
+    };
+    let traced = ok(eval()
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_DAG", path("dag")));
+    assert_eq!(stdout(&traced), "[ 1 2 0 ]");
+    fs::write(path("guard"), "false").unwrap();
+    assert_eq!(stdout(&ok(&mut eval())), "[ 3 4 5 ]");
+
+    // Model four revisions, each editing the root region of one imported file.
+    let changes: String = ["guard", "left", "right", "other"]
+        .iter()
+        .map(|name| format!("{name}\tCR\t{}\t\n", path(name).display()))
+        .collect();
+    fs::write(path("changes"), changes).unwrap();
+    let checked = ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .args(["fine-check", "changes", "dag"]));
+    assert_eq!(
+        stdout(&checked),
+        "dag\t0\tguard\ndag\t0\tleft\ndag\t1\tguard\ndag\t1\tright\ndag\t2\tguard"
+    );
 }
 
 fn run_complete(mut c: Command, words: &[&str]) -> String {

@@ -1553,6 +1553,10 @@ mod tests {
         for (count, expected) in [
             (&[0x80, 0][..], true),
             (&[0x80, 0x80, 0x80, 0x80, 0x10][..], false),
+            (
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2][..],
+                false,
+            ),
             (&[0x80; 10][..], false),
         ] {
             assert_eq!(loads(&[MAGIC.as_slice(), count, body].concat()), expected);

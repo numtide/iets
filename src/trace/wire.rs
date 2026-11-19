@@ -600,6 +600,10 @@ mod tests {
     #[test]
     fn trace_count_must_fit_the_remaining_payload() {
         assert!(decode_readset(&[7, 0x80, 0]).unwrap().is_empty());
+        let mut overflow = vec![VERSION];
+        overflow.extend([0x80; 9]);
+        overflow.push(2); // 2^64 records would wrap to an empty readset
+        assert!(decode_readset(&overflow).is_none());
         let mut d = Dec::new(&[7, 0x80, 0x80, 0x40]).unwrap();
         assert!(d.count().is_err());
     }

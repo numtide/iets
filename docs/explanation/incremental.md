@@ -69,6 +69,11 @@ of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
 
+An `iets eval` with `IETS_FINE_TRACE` set evaluates the request even when
+its rendered result is already cached. Check the command's exit status
+before consuming any requested trace files. A write failure reports the
+destination and fails the command even if it already printed its result.
+
 ## Results
 
 All measurements are on bld1 (32 cores, 125 GB), at one worker per process,

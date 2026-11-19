@@ -129,11 +129,15 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
         if mode == Follow::Ancestors && todo.is_empty() {
             break;
         }
-        let Some(target) = resolve(ev, &res).read_link() else {
+        let src = resolve(ev, &res);
+        let Some(target) = src.read_link() else {
             continue;
         };
         if !allowed(ev, &res) {
             continue;
+        }
+        if trace::fine::on() && src.local().is_some() {
+            trace::fine::followed_link();
         }
         hops += 1;
         if hops > 1024 {
@@ -473,7 +477,11 @@ impl SrcPath {
                         out.push((name, t));
                     }
                 }
-                if ev.trace().is_on() && !trace::fine::on() {
+                if trace::fine::on() {
+                    // Fine reads of names carry directory provenance; no
+                    // whole-listing observation passes through Trace::record.
+                    trace::fine::disk_listing(&p);
+                } else if ev.trace().is_on() {
                     ev.trace().record(Obs::Dir {
                         path: p,
                         hash: trace::dir_listing_hash(&mut listing),

@@ -64,6 +64,16 @@ of a file as if it were at `AS`. A change between two revisions is then a list
 of changed regions, names that came or went per set and per directory, the
 files that changed, and the first changed byte of each file.
 
+A Git revision reports paths by their repository names. A job that reads
+`builtins.readFile ./link` can observe new bytes even when only the target
+appears in the diff. The fine recorder marks the reading force as volatile
+when it follows a physical symlink. Any revision step then invalidates jobs
+that consumed that force. Reading the type of the link itself uses its
+ordinary type dependency. For paths through ordinary directories the checker
+also tracks replacement of an ancestor, which can make a previously absent
+name appear through a new link. Graphs and flat job traces from before this
+evidence was recorded need a fresh recording.
+
 `IETS_FINE_DAG=DIR` writes the traces of a run as one graph, with the trace
 of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the

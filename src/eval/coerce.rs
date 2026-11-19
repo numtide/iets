@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use super::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use super::{Error, ErrorKind, EvalResult, Evaluator, NIX_STATIC_SYMBOLS, Pos, bail};
 use crate::builtins::store_hooks;
 use crate::lint::{LintId, coerce};
 use crate::runtime::{Cell, Ctx, Taint, Value, ValueType, Word};
@@ -287,11 +287,11 @@ impl Evaluator {
                 let mut check_order = fine::on() && len > 1;
                 for (i, (ax, ay)) in x.iter().zip(y.iter()).enumerate() {
                     if check_order
-                        && ax.sym.0 as usize >= super::NIX_STATIC_SYMBOLS.len()
-                        && ay.sym.0 as usize >= super::NIX_STATIC_SYMBOLS.len()
+                        && ax.sym.0 as usize >= NIX_STATIC_SYMBOLS.len()
+                        && ay.sym.0 as usize >= NIX_STATIC_SYMBOLS.len()
                     {
                         if i + 1 < len {
-                            fine::attr_order(x, y, super::NIX_STATIC_SYMBOLS.len());
+                            fine::attr_order(x, y, NIX_STATIC_SYMBOLS.len());
                         }
                         check_order = false;
                     }

@@ -21,8 +21,10 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs::File;
+use std::io::{self, Read};
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
@@ -1879,25 +1881,24 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
-fn header(bytes: &[u8]) -> std::io::Result<u32> {
+fn header(bytes: &[u8]) -> io::Result<u32> {
     if let Some(word) = bytes.get(4..8) {
         let flags = u32::from_le_bytes(word.try_into().unwrap());
         if flags & !ATTR_ORDER_SEEN == TRACE_FORMAT {
             return Ok(flags);
         }
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
         "incompatible fine trace, record the graph again",
     ))
 }
 
-fn require_stable_attr_order(dir: &str) -> std::io::Result<()> {
-    use std::io::Read;
+fn require_stable_attr_order(dir: &str) -> io::Result<()> {
     let mut bytes = [0; 8];
-    std::fs::File::open(std::path::Path::new(dir).join("nodes"))?.read_exact(&mut bytes)?;
+    File::open(Path::new(dir).join("nodes"))?.read_exact(&mut bytes)?;
     if header(&bytes)? & ATTR_ORDER_SEEN != 0 {
-        return Err(std::io::Error::other(
+        return Err(io::Error::other(
             "attribute comparison can depend on earlier jobs, evaluate the original batch in order",
         ));
     }

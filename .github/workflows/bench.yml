@@ -21,6 +21,7 @@ jobs:
           fetch-depth: 0
       - uses: cachix/install-nix-action@v31
       - name: Build the benchmark environment
+        id: environment
         run: |
           nix build .#default --out-link result-candidate
           nix build .#bench-ab --out-link result-ab
@@ -28,6 +29,7 @@ jobs:
       # Use the candidate's locked toolchain for both sides, even when the
       # base has an older flake.lock. No host Cargo or floating stable Rust.
       - name: Build the base
+        id: base
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -46,6 +48,7 @@ jobs:
           ./result-ab/bin/iets-bench-ab ./result-base/bin/iets \
             ./result-candidate/bin/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Compare instructions on evaluation and component workloads
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' && steps.base.outcome == 'success' }}
         run: |
           set -o pipefail
           IETS_BENCH_BIN="$PWD/result-base/bin/iets" \

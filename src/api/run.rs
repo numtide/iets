@@ -8,6 +8,7 @@ use crate::parallel;
 use crate::parallel::fiber::StackError;
 use crate::session::Session;
 use crate::store::path::StorePath;
+use crate::trace::fine;
 use crate::trace::run::Cache;
 use crate::trace::store::Part;
 
@@ -127,8 +128,8 @@ impl Run {
     ) -> Result<R, StackError> {
         let store = self.cache.as_ref().map(|c| &c.store);
         let mut cfg = self.cfg.trace_in(store);
-        crate::trace::fine::init();
-        if crate::trace::fine::on() {
+        fine::init();
+        if fine::on() {
             cfg = cfg.trace(true).ir_cache(None);
         }
         let ev = cfg.build();
@@ -159,8 +160,8 @@ impl Run {
 /// for another command.
 pub fn fine_command(cmd: &str, argv: &[String]) -> Option<i32> {
     match cmd {
-        "fine-check" => Some(crate::trace::fine::check_main(argv)),
-        "fine-regions" => Some(crate::trace::fine::regions_main(argv)),
+        "fine-check" => Some(fine::check_main(argv)),
+        "fine-regions" => Some(fine::regions_main(argv)),
         _ => None,
     }
 }

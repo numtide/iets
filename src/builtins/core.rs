@@ -5,6 +5,7 @@ use crate::compile::ir::ParamIr;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::purity;
 use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
+use crate::trace::fine;
 use crate::{log, parallel, print};
 
 pub fn register(r: &mut Registry) {
@@ -431,7 +432,7 @@ fn fine_root(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the argument passed to builtins.fineRoot",
     )?;
-    crate::trace::fine::root(a);
+    fine::root(a);
     Ok(args[0])
 }
 
@@ -445,6 +446,6 @@ fn fine_query(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
             let _ = ev.force_cell(c);
         }
     }
-    let fp = crate::trace::fine::fingerprint_hex(&ev.interner, v);
+    let fp = fine::fingerprint_hex(&ev.interner, v);
     Ok(ev.mk_string(fp.as_bytes()))
 }

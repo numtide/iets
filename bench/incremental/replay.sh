@@ -27,7 +27,9 @@ for ((n = $1; n <= $2; n++)); do
   until awk '{ exit !($1 < 1.0 && $2 < 1.5) }' /proc/loadavg; do sleep 10; done
   sed "s/^/$n\t/" fchg/$n.txt > $R/step.chg
   t=$(now)
-  $I fine-check $R/step.chg $(cut -f2 $R/owners | sort -u) > $R/inv
+  mapfile -t dags < <(cut -f2 $R/owners | sort -u)
+  $I fine-check --require-stable-attr-order "${dags[@]}" || exit 1
+  $I fine-check $R/step.chg "${dags[@]}" > $R/inv || exit 1
   check=$(since $t)
   $Z/zstdcat drvs/$b.txt.zst | gawk -F'\t' '$2 != "ERR"' > $R/want
   # invalid owned jobs that still exist, and jobs not owned yet; the rest of the owned jobs are kept
@@ -62,6 +64,7 @@ for ((n = $1; n <= $2; n++)); do
     done
     wait
     for ((c = 0; c < k; c++)); do
+      $I fine-check --require-stable-attr-order "$R/dag-$n-$c" || exit 1
       tr -d '[]' < $R/out-$c | tr ' ' '\n' | grep -v '^$' | tr -d '"' | paste $R/redo-$c - |
         gawk -F'\t' -v d=$R/dag-$n-$c '{ print $1 "\t" d "\t" NR - 1 "\t" $2 }' >> $R/new-owners
     done

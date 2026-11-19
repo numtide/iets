@@ -33,6 +33,7 @@ mod ab {
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
     use std::ptr;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -221,18 +222,31 @@ mod ab {
     }
 
     /// Independent of line order, which eval-jobs's workers do not keep.
-    fn hash_output(r: impl Read) -> [u8; 32] {
+    fn hash_output(r: impl Read, eof: mpsc::Sender<()>) -> [u8; 32] {
         let mut lines: Vec<[u8; 32]> = BufReader::new(r)
             .split(b'\n')
             .map_while(Result::ok)
             .map(|l| Sha256::digest(mask_stats(&l)).into())
             .collect();
+        let _ = eof.send(());
         lines.sort_unstable();
         let mut h = Sha256::new();
         for l in &lines {
             h.update(l);
         }
         h.finalize().into()
+    }
+
+    fn wait_for_stdout(eof: &mpsc::Receiver<()>, timeout: Duration) -> io::Result<()> {
+        eof.recv_timeout(timeout).map_err(|e| match e {
+            mpsc::RecvTimeoutError::Timeout => io::Error::new(
+                io::ErrorKind::TimedOut,
+                "benchmark stdout did not close after the run-on limit",
+            ),
+            mpsc::RecvTimeoutError::Disconnected => {
+                io::Error::other("benchmark stdout reader disconnected")
+            }
+        })
     }
 
     /// How long processes a run left behind may go on before they are killed.
@@ -360,7 +374,7 @@ mod ab {
     }
 
     /// Processes the run left behind, which are ours as the subreaper. False
-    /// when they had to be killed.
+    /// when a live child exceeded the run-on limit.
     fn reap_leftovers(
         limit: Duration,
         grace: Duration,
@@ -374,6 +388,8 @@ mod ab {
         // between polls. Bound the work if descendants keep producing exits.
         let mut final_polls = 256;
         loop {
+            // A timeout decision needs an observation made after the deadline.
+            let now = Instant::now();
             // SAFETY: waitpid with a null status pointer is allowed.
             let pid = unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) };
             if pid == -1 {
@@ -384,10 +400,16 @@ mod ab {
                     _ => return Err(e),
                 }
             }
-            let now = Instant::now();
             if now >= until {
+                // Exits may have started the deadline before a live child was
+                // observed. Give the first actual sweep its full grace.
+                let first_sweep = pid == 0 && clean;
+                if first_sweep {
+                    clean = false;
+                    cleanup_until = Some(now + grace);
+                }
                 let end = cleanup_until.get_or_insert(now + grace);
-                if now >= *end {
+                if !first_sweep && now >= *end {
                     if pid != 0 && final_polls > 0 {
                         final_polls -= 1;
                         continue;
@@ -421,7 +443,6 @@ mod ab {
                     }));
                 }
                 if pid == 0 {
-                    clean = false;
                     // A killed process's children come to us in turn.
                     if let Err(e) = sweep() {
                         sweep_error = Some(e);
@@ -478,7 +499,8 @@ mod ab {
         let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
-        let hasher = thread::spawn(move || hash_output(out));
+        let (notify_eof, eof) = mpsc::channel();
+        let hasher = thread::spawn(move || hash_output(out, notify_eof));
         let mut status = 0;
         let mut ru = MaybeUninit::<libc::rusage>::uninit();
         let ru = loop {
@@ -493,10 +515,18 @@ mod ab {
             }
         };
         let wall = t0.elapsed().as_secs_f64();
+        let output_deadline = Instant::now() + LEFTOVER_LIMIT + CLEANUP_GRACE;
         // A surviving writer may keep the pipe open. On incomplete cleanup the
         // whole invocation exits; joining its stdout reader here could hang.
         let clean = reap_leftovers(LEFTOVER_LIMIT, CLEANUP_GRACE, kill_leftovers)
             .map_err(RunError::Cleanup)?;
+        // A process outside our child tree can still hold a pipe writer.
+        // Only bound the read; sorting the completed output may take longer.
+        wait_for_stdout(
+            &eof,
+            output_deadline.saturating_duration_since(Instant::now()),
+        )
+        .map_err(RunError::Cleanup)?;
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -511,7 +541,7 @@ mod ab {
         }
         if !clean {
             return Err(format!(
-                "processes still ran {}s after it exited, and were killed",
+                "processes still ran {}s after it exited",
                 LEFTOVER_LIMIT.as_secs()
             )
             .into());
@@ -987,10 +1017,25 @@ mod ab {
     mod tests {
         #[cfg(target_os = "linux")]
         use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixStream;
         #[cfg(target_os = "linux")]
         use std::str;
 
         use super::*;
+
+        #[test]
+        fn a_writer_can_outlive_the_child_tree() {
+            let (reader, writer) = UnixStream::pair().unwrap();
+            let (notify, eof) = mpsc::channel();
+            let hasher = thread::spawn(move || hash_output(reader, notify));
+            assert_eq!(
+                wait_for_stdout(&eof, Duration::ZERO).unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
+            drop(writer);
+            wait_for_stdout(&eof, Duration::from_secs(10)).unwrap();
+            assert_eq!(hasher.join().unwrap(), <[u8; 32]>::from(Sha256::digest([])));
+        }
 
         #[test]
         fn stats_numbers_are_masked() {
@@ -1004,6 +1049,21 @@ mod ab {
         }
 
         #[cfg(target_os = "linux")]
+        fn wait_until_exited(pid: u32) {
+            let mut info = MaybeUninit::uninit();
+            // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
+            let observed = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            assert_eq!(observed, 0);
+        }
+
+        #[cfg(target_os = "linux")]
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
             enable_subreaper().unwrap();
@@ -1013,17 +1073,7 @@ mod ab {
                 thread::sleep(Duration::from_millis(1));
                 for child in &mut last {
                     child.kill().unwrap();
-                    let mut info = MaybeUninit::uninit();
-                    // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
-                    let observed = unsafe {
-                        libc::waitid(
-                            libc::P_PID,
-                            child.id(),
-                            info.as_mut_ptr(),
-                            libc::WEXITED | libc::WNOWAIT,
-                        )
-                    };
-                    assert_eq!(observed, 0);
+                    wait_until_exited(child.id());
                 }
                 Ok(())
             })
@@ -1032,6 +1082,23 @@ mod ab {
             for mut child in last {
                 assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
+            // Reaping an exit at the limit must leave the first sweep available
+            // for a live sibling, even if grace has already elapsed.
+            let mut ready = Command::new("true").spawn().unwrap();
+            wait_until_exited(ready.id());
+            let mut live = Command::new("sleep").arg("30").spawn().unwrap();
+            assert!(
+                !reap_leftovers(Duration::ZERO, Duration::ZERO, || {
+                    live.kill().unwrap();
+                    wait_until_exited(live.id());
+                    Ok(())
+                })
+                .unwrap()
+            );
+            for child in [&mut ready, &mut live] {
+                assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
+
             // Model a procfs listing that omits a live child PID.
             let procfs = tempfile::tempdir().unwrap();
             let own_pid = process::id().to_string();
@@ -1055,9 +1122,11 @@ mod ab {
             // This direct child belongs to the test thread. Orphans that sh
             // leaves behind can belong to the process leader instead.
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
+            let nested_pid = procfs.path().join("nested-pid");
             let shell = Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
-                .args(["-c", "(sleep 30 & wait) >/dev/null 2>&1 & echo $!"])
+                .args(["-c", r#"(sleep 30 >/dev/null 2>&1 & echo $! > "$1"; exec >/dev/null 2>&1; wait) & echo $!"#, "sh"])
+                .arg(&nested_pid)
                 .output()
                 .unwrap();
             assert!(shell.status.success());
@@ -1066,7 +1135,14 @@ mod ab {
                 .trim()
                 .parse()
                 .unwrap();
-            assert!(adopted > 0);
+            let nested: libc::pid_t = fs::read_to_string(nested_pid)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(adopted > 0 && nested > 0 && nested != adopted);
+            // SAFETY: signal zero checks that the reported nested process exists.
+            assert_eq!(unsafe { libc::kill(nested, 0) }, 0);
             // SAFETY: a null status pointer is allowed. Zero proves this live PID is ours.
             assert_eq!(
                 unsafe { libc::waitpid(adopted, ptr::null_mut(), libc::WNOHANG) },

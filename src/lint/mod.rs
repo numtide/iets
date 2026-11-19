@@ -14,6 +14,7 @@ pub mod path;
 pub mod purity;
 pub mod site;
 
+use std::array;
 use std::collections::HashSet;
 use std::fs;
 use std::hash::BuildHasherDefault;
@@ -456,7 +457,7 @@ impl Config {
         if w == Where::Root || !self.scoped() {
             return self.levels;
         }
-        std::array::from_fn(|i| self.site_level(LINTS[i].id, w))
+        array::from_fn(|i| self.site_level(LINTS[i].id, w))
     }
 
     fn apply_inputs(&mut self, t: &toml::Table, origin: &str) -> Result<(), String> {

@@ -88,6 +88,24 @@ fn run(mut c: Command) -> Run {
     }
 }
 
+#[rstest]
+fn fine_root_returns_the_forced_set(work: Work) {
+    let result = work.eval_with(
+        &[("IETS_FINE_TRACE", "")],
+        &[
+            "--workers",
+            "1",
+            "--no-tracing-cache",
+            "--no-ir-cache",
+            "--raw",
+            "-E",
+            r#"let s = { a = throw "unused"; }; in builtins.typeOf (builtins.fineRoot s)"#,
+        ],
+    );
+    assert_eq!(result.rc, 0);
+    assert_eq!(result.out, "set");
+}
+
 /// Sets the mtime of `files` to `secs` after the epoch. BSD touch has no
 /// `-d` for an ISO date.
 fn touch(secs: u64, files: &[&str]) {

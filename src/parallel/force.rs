@@ -834,11 +834,7 @@ pub fn import_thunk(ev: &mut Evaluator, resolved: &[u8], pos: Pos) -> Word {
     let posw = Word::imm_int(pos.0 as i64);
     let s = ev.sym(b"importRaw");
     let op = ev.arena.mk_primop("importRaw", 2, import_raw, s);
-    let Value::PrimOp(p) = op.view() else {
-        unreachable!("mk_primop makes a primop")
-    };
-    let app = ev.arena.mk_primop_app(p, &[path]);
-    ev.arena.mk_thunk_app(app, posw)
+    ev.arena.mk_thunk_app2(op, path, posw)
 }
 
 fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {

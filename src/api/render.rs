@@ -11,6 +11,7 @@ use crate::build::Outcome;
 use crate::remote::plan::Plan;
 use crate::remote::worker;
 use crate::store::drvdiff::Diff;
+use crate::store::path::HASH_PART_LEN;
 
 /// A value an operation produced. `json` is the contract in docs/reference/plumbing.md.
 pub trait Report {
@@ -38,7 +39,11 @@ impl Missing {
         let mut will_build = m.will_build.clone();
         will_build.sort_by_key(|p| at.get(p).copied().unwrap_or(usize::MAX));
         let mut will_substitute = m.will_substitute.clone();
-        will_substitute.sort_by_key(|p| (p.get(44..).unwrap_or(p).to_string(), p.clone()));
+        fn key(path: &str) -> (&str, &str) {
+            let base = path.rsplit('/').next().unwrap_or(path);
+            (base.get(HASH_PART_LEN + 1..).unwrap_or(base), path)
+        }
+        will_substitute.sort_by(|a, b| key(a).cmp(&key(b)));
         Missing {
             will_build,
             will_substitute,
@@ -181,4 +186,31 @@ fn node(d: &Diff) -> Value {
         o["cut"] = c.into();
     }
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitutes_sort_by_name_then_full_path_in_any_store() {
+        for dir in ["/nix/store", "/s", "/a/longer/nix/store"] {
+            let path =
+                |digit: char, name: &str| format!("{dir}/{}-{name}", digit.to_string().repeat(32));
+            let expected = [
+                path('0', "a"),
+                path('z', "a"),
+                path('b', "a.drv"),
+                path('0', "z"),
+            ];
+            let missing = worker::Missing {
+                will_substitute: expected.iter().rev().cloned().collect(),
+                ..Default::default()
+            };
+            assert_eq!(
+                Missing::of(&missing, &Plan::default()).will_substitute,
+                expected
+            );
+        }
+    }
 }

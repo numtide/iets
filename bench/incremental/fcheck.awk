@@ -23,7 +23,15 @@ function entries(e, name, why,    n, x, i, y) {
     if (name == "" || y[2] == "*" || index(" " y[2] " ", " " name " ")) mark(y[1], why)
   }
 }
-function flush(   s) { if (job != "" && !volatile_format) { print "regenerate the job trace to record uncacheable forces" > "/dev/stderr"; exit 1 }; if (job != "") for (s in inv) print job, s, inv[s]; delete inv; delete pc }
+function flush(   s) {
+  if (job != "" && !volatile_format) {
+    print "regenerate the job trace to record uncacheable forces" > "/dev/stderr"
+    failed = 1
+    exit 1
+  }
+  if (job != "") for (s in inv) print job, s, inv[s]
+  delete inv; delete pc
+}
 $1 == "J" { flush(); volatile_format = 0; job = $2; next }
 $0 == "V\tvolatile-v1" { volatile_format = 1; next }
 $1 == "R" && $2 == "?" && $3 == "volatile" { for (s in steps) inv[s] = "volatile"; next }
@@ -43,4 +51,4 @@ $1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }
-END { flush() }
+END { if (!failed) flush() }

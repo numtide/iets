@@ -314,6 +314,22 @@ fn a_pure_run_never_reads_an_impure_entry(work: Work) {
 }
 
 #[rstest]
+fn tracing_cache_keys_on_the_resolved_store_directory(work: Work) {
+    let args = ["--raw", "-E", "builtins.storeDir"];
+    for (dir, legacy, expected, status) in [
+        ("/store-a", "", "/store-a", "miss (no entry)"),
+        ("/store-b", "", "/store-b", "miss (no entry)"),
+        ("", "/store-b/", "/store-b", "cache: hit"),
+        ("/store-a", "/store-b", "/store-a", "cache: hit"),
+    ] {
+        let r = work.eval_with(&[("NIX_STORE_DIR", dir), ("NIX_STORE", legacy)], &args);
+        assert_eq!(r.rc, 0);
+        assert_eq!(r.out, expected);
+        assert!(r.status.contains(status), "{}", r.status);
+    }
+}
+
+#[rstest]
 fn uncacheable_runs_write_nothing(work: Work) {
     let r = work.eval(&["-E", "builtins.currentTime > 0"]);
     assert!(r.status.contains("not written"), "{}", r.status);

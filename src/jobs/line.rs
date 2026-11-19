@@ -143,7 +143,10 @@ impl Line {
     /// Parses a line a worker printed. A line with `drvPath` is a job, one
     /// with `error` and no `drvPath` is an error.
     pub fn parse(bytes: &[u8]) -> Result<Line> {
-        let fields = split_object(bytes)?;
+        Self::from_fields(split_object(bytes)?)
+    }
+
+    pub(super) fn from_fields(fields: Vec<(String, &[u8])>) -> Result<Line> {
         let mut map: BTreeMap<String, &[u8]> = fields.into_iter().collect();
         let take_str = |map: &mut BTreeMap<String, &[u8]>, k: &str| -> Result<String> {
             let raw = map

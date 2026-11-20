@@ -1081,11 +1081,7 @@ impl Arena {
         Interned {
             bytes: b,
             word: Word::EMPTY,
-            hash: if e.bytes.as_ptr() == b.as_ptr() {
-                hash
-            } else {
-                0
-            },
+            hash: if ptr::eq(e.bytes, b) { hash } else { 0 },
         }
     }
 

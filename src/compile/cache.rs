@@ -1519,8 +1519,10 @@ mod tests {
 
     use std::collections::HashSet;
     use std::iter;
+    use std::sync::Arc;
     use std::thread::Builder;
 
+    use crate::eval::EvalConfig;
     use crate::print;
 
     const SRC: &str = "let f = a: with { x = a; }; [ x 1 true null \"s\" ./p 2.5 ]; in f 3\n";
@@ -1559,10 +1561,8 @@ mod tests {
         let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
         cache.min_size = 0;
         cache.stats = false;
-        let cache = std::sync::Arc::new(cache);
-        let mut ev = crate::eval::EvalConfig::new()
-            .ir_cache(Some(cache.clone()))
-            .build();
+        let cache = Arc::new(cache);
+        let mut ev = EvalConfig::new().ir_cache(Some(cache.clone())).build();
         let mut cold = Evaluator::new();
         let source = b"./payload";
         let read = |ev: &mut Evaluator, base: &[u8]| {
@@ -1593,8 +1593,8 @@ mod tests {
         let mut custom_cache = IrCache::locate(Some(custom_dir.to_str().unwrap()), false).unwrap();
         custom_cache.min_size = 0;
         custom_cache.stats = false;
-        let custom_cache = std::sync::Arc::new(custom_cache);
-        let mut custom_first = crate::eval::EvalConfig::new()
+        let custom_cache = Arc::new(custom_cache);
+        let mut custom_first = EvalConfig::new()
             .ir_cache(Some(custom_cache.clone()))
             .build();
         assert_eq!(read(&mut custom_first, b"/other"), b"/other/payload");

@@ -252,98 +252,21 @@ impl Parser<'_> {
         Ok(self.ev.mk_list(&items))
     }
 
-    fn hex4(&mut self) -> EvalResult<u32> {
-        let mut v = 0u32;
-        for _ in 0..4 {
-            let Some(c) = self.peek() else {
-                return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-            };
-            let d = match c {
-                b'0'..=b'9' => c - b'0',
-                b'a'..=b'f' => c - b'a' + 10,
-                b'A'..=b'F' => c - b'A' + 10,
-                _ => return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits"),
-            };
-            v = v * 16 + d as u32;
-            self.i += 1;
-        }
-        Ok(v)
-    }
-
     fn string(&mut self) -> EvalResult<Vec<u8>> {
-        self.i += 1;
-        let mut out: Vec<u8> = Vec::new();
-        loop {
-            let Some(c) = self.peek() else {
-                return self.err(
-                    "syntax error while parsing value - invalid string: missing closing quote",
-                );
-            };
-            self.i += 1;
-            match c {
-                b'"' => break,
-                b'\\' => {
-                    let Some(e) = self.peek() else {
-                        return self.err("syntax error while parsing value - invalid string: forbidden character after backslash");
-                    };
-                    self.i += 1;
-                    match e {
-                        b'"' => out.push(b'"'),
-                        b'\\' => out.push(b'\\'),
-                        b'/' => out.push(b'/'),
-                        b'b' => out.push(8),
-                        b'f' => out.push(12),
-                        b'n' => out.push(b'\n'),
-                        b'r' => out.push(b'\r'),
-                        b't' => out.push(b'\t'),
-                        b'u' => {
-                            let mut cp = self.hex4()?;
-                            if (0xD800..0xDC00).contains(&cp) {
-                                if !self.s[self.i..].starts_with(b"\\u") {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate must be followed by a low surrogate");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate must be followed by a low surrogate");
-                                }
-                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                            } else if (0xDC00..0xE000).contains(&cp) {
-                                return self.err("syntax error while parsing value - invalid string: low surrogate must follow a high surrogate");
-                            }
-                            let ch = char::from_u32(cp).expect("valid scalar");
-                            let mut buf = [0u8; 4];
-                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                        }
-                        _ => return self.err("syntax error while parsing value - invalid string: forbidden character after backslash"),
-                    }
-                }
-                0..=0x1f => return self.err("syntax error while parsing value - invalid string: control character must be escaped"),
-                0x80.. => {
-                    // validate one UTF-8 sequence, as nlohmann's lexer does
-                    let start = self.i - 1;
-                    let len = match c {
-                        0xc2..=0xdf => 2,
-                        0xe0..=0xef => 3,
-                        0xf0..=0xf4 => 4,
-                        _ => return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte"),
-                    };
-                    if start + len > self.s.len()
-                        || str::from_utf8(&self.s[start..start + len]).is_err()
-                    {
-                        return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte");
-                    }
-                    out.extend_from_slice(&self.s[start..start + len]);
-                    self.i = start + len;
-                }
-                _ => out.push(c),
+        let text = match crate::json_string::decode(self.s, &mut self.i) {
+            Ok(text) => text,
+            Err(e) => {
+                return self.err(&format!(
+                    "syntax error while parsing value - invalid string: {}",
+                    e.reason(false)
+                ));
             }
-        }
+        };
         // json-to-value.cc checks each key and string value once it is whole
-        if let Err(msg) = lexer::no_nul(&out) {
+        if let Err(msg) = lexer::no_nul(text.as_bytes()) {
             bail!(ErrorKind::Eval, Pos::NONE, "{}", msg);
         }
-        Ok(out)
+        Ok(text.into_bytes())
     }
 
     fn number(&mut self) -> EvalResult<Word> {

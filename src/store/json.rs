@@ -206,85 +206,18 @@ impl Parser<'_> {
         }
     }
 
-    fn hex4(&mut self) -> Result<u32, DrvError> {
-        let Some(h) = self.s.get(self.i..self.i + 4) else {
-            return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-        };
-        let Some(v) = str::from_utf8(h)
-            .ok()
-            .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
-            .and_then(|h| u32::from_str_radix(h, 16).ok())
-        else {
-            return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-        };
-        self.i += 4;
-        Ok(v)
-    }
-
     fn string(&mut self) -> Result<String, DrvError> {
-        self.i += 1;
-        let mut out = String::new();
-        loop {
-            let Some(c) = self.peek() else {
-                return self.err(
-                    "syntax error while parsing value - invalid string: missing closing quote",
-                );
-            };
-            self.i += 1;
-            match c {
-                b'"' => return Ok(out),
-                b'\\' => {
-                    let e = self.peek();
-                    self.i += 1;
-                    match e {
-                        Some(b'"') => out.push('"'),
-                        Some(b'\\') => out.push('\\'),
-                        Some(b'/') => out.push('/'),
-                        Some(b'b') => out.push('\u{8}'),
-                        Some(b'f') => out.push('\u{c}'),
-                        Some(b'n') => out.push('\n'),
-                        Some(b'r') => out.push('\r'),
-                        Some(b't') => out.push('\t'),
-                        Some(b'u') => {
-                            let mut cp = self.hex4()?;
-                            if (0xD800..0xDC00).contains(&cp) {
-                                if !self.s[self.i..].starts_with(b"\\u") {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF");
-                                }
-                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                            } else if (0xDC00..0xE000).contains(&cp) {
-                                return self.err("syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF");
-                            }
-                            out.push(char::from_u32(cp).expect("a scalar value"));
-                        }
-                        _ => return self.err("syntax error while parsing value - invalid string: forbidden character after backslash"),
-                    }
+        match crate::json_string::decode(self.s, &mut self.i) {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                // This reader reports malformed hex at the start of its four digits.
+                if let crate::json_string::StringError::Hex { start } = e {
+                    self.i = start;
                 }
-                0..=0x1f => return self.err("syntax error while parsing value - invalid string: control character must be escaped"),
-                0x80.. => {
-                    let start = self.i - 1;
-                    let len = match c {
-                        0xc2..=0xdf => 2,
-                        0xe0..=0xef => 3,
-                        0xf0..=0xf4 => 4,
-                        _ => 1,
-                    };
-                    let Some(ch) = self
-                        .s
-                        .get(start..start + len)
-                        .and_then(|b| str::from_utf8(b).ok())
-                    else {
-                        return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte");
-                    };
-                    out.push_str(ch);
-                    self.i = start + len;
-                }
-                _ => out.push(char::from(c)),
+                self.err(&format!(
+                    "syntax error while parsing value - invalid string: {}",
+                    e.reason(true)
+                ))
             }
         }
     }

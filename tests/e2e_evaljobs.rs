@@ -592,15 +592,27 @@ fn iets_options_reach_the_workers(bin: Iets) {
 fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
     let input = tempfile::NamedTempFile::new().unwrap();
     fs::write(input.path(), "do []\nexit\n").unwrap();
-    let expr = r#"builtins.listToAttrs (map (name: { inherit name; value = throw "unused"; }) [ "c" "b" "a" ])"#;
-    for (depth, names) in [("1", vec!["a", "c"]), ("2", vec!["a", "b", "c"])] {
+    // Both invalid byte strings travel as the same protocol name. Sort by the
+    // original bytes, but hash the name that the collector can request.
+    let expr = r#"let bad = builtins.substring 0 1 "é"; in
+        builtins.listToAttrs (map (name: { inherit name; value = throw "unused"; })
+          [ "c" "Z${bad}" "b" "M" "A${bad}" "a" ])"#;
+    for (chunk, depth, names) in [
+        ("0", "1", vec!["<non-utf8>", "M", "<non-utf8>", "a", "c"]),
+        ("1", "1", vec!["b"]),
+        (
+            "0",
+            "2",
+            vec!["<non-utf8>", "M", "<non-utf8>", "a", "b", "c"],
+        ),
+    ] {
         let output = ok(ci(&bin)
             .args([
                 "--worker",
                 "--chunks",
                 "2",
                 "--chunk",
-                "0",
+                chunk,
                 "--chunk-depth",
                 depth,
                 "--expr",

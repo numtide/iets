@@ -475,6 +475,23 @@ fn ci(bin: &Iets) -> Command {
     c
 }
 
+#[rstest]
+fn worker_keeps_flag_shaped_include_operand(bin: Iets) {
+    let system = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs/system.txt");
+    let output = ok(ci(&bin).stdin(File::open(system).unwrap()).args([
+        "--max-memory-size",
+        "1024",
+        "--include",
+        "--arg-from-stdin",
+        "--arg-from-stdin",
+        "system",
+        "--expr",
+        r#"{ system }: { job = derivation { inherit system; name = "job"; builder = ":"; }; }"#,
+    ]));
+    let row: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(row["system"], "aarch64-linux");
+}
+
 /// Every line from a worker carries the `stats` nixbot reads.
 #[rstest]
 fn every_line_has_stats(bin: Iets) {

@@ -391,7 +391,7 @@ impl<'a> Compiler<'a> {
                 let path = ast.elems(*path);
                 if let Expr::Var(s) = ast.expr(*subject)
                     && *s == self.sym_builtins
-                    && self.lexical_lookup(*s).is_none()
+                    && !self.lexically_bound(*s)
                     && let Some(AttrElem::Static(first)) = path.first()
                 {
                     self.global_ref(self.interner.name(*first), pos)?;
@@ -538,7 +538,7 @@ impl<'a> Compiler<'a> {
     /// `__sub` and co., which a `let` or a lambda can rebind.
     fn rebound(&mut self, name: &[u8], args: [IrRef; 2], pos: Pos) -> CResult<Option<Ir>> {
         let sym = self.interner.intern(name);
-        if self.lexical_lookup(sym).is_none() {
+        if !self.lexically_bound(sym) {
             return Ok(None);
         }
         let func = self.var_ir(sym, pos)?;
@@ -549,15 +549,11 @@ impl<'a> Compiler<'a> {
         }))
     }
 
-    fn lexical_lookup(&self, sym: Sym) -> Option<(u32, u32)> {
-        for (d, scope) in self.scopes.iter().rev().enumerate() {
-            if let Scope::Lexical { names, .. } = scope
-                && let Some(&idx) = names.get(&sym)
-            {
-                return Some((d as u32, idx));
-            }
-        }
-        None
+    fn lexically_bound(&self, sym: Sym) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| matches!(scope, Scope::Lexical { names, .. } if names.contains_key(&sym)))
     }
 
     /// `builtins.x` where `builtins` is the global: fold to the constant.
@@ -570,7 +566,7 @@ impl<'a> Compiler<'a> {
         let Expr::Var(s) = self.ast.expr(subject) else {
             return None;
         };
-        if *s != self.sym_builtins || self.lexical_lookup(*s).is_some() {
+        if *s != self.sym_builtins || self.lexically_bound(*s) {
             return None;
         }
         if self.scopes.iter().any(|s| matches!(s, Scope::With)) {
@@ -746,8 +742,8 @@ impl<'a> Compiler<'a> {
             // or `__findFile` takes part like in Nix
             let ff = self.interner.intern(b"__findFile");
             let np = self.interner.intern(b"__nixPath");
-            if self.lexical_lookup(ff).is_some()
-                || self.lexical_lookup(np).is_some()
+            if self.lexically_bound(ff)
+                || self.lexically_bound(np)
                 || self.scopes.iter().any(|s| matches!(s, Scope::With))
             {
                 let func = self.var_ir(ff, pos)?;

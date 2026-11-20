@@ -246,6 +246,13 @@ mod ab {
         eof: &mpsc::Receiver<io::Result<()>>,
         deadline: Instant,
     ) -> Result<(), RunError> {
+        poll_stdout_until(deadline, |wait| eof.recv_timeout(wait))
+    }
+
+    fn poll_stdout_until(
+        deadline: Instant,
+        mut recv: impl FnMut(Duration) -> Result<io::Result<()>, mpsc::RecvTimeoutError>,
+    ) -> Result<(), RunError> {
         let mut final_poll = false;
         loop {
             // recv_timeout takes a relative duration. Recheck the absolute deadline
@@ -253,7 +260,7 @@ mod ab {
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .min(REAP_INTERVAL);
-            match eof.recv_timeout(wait) {
+            match recv(wait) {
                 Ok(result) => {
                     return result
                         .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
@@ -1225,8 +1232,15 @@ mod ab {
         #[test]
         fn a_writer_can_outlive_the_child_tree() {
             let (notify, eof) = mpsc::channel();
-            notify.send(Ok(())).unwrap();
-            wait_for_stdout(&eof, Instant::now()).unwrap();
+            poll_stdout_until(Instant::now(), |wait| {
+                assert!(wait.is_zero());
+                let result = eof.recv_timeout(wait);
+                if matches!(result, Err(mpsc::RecvTimeoutError::Timeout)) {
+                    notify.send(Ok(())).unwrap();
+                }
+                result
+            })
+            .unwrap();
 
             let (reader, writer) = UnixStream::pair().unwrap();
             let (notify, eof) = mpsc::channel();

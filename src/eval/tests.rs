@@ -4,6 +4,7 @@ use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
 use crate::print;
+use crate::runtime::Value;
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -144,7 +145,7 @@ fn every_empty_list_and_set_is_one_object() {
 fn lambda_captures_enclosing_scopes(#[case] src: &str, #[case] closed: bool) {
     let mut ev = Evaluator::new();
     let word = ev.eval_string(src, b"/").and_then(|w| ev.force(w)).unwrap();
-    let crate::runtime::Value::Lambda(lambda) = word.view() else {
+    let Value::Lambda(lambda) = word.view() else {
         panic!("expected a lambda");
     };
     assert_eq!(lambda.lam.closed, closed);

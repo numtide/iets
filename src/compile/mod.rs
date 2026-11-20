@@ -394,7 +394,13 @@ impl<'a> Compiler<'a> {
                 {
                     if path.len() == 1 {
                         if let Some(d) = default {
-                            self.expr_inner(*d)?;
+                            // Bind the fallback for diagnostics only. Its reads are absent from the emitted IR.
+                            let enclosing = mem::take(&mut self.lambdas);
+                            let used_home = self.used_home.get();
+                            let result = self.expr(*d);
+                            self.lambdas = enclosing;
+                            self.used_home.set(used_home);
+                            result?;
                         }
                         return Ok(Ir::Const(word));
                     }

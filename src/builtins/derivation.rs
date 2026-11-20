@@ -821,7 +821,7 @@ fn derivation_strict_internal(
     ev.mk_attrs(&mut entries, pos)
 }
 
-/// The same path bytes back the string and its derivation contexts.
+/// Intern the path once for the string and the contexts we construct.
 fn drv_path_string(ev: &mut Evaluator, path: &[u8]) -> (Word, &'static [u8]) {
     let bytes = ev.arena.intern_bytes(path).bytes;
     let ctx = ev.arena.intern_ctx(&[Ctx::DrvDeep(bytes)]);

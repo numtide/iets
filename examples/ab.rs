@@ -483,6 +483,7 @@ mod ab {
         let mut sweep_error = None;
         let mut final_polls = 32;
         loop {
+            let before_deadline = Instant::now() < deadline;
             // SAFETY: this runner is the sole reaper; a null status pointer is allowed.
             match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
                 p if p > 0 && Instant::now() < deadline => {
@@ -536,6 +537,9 @@ mod ab {
                 }
             }
             if Instant::now() >= deadline {
+                if before_deadline {
+                    continue;
+                }
                 return Err(sweep_error.unwrap_or_else(|| io::ErrorKind::TimedOut.into()));
             }
             thread::sleep(REAP_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));

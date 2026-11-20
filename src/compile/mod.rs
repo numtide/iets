@@ -72,6 +72,9 @@ pub struct Compiler<'a> {
     lints: Option<&'a lint::Config>,
     /// The warnings the compile produced; the evaluator reports them.
     pub diags: Vec<lint::Diag>,
+    /// Multiple warnings arose during a traversal ordered by the caller's
+    /// symbol IDs. Another caller can encounter them in a different order.
+    pub(crate) diags_depend_on_symbol_order: bool,
     sym_builtins: Sym,
     sym_rev_count: Sym,
     sym_cur_pos: Sym,
@@ -180,6 +183,7 @@ impl<'a> Compiler<'a> {
             used_home: Cell::new(false),
             lints,
             diags: Vec::new(),
+            diags_depend_on_symbol_order: false,
             sym_builtins,
             sym_rev_count,
             sym_cur_pos,
@@ -1124,6 +1128,7 @@ impl<'a> Compiler<'a> {
             from_exprs,
             ..
         } = m;
+        let diags_before = self.diags.len();
         statics.sort_by_key(|s| s.0);
         // `inherit x` values resolve in the enclosing scope, so compile them
         // before pushing the new frame.
@@ -1168,6 +1173,7 @@ impl<'a> Compiler<'a> {
                 scope,
             });
         }
+        self.diags_depend_on_symbol_order |= nbinds > 1 && self.diags.len() - diags_before > 1;
         let mut from = Vec::with_capacity(from_exprs.len());
         for e in from_exprs {
             from.push(self.expr(e)?);
@@ -1307,6 +1313,7 @@ impl<'a> Compiler<'a> {
                     shares: base.is_some(),
                 });
                 let mut firs = Vec::with_capacity(sorted.len());
+                let diags_before = self.diags.len();
                 for f in &sorted {
                     let default = match f.default {
                         Some(d) => Some(self.expr(d)?),
@@ -1318,6 +1325,8 @@ impl<'a> Compiler<'a> {
                         pos: Pos(self.base + f.span.start),
                     });
                 }
+                self.diags_depend_on_symbol_order |=
+                    sorted.len() > 1 && self.diags.len() - diags_before > 1;
                 let body = self.lambda_body(body, idx)?;
                 self.scopes.pop();
                 let closed = !self.lambdas.pop().unwrap().1.get();

@@ -947,7 +947,7 @@ impl Evaluator {
             .map(|(ir, _, _)| ir)
     }
 
-    /// `compile_source` plus whether a `~/` path literal was compiled and
+    /// `compile_source` plus whether its IR can be cached and
     /// the lint diagnostics, already reported.
     fn compile_source_inner(
         &mut self,
@@ -979,6 +979,7 @@ impl Evaluator {
         );
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
+        let cacheable = !used_home && !c.diags_depend_on_symbol_order;
         let diags = mem::take(&mut c.diags);
         self.arena
             .stats
@@ -998,7 +999,7 @@ impl Evaluator {
             self.session.profile.note_ir(ir);
         }
         self.report_diags(&diags);
-        Ok((ir, used_home, diags))
+        Ok((ir, cacheable, diags))
     }
 
     /// `compile_source` for an imported file, through the IR cache when it is on.
@@ -1061,11 +1062,11 @@ impl Evaluator {
                 return Ok(ir);
             }
         }
-        let (ir, used_home, diags) =
+        let (ir, cacheable, diags) =
             self.compile_source_inner(path, src, base_dir, None, Origin::File)?;
         let t1 = Instant::now();
         let allows = self.files[file.0 as usize].allows();
-        if !used_home && let Some(bytes) = cache::serialize(self, ir, base, &diags, allows) {
+        if cacheable && let Some(bytes) = cache::serialize(self, ir, base, &diags, allows) {
             cache.write(&key, &bytes);
         }
         if cache.stats {

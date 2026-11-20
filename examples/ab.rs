@@ -476,7 +476,9 @@ mod ab {
         let mut revisit = Instant::now() + REAP_INTERVAL;
         let mut restart = None;
         for pass in 0..2 {
-            for entry in fs::read_dir(procfs)? {
+            let mut entries = fs::read_dir(procfs)?;
+            while Instant::now() < deadline {
+                let Some(entry) = entries.next() else { break };
                 let now = Instant::now();
                 if now >= deadline {
                     break;
@@ -489,6 +491,9 @@ mod ab {
                 }
                 if now >= revisit {
                     direct &= signal_direct(&mut result, &mut waitable, false);
+                    if Instant::now() >= deadline {
+                        break;
+                    }
                     let state = children_state(libc::P_ALL, 0);
                     waitable |= matches!(&state, Ok(Some(true)));
                     if Instant::now() >= deadline || matches!(state, Ok(None)) {

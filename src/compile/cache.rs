@@ -1553,6 +1553,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn compile_file_cache_respects_an_explicit_relative_path_base() {
+        let dir = tempdir().unwrap();
+        let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        cache.min_size = 0;
+        cache.stats = false;
+        let cache = std::sync::Arc::new(cache);
+        let mut ev = crate::eval::EvalConfig::new()
+            .ir_cache(Some(cache.clone()))
+            .build();
+        let mut cold = Evaluator::new();
+        let source = b"./payload";
+        let read = |ev: &mut Evaluator, base: &[u8]| {
+            let ir = ev.compile_file(PATH, source.to_vec(), base).unwrap();
+            let value = ev.eval(ev.root_env, ir).unwrap();
+            let runtime::Value::Path(path) = value.view() else {
+                panic!("path")
+            };
+            path.path.to_vec()
+        };
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(cache.hits(), 1, "ordinary identical files still hit");
+        for base in [&b"/other"[..], &b"/other\0suffix"[..], &b"/t/"[..]] {
+            let expected = read(&mut cold, base);
+            assert_eq!(read(&mut ev, base), expected, "explicit base {base:?}");
+            assert_eq!(cache.hits(), 1, "noncanonical bases bypass the old key");
+        }
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(
+            cache.hits(),
+            2,
+            "alternate bases cannot replace the ordinary entry"
+        );
+    }
+
     /// Every case runs against one evaluator: building one and compiling
     /// `SRC` costs far more than a decode.
     #[test]

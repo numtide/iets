@@ -31,10 +31,19 @@ nix run .#bench-callgrind -- --baseline=before --callgrind-limits='Ir=5%' \
   --callgrind-metrics=Ir --show-intermediate --save-summary=json
 ```
 
-The four evaluation fixtures cover calls, strings, attribute updates/lookups
-and derivations. They run with one worker, strict JSON and disabled evaluator
-caches. Independent teardown checks compare full expected output outside the
-measurement; successful exit alone does not prove that the work ran.
+The evaluation fixtures cover calls, strings, attribute updates and lookups,
+and input-addressed and fixed-output derivations. Each runs with one worker,
+strict JSON and disabled evaluator caches. Teardown checks the full expected
+output outside the measurement.
+
+To profile fixed-output path construction, select the fixture that evaluates
+500 derivations with 100 distinct recipes. Its result checks both the derivation
+paths and the output paths for flat and recursive hashes.
+
+```sh
+nix run .#bench-callgrind -- '*::evaluation::*::fixed_derivations' \
+  --callgrind-args='--cache-sim=no --dump-instr=yes' --callgrind-metrics=Ir
+```
 
 Four component cases share generated literal input with 2,000 nested bindings:
 

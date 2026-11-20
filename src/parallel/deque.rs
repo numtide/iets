@@ -17,10 +17,6 @@ pub struct Deque {
     buf: Box<[AtomicU64]>,
 }
 
-// SAFETY: every slot is an atomic; the top/bottom protocol keeps a thief
-// from reading a slot that the owner may be writing (see `push`).
-unsafe impl Sync for Deque {}
-
 impl Deque {
     pub fn new(cap: usize) -> Deque {
         assert!(cap.is_power_of_two());

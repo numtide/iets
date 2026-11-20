@@ -29,7 +29,7 @@ use crate::provenance::{describe_pos, rewrite_msg};
 use crate::runtime::Word;
 use crate::session::Session;
 use crate::source::nix_conf;
-use crate::store::path::StorePath;
+use crate::store::path::{StorePath, store_dir};
 use crate::sys::{self, OsStringExt};
 use crate::trace::key::{Key, has_relative_path};
 use crate::trace::run::Cache;
@@ -553,6 +553,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.flag("raw", a.raw);
     k.field("lints", lint_config(a).ok()?.key().as_bytes());
     k.field("system", cfg.current_system().as_bytes());
+    k.field("store-dir", store_dir().as_bytes());
     // what builtins.fetchClosure trusts
     let conf = nix_conf(cfg.configured_session());
     k.field(

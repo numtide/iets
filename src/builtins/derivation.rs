@@ -72,6 +72,22 @@ pub struct DrvState {
 }
 
 impl DrvState {
+    pub(crate) fn aterm(&self, path: &StorePath) -> Option<Arc<Vec<u8>>> {
+        self.drvs.lock().get(path)?.aterm.clone()
+    }
+
+    /// Read this evaluator's ATerm when retained, otherwise use the caller's store reader.
+    pub(crate) fn read_derivation(
+        &self,
+        path: &StorePath,
+        from_store: impl FnOnce(&StorePath) -> Result<Derivation, DrvError>,
+    ) -> Result<Derivation, DrvError> {
+        match self.aterm(path) {
+            Some(text) => Derivation::parse(&text, Derivation::name_from_path(path)?),
+            None => from_store(path),
+        }
+    }
+
     /// Records the attribute path a cli walk reached `p` by. The first walk
     /// to name a drv wins, as `getDerivations` reports the first path.
     pub fn set_attr(&self, p: &StorePath, attr: &str) {
@@ -1011,10 +1027,8 @@ pub fn load_drv_traced(trace: &Trace, p: &StorePath) -> Result<Derivation, DrvEr
 
 /// The derivation as this evaluation wrote it, else from the store.
 pub fn load_drv(ev: &Evaluator, p: &StorePath) -> Result<Derivation, DrvError> {
-    match ev.drv.drvs.get(p).and_then(|i| i.aterm) {
-        Some(aterm) => Derivation::parse(&aterm, Derivation::name_from_path(p)?),
-        None => load_drv_traced(ev.trace(), p),
-    }
+    ev.drv
+        .read_derivation(p, |p| load_drv_traced(ev.trace(), p))
 }
 
 /// Output names and `.drv` references of `p`: from this evaluation's table,

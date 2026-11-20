@@ -513,17 +513,6 @@ fn meta_json(ev: &mut Evaluator, a: &'static AttrsObj, out: &mut Vec<u8>) -> Eva
     Ok(())
 }
 
-/// The `.drv` nix-eval-jobs reads back from the store: from this
-/// evaluation's table, else from `/nix/store`.
-fn read_drv(ev: &Evaluator, p: &StorePath) -> EvalResult<Derivation> {
-    let err = |m: String| Error::boxed(ErrorKind::Eval, m, Pos::NONE);
-    let name = Derivation::name_from_path(p).map_err(|e| err(e.0))?;
-    match ev.drv.drvs.get(p).and_then(|i| i.aterm) {
-        Some(aterm) => Derivation::parse(&aterm, name).map_err(|e| err(e.0)),
-        None => load_derivation_from_store(p).map_err(|e| err(e.0)),
-    }
-}
-
 /// derivation-options.cc:getRequiredSystemFeatures.
 fn required_system_features(drv: &Derivation) -> BTreeSet<String> {
     let mut set: BTreeSet<String> = match &drv.structured_attrs {
@@ -737,7 +726,10 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
             None => b"unknown".to_vec(),
         }
     } else {
-        let drv = read_drv(ev, &drv_path)?;
+        let drv = ev
+            .drv
+            .read_derivation(&drv_path, load_derivation_from_store)
+            .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, Pos::NONE))?;
         if cfg.opts.show_input_drvs {
             let mut v = vec![b'{'];
             for (i, (p, names)) in drv.input_drvs.iter().enumerate() {

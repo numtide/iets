@@ -149,9 +149,12 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             filtered,
             newest,
         } => {
-            let accepted: Option<HashSet<PathBuf>> = filtered
-                .as_ref()
-                .map(|f| f.accepted.iter().map(|p| sys::path_from_internal(p)).collect());
+            let accepted: Option<HashSet<PathBuf>> = filtered.as_ref().map(|f| {
+                f.accepted
+                    .iter()
+                    .map(|p| sys::path_from_internal(p))
+                    .collect()
+            });
             let root_p = sys::native_path(root);
             match tree_fingerprint(&root_p, accepted.as_ref()) {
                 Ok((sh, _)) if sh == *stat_hash => return Outcome::Same,

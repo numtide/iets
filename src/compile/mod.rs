@@ -144,14 +144,6 @@ impl Merged {
     }
 }
 
-/// The name of an attrpath element: a symbol when it is known at compile
-/// time (a literal, or a string with no interpolation), otherwise the
-/// expression that computes it.
-enum Name {
-    Static(Sym),
-    Dynamic(ExprId),
-}
-
 impl<'a> Compiler<'a> {
     pub fn new(
         ast: &'a Ast,
@@ -837,8 +829,8 @@ impl<'a> Compiler<'a> {
         let (last, prefix) = path.split_last().expect("attrpath has an element");
         let mut cur = m;
         for elem in prefix {
-            match self.attr_name(elem) {
-                Name::Static(sym) => {
+            match *elem {
+                AttrElem::Static(sym) => {
                     let idx = match cur.index.get(&sym) {
                         Some(&i) => {
                             self.open_nested(cur, i, pos)?;
@@ -857,7 +849,7 @@ impl<'a> Compiler<'a> {
                     };
                     cur = cur.nested_at(idx);
                 }
-                Name::Dynamic(e) => {
+                AttrElem::Dynamic(e) => {
                     cur.dynamics
                         .push((e, Def::Nested(Box::new(Merged::new(false, pos))), pos));
                     let last = cur.dynamics.last_mut().expect("just pushed");
@@ -868,27 +860,11 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        match self.attr_name(last) {
-            Name::Static(sym) => self.add_static(cur, sym, def, pos),
-            Name::Dynamic(e) => {
+        match *last {
+            AttrElem::Static(sym) => self.add_static(cur, sym, def, pos),
+            AttrElem::Dynamic(e) => {
                 cur.dynamics.push((e, def, pos));
                 Ok(())
-            }
-        }
-    }
-
-    fn attr_name(&mut self, e: &AttrElem) -> Name {
-        let ast: &'a Ast = self.ast;
-        match e {
-            AttrElem::Static(s) => Name::Static(*s),
-            AttrElem::Dynamic(id) => {
-                if let Expr::Str(parts) = ast.expr(*id)
-                    && let Some(lit) = ast.single_lit(*parts)
-                {
-                    Name::Static(self.interner.intern(lit))
-                } else {
-                    Name::Dynamic(*id)
-                }
             }
         }
     }

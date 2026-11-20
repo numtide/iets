@@ -16,6 +16,7 @@ use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::str;
 
 use e2e::{Store, ok, stderr};
 use serde_json::Value;
@@ -606,7 +607,7 @@ fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
                 expr,
             ])
             .stdin(File::open(input.path()).unwrap()));
-        let text = std::str::from_utf8(&output.stdout).unwrap();
+        let text = str::from_utf8(&output.stdout).unwrap();
         let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
         assert_eq!(response["attrs"], serde_json::json!(names));
     }

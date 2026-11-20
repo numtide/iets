@@ -361,9 +361,25 @@ mod ab {
         kill_leftovers_in(Path::new("/proc"), deadline)
     }
 
+    // A first direct pass that starts after setup exhausted the deadline has
+    // 32 task or PID checks. A timely pass and all revisits stop at the deadline.
+    // Only a timely check can use exit readiness to schedule a table revisit.
+    #[cfg(target_os = "linux")]
+    fn direct_list_budget(first: bool) -> impl FnMut(bool) -> Option<bool> {
+        let mut remaining = if first { 32usize } else { 0 };
+        move |in_time| {
+            if in_time {
+                remaining = 0;
+                Some(true)
+            } else {
+                remaining = remaining.checked_sub(1)?;
+                Some(false)
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
-        let overdue = Instant::now() >= deadline;
         let own_pid = process::id().to_string();
         let status = fs::read(procfs.join("self/status"))?;
         // An ancestor namespace can assign us the same numeric PID. NStgid
@@ -405,27 +421,14 @@ mod ab {
             }
             Ok(false)
         };
-        let signal_direct = |result: &mut io::Result<()>, waitable: &mut bool| {
+        let signal_direct = |result: &mut io::Result<()>, waitable: &mut bool, first: bool| {
             let mut complete = true;
             let mut found = false;
-            // Allow a small direct-list pass if the first sweep starts overdue.
-            // Count task entries too, since many threads may have no children.
-            let mut remaining = 32usize;
-            let mut allow_direct = || {
-                if overdue {
-                    if remaining == 0 {
-                        return false;
-                    }
-                    remaining -= 1;
-                    true
-                } else {
-                    Instant::now() < deadline
-                }
-            };
+            let mut permit = direct_list_budget(first);
             if let Ok(threads) = fs::read_dir(procfs.join("self/task")) {
                 let mut field = Vec::new();
                 for task in threads {
-                    if !allow_direct() {
+                    if permit(Instant::now() < deadline).is_none() {
                         return false;
                     }
                     let Ok(file) = task.and_then(|task| File::open(task.path().join("children")))
@@ -437,9 +440,9 @@ mod ab {
                     // procfs emits space-separated decimal PIDs, including a trailing space.
                     let mut children = BufReader::new(file);
                     loop {
-                        if !allow_direct() {
+                        let Some(observe_ready) = permit(Instant::now() < deadline) else {
                             return false;
-                        }
+                        };
                         field.clear();
                         match children.read_until(b' ', &mut field) {
                             Ok(0) => break,
@@ -453,7 +456,7 @@ mod ab {
                             .ok()
                             .and_then(|s| s.parse().ok())
                         {
-                            match signal(pid, !overdue && !*waitable) {
+                            match signal(pid, observe_ready && !*waitable) {
                                 Ok(ready) => *waitable |= ready,
                                 Err(e) => *result = Err(e),
                             }
@@ -464,7 +467,7 @@ mod ab {
             complete && found
         };
         let mut waitable = false;
-        let mut direct = signal_direct(&mut result, &mut waitable);
+        let mut direct = signal_direct(&mut result, &mut waitable, true);
         if Instant::now() >= deadline {
             return result;
         }
@@ -485,7 +488,7 @@ mod ab {
                     break;
                 }
                 if now >= revisit {
-                    direct &= signal_direct(&mut result, &mut waitable);
+                    direct &= signal_direct(&mut result, &mut waitable, false);
                     let state = children_state(libc::P_ALL, 0);
                     waitable |= matches!(&state, Ok(Some(true)));
                     if Instant::now() >= deadline || matches!(state, Ok(None)) {
@@ -1248,6 +1251,21 @@ mod ab {
         use std::thread::sleep;
 
         use super::*;
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_direct_pass_uses_the_time_of_its_first_check() {
+            let mut delayed = direct_list_budget(true);
+            for _ in 0..32 {
+                assert_eq!(delayed(false), Some(false));
+            }
+            assert_eq!(delayed(false), None);
+
+            let mut timely = direct_list_budget(true);
+            assert_eq!(timely(true), Some(true));
+            assert_eq!(timely(false), None);
+            assert_eq!(direct_list_budget(false)(false), None);
+        }
 
         #[test]
         fn a_writer_can_outlive_the_child_tree() {

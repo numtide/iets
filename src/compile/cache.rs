@@ -207,8 +207,9 @@ impl IrCache {
             lint_key.as_bytes(),
             &[u8::from(pure)][..],
         ] {
+            // Public byte/string inputs may contain NUL; delimiters are ambiguous.
+            h.update(&(part.len() as u64).to_le_bytes());
             h.update(part);
-            h.update(b"\0");
         }
         h.update(src);
         h.finalize().to_hex().to_string()
@@ -1519,8 +1520,10 @@ mod tests {
 
     use std::collections::HashSet;
     use std::iter;
+    use std::sync::Arc;
     use std::thread::Builder;
 
+    use crate::eval::EvalConfig;
     use crate::print;
 
     const SRC: &str = "let f = a: with { x = a; }; [ x 1 true null \"s\" ./p 2.5 ]; in f 3\n";
@@ -1551,6 +1554,46 @@ mod tests {
             Ok(s) => s,
             Err(e) => format!("error: {}", e.msg),
         }
+    }
+
+    #[test]
+    fn compile_file_cache_nul_framing_preserves_current_system() {
+        let dir = tempdir().unwrap();
+        let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        cache.min_size = 0;
+        cache.stats = false;
+        let cache = Arc::new(cache);
+        let mut first = EvalConfig::new()
+            .pure(false)
+            .system("right")
+            .ir_cache(Some(cache.clone()))
+            .build();
+        let mut second = EvalConfig::new()
+            .pure(false)
+            .system("left\0right")
+            .ir_cache(Some(cache.clone()))
+            .build();
+        let mut cold = EvalConfig::new().pure(false).system("left\0right").build();
+        let source = b"builtins.currentSystem";
+        let a = b"/t/f.nix\0left";
+        let b = b"/t/f.nix";
+        let read = |ev: &mut Evaluator, path: &[u8]| {
+            let ir = ev.compile_file(path, source.to_vec(), b"/t").unwrap();
+            let value = ev.eval(ev.root_env, ir).unwrap();
+            let value = ev.force(value).unwrap();
+            value.as_string().unwrap().bytes.to_vec()
+        };
+        assert_eq!(read(&mut first, a), b"right");
+        let expected = read(&mut cold, b);
+        assert_eq!(expected, b"left\0right");
+        assert_eq!(read(&mut second, b), expected);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(read(&mut second, b), expected);
+        assert_eq!(
+            cache.hits(),
+            1,
+            "identical NUL-bearing configurations still hit"
+        );
     }
 
     /// Every case runs against one evaluator: building one and compiling

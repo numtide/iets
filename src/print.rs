@@ -2,6 +2,7 @@
 //! JSON (`printValueAsJSON`), and short forms for error messages.
 
 use crate::bytescan::Escapes;
+use std::borrow::Cow;
 use std::str;
 
 use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
@@ -298,7 +299,7 @@ fn print_derivation(
             false,
             true,
         )?,
-        None => std::borrow::Cow::Borrowed(&[][..]),
+        None => Cow::Borrowed(&[][..]),
     };
     out.extend_from_slice("«derivation".as_bytes());
     if !path.is_empty() {

@@ -643,7 +643,10 @@ mod ab {
                         format!("wait4: {e}; leftover cleanup: {cleanup}"),
                     )));
                 }
-                return Err(RunError::Cleanup(e));
+                return Err(RunError::Cleanup(io::Error::new(
+                    e.kind(),
+                    format!("wait4: {e}"),
+                )));
             }
         };
         let wall = t0.elapsed().as_secs_f64();
@@ -1038,7 +1041,7 @@ mod ab {
             match measure(&c, sc, &o) {
                 Ok(row) => rows.push(row),
                 Err(e) => {
-                    eprintln!("ab: stopping after incomplete process cleanup: {e}");
+                    eprintln!("ab: stopping benchmark: {e}");
                     return ExitCode::FAILURE;
                 }
             }

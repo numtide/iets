@@ -486,7 +486,7 @@ impl Ser {
             return;
         }
         match ir {
-            Ir::Const(w, origin) => {
+            Ir::Const(w, origin) | Ir::LazyConst(w, origin) => {
                 self.tag(IrTag::Const);
                 match origin {
                     ConstOrigin::Literal => self.literal(*w),
@@ -1012,7 +1012,7 @@ impl<'a> De<'a, '_> {
             Some(ConstTag::Global) => {
                 let s = self.sym();
                 match self.ev.globals.table.get(&s) {
-                    Some(w) => return Ir::Const(*w, ConstOrigin::Global(s)),
+                    Some(w) => return Ir::named(*w, ConstOrigin::Global(s)),
                     None => {
                         self.ok = false;
                         Word::NULL
@@ -1022,7 +1022,7 @@ impl<'a> De<'a, '_> {
             Some(ConstTag::Builtin) => {
                 let s = self.sym();
                 match self.ev.globals.builtins.and_then(|b| b.get(s)) {
-                    Some(a) => return Ir::Const(a.cell.get(), ConstOrigin::Builtin(s)),
+                    Some(a) => return Ir::named(a.cell.get(), ConstOrigin::Builtin(s)),
                     None => {
                         self.ok = false;
                         Word::NULL

@@ -123,7 +123,9 @@ and `pure-eval`. Purity changes which names exist when the compiler folds
 an expression such as `builtins.currentSystem or "fallback"`. The entry
 stores literals by content and folded names by symbol. On load,
 `builtins.nixPath` takes its value from the current evaluator, even if the
-search path was empty when the entry was written.
+search path was empty when the entry was written. If the rebound value is
+still lazy, as `builtins.currentTime` can be, evaluating that expression
+forces it. Loading the IR leaves it untouched.
 
 `eval-jobs` uses no other cache, so its effect is easy to see. On
 `nixos/release-small.nix` with four workers on a 16-core EPYC:

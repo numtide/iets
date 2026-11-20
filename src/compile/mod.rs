@@ -331,7 +331,7 @@ impl<'a> Compiler<'a> {
         // Globals live in Nix's static base env, a lexical scope, so they
         // beat any enclosing `with` (`with { true = 1; }; true` is `true`).
         if let Some(w) = self.globals.table.get(&sym) {
-            return Some(Ir::Const(*w, ConstOrigin::Global(sym)));
+            return Some(Ir::named(*w, ConstOrigin::Global(sym)));
         }
         if withs.is_empty() {
             return None;
@@ -369,7 +369,7 @@ impl<'a> Compiler<'a> {
                 match self.resolve(sym) {
                     Some(Ir::WithVar { sym, withs, .. }) => Ir::WithVar { sym, withs, pos },
                     Some(ir) => {
-                        if matches!(ir, Ir::Const(..)) {
+                        if matches!(ir, Ir::Const(..) | Ir::LazyConst(..)) {
                             self.global_ref(self.interner.name(sym), pos)?;
                         }
                         ir
@@ -1182,7 +1182,7 @@ impl<'a> Compiler<'a> {
         match self.resolve(var) {
             Some(Ir::WithVar { sym, withs, .. }) => Ok(self.alloc(Ir::WithVar { sym, withs, pos })),
             Some(ir) => {
-                if matches!(ir, Ir::Const(..)) {
+                if matches!(ir, Ir::Const(..) | Ir::LazyConst(..)) {
                     self.global_ref(self.interner.name(var), pos)?;
                 }
                 Ok(self.alloc(ir))

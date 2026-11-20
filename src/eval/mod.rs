@@ -22,7 +22,8 @@ use crate::builtins::derivation::DrvState;
 use crate::builtins::{self, store_hooks};
 use crate::compile::cache::{self, IrCache};
 use crate::compile::ir::{
-    AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, ParamIr, SelectIr,
+    AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, Ir, IrRef, LambdaIr, LetIr, ParamIr,
+    SelectIr,
 };
 use crate::compile::{self, Compiler, Globals};
 use crate::events::{self, Field, Group};
@@ -1393,7 +1394,7 @@ impl Evaluator {
     #[inline]
     pub fn maybe_thunk(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
         match ir {
-            Ir::Const(w, _) => *w,
+            Ir::Const(w, _) | Ir::LazyConst(w, ConstOrigin::Global(_)) => *w,
             Ir::Local { depth, idx } => {
                 let mut e = env;
                 for _ in 0..*depth {
@@ -2201,6 +2202,12 @@ impl Evaluator {
     pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
             Ir::Const(w, _) => Ok(*w),
+            Ir::LazyConst(_, ConstOrigin::Builtin(sym)) => {
+                // A source selection forces this cell and records its demand.
+                let attr = self.globals.builtins.unwrap().get(*sym).unwrap();
+                self.force_cell(&attr.cell)
+            }
+            Ir::LazyConst(w, _) => self.force(*w),
             Ir::Local { .. } => self.eval_k_local(env, ir),
             Ir::WithVar { .. } => self.eval_k_with_var(env, ir),
             Ir::CurPos(..) => self.eval_k_cur_pos(env, ir),
@@ -3318,7 +3325,9 @@ pub fn ir_pos(ir: &Ir) -> Pos {
         Ir::Lambda(l) => l.pos,
         Ir::Select(s) | Ir::SelectCount(s) => s.pos,
         Ir::Let(l) => ir_pos(l.body),
-        Ir::Const(..) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => Pos::NONE,
+        Ir::Const(..) | Ir::LazyConst(..) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => {
+            Pos::NONE
+        }
     }
 }
 

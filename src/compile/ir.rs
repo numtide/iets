@@ -21,6 +21,8 @@ pub enum ConstOrigin {
 pub enum Ir {
     /// Evaluation reads the already resolved word for any origin.
     Const(Word, ConstOrigin),
+    /// A named constant whose current value still needs evaluation.
+    LazyConst(Word, ConstOrigin),
     /// Lexically bound variable: walk `depth` envs up, take slot `idx`.
     Local {
         depth: u32,
@@ -110,6 +112,14 @@ pub enum Ir {
 }
 
 impl Ir {
+    pub(crate) fn named(w: Word, origin: ConstOrigin) -> Self {
+        if w.is_thunk() {
+            Self::LazyConst(w, origin)
+        } else {
+            Self::Const(w, origin)
+        }
+    }
+
     pub(crate) const fn literal(w: Word) -> Self {
         Self::Const(w, ConstOrigin::Literal)
     }

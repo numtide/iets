@@ -185,6 +185,18 @@ mod ab {
         ]
     }
 
+    #[derive(Debug)]
+    enum RunError {
+        Scenario(String),
+        Cleanup(io::Error),
+    }
+
+    impl From<String> for RunError {
+        fn from(message: String) -> Self {
+            Self::Scenario(message)
+        }
+    }
+
     /// The numbers in an eval-jobs `"stats":{...}` are time and allocation,
     /// which a change may move on purpose.
     fn mask_stats(line: &[u8]) -> Vec<u8> {
@@ -237,8 +249,6 @@ mod ab {
 
     /// How long processes a run left behind may go on before they are killed.
     const LEFTOVER_LIMIT: Duration = Duration::from_secs(60);
-
-    const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
     const COUNTERS: [&str; 5] = [
         "instructions",
@@ -294,7 +304,12 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn enable_subreaper() -> io::Result<()> {
-        // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag.
+        // An inherited SIG_IGN would let checked child PIDs be recycled.
+        // SAFETY: SIG_DFL is a valid SIGCHLD disposition; this runner is the sole reaper.
+        if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: this prctl takes an integer flag.
         if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
             return Err(io::Error::last_os_error());
         }
@@ -302,121 +317,158 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
-    fn kill_leftovers() -> io::Result<()> {
-        if fs::read_link("/proc/self")? != Path::new(&process::id().to_string()) {
-            return Err(io::Error::other("/proc uses a different PID namespace"));
+    fn check_proc_namespace(procfs: &Path) -> io::Result<()> {
+        let status = fs::read(procfs.join("self/status"))?;
+        let own = process::id().to_string();
+        // A procfs mounted in an ancestor namespace exposes different PID numbers.
+        // Require one NStgid, even when two namespaces happen to assign equal numbers.
+        if status
+            .split(|&b| b == b'\n')
+            .find_map(|s| s.strip_prefix(b"NStgid:"))
+            .is_some_and(|ids| ids.trim_ascii() == own.as_bytes())
+        {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "cleanup requires /proc in the caller's PID namespace with NStgid",
+            ))
         }
-        // The per-thread children file is optional in Linux. At the deadline
-        // enumerate process IDs, then let waitpid verify our ownership.
-        let mut result = Ok(());
-        for entry in fs::read_dir("/proc")? {
-            let name = match entry {
-                Ok(entry) => entry.file_name(),
-                Err(e) => {
-                    result = Err(e);
-                    continue;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
+        check_proc_namespace(procfs)?;
+        let signal = |pid: libc::pid_t| -> io::Result<()> {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "child discovery deadline",
+                ));
+            }
+            let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: writable exit info; WNOWAIT leaves exits for the sole outer reaper.
+            if unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            } == -1
+            {
+                let e = io::Error::last_os_error();
+                return if e.raw_os_error() == Some(libc::ECHILD) {
+                    Ok(())
+                } else {
+                    Err(e)
+                };
+            }
+            // SAFETY: this is our unreaped child, under the checked SIGCHLD disposition.
+            if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
+                let e = io::Error::last_os_error();
+                if e.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(e);
                 }
-            };
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) else {
-                continue;
-            };
-            // SAFETY: only a live child returns zero. This is the sole reaper,
-            // so an exit between the check and kill cannot recycle its PID.
-            if pid > 0 && unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) } == 0 {
-                // SAFETY: the PID above names our child in this namespace.
-                if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
-                    let e = io::Error::last_os_error();
-                    if e.raw_os_error() != Some(libc::ESRCH) {
-                        result = Err(e);
+            }
+            Ok(())
+        };
+        let mut complete = false;
+        if let Ok(tasks) = fs::read_dir(procfs.join("self/task")) {
+            complete = true;
+            let mut found = false;
+            for task in tasks {
+                found = true;
+                if Instant::now() >= deadline {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                let kids = task.and_then(|t| fs::read_to_string(t.path().join("children")));
+                match kids {
+                    Ok(kids) => {
+                        for pid in kids
+                            .split_whitespace()
+                            .filter_map(|p| p.parse::<libc::pid_t>().ok())
+                            .filter(|&p| p > 0)
+                        {
+                            signal(pid)?;
+                        }
                     }
+                    Err(_) => complete = false,
+                }
+            }
+            complete &= found;
+        }
+        if !complete {
+            // Optional task children files may be absent. Scan only on cleanup/progress.
+            for entry in fs::read_dir(procfs)? {
+                if Instant::now() >= deadline {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                let name = entry?.file_name();
+                if let Some(pid) = name
+                    .to_str()
+                    .and_then(|s| s.parse::<libc::pid_t>().ok())
+                    .filter(|&p| p > 0)
+                {
+                    signal(pid)?;
                 }
             }
         }
-        result
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn kill_leftovers() -> io::Result<()> {
         Ok(())
     }
 
-    /// Processes the run left behind, which are ours as the subreaper. False
-    /// when they had to be killed.
+    #[cfg(target_os = "linux")]
+    fn kill_leftovers(deadline: Instant) -> io::Result<()> {
+        kill_leftovers_in(Path::new("/proc"), deadline)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn kill_leftovers(_: Instant) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// False when cleanup needed a kill sweep; an error stops the campaign too.
     fn reap_leftovers(
         limit: Duration,
-        grace: Duration,
-        mut sweep: impl FnMut() -> io::Result<()>,
+        mut sweep: impl FnMut(Instant) -> io::Result<()>,
     ) -> io::Result<bool> {
         let until = Instant::now() + limit;
-        let mut clean = true;
-        let mut cleanup_until = None;
-        let mut sweep_error = None;
+        let deadline = until + Duration::from_secs(2);
+        let (mut clean, mut discover) = (true, true);
         loop {
-            // SAFETY: waitpid with a null status pointer is allowed.
-            let pid = unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) };
-            if pid == -1 {
-                let e = io::Error::last_os_error();
-                match e.raw_os_error() {
-                    Some(libc::ECHILD) => return Ok(clean),
-                    Some(libc::EINTR) => {}
-                    _ => return Err(e),
+            // SAFETY: this runner is the sole reaper; a null status pointer is allowed.
+            match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
+                p if p > 0 && Instant::now() < deadline => {
+                    discover = true;
+                    continue;
                 }
-            }
-            let now = Instant::now();
-            if now >= until {
-                let end = cleanup_until.get_or_insert(now + grace);
-                if now >= *end {
-                    if pid != 0 {
-                        // An exit or EINTR leaves the remaining count unknown.
-                        // Check without consuming another exit or extending grace.
-                        let mut info = MaybeUninit::uninit();
-                        // SAFETY: info is writable and its contents are discarded.
-                        if unsafe {
-                            libc::waitid(
-                                libc::P_ALL,
-                                0,
-                                info.as_mut_ptr(),
-                                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                            )
-                        } == -1
-                        {
-                            let e = io::Error::last_os_error();
-                            if e.raw_os_error() == Some(libc::ECHILD) {
-                                return Ok(clean);
-                            }
-                            return Err(e);
-                        }
-                    }
-                    return Err(sweep_error.unwrap_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "children remain after the cleanup deadline",
-                        )
-                    }));
-                }
-                if pid == 0 {
+                p if p > 0 => return Err(io::ErrorKind::TimedOut.into()),
+                0 if Instant::now() < until => {}
+                0 => {
                     clean = false;
-                    // A killed process's children come to us in turn.
-                    if let Err(e) = sweep() {
-                        sweep_error = Some(e);
+                    if discover {
+                        sweep(deadline)?;
+                        discover = false;
+                    }
+                }
+                _ => {
+                    let e = io::Error::last_os_error();
+                    if e.raw_os_error() == Some(libc::ECHILD) {
+                        return Ok(clean);
+                    }
+                    if e.raw_os_error() != Some(libc::EINTR) {
+                        return Err(e);
                     }
                 }
             }
-            if pid == 0 {
-                thread::sleep(Duration::from_millis(10));
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "children remain after cleanup deadline",
+                ));
             }
-        }
-    }
-
-    #[derive(Debug)]
-    enum RunError {
-        Scenario(String),
-        Cleanup(io::Error),
-    }
-
-    impl From<String> for RunError {
-        fn from(message: String) -> Self {
-            Self::Scenario(message)
+            thread::sleep(
+                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+            );
         }
     }
 
@@ -454,23 +506,26 @@ mod ab {
         let out = child.stdout.take().expect("piped");
         let hasher = thread::spawn(move || hash_output(out));
         let mut status = 0;
-        let mut ru = MaybeUninit::<libc::rusage>::uninit();
-        let ru = loop {
-            // SAFETY: pid is our child; a successful wait4 initializes status and ru.
+        let mut ru = MaybeUninit::<libc::rusage>::zeroed();
+        loop {
+            // SAFETY: pid is our child and ru points to writable usage storage.
             if unsafe { libc::wait4(pid, &mut status, 0, ru.as_mut_ptr()) } == pid {
-                // SAFETY: wait4 filled ru for this child.
-                break unsafe { ru.assume_init() };
+                break;
             }
             let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::Interrupted {
-                return Err(RunError::Cleanup(e));
+            if e.raw_os_error() != Some(libc::EINTR) {
+                return Err(RunError::Cleanup(io::Error::new(
+                    e.kind(),
+                    format!("wait4 failed: {e}"),
+                )));
             }
-        };
+        }
+        // SAFETY: the successful wait4 initialized ru.
+        let ru = unsafe { ru.assume_init() };
         let wall = t0.elapsed().as_secs_f64();
-        // A surviving writer may keep the pipe open. On incomplete cleanup the
-        // whole invocation exits; joining its stdout reader here could hang.
-        let clean = reap_leftovers(LEFTOVER_LIMIT, CLEANUP_GRACE, kill_leftovers)
-            .map_err(RunError::Cleanup)?;
+        // Failed cleanup stops the campaign without joining an inherited pipe reader.
+        // Confirmed cleanup retains the ordinary scenario failure path below.
+        let clean = reap_leftovers(LEFTOVER_LIMIT, kill_leftovers).map_err(RunError::Cleanup)?;
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -484,11 +539,10 @@ mod ab {
             return Err(format!("exit status {status}:\n{}", tail.join("\n")).into());
         }
         if !clean {
-            return Err(format!(
-                "processes still ran {}s after it exited, and were killed",
+            return Err(RunError::Scenario(format!(
+                "processes still ran {}s after exit and needed cleanup",
                 LEFTOVER_LIMIT.as_secs()
-            )
-            .into());
+            )));
         }
         let kb = if cfg!(target_os = "macos") {
             1.0
@@ -700,8 +754,10 @@ mod ab {
                         kept[i].path()
                     };
                     let r = run_once(bins[i], &sc.args, cache, &err).map_err(|e| match e {
-                        RunError::Scenario(msg) => format!("{}: {msg}", bins[i].display()).into(),
-                        fatal => fatal,
+                        RunError::Scenario(message) => {
+                            RunError::Scenario(format!("{}: {message}", bins[i].display()))
+                        }
+                        other => other,
                     })?;
                     row.runs[i].push(r);
                 }
@@ -792,8 +848,8 @@ mod ab {
         }
         #[cfg(target_os = "linux")]
         if let Err(e) = enable_subreaper() {
-            eprintln!("ab: cannot track leftover processes: {e}");
-            return ExitCode::FAILURE;
+            eprintln!("ab: cannot initialize child cleanup: {e}");
+            return ExitCode::from(2);
         }
         #[cfg(target_os = "linux")]
         if counters::open().is_none() {
@@ -849,7 +905,7 @@ mod ab {
             match measure(&c, sc, &o) {
                 Ok(row) => rows.push(row),
                 Err(e) => {
-                    eprintln!("ab: stopping after incomplete process cleanup: {e}");
+                    eprintln!("ab: stopping benchmark: {e}");
                     return ExitCode::FAILURE;
                 }
             }
@@ -975,53 +1031,68 @@ mod ab {
         #[cfg(target_os = "linux")]
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
+            // SAFETY: this test is the only test that starts children.
+            unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
             enable_subreaper().unwrap();
-            // Make the last child waitable after grace expires, before the next poll.
-            let mut last = Command::new("sleep").arg("30").spawn().unwrap();
-            let clean = reap_leftovers(Duration::ZERO, Duration::from_millis(1), || {
-                thread::sleep(Duration::from_millis(1));
-                last.kill().unwrap();
-                let mut info = MaybeUninit::uninit();
-                // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
-                let observed = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        last.id(),
-                        info.as_mut_ptr(),
-                        libc::WEXITED | libc::WNOWAIT,
-                    )
-                };
-                assert_eq!(observed, 0);
-                Ok(())
-            })
-            .unwrap();
-            assert!(!clean);
-            assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
-            let t = Instant::now();
-            // This direct child belongs to the test thread. Orphans that sh
-            // leaves behind can belong to the process leader instead.
+            assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
+            let t = Instant::now();
             Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
                 .args(["-c", "(sleep 30 & wait) &"])
                 .status()
                 .unwrap();
-            // A sweep may see no children, or fail to signal one it sees.
-            // Neither case permits the benchmark to continue measuring.
-            for error in [None, Some(io::ErrorKind::PermissionDenied)] {
-                let failure = reap_leftovers(Duration::ZERO, Duration::from_millis(30), || {
-                    error.map_or(Ok(()), |e| Err(io::Error::from(e)))
-                })
-                .unwrap_err();
-                assert_eq!(failure.kind(), error.unwrap_or(io::ErrorKind::TimedOut));
-            }
-            assert!(
-                !reap_leftovers(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap()
-            );
+            assert!(!reap_leftovers(Duration::from_secs(1), kill_leftovers).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
             assert_eq!(
                 direct.wait().unwrap_err().raw_os_error(),
                 Some(libc::ECHILD)
+            );
+
+            // No optional task children file: discover only the listed owned PID.
+            let procfs = tempfile::tempdir().unwrap();
+            fs::create_dir_all(procfs.path().join("self/task/1")).unwrap();
+            let own = process::id();
+            let status = procfs.path().join("self/status");
+            fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
+            fs::create_dir(procfs.path().join(own.to_string())).unwrap();
+            let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
+            let listed = procfs.path().join(hidden.id().to_string());
+            fs::create_dir(&listed).unwrap();
+            let result = reap_leftovers(Duration::ZERO, |deadline| {
+                kill_leftovers_in(procfs.path(), deadline)
+            });
+            if result.is_err() {
+                let _ = hidden.kill();
+                let _ = hidden.wait();
+            }
+            assert!(!result.unwrap());
+            assert_eq!(
+                hidden.wait().unwrap_err().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+            fs::remove_dir(listed).unwrap();
+
+            // A child omitted from both discovery sources must fail boundedly.
+            let mut unknown = Command::new("sleep").arg("30").spawn().unwrap();
+            let started = Instant::now();
+            let result = reap_leftovers(Duration::ZERO, |deadline| {
+                kill_leftovers_in(procfs.path(), deadline)
+            });
+            unknown.kill().unwrap();
+            unknown.wait().unwrap();
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(started.elapsed() < Duration::from_secs(10));
+
+            // Reject even coincident numbers from distinct namespaces, as bytes.
+            fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
+            assert!(check_proc_namespace(procfs.path()).is_err());
+            fs::write(&status, b"Name:\tbad-\xff\n").unwrap();
+            assert!(check_proc_namespace(procfs.path()).is_err());
+            fs::remove_file(&status).unwrap();
+            assert_eq!(
+                check_proc_namespace(procfs.path()).unwrap_err().kind(),
+                io::ErrorKind::NotFound
             );
         }
 

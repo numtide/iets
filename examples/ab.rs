@@ -322,6 +322,7 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
+        let overdue = Instant::now() >= deadline;
         let own_pid = process::id().to_string();
         let status = fs::read(procfs.join("self/status"))?;
         // An ancestor namespace can assign us the same numeric PID. NStgid
@@ -357,17 +358,53 @@ mod ab {
             }
             Ok(())
         };
-        // Even on an overdue first sweep, signal the directly listed children.
+        // Allow a small direct-list pass if the first sweep starts overdue.
+        // Count task entries too, since many threads may have no children.
+        let mut remaining = 32usize;
+        let mut allow_direct = || {
+            if overdue {
+                if remaining == 0 {
+                    return false;
+                }
+                remaining -= 1;
+                true
+            } else {
+                Instant::now() < deadline
+            }
+        };
         if let Ok(threads) = fs::read_dir(procfs.join("self/task")) {
-            for task in threads.flatten() {
-                if let Ok(children) = fs::read_to_string(task.path().join("children")) {
-                    for pid in children.split_whitespace().filter_map(|s| s.parse().ok()) {
-                        if let Err(e) = signal(pid) {
-                            result = Err(e);
-                        }
+            let mut field = Vec::new();
+            for task in threads {
+                if !allow_direct() {
+                    return result;
+                }
+                let Ok(file) = task.and_then(|task| File::open(task.path().join("children")))
+                else {
+                    continue;
+                };
+                // procfs emits space-separated decimal PIDs, including a trailing space.
+                let mut children = BufReader::new(file);
+                loop {
+                    if !allow_direct() {
+                        return result;
+                    }
+                    field.clear();
+                    match children.read_until(b' ', &mut field) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    if let Some(pid) = str::from_utf8(field.trim_ascii())
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        && let Err(e) = signal(pid)
+                    {
+                        result = Err(e);
                     }
                 }
             }
+        }
+        if Instant::now() >= deadline {
+            return result;
         }
         // Bound the system-wide fallback, which scales with unrelated processes.
         for entry in fs::read_dir(procfs)? {
@@ -400,13 +437,21 @@ mod ab {
     fn reap_leftovers(
         until: Instant,
         deadline: Instant,
+        sweep: impl FnMut(Instant) -> io::Result<()>,
+    ) -> io::Result<bool> {
+        reap_with_final_polls(until, deadline, 256, sweep)
+    }
+
+    fn reap_with_final_polls(
+        until: Instant,
+        deadline: Instant,
+        mut final_polls: usize,
         mut sweep: impl FnMut(Instant) -> io::Result<()>,
     ) -> io::Result<bool> {
         let mut clean = true;
         let mut sweep_error = None;
         // Drain exits already pending at the deadline, even if several arrived
         // between polls. Bound the work if descendants keep producing exits.
-        let mut final_polls = 256;
         loop {
             // A timeout decision needs an observation made after the deadline.
             let now = Instant::now();
@@ -451,6 +496,11 @@ mod ab {
                             }
                             return Err(e);
                         }
+                    }
+                    if clean {
+                        // Exits exhausted the budget before we observed a live child.
+                        // waitid confirmed children remain, so attempt one sweep.
+                        sweep(deadline)?;
                     }
                     return Err(sweep_error.unwrap_or_else(|| {
                         io::Error::new(
@@ -1049,6 +1099,8 @@ mod ab {
         use std::os::unix::fs::{PermissionsExt, symlink};
         use std::os::unix::net::UnixStream;
         #[cfg(target_os = "linux")]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(target_os = "linux")]
         use std::str;
 
         use super::*;
@@ -1139,6 +1191,23 @@ mod ab {
                 assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
 
+            // Two pending exits exhaust a reduced poll budget before a live sibling.
+            let ready = [(); 2].map(|_| Command::new("true").spawn().unwrap());
+            for child in &ready {
+                wait_until_exited(child.id());
+            }
+            let mut live = Command::new("sleep").arg("30").spawn().unwrap();
+            let expired = Instant::now();
+            let mut sweeps = 0;
+            let error = reap_with_final_polls(expired, expired, 1, |_| {
+                sweeps += 1;
+                live.kill()
+            })
+            .unwrap_err();
+            live.kill().unwrap();
+            live.wait().unwrap();
+            assert_eq!((error.kind(), sweeps), (io::ErrorKind::TimedOut, 1));
+
             // Model a procfs listing that omits a live child PID.
             let procfs = tempfile::tempdir().unwrap();
             let own_pid = process::id().to_string();
@@ -1170,9 +1239,6 @@ mod ab {
             // claim success or grant itself another grace period.
             let mut unknown = Command::new("sleep").arg("30").spawn().unwrap();
             fs::write(task.join("children"), "").unwrap();
-            let expected = fs::read_dir(procfs.path())
-                .err()
-                .map_or(io::ErrorKind::TimedOut, |e| e.kind());
             let expired = Instant::now() - Duration::from_secs(1);
             let mut sweeps = 0;
             let error = reap_leftovers(expired, expired, |deadline| {
@@ -1180,7 +1246,7 @@ mod ab {
                 kill_leftovers_in(procfs.path(), deadline)
             })
             .unwrap_err();
-            assert_eq!((sweeps, error.kind()), (1, expected));
+            assert_eq!((sweeps, error.kind()), (1, io::ErrorKind::TimedOut));
             unknown.kill().unwrap();
             unknown.wait().unwrap();
             fs::set_permissions(procfs.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -1188,11 +1254,29 @@ mod ab {
             let mut known = Command::new("sleep").arg("30").spawn().unwrap();
             let mut fallback = Command::new("true").spawn().unwrap();
             wait_until_exited(fallback.id());
-            fs::write(task.join("children"), known.id().to_string()).unwrap();
+            let mut distant = Command::new("true").spawn().unwrap();
+            wait_until_exited(distant.id());
+            fs::write(
+                task.join("children"),
+                format!("{} {}{}", known.id(), "0 ".repeat(1024), distant.id()),
+            )
+            .unwrap();
             fs::create_dir(procfs.path().join(fallback.id().to_string())).unwrap();
             kill_leftovers_in(procfs.path(), expired).unwrap();
-            wait_until_exited(known.id());
-            known.wait().unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = known.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= until {
+                    known.kill().unwrap();
+                    known.wait().unwrap();
+                    panic!("overdue sweep left the directly listed child alive");
+                }
+                thread::sleep(Duration::from_millis(5));
+            };
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert!(distant.wait().unwrap().success());
             assert!(fallback.wait().unwrap().success());
             let t = Instant::now();
             // This direct child belongs to the test thread. Orphans that sh

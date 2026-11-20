@@ -115,11 +115,10 @@ prints the message replaces Rust's `SIGSEGV` handler.
 
 `api::value` is the safe way to look at what an evaluation produced
 (`examples/value.rs`). `value::Eval<'e>` wraps a `&'e mut Evaluator`.
-`value::Value<'e>` is one value of that evaluator: a `Copy` machine word
-whose methods never reach into the arena by themselves. A `Value<'e>`
-exists only while the evaluator is borrowed, so it can't outlive the arena it
-points into, and it is invariant in `'e`, so it never widens to another
-borrow. You never see a `runtime::Word`, an arena pointer or a tag.
+`value::Value<'e>` is a `Copy` machine word carrying the lifetime of that
+borrow. Use `Eval::evaluator()` to borrow the underlying evaluator for
+operations such as `api::report`. To use the original evaluator mutably,
+finish using its typed handles and the `Eval` wrapper first.
 
 Methods on `Value` read an already-forced value and need nothing else.
 Methods on `Eval` may evaluate, intern a name or allocate.
@@ -127,7 +126,7 @@ Methods on `Eval` may evaluate, intern a name or allocate.
 | What | Where |
 |:---|:---|
 | Borrow an evaluator | `value::Eval::new(&mut Evaluator)` |
-| The evaluator back, for the rest of the library | `Eval::evaluator()` |
+| Shared access to the underlying evaluator | `Eval::evaluator()` |
 | Evaluate an expression | `Eval::eval_expr(src, base_dir)` |
 | Evaluate an `EvalArgs` | `Eval::evaluate(args)` |
 | Force to weak head normal form | `Eval::force(v)` |

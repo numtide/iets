@@ -53,7 +53,7 @@ pub fn json_str_list(items: impl Iterator<Item = impl AsRef<str>>) -> Vec<u8> {
         if i > 0 {
             out.push(b',');
         }
-        out.extend(json_str(s.as_ref()));
+        serde_json::to_writer(&mut out, s.as_ref()).expect("string to JSON");
     }
     out.push(b']');
     out

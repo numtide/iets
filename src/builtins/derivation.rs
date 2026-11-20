@@ -787,7 +787,11 @@ fn derivation_strict_internal(
     // same way, so the first attribute still bound in a root tree is next.
     let site = if ev.drv.keep_site {
         provenance::real_pos(ev, pos)
-            .or_else(|| attrs.get(s.pname).and_then(|a| provenance::real_pos(ev, a.pos)))
+            .or_else(|| {
+                attrs
+                    .get(s.pname)
+                    .and_then(|a| provenance::real_pos(ev, a.pos))
+            })
             .or_else(|| {
                 let p = coerce::drv_fallback(ev, attrs, pos, name_pos);
                 provenance::real_pos(ev, p)

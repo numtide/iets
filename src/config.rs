@@ -491,9 +491,10 @@ impl Config {
         }
     }
 
-    /// `load` for iets's own commands, which send a daemon no settings.
+    /// `load` for iets's own commands but `iets build`, which send a daemon no
+    /// settings.
     pub fn load_native(overrides: &[(String, String)]) -> Result<Config> {
-        let why = "iets's own commands send a daemon no settings; classic mode does";
+        let why = "this command sends a daemon no settings; 'iets build' and classic mode do";
         note_unsent(overrides, &[], why);
         Config::load(overrides)
     }

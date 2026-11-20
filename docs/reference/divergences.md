@@ -762,8 +762,9 @@ These flags are not ignored:
 `docs/reference/settings.md` has the rules. A setting that acts in the Nix
 client and that iets has nothing for falls back in classic mode and
 gives one `ignored-setting` warning in iets's own commands. A store setting
-given to `iets build`, `eval-jobs` or `print-dev-env` with `--option` gives
-one too, because those commands send a daemon no settings.
+given to `eval-jobs` or `print-dev-env` with `--option` gives one too,
+because those commands send a daemon no settings. `iets build` sends them,
+as classic mode does.
 
 ### A flake's `nixConfig`
 

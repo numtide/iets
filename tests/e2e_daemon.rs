@@ -451,6 +451,48 @@ fn a_path_on_stdout_or_a_failure() {
     assert!(!wrong.status.success() && stdout(&wrong).is_empty());
 }
 
+/// `--cores`, `-j` and `--option` reach the daemon in `SetOptions`, as Nix's
+/// client sends them: the build sees the cores as `NIX_BUILD_CORES`.
+#[test]
+fn the_daemon_gets_the_build_settings() {
+    let s = store!();
+    let cores = |name: &str, args: &[&str]| {
+        let f = s.write(
+            &format!("cores/{name}.nix"),
+            &format!(
+                "derivation {{ name = \"iets-cores-{name}-@NONCE@\"; system = \"@SYSTEM@\"; builder = \"@SHELL@\"; args = [ \"-c\" \"echo $NIX_BUILD_CORES > $out\" ]; }}\n"
+            ),
+        );
+        let o = s
+            .iets()
+            .args(["build", "--builder", "daemon", "--no-tracing-cache"])
+            .args(args)
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{args:?}: {}", stderr(&o));
+        assert!(
+            !stderr(&o).contains("is ignored"),
+            "{args:?}: {}",
+            stderr(&o)
+        );
+        let out = s
+            .store_dir()
+            .join(stdout(&o).trim().rsplit('/').next().unwrap());
+        fs::read_to_string(out).unwrap().trim().to_string()
+    };
+    assert_eq!(cores("flag", &["--cores", "3", "-j", "2"]), "3");
+    assert_eq!(cores("option", &["--option", "cores", "5"]), "5");
+
+    let bad = s
+        .iets()
+        .args(["build", "--builder", "daemon", "-j", "many", "-E", "[]"])
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("'max-jobs'"), "{}", stderr(&bad));
+}
+
 /// What a connection was told is valid stays valid until it closes.
 #[test]
 fn a_queried_path_is_rooted_until_the_connection_closes() {

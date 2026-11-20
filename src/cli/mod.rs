@@ -183,12 +183,18 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
             _ => set_positional(&mut a, s),
         }
     });
-    // for its warnings, and for the session's copy that the fetcher reads
-    if let Err(e) = config::Config::load_native(&f.overrides) {
+    // for its warnings, and for the session's copy that the fetcher and
+    // `iets build`'s `SetOptions` read
+    let loaded = match help::command() {
+        Some("build") => config::Config::load(&f.overrides),
+        _ => config::Config::load_native(&f.overrides),
+    };
+    if let Err(e) = loaded {
         session::exit(e.report())
     }
     ignored::flush();
     (a.includes, a.args, a.pure) = (f.includes, f.args, f.pure);
+    a.overrides = f.overrides;
     a.attrs = f.attrs;
     a.attr = a.attrs.last().cloned();
     a

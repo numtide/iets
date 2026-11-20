@@ -19,6 +19,7 @@ use crate::cli::render::{self, text};
 use crate::cli::{
     self, EvalArgs, Input, Run, build_targets, devenv, parse_eval_args, report, run_for,
 };
+use crate::config;
 use crate::error::Error as CrateError;
 use crate::eval::{self, Evaluator};
 use crate::log;
@@ -45,6 +46,8 @@ struct BuildArgs {
     sources: HashMap<String, PathBuf>,
     /// What names this run's roots in the roots store ([`keep_outputs`]).
     root_key: Vec<Vec<u8>>,
+    /// `--option`, `-j` and `--cores`, for the `grpc://` warning.
+    overrides: Vec<(String, String)>,
 }
 
 /// `iets build`: evaluate to derivations and ship their closure from memory, or (legacy)
@@ -114,6 +117,7 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         outputs: Vec::new(),
         sources: HashMap::new(),
         root_key: Vec::new(),
+        overrides: Vec::new(),
     };
     let mut rest: Vec<String> = Vec::new();
     each_arg(argv, |s, next| match s {
@@ -123,6 +127,9 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         "--dry-run" => b.dry_run = true,
         "--json" => b.json = true,
         "-k" | "--keep-going" => b.keep_going = true,
+        // the settings they alias, so they reach the daemon as `--option` does
+        "-j" | "--max-jobs" => rest.extend(setting(s, "max-jobs", next())),
+        "--cores" => rest.extend(setting(s, "cores", next())),
         "--fetch-to" => b.fetch_to = Some(next().into()),
         "-o" | "--out-link" => b.out_link = Some(next()),
         "--out" => b.outputs.push(next()),
@@ -137,7 +144,18 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
     });
     let a = parse_eval_args(&rest);
     b.root_key = root_key(&installables(&a));
+    b.overrides = a.overrides.clone();
     (b, a)
+}
+
+/// `--option SETTING VALUE` for `flag`, which aliases `SETTING`. The value is
+/// checked as the setting's, an integer or for `max-jobs` also `auto`, so a
+/// bad one stops the run at the flag.
+fn setting(flag: &str, setting: &str, value: String) -> [String; 3] {
+    if let Err(e) = config::check_value(setting, &value) {
+        arg_error(format!("{flag}: {e}"))
+    }
+    ["--option".into(), setting.into(), value]
 }
 
 /// One `EvalArgs` per installable, sorted and without repeats, so every order
@@ -387,11 +405,26 @@ fn build_roots(
     if roots.is_empty() {
         return no_output("nothing to build: the expression has no derivation in it");
     }
-    let cfg = apibuild::config();
+    // the settings `parse_eval_args` loaded, with every `--option`
+    let cfg = Session::current()
+        .nix_conf
+        .get()
+        .cloned()
+        .unwrap_or_else(apibuild::config);
     let transport = match apibuild::transport(b.url.as_deref(), &cfg) {
         Ok(t) => t,
         Err(e) => return e.report(),
     };
+    if matches!(transport, worker::Transport::Grpc(_)) {
+        config::note_grpc(&b.overrides);
+    }
+    let mut opts = match worker::Options::try_from(&cfg) {
+        Ok(o) => o,
+        Err(e) => return e.report(),
+    };
+    // one root is one question, and its first failure answers it; several
+    // roots are several questions, and each one gets its verdict
+    opts.keep_going |= b.keep_going || roots.len() > 1;
     let t0 = Instant::now();
     let plan = match apibuild::plan_with(roots, inputs) {
         Ok(p) => p,
@@ -404,12 +437,6 @@ fn build_roots(
             plan.store_drvs
         );
     }
-    let opts = worker::Options {
-        // one root is one question, and its first failure answers it; several
-        // roots are several questions, and each one gets its verdict
-        keep_going: b.keep_going || roots.len() > 1,
-        ..Default::default()
-    };
     let mut d = match Dispatch::open(&transport, &opts, plan, prov.clone(), Style::detect()) {
         Ok(d) => d.overrides(b.sources.clone()),
         Err(e) => return e.report(),

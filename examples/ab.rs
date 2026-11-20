@@ -244,21 +244,33 @@ mod ab {
 
     fn wait_for_stdout(
         eof: &mpsc::Receiver<io::Result<()>>,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<(), RunError> {
-        eof.recv_timeout(timeout)
-            .map_err(|e| {
-                RunError::Cleanup(match e {
-                    mpsc::RecvTimeoutError::Timeout => io::Error::new(
+        loop {
+            // recv_timeout takes a relative duration. Recheck the absolute deadline
+            // so a paused receiver cannot start a second full wait when it resumes.
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(REAP_INTERVAL);
+            match eof.recv_timeout(wait) {
+                Ok(result) => {
+                    return result
+                        .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(RunError::Cleanup(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "benchmark stdout did not close after the run-on limit",
-                    ),
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        io::Error::other("benchmark stdout reader disconnected")
-                    }
-                })
-            })?
-            .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")))
+                    )));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(RunError::Cleanup(io::Error::other(
+                        "benchmark stdout reader disconnected",
+                    )));
+                }
+            }
+        }
     }
 
     /// How long processes a run left behind may go on before they are killed.
@@ -637,10 +649,7 @@ mod ab {
         // A process outside our child tree can still hold a pipe writer.
         // Bound the wait for a writer. A queued EOF is usable immediately,
         // and sorting the completed output may take longer.
-        wait_for_stdout(
-            &eof,
-            cleanup_deadline.saturating_duration_since(Instant::now()),
-        )?;
+        wait_for_stdout(&eof, cleanup_deadline)?;
         let out = hasher
             .join()
             .expect("the hash thread")
@@ -1148,11 +1157,11 @@ mod ab {
             let (notify, eof) = mpsc::channel();
             let hasher = thread::spawn(move || hash_output(reader, notify));
             assert!(matches!(
-                wait_for_stdout(&eof, Duration::ZERO),
+                wait_for_stdout(&eof, Instant::now()),
                 Err(RunError::Cleanup(e)) if e.kind() == io::ErrorKind::TimedOut
             ));
             drop(writer);
-            wait_for_stdout(&eof, Duration::from_secs(10)).unwrap();
+            wait_for_stdout(&eof, Instant::now() + Duration::from_secs(10)).unwrap();
             assert_eq!(
                 hasher.join().unwrap(),
                 Some(<[u8; 32]>::from(Sha256::digest([])))
@@ -1172,7 +1181,7 @@ mod ab {
             let (notify, eof) = mpsc::channel();
             let digest = hash_output(reader, notify);
             assert!(matches!(
-                wait_for_stdout(&eof, Duration::ZERO),
+                wait_for_stdout(&eof, Instant::now()),
                 Err(RunError::Scenario(e)) if e == "read benchmark stdout: injected read failure"
             ));
             assert!(digest.is_none());

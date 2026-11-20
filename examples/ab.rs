@@ -355,16 +355,21 @@ mod ab {
             }
         }
         let mut result = Ok(());
-        for entry in fs::read_dir(procfs)? {
-            let name = match entry {
-                Ok(entry) => entry.file_name(),
-                Err(e) => {
-                    result = Err(e);
-                    continue;
+        match fs::read_dir(procfs) {
+            Err(e) => result = Err(e),
+            Ok(entries) => {
+                for entry in entries {
+                    let name = match entry {
+                        Ok(entry) => entry.file_name(),
+                        Err(e) => {
+                            result = Err(e);
+                            continue;
+                        }
+                    };
+                    if let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) {
+                        candidates.push(pid);
+                    }
                 }
-            };
-            if let Some(pid) = name.to_str().and_then(|s| s.parse::<libc::pid_t>().ok()) {
-                candidates.push(pid);
             }
         }
         for pid in candidates {
@@ -391,13 +396,11 @@ mod ab {
     /// Processes the run left behind, which are ours as the subreaper. False
     /// when a live child exceeded the run-on limit.
     fn reap_leftovers(
-        limit: Duration,
-        grace: Duration,
+        until: Instant,
+        deadline: Instant,
         mut sweep: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
-        let until = Instant::now() + limit;
         let mut clean = true;
-        let mut cleanup_until = None;
         let mut sweep_error = None;
         // Drain exits already pending at the deadline, even if several arrived
         // between polls. Bound the work if descendants keep producing exits.
@@ -416,15 +419,12 @@ mod ab {
                 }
             }
             if now >= until {
-                // Exits may have started the deadline before a live child was
-                // observed. Give the first actual sweep its full grace.
+                // Always attempt the first sweep, even if the deadline has passed.
                 let first_sweep = pid == 0 && clean;
                 if first_sweep {
                     clean = false;
-                    cleanup_until = Some(now + grace);
                 }
-                let end = cleanup_until.get_or_insert(now + grace);
-                if !first_sweep && now >= *end {
+                if !first_sweep && now >= deadline {
                     if pid != 0 && final_polls > 0 {
                         final_polls -= 1;
                         continue;
@@ -465,7 +465,10 @@ mod ab {
                 }
             }
             if pid == 0 {
-                thread::sleep(Duration::from_millis(10));
+                let next = if clean { until } else { deadline };
+                thread::sleep(
+                    Duration::from_millis(10).min(next.saturating_duration_since(Instant::now())),
+                );
             }
         }
     }
@@ -528,8 +531,8 @@ mod ab {
             if e.kind() != io::ErrorKind::Interrupted {
                 // The measurement has failed, but adopted descendants can
                 // still be running even when wait4 reports ECHILD.
-                if let Err(cleanup) = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, kill_leftovers)
-                {
+                let now = Instant::now();
+                if let Err(cleanup) = reap_leftovers(now, now + CLEANUP_GRACE, kill_leftovers) {
                     return Err(RunError::Cleanup(io::Error::new(
                         e.kind(),
                         format!("wait4: {e}; leftover cleanup: {cleanup}"),
@@ -539,16 +542,17 @@ mod ab {
             }
         };
         let wall = t0.elapsed().as_secs_f64();
-        let output_deadline = Instant::now() + LEFTOVER_LIMIT + CLEANUP_GRACE;
+        let run_on_deadline = Instant::now() + LEFTOVER_LIMIT;
+        let cleanup_deadline = run_on_deadline + CLEANUP_GRACE;
         // A surviving writer may keep the pipe open. On incomplete cleanup the
         // whole invocation exits; joining its stdout reader here could hang.
-        let clean = reap_leftovers(LEFTOVER_LIMIT, CLEANUP_GRACE, kill_leftovers)
+        let clean = reap_leftovers(run_on_deadline, cleanup_deadline, kill_leftovers)
             .map_err(RunError::Cleanup)?;
         // A process outside our child tree can still hold a pipe writer.
         // Only bound the read; sorting the completed output may take longer.
         wait_for_stdout(
             &eof,
-            output_deadline.saturating_duration_since(Instant::now()),
+            cleanup_deadline.saturating_duration_since(Instant::now()),
         )
         .map_err(RunError::Cleanup)?;
         let out = hasher.join().expect("the hash thread");
@@ -1040,7 +1044,7 @@ mod ab {
     #[cfg(test)]
     mod tests {
         #[cfg(target_os = "linux")]
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{PermissionsExt, symlink};
         use std::os::unix::net::UnixStream;
         #[cfg(target_os = "linux")]
         use std::str;
@@ -1073,6 +1077,16 @@ mod ab {
         }
 
         #[cfg(target_os = "linux")]
+        fn reap_after(
+            limit: Duration,
+            grace: Duration,
+            sweep: impl FnMut() -> io::Result<()>,
+        ) -> io::Result<bool> {
+            let until = Instant::now() + limit;
+            reap_leftovers(until, until + grace, sweep)
+        }
+
+        #[cfg(target_os = "linux")]
         fn wait_until_exited(pid: u32) {
             let mut info = MaybeUninit::uninit();
             // SAFETY: info is writable; WNOWAIT leaves the exit for the reaper.
@@ -1093,7 +1107,7 @@ mod ab {
             enable_subreaper().unwrap();
             // Make two children waitable after grace expires, before the next poll.
             let mut last = [(); 2].map(|_| Command::new("sleep").arg("30").spawn().unwrap());
-            let clean = reap_leftovers(Duration::ZERO, Duration::from_millis(1), || {
+            let clean = reap_after(Duration::ZERO, Duration::from_millis(1), || {
                 thread::sleep(Duration::from_millis(1));
                 for child in &mut last {
                     child.kill().unwrap();
@@ -1112,7 +1126,7 @@ mod ab {
             wait_until_exited(ready.id());
             let mut live = Command::new("sleep").arg("30").spawn().unwrap();
             assert!(
-                !reap_leftovers(Duration::ZERO, Duration::ZERO, || {
+                !reap_after(Duration::ZERO, Duration::ZERO, || {
                     live.kill().unwrap();
                     wait_until_exited(live.id());
                     Ok(())
@@ -1135,10 +1149,11 @@ mod ab {
             let mut same_namespace = b"Name:\tinvalid-\xff\nNStgid:\t".to_vec();
             same_namespace.extend_from_slice(own_pid.as_bytes());
             fs::write(status, same_namespace).unwrap();
+            fs::set_permissions(procfs.path(), fs::Permissions::from_mode(0o111)).unwrap();
             let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
             fs::write(task.join("children"), hidden.id().to_string()).unwrap();
             assert!(
-                !reap_leftovers(Duration::ZERO, CLEANUP_GRACE, || kill_leftovers_in(
+                !reap_after(Duration::ZERO, CLEANUP_GRACE, || kill_leftovers_in(
                     procfs.path()
                 ))
                 .unwrap()
@@ -1148,6 +1163,24 @@ mod ab {
                 Some(libc::ECHILD)
             );
 
+            // With a genuinely unknown child, even a late first sweep cannot
+            // claim success or grant itself another grace period.
+            let mut unknown = Command::new("sleep").arg("30").spawn().unwrap();
+            fs::write(task.join("children"), "").unwrap();
+            let expected = fs::read_dir(procfs.path())
+                .err()
+                .map_or(io::ErrorKind::TimedOut, |e| e.kind());
+            let expired = Instant::now() - Duration::from_secs(1);
+            let mut sweeps = 0;
+            let error = reap_leftovers(expired, expired, || {
+                sweeps += 1;
+                kill_leftovers_in(procfs.path())
+            })
+            .unwrap_err();
+            assert_eq!((sweeps, error.kind()), (1, expected));
+            unknown.kill().unwrap();
+            unknown.wait().unwrap();
+            fs::set_permissions(procfs.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let t = Instant::now();
             // This direct child belongs to the test thread. Orphans that sh
             // leaves behind can belong to the process leader instead.
@@ -1181,15 +1214,13 @@ mod ab {
             // A sweep may see no children, or fail to signal one it sees.
             // Neither case permits the benchmark to continue measuring.
             for error in [None, Some(io::ErrorKind::PermissionDenied)] {
-                let failure = reap_leftovers(Duration::ZERO, Duration::from_millis(30), || {
+                let failure = reap_after(Duration::ZERO, Duration::from_millis(30), || {
                     error.map_or(Ok(()), |e| Err(io::Error::from(e)))
                 })
                 .unwrap_err();
                 assert_eq!(failure.kind(), error.unwrap_or(io::ErrorKind::TimedOut));
             }
-            assert!(
-                !reap_leftovers(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap()
-            );
+            assert!(!reap_after(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
             assert_eq!(
                 direct.wait().unwrap_err().raw_os_error(),

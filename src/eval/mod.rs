@@ -2072,14 +2072,14 @@ impl Evaluator {
         pos: Pos,
     ) -> EvalResult<()> {
         let base = lam.base as usize;
-        let slots = &env2.slots_n(base + lam.nslots())[base..];
         match &lam.param {
-            ParamIr::Ident => slots[0].set(arg),
+            ParamIr::Ident => env2.slot(base).set(arg),
             ParamIr::Formals {
                 has_bind,
                 formals,
                 ellipsis,
             } => {
+                let slots = &env2.slots_n(base + lam.nslots())[base..];
                 let attrs = self
                     .force_attrs(
                         arg,

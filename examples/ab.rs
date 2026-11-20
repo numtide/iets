@@ -1419,12 +1419,19 @@ mod ab {
                 thread::sleep(Duration::from_millis(5));
             };
             assert_eq!(status.signal(), Some(libc::SIGKILL));
-            let untouched = [&mut distant, &mut fallback].map(|child| {
-                let status = child.try_wait().unwrap();
+            let until = Instant::now() + Duration::from_millis(100);
+            let untouched = loop {
+                let untouched =
+                    [&mut distant, &mut fallback].map(|child| child.try_wait().unwrap().is_none());
+                if untouched != [true, true] || Instant::now() >= until {
+                    break untouched;
+                }
+                thread::sleep(REAP_INTERVAL);
+            };
+            for child in [&mut distant, &mut fallback] {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                status.is_none()
-            });
+            }
             assert_eq!(untouched, [true, true]);
             let t = Instant::now();
             // This direct child belongs to the test thread. Orphans that sh

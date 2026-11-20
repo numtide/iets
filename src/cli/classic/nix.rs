@@ -4,7 +4,6 @@
 //! for everything else.
 //! See `docs/reference/classic.md`.
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,13 +18,12 @@ use crate::build::render::Style;
 use crate::cli::{
     self, EvalArgs, Input, Outcome, Run, abs_path, auto_args, cwd, devenv, render, report, search,
 };
-use crate::eval::{self, Error, ErrorKind, EvalConfig, EvalResult, Evaluator, Pos};
+use crate::eval::{Error, ErrorKind, EvalConfig, EvalResult, Evaluator, Pos};
 use crate::provenance::Provenance;
 use crate::remote::plan::Plan;
 use crate::remote::worker::{Options, Transport};
-use crate::runtime::{Value, Word};
+use crate::runtime::Word;
 use crate::store::path::StorePath;
-use crate::syntax::symbol::FxHashSet;
 use crate::{config, error, ignored, print, session};
 
 const NAME: &str = "nix";
@@ -349,8 +347,7 @@ fn eval_run(ev: &mut Evaluator, n: &Nix) -> error::Result<Vec<u8>> {
         print::print_json(ev, v, &mut out, &mut ctx, true, Pos::NONE)?;
         out.push(b'\n');
     } else {
-        let mut seen = HashSet::default();
-        print_eval(ev, v, &mut out, &mut seen, 0)?;
+        print::print_eval(ev, v, &mut out)?;
         out.push(b'\n');
     }
     Ok(out)
@@ -632,138 +629,6 @@ fn realise(
     devenv::keep_outputs(&local(), &key, &kept);
     render::bytes(out.as_bytes());
     0
-}
-
-/// An error the printer shows in place of the value. `Unsupported` must
-/// escape so the caller can fall back to the real nix instead.
-fn printable(e: &Error) -> bool {
-    !matches!(e.kind, ErrorKind::Unsupported | ErrorKind::StackOverflow)
-}
-
-/// `nix eval`'s printer (print.cc:Printer with `force`, `derivationPaths`
-/// and `trackRepeated`): forces as it goes, prints a derivation as its drv
-/// path and a failing value as `«error: …»`.
-fn print_eval(
-    ev: &mut Evaluator,
-    w: Word,
-    out: &mut Vec<u8>,
-    seen: &mut FxHashSet<u64>,
-    depth: usize,
-) -> EvalResult<()> {
-    if depth > eval::MAX_CALL_DEPTH as usize {
-        return Err(Error::stack_overflow(Pos::NONE));
-    }
-    let w = match ev.force(w) {
-        Ok(w) => w,
-        Err(e) if printable(&e) => {
-            // docs/explanation/caching.md: errors are never cached. A read
-            // that failed leaves no observation of the absence, so an entry
-            // holding this text would replay it after the path appeared.
-            ev.trace().mark_uncacheable();
-            out.extend_from_slice("«error: ".as_bytes());
-            out.extend_from_slice(e.msg.as_bytes());
-            out.extend_from_slice("»".as_bytes());
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
-    match w.view() {
-        Value::Attrs(a) => {
-            // Nix keys the seen set on the `Bindings` and shares one empty
-            // `Bindings`, so the second empty attrset is «repeated».
-            let key = if a.is_empty() { 0 } else { w.bits() };
-            if !seen.insert(key) {
-                out.extend_from_slice("«repeated»".as_bytes());
-                return Ok(());
-            }
-            if let Some(drv) = derivation_path(ev, w)? {
-                out.extend_from_slice("«derivation".as_bytes());
-                if !drv.is_empty() {
-                    out.push(b' ');
-                    out.extend_from_slice(&drv);
-                }
-                out.extend_from_slice("»".as_bytes());
-                return Ok(());
-            }
-            out.extend_from_slice(b"{ ");
-            for attr in print::lexicographic_order(ev, a) {
-                print::print_attr_name(out, ev.interner.name(attr.sym));
-                out.extend_from_slice(b" = ");
-                print_eval(ev, attr.cell.get(), out, seen, depth + 1)?;
-                out.extend_from_slice(b"; ");
-            }
-            out.push(b'}');
-        }
-        Value::List(l) => {
-            if l.len > 0 && !seen.insert(w.bits()) {
-                out.extend_from_slice("«repeated»".as_bytes());
-                return Ok(());
-            }
-            out.extend_from_slice(b"[ ");
-            for c in l.cells() {
-                print_eval(ev, c.get(), out, seen, depth + 1)?;
-                out.push(b' ');
-            }
-            out.push(b']');
-        }
-        Value::PrimOp(p) => {
-            out.extend_from_slice("«primop ".as_bytes());
-            out.extend_from_slice(primop_name(p.name).as_bytes());
-            out.extend_from_slice("»".as_bytes());
-        }
-        Value::PrimOpApp(p) => {
-            out.extend_from_slice("«partially applied primop ".as_bytes());
-            out.extend_from_slice(primop_name(p.op.name).as_bytes());
-            out.extend_from_slice("»".as_bytes());
-        }
-        Value::Lambda(_) => {
-            out.extend_from_slice(print::show_value_short(ev, w).as_bytes());
-        }
-        _ => {
-            let mut one = HashSet::default();
-            print::print_ambiguous(ev, w, 1, out, &mut one, depth)?;
-        }
-    }
-    Ok(())
-}
-
-/// eval.cc:addPrimOp drops a leading `__` from a primop's name, so that is
-/// the name print.cc:printFunction shows.
-fn primop_name(name: &str) -> &str {
-    name.strip_prefix("__").unwrap_or(name)
-}
-
-/// print.cc:printDerivation: `Some(drvPath)` when the attrset is a
-/// derivation, which the printer shows instead of the attributes.
-fn derivation_path(ev: &mut Evaluator, w: Word) -> EvalResult<Option<Vec<u8>>> {
-    let Some(attrs) = w.as_attrs() else {
-        return Ok(None);
-    };
-    let Some(t) = attrs.get(ev.s.type_) else {
-        return Ok(None);
-    };
-    let t = ev.force_string(
-        t.cell.get(),
-        Pos::NONE,
-        "while evaluating the 'type' attribute",
-    )?;
-    if t.bytes != b"derivation" {
-        return Ok(None);
-    }
-    let Some(dp) = attrs.get(ev.s.drv_path) else {
-        return Ok(Some(Vec::new()));
-    };
-    let mut ctx = Vec::new();
-    let s = ev.coerce_to_string(
-        dp.cell.get(),
-        &mut ctx,
-        dp.pos,
-        "while evaluating the drvPath of a derivation",
-        false,
-        false,
-        true,
-    )?;
-    Ok(Some(s.to_vec()))
 }
 
 #[cfg(test)]

@@ -136,10 +136,49 @@ pub fn print_ambiguous(
     seen: &mut FxHashSet<u64>,
     depth: usize,
 ) -> EvalResult<()> {
+    print_value::<false>(ev, w, cell, out, seen, depth)
+}
+
+/// Modern `nix eval` forces each member as it prints it.
+pub(crate) fn print_eval(ev: &mut Evaluator, w: Word, out: &mut Vec<u8>) -> EvalResult<()> {
+    print_value::<true>(ev, w, 1, out, &mut FxHashSet::default(), 0)
+}
+
+// Keep the attribute iterator's sorting workspace out of recursive printer frames.
+#[inline(never)]
+fn printer_attr_order(
+    ev: &Evaluator,
+    attrs: &'static AttrsObj,
+) -> impl ExactSizeIterator<Item = &'static Attr> + use<> {
+    lexicographic_order(ev, attrs)
+}
+
+/// The modern printer forces while walking. The ambiguous printer inspects thunk state.
+fn print_value<const MODERN: bool>(
+    ev: &mut Evaluator,
+    w: Word,
+    cell: u64,
+    out: &mut Vec<u8>,
+    seen: &mut FxHashSet<u64>,
+    depth: usize,
+) -> EvalResult<()> {
     if depth > eval::MAX_CALL_DEPTH as usize {
         return Err(Error::stack_overflow(Pos::NONE));
     }
-    if w.is_thunk() {
+    let w = if MODERN {
+        match ev.force(w) {
+            Ok(w) => w,
+            Err(e) if !matches!(e.kind, ErrorKind::Unsupported | ErrorKind::StackOverflow) => {
+                // The failed read has no observation to invalidate a cached result.
+                ev.trace().mark_uncacheable();
+                out.extend_from_slice("«error: ".as_bytes());
+                out.extend_from_slice(e.msg.as_bytes());
+                out.extend_from_slice("»".as_bytes());
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    } else if w.is_thunk() {
         let st = w.thunk_state_cell().get();
         if st.is_blackhole() {
             // only this fiber's own claim is the program's recursion; a
@@ -152,10 +191,12 @@ pub fn print_ambiguous(
         } else if w.thunk_unforced(st) || w.thunk_speculated(st) {
             out.extend_from_slice(b"<CODE>");
         } else {
-            return print_ambiguous(ev, w.thunk_value(), cell, out, seen, depth);
+            return print_value::<MODERN>(ev, w.thunk_value(), cell, out, seen, depth);
         }
         return Ok(());
-    }
+    } else {
+        w
+    };
     match w.view() {
         Value::Int(i) => out.extend_from_slice(i.to_string().as_bytes()),
         Value::Float(f) => out.extend_from_slice(format_g(f).as_bytes()),
@@ -164,15 +205,24 @@ pub fn print_ambiguous(
         Value::String(s) => print_literal_string(out, s.bytes),
         Value::Path(p) => out.extend_from_slice(p.path),
         Value::Attrs(a) => {
-            if !a.is_empty() && !seen.insert(w.bits()) {
+            // Modern Nix shares one identity for all empty sets. The ambiguous printer skips them.
+            let repeated = if a.is_empty() {
+                MODERN && !seen.insert(0)
+            } else {
+                !seen.insert(w.bits())
+            };
+            if repeated {
                 out.extend_from_slice("«repeated»".as_bytes());
                 return Ok(());
             }
+            if MODERN && print_derivation(ev, a, out)? {
+                return Ok(());
+            }
             out.extend_from_slice(b"{ ");
-            for attr in lexicographic_order(ev, a) {
+            for attr in printer_attr_order(ev, a) {
                 print_attr_name(out, ev.interner.name(attr.sym));
                 out.extend_from_slice(b" = ");
-                print_ambiguous(
+                print_value::<MODERN>(
                     ev,
                     attr.cell.get(),
                     &attr.cell as *const _ as u64,
@@ -185,22 +235,78 @@ pub fn print_ambiguous(
             out.push(b'}');
         }
         Value::List(l) => {
-            if l.len > 0 && !seen.insert(cell) {
+            let key = if MODERN { w.bits() } else { cell };
+            if l.len > 0 && !seen.insert(key) {
                 out.extend_from_slice("«repeated»".as_bytes());
                 return Ok(());
             }
             out.extend_from_slice(b"[ ");
             for c in l.cells() {
-                print_ambiguous(ev, c.get(), c as *const _ as u64, out, seen, depth + 1)?;
+                print_value::<MODERN>(ev, c.get(), c as *const _ as u64, out, seen, depth + 1)?;
                 out.push(b' ');
             }
             out.push(b']');
+        }
+        Value::Lambda(_) if MODERN => out.extend_from_slice(show_value_short(ev, w).as_bytes()),
+        Value::PrimOp(p) if MODERN => {
+            out.extend_from_slice("«primop ".as_bytes());
+            out.extend_from_slice(primop_name(p.name).as_bytes());
+            out.extend_from_slice("»".as_bytes());
+        }
+        Value::PrimOpApp(p) if MODERN => {
+            out.extend_from_slice("«partially applied primop ".as_bytes());
+            out.extend_from_slice(primop_name(p.op.name).as_bytes());
+            out.extend_from_slice("»".as_bytes());
         }
         Value::Lambda(_) => out.extend_from_slice(b"<LAMBDA>"),
         Value::PrimOp(_) => out.extend_from_slice(b"<PRIMOP>"),
         Value::PrimOpApp(_) => out.extend_from_slice(b"<PRIMOP-APP>"),
     }
     Ok(())
+}
+
+/// eval.cc:addPrimOp drops a leading `__` from a primop's name, so that is
+/// the name print.cc:printFunction shows.
+fn primop_name(name: &str) -> &str {
+    name.strip_prefix("__").unwrap_or(name)
+}
+
+/// A derivation appears as its drv path in modern output.
+fn print_derivation(
+    ev: &mut Evaluator,
+    attrs: &'static AttrsObj,
+    out: &mut Vec<u8>,
+) -> EvalResult<bool> {
+    let Some(t) = attrs.get(ev.s.type_) else {
+        return Ok(false);
+    };
+    let t = ev.force_string(
+        t.cell.get(),
+        Pos::NONE,
+        "while evaluating the 'type' attribute",
+    )?;
+    if t.bytes != b"derivation" {
+        return Ok(false);
+    }
+    let path = match attrs.get(ev.s.drv_path) {
+        Some(dp) => ev.coerce_to_string(
+            dp.cell.get(),
+            &mut Vec::new(),
+            dp.pos,
+            "while evaluating the drvPath of a derivation",
+            false,
+            false,
+            true,
+        )?,
+        None => std::borrow::Cow::Borrowed(&[][..]),
+    };
+    out.extend_from_slice("«derivation".as_bytes());
+    if !path.is_empty() {
+        out.push(b' ');
+        out.extend_from_slice(&path);
+    }
+    out.extend_from_slice("»".as_bytes());
+    Ok(true)
 }
 
 /// Short rendering for error messages: like the modern printer with limits.

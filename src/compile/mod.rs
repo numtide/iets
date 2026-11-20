@@ -189,6 +189,7 @@ impl<'a> Compiler<'a> {
 
     /// Compile a whole file. `extra_scope`, when given, is a lexical frame
     /// (for `scopedImport`) that the runtime supplies as the env above root.
+    /// The compiler can be used again after a returned error.
     pub fn compile_root(&mut self, extra_scope: Option<&[Sym]>) -> CResult<IrRef> {
         if let Some(names) = extra_scope {
             let mut m = FxHashMap::default();
@@ -197,11 +198,10 @@ impl<'a> Compiler<'a> {
             }
             self.scopes.push(Scope::frame(m));
         }
-        self.parser_notes()?;
-        let root = self.ast.root;
-        let ir = self.expr(root)?;
+        let result = self.parser_notes().and_then(|()| self.expr(self.ast.root));
         self.scopes.clear();
-        Ok(ir)
+        self.lambdas.clear();
+        result
     }
 
     #[inline]

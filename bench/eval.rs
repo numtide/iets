@@ -22,11 +22,11 @@ fn command() -> Command {
 }
 
 #[binary_benchmark]
-#[bench::calls(args = ("calls.nix"), teardown = check_scalar(15_792))]
-#[bench::strings(args = ("strings.nix"), teardown = check_scalar(50_000))]
-#[bench::attrs(args = ("attrs.nix"), teardown = check_scalar(2_003))]
+#[bench::calls(args = ("calls.nix"), teardown = check_output(15_792))]
+#[bench::strings(args = ("strings.nix"), teardown = check_output(50_000))]
+#[bench::attrs(args = ("attrs.nix"), teardown = check_output(2_003))]
 #[bench::derivations(args = ("derivations.nix"), teardown = check_derivations())]
-#[bench::fixed_derivations(args = ("fixed-derivations.nix"), teardown = check_scalar("54e5be761db238fac542a7f7bd5d635b4d10f0989eb246e18754031c7c9e5dcc"))]
+#[bench::fixed_derivations(args = ("fixed-derivations.nix"), teardown = check_output("54e5be761db238fac542a7f7bd5d635b4d10f0989eb246e18754031c7c9e5dcc"))]
 fn evaluate(fixture: &str) -> Command {
     let workloads = env::var_os("IETS_BENCH_WORKLOADS")
         .map(PathBuf::from)
@@ -85,21 +85,17 @@ fn render(format: &str) -> Command {
 }
 
 // Teardown validates output after every tool run, outside the measurement.
-fn check_scalar(expected: impl Into<serde_json::Value>) {
+fn check_output(expected: impl Into<serde_json::Value>) {
     let expected = expected.into();
     let actual: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
     assert_eq!(actual, expected);
 }
 
 fn check_derivations() {
-    let actual: serde_json::Value = serde_json::from_slice(&fs::read("output").unwrap()).unwrap();
-    assert_eq!(
-        actual,
-        serde_json::json!({
-            "count": 100,
-            "digest": "93992c8668eb390e01499c1ea64d40863403ba29ceb9ffb4b544a3c9976e79f9"
-        })
-    );
+    check_output(serde_json::json!({
+        "count": 100,
+        "digest": "93992c8668eb390e01499c1ea64d40863403ba29ceb9ffb4b544a3c9976e79f9"
+    }));
 }
 
 fn check_parse() {

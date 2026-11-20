@@ -712,6 +712,10 @@ pub struct TreeFp {
 }
 
 impl TreeFp {
+    pub(crate) fn newest(&self) -> i64 {
+        self.newest
+    }
+
     /// Seeds the fingerprint with the root's own `lstat`, the one node the
     /// dump never offers to the filter. `None` when the root cannot be read.
     pub fn new(root: &Path) -> Option<TreeFp> {

@@ -99,13 +99,19 @@ fn names_its_content(dir: &Path, hash: &Hash) -> bool {
 /// entry in the tree, so the newest `lstat` mtime comes from its filter callback instead of a
 /// second recursive `read_dir`.
 fn dump_and_max_mtime(dir: &Path, fp: &mut Option<TreeFp>) -> io::Result<(Hash, u64, i64)> {
+    if let Some(fp) = fp {
+        let mut filter = |p: &Path, t| {
+            fp.entry(p, t, true);
+            true
+        };
+        let (hash, nar_size) = nar::nar_hash_filtered(dir, HashAlgo::Sha256, &mut filter)?;
+        return Ok((hash, nar_size, fp.newest()));
+    }
+
     let mut mtime = mtime_secs(&fs::symlink_metadata(dir)?);
-    let mut filter = |p: &Path, t: nar::FileType| {
+    let mut filter = |p: &Path, _| {
         if let Ok(st) = fs::symlink_metadata(p) {
             mtime = mtime.max(mtime_secs(&st));
-        }
-        if let Some(fp) = fp.as_mut() {
-            fp.entry(p, t, true);
         }
         true
     };
@@ -462,6 +468,19 @@ mod tests {
         let mut v: Vec<&str> = acc.iter().map(|p| p.to_str().unwrap()).collect();
         v.sort();
         assert_eq!(v, ["/r/a", "/r/a/b", "/r/a/b/c.nix", "/r/d.nix"]);
+    }
+
+    #[rstest]
+    fn traced_mtime_agrees_with_the_fingerprint_when_the_root_changes(#[from(tree)] d: Tree) {
+        let root = d.join("empty");
+        fs::create_dir(&root).unwrap();
+        sys::fs::set_times(&root, 100, true).unwrap();
+        let old = trace::tree_fingerprint(&root, None).unwrap();
+        let mut fp = Some(TreeFp::new(&root).unwrap());
+        sys::fs::set_times(&root, 200, true).unwrap();
+        let (_, _, mtime) = dump_and_max_mtime(&root, &mut fp).unwrap();
+        assert_eq!(fp.unwrap().finish(), Some(old));
+        assert_eq!(mtime, 100);
     }
 
     #[rstest]

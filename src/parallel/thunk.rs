@@ -211,9 +211,6 @@ mod tests {
         fibers: AtomicUsize,
     }
 
-    // SAFETY: cells are atomic; deps are immutable.
-    unsafe impl Sync for Graph {}
-
     struct GraphDriver(&'static Graph);
 
     fn force(g: &Graph, slot: &mut Slot, i: usize) -> i64 {
@@ -268,9 +265,6 @@ mod tests {
         done: AtomicUsize,
         deadlocks: AtomicUsize,
     }
-
-    // SAFETY: cells are atomic.
-    unsafe impl Sync for Pair {}
 
     struct PairDriver(&'static Pair);
 

@@ -211,8 +211,7 @@ pub static START: OnceLock<Instant> = OnceLock::new();
 pub fn force_thunk(ev: &mut Evaluator, w: Word) -> EvalResult<Word> {
     let cell = w.thunk_state_cell();
     // Acquire pairs with the publish that released the value cell.
-    // SAFETY: the word a fiber stored in this state cell.
-    let st = unsafe { Word::from_bits(cell.atomic().load(Ordering::Acquire)) };
+    let st = cell.get();
     if !st.is_blackhole() && !w.thunk_unforced(st) {
         if w.thunk_speculated(st) {
             read_speculated(ev, cell, st);

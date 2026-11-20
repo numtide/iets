@@ -515,6 +515,15 @@ mod ab {
                 .join()
                 .expect("the run thread")
         })
+        .map_err(|error| match error {
+            RunError::Scenario(message) => {
+                RunError::Scenario(format!("{}: {message}", bin.display()))
+            }
+            RunError::Cleanup(error) => RunError::Cleanup(io::Error::new(
+                error.kind(),
+                format!("{}: {error}", bin.display()),
+            )),
+        })
     }
 
     fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
@@ -537,7 +546,7 @@ mod ab {
         #[cfg(target_os = "linux")]
         let mut counters = counters::open();
         let t0 = Instant::now();
-        let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
         let hasher = thread::spawn(move || hash_output(out));
@@ -790,12 +799,7 @@ mod ab {
                     } else {
                         kept[i].path()
                     };
-                    let r = run_once(bins[i], &sc.args, cache, &err).map_err(|e| match e {
-                        RunError::Scenario(message) => {
-                            RunError::Scenario(format!("{}: {message}", bins[i].display()))
-                        }
-                        other => other,
-                    })?;
+                    let r = run_once(bins[i], &sc.args, cache, &err)?;
                     row.runs[i].push(r);
                 }
             }
@@ -1071,6 +1075,36 @@ mod ab {
             // SAFETY: this test is the only test that starts children.
             unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
             enable_subreaper().unwrap();
+            // The shared boundary identifies either binary once for execution
+            // and spawn failures; keep child-spawning assertions in this test.
+            {
+                let root = tempfile::tempdir().unwrap();
+                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
+                    .map(|dir| dir.join("false"))
+                    .find(|path| path.is_file())
+                    .expect("the false utility");
+                for name in ["before", "after", "missing"] {
+                    let bin = root.path().join(name);
+                    if name != "missing" {
+                        std::os::unix::fs::symlink(&false_bin, &bin).unwrap();
+                    }
+                    let result = run_once(
+                        &bin,
+                        &["eval".into()],
+                        root.path(),
+                        &root.path().join("stderr"),
+                    );
+                    let Err(RunError::Scenario(message)) = result else {
+                        panic!("execution failure lost its scenario classification");
+                    };
+                    let context = format!("{}: ", bin.display());
+                    assert_eq!(message.matches(context.as_str()).count(), 1);
+                    assert!(message.starts_with(&context));
+                    if name != "missing" {
+                        assert!(message.contains("exit status"));
+                    }
+                }
+            }
             assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
             let t = Instant::now();

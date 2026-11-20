@@ -51,9 +51,12 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn err<T>(&self, what: &str) -> Result<T, DrvError> {
-        let before = &self.s[..self.i.min(self.s.len())];
+        Self::parse_error(what, &self.s[..self.i.min(self.s.len())], 1)
+    }
+
+    fn parse_error<T>(what: &str, before: &[u8], column_offset: usize) -> Result<T, DrvError> {
         let line = 1 + before.iter().filter(|&&b| b == b'\n').count();
-        let col = 1 + before.iter().rev().take_while(|&&b| b != b'\n').count();
+        let col = column_offset + before.iter().rev().take_while(|&&b| b != b'\n').count();
         Err(DrvError(format!(
             "cannot process __json attribute: [json.exception.parse_error.101] parse error at line {line}, column {col}: {what}"
         )))
@@ -279,7 +282,7 @@ impl Parser<'_> {
                         .get(start..start + len)
                         .and_then(|b| str::from_utf8(b).ok())
                     else {
-                        return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte");
+                        return self.invalid_utf8(start, len);
                     };
                     out.push_str(ch);
                     self.i = start + len;
@@ -287,6 +290,25 @@ impl Parser<'_> {
                 _ => out.push(char::from(c)),
             }
         }
+    }
+
+    #[cold]
+    fn invalid_utf8<T>(&self, start: usize, len: usize) -> Result<T, DrvError> {
+        // nlohmann counts the offending byte (including a newline), or one read past EOF.
+        let bad = if len == 1 {
+            start // invalid leading byte
+        } else {
+            str::from_utf8(&self.s[start..])
+                .expect_err("invalid or incomplete UTF-8 sequence")
+                .error_len()
+                .map_or(self.s.len(), |prefix| start + prefix)
+        };
+        let end = (bad + 1).min(self.s.len());
+        Self::parse_error(
+            "syntax error while parsing value - invalid string: ill-formed UTF-8 byte",
+            &self.s[..end],
+            usize::from(bad == self.s.len()),
+        )
     }
 
     fn number(&mut self) -> Result<String, DrvError> {
@@ -461,6 +483,24 @@ mod tests {
                 "{got}"
             );
             assert!(got.contains(err), "{got}");
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_positions() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"{\"\xff", "line 1, column 3"),
+            (b"{\"a\":\"\xc2Z", "line 1, column 8"),
+            (b"{\"a\":\"\xe1\x80Z", "line 1, column 9"),
+            (b"{\"a\":\"\xf1\x80\x80Z", "line 1, column 10"),
+            (b"{\"a\":\"\xed\xa0", "line 1, column 8"),
+            (b"{\"a\":\"\xf0\x9f\x99", "line 1, column 10"),
+            (b"{\"a\":\"\xe2\n", "line 2, column 0"),
+            (b"{\n  \"\xc3\xa9\":\"\xff", "line 2, column 9"),
+        ];
+        for &(text, pos) in cases {
+            let error = norm(text).unwrap_err().0;
+            assert!(error.contains(pos), "{text:?}: {error}");
         }
     }
 

@@ -253,19 +253,27 @@ impl IrCache {
     /// Skips the write when a sibling process holds the store lock: the file
     /// is compiled again next run, which is cheaper than waiting here.
     pub fn write(&self, key: &str, bytes: &[u8]) {
+        self.store(key, bytes);
+    }
+
+    pub(crate) fn store(&self, key: &str, bytes: &[u8]) -> bool {
         let path = self.entry(key);
         let dir = path.parent().expect("entry has a parent");
         let _ = cachefs::create_dir(dir);
         let name = &key[2..];
-        if let Some(_lock) = cachefs::write_lock(&self.root) {
+        let stored = if let Some(_lock) = cachefs::write_lock(&self.root) {
             let sum = cachefs::checksum(key, &[bytes]);
-            let _ = cachefs::write_atomic(dir, name, &[bytes, &sum]);
-        } else if self.stats {
-            errln!("ir-cache skip {name} (a sibling holds the store lock)");
-        }
+            cachefs::write_atomic(dir, name, &[bytes, &sum]).is_ok()
+        } else {
+            if self.stats {
+                errln!("ir-cache skip {name} (could not acquire the store lock)");
+            }
+            false
+        };
         if !self.swept.swap(true, Ordering::Relaxed) {
             cachefs::maybe_sweep(&self.root, Shape::ShardedFiles, self.stats);
         }
+        stored
     }
 
     /// Poison and wipe, never repair: an entry that does not decode goes.

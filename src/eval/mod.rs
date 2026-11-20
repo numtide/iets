@@ -2310,8 +2310,8 @@ impl Evaluator {
         node!(Ir::HasAttr { subject, path } = ir);
         let mut v = self.eval_fast(env, subject)?;
         for elem in path.iter() {
-            let name = self.attr_name(env, elem)?;
             let attrs = self.force(v)?;
+            let name = self.attr_name(env, elem)?;
             match attrs.as_attrs().and_then(|a| a.get(name)) {
                 Some(a) => v = a.cell.get(),
                 None => return Ok(Word::FALSE),

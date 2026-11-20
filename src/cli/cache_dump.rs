@@ -20,8 +20,19 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
     for o in &obs {
         match o {
             Obs::File {
-                path, size, hash, ..
-            } => render::line(&format!("file {} {size} {}", s(path), &hex(hash)[..16])),
+                path,
+                size,
+                hash,
+                follow,
+                ..
+            } => {
+                let mode = if *follow { "" } else { " nofollow" };
+                render::line(&format!(
+                    "file {} {size} {}{mode}",
+                    s(path),
+                    &hex(hash)[..16]
+                ))
+            }
             Obs::Dir { path, hash } => {
                 render::line(&format!("dir {} {}", s(path), &hex(hash)[..16]))
             }
@@ -54,6 +65,9 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
             )),
             Obs::Input { entry, version } => {
                 render::line(&format!("input {} v{version}", s(entry)))
+            }
+            Obs::ImportPath { path, target } => {
+                render::line(&format!("import {} -> {}", s(path), s(target)))
             }
         }
     }

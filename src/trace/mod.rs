@@ -108,6 +108,8 @@ pub struct Filtered {
 pub enum Obs {
     File {
         path: Vec<u8>,
+        /// False when the run also observed this final component as a regular file.
+        follow: bool,
         size: u64,
         mtime_ns: i64,
         /// Changes on every write, and no user program can set it: without
@@ -139,6 +141,11 @@ pub enum Obs {
     Canon {
         path: Vec<u8>,
         target: Option<Vec<u8>>,
+    },
+    /// The source path after following the final component of an import.
+    ImportPath {
+        path: Vec<u8>,
+        target: Vec<u8>,
     },
     /// `value` is a keyed hash, not the value: the observation needs only to
     /// know whether the value changed, and an entry that held the answer of
@@ -179,6 +186,7 @@ impl Obs {
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
+            Obs::ImportPath { path, .. } => (8, Cow::Borrowed(path), 0),
         }
     }
 }
@@ -594,6 +602,10 @@ const RACY_NS: i64 = 2_000_000_000;
 const UNTRUSTED_MTIME: i64 = i64::MIN;
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
+    observed_file(path, meta, hash, true)
+}
+
+fn observed_file(path: &[u8], meta: &fs::Metadata, hash: Digest32, follow: bool) -> Obs {
     let at = sys::path_from_internal(path);
     let (dev, ino) = file_id(&at, meta);
     let mtime = mtime_ns(meta);
@@ -603,6 +615,7 @@ pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
     let racy = mtime > now.saturating_sub(RACY_NS);
     Obs::File {
         path: path.to_vec(),
+        follow,
         size: meta.len(),
         mtime_ns: if racy { UNTRUSTED_MTIME } else { mtime },
         ctime_ns: ctime_ns(&at, meta),

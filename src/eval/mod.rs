@@ -1133,37 +1133,33 @@ impl Evaluator {
             return Ok(p);
         }
         store_hooks::confine(self, &p, store_hooks::Follow::Full, pos)?;
-        let mut at = store_hooks::open(self, &p, pos)?;
+        let origin = store_hooks::locate(self, &p);
+        let host = origin.is_none();
+        let at = store_hooks::check(self, origin, &p, store_hooks::Follow::Full, pos)?;
         read_through_copy(self, &p, pos)?;
-        // eval.cc:resolveExprPath follows a symlink on the last component,
-        // so a relative path in the file resolves against the directory of
-        // the target. The `lstat` is what it costs; a path inside a copied
-        // tree keeps `store_hooks`' own resolution.
-        if let Some(local) = at.local()
-            && fs::symlink_metadata(&local).is_ok_and(|m| m.is_symlink())
-            && store_hooks::locate(self, &p).is_none()
-        {
-            for _ in 0..1024 {
-                let Ok(target) = fs::read_link(sys::path_from_internal(&p)) else {
-                    break;
-                };
-                let t = sys::path_to_internal(&target);
-                let joined = if t.starts_with(b"/") {
-                    t
-                } else {
-                    let mut d = dir_of(&p).to_vec();
-                    d.push(b'/');
-                    d.extend_from_slice(&t);
-                    d
-                };
-                p = compile::canon_path(&joined);
+        let is_dir = if host {
+            let meta = fs::symlink_metadata(sys::path_from_internal(&p));
+            let kind = trace::Kind::of(&meta);
+            if kind == trace::Kind::Symlink {
+                let target = follow_import_links(&p);
+                if self.trace().is_on() {
+                    self.trace().record(trace::Obs::ImportPath {
+                        path: p,
+                        target: target.clone(),
+                    });
+                }
+                p = target;
+                store_hooks::open(self, &p, pos)?.is_dir(self)
+            } else {
+                // Replacing a regular file with a link can change the base
+                // of its relative imports even when its contents match.
+                self.trace().stat(&p, false, kind);
+                meta.map(|m| m.is_dir())
             }
-            let full = sys::fs::canonicalize(&local);
-            self.trace()
-                .canon(&sys::path_to_internal(&local), full.ok().as_deref());
-            at = store_hooks::open(self, &p, pos)?;
-        }
-        match at.is_dir(self) {
+        } else {
+            at.is_dir(self)
+        };
+        match is_dir {
             Ok(true) => p.extend_from_slice(b"/default.nix"),
             Ok(false) => {}
             Err(e) => bail!(
@@ -3328,6 +3324,28 @@ pub fn dir_of(path: &[u8]) -> &[u8] {
         Some(i) => &path[..i],
         None => b".",
     }
+}
+
+/// eval.cc:resolveExprPath follows links on the final component. Ancestor
+/// spellings survive and are visible to relative paths and source positions.
+pub(crate) fn follow_import_links(path: &[u8]) -> Vec<u8> {
+    let mut path = path.to_vec();
+    for _ in 0..1024 {
+        let Ok(target) = fs::read_link(sys::path_from_internal(&path)) else {
+            break;
+        };
+        let target = sys::path_to_internal(&target);
+        let joined = if target.starts_with(b"/") {
+            target
+        } else {
+            let mut dir = dir_of(&path).to_vec();
+            dir.push(b'/');
+            dir.extend_from_slice(&target);
+            dir
+        };
+        path = compile::canon_path(&joined);
+    }
+    path
 }
 
 impl Evaluator {

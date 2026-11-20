@@ -19,7 +19,37 @@ use crate::store::source::SourceOrigin;
 use crate::syntax::symbol::FxHashMap;
 use crate::trace::key::Key;
 use crate::trace::store::{self, Entry, Opened, Part};
-use crate::trace::{validate, wire};
+use crate::trace::{Kind, Obs, validate, wire};
+
+/// In a persisted read set, a non-following stat on a regular file supplies
+/// both its kind and the metadata for its content check. The recorder has
+/// already removed exact duplicates, including repeated kind probes.
+fn combine_regular_file_stats(obs: &mut Vec<Obs>) {
+    let mut covered = vec![false; obs.len()];
+    let mut regular = HashMap::new();
+    let mut files = Vec::new();
+    for (o, covered) in obs.iter_mut().zip(&mut covered) {
+        match o {
+            Obs::Stat {
+                path,
+                follow: false,
+                kind: Kind::Regular,
+            } => {
+                regular.insert(path.as_slice(), covered);
+            }
+            Obs::File { path, follow, .. } => files.push((path.as_slice(), follow)),
+            _ => {}
+        }
+    }
+    for (path, follow) in files {
+        if let Some(covered) = regular.get_mut(path) {
+            **covered = true;
+            *follow = false;
+        }
+    }
+    let mut covered = covered.into_iter();
+    obs.retain(|_| !covered.next().unwrap());
+}
 
 /// What a `build` entry holds besides its read set.
 pub struct BuildTables {
@@ -174,7 +204,8 @@ impl Cache {
             return;
         }
         let t0 = Instant::now();
-        let obs = ev.trace().take();
+        let mut obs = ev.trace().take();
+        combine_regular_file_stats(&mut obs);
         let mut warnings = Vec::new();
         for w in ev.lints.records() {
             warnings.extend_from_slice(w.as_bytes());

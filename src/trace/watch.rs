@@ -124,6 +124,7 @@ mod tests {
         let b = |p: &str| at(p).into_os_string().into_encoded_bytes();
         let file = |path: Vec<u8>| Obs::File {
             path,
+            follow: true,
             size: 0,
             mtime_ns: 0,
             ctime_ns: 0,

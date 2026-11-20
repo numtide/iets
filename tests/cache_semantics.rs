@@ -9,6 +9,7 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -256,6 +257,63 @@ fn hits_and_misses(work: Work) {
     work.write("src/lib.nix", "1\n");
     let r = work.eval(&main);
     assert!(r.rc == 0 && r.status.contains("miss ("), "{}", r.status);
+}
+
+#[rstest]
+fn import_starts_following_a_link(work: Work) {
+    let main = work.write(
+        "main.nix",
+        "builtins.seq (builtins.readFile ./entry.nix) (import ./entry.nix)",
+    );
+    let reader = work.write("read.nix", "builtins.readFile ./entry.nix");
+    let src = "import ./value.nix";
+    let entry = work.write("entry.nix", src);
+    work.write("value.nix", "1");
+    work.write("other/entry.nix", src);
+    work.write("other/value.nix", "2");
+
+    assert_eq!(work.eval(&[&main]).out.trim(), "1");
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+    touch(946_684_800, &[&entry]);
+    let refreshed = work.eval(&[&main]);
+    assert!(
+        refreshed.status.contains("cache: hit") && refreshed.status.contains(" 1 rehashed"),
+        "{}",
+        refreshed.status
+    );
+    let read = work.eval(&[&reader]).out;
+    fs::remove_file(&entry).unwrap();
+    symlink("other/entry.nix", &entry).unwrap();
+    let r = work.eval(&[&main]);
+    assert_eq!(r.out.trim(), "2");
+    assert!(r.status.contains("cache: miss"), "{}", r.status);
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+    // Reading only the bytes still follows the link.
+    let r = work.eval(&[&reader]);
+    assert_eq!(r.out, read);
+    assert!(r.status.contains("cache: hit"), "{}", r.status);
+}
+
+#[rstest]
+fn import_keeps_the_target_directory_spelling(work: Work) {
+    let main = work.write("main.nix", "import ./entry.nix");
+    work.write("source/entry.nix", "baseNameOf (toString ./.)");
+    symlink("source", work.path("alias")).unwrap();
+    symlink("source/entry.nix", work.path("entry.nix")).unwrap();
+    assert_eq!(work.eval(&[&main]).out.trim(), "\"source\"");
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+
+    fs::remove_file(work.path("entry.nix")).unwrap();
+    symlink("alias/entry.nix", work.path("entry.nix")).unwrap();
+    let r = work.eval(&[&main]);
+    assert_eq!(r.out.trim(), "\"alias\"");
+    assert!(r.status.contains("cache: miss"), "{}", r.status);
+
+    // An extra hop to the same lexical target preserves the relative base.
+    symlink("alias/entry.nix", work.path("hop")).unwrap();
+    fs::remove_file(work.path("entry.nix")).unwrap();
+    symlink("hop", work.path("entry.nix")).unwrap();
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
 }
 
 /// `cp -p` in place keeps the size, the mtime and the inode. Only ctime says

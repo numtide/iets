@@ -305,6 +305,7 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn enable_subreaper() -> io::Result<()> {
+        check_proc_namespace(Path::new("/proc"), false)?;
         // An inherited SIG_IGN would let checked child PIDs be recycled.
         // SAFETY: SIG_DFL is a valid SIGCHLD disposition; this runner is the sole reaper.
         if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
@@ -318,16 +319,27 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
-    fn check_proc_namespace(procfs: &Path) -> io::Result<()> {
-        let status = fs::read(procfs.join("self/status"))?;
+    fn check_proc_namespace(procfs: &Path, require_proof: bool) -> io::Result<()> {
         let own = process::id().to_string();
-        // A procfs mounted in an ancestor namespace exposes different PID numbers.
-        // Require one NStgid, even when two namespaces happen to assign equal numbers.
-        if status
-            .split(|&b| b == b'\n')
-            .find_map(|s| s.strip_prefix(b"NStgid:"))
-            .is_some_and(|ids| ids.trim_ascii() == own.as_bytes())
+        // At startup reject visible mismatches, but defer unavailable proof until
+        // discovery. Equal PID numbers alone do not authorize signaling.
+        let matches = if !require_proof
+            && fs::read_link(procfs.join("self")).is_ok_and(|pid| pid != Path::new(&own))
         {
+            false
+        } else {
+            let status = match fs::read(procfs.join("self/status")) {
+                Ok(status) => status,
+                Err(_) if !require_proof => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            // An ancestor mount can assign equal numeric PIDs in two namespaces.
+            status
+                .split(|&b| b == b'\n')
+                .find_map(|s| s.strip_prefix(b"NStgid:"))
+                .map_or(!require_proof, |ids| ids.trim_ascii() == own.as_bytes())
+        };
+        if matches {
             Ok(())
         } else {
             Err(io::Error::other(
@@ -338,7 +350,7 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
-        check_proc_namespace(procfs)?;
+        check_proc_namespace(procfs, true)?;
         let mut first_error = None;
         let scan = signal_listed_children(procfs, deadline, &mut first_error);
         first_error.map_or(scan, Err)
@@ -351,12 +363,6 @@ mod ab {
         first_error: &mut Option<io::Error>,
     ) -> io::Result<()> {
         let mut signal = |pid: libc::pid_t| -> io::Result<()> {
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "child discovery deadline",
-                ));
-            }
             let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
             // SAFETY: writable exit info; WNOWAIT leaves exits for the sole outer reaper.
             if unsafe {
@@ -383,6 +389,7 @@ mod ab {
             }
             Ok(())
         };
+        // Budget exhaustion stops discovery; the outer reap decides whether children remain.
         let mut complete = false;
         if let Ok(tasks) = fs::read_dir(procfs.join("self/task")) {
             complete = true;
@@ -390,7 +397,7 @@ mod ab {
             for task in tasks {
                 found = true;
                 if Instant::now() >= deadline {
-                    return Err(io::ErrorKind::TimedOut.into());
+                    return Ok(());
                 }
                 let kids = task.and_then(|t| fs::read_to_string(t.path().join("children")));
                 match kids {
@@ -400,6 +407,9 @@ mod ab {
                             .filter_map(|p| p.parse::<libc::pid_t>().ok())
                             .filter(|&p| p > 0)
                         {
+                            if Instant::now() >= deadline {
+                                return Ok(());
+                            }
                             signal(pid)?;
                         }
                     }
@@ -412,7 +422,7 @@ mod ab {
             // Optional task children files may be absent. Scan only on cleanup/progress.
             for entry in fs::read_dir(procfs)? {
                 if Instant::now() >= deadline {
-                    return Err(io::ErrorKind::TimedOut.into());
+                    return Ok(());
                 }
                 let name = entry?.file_name();
                 if let Some(pid) = name
@@ -517,6 +527,15 @@ mod ab {
                 .join()
                 .expect("the run thread")
         })
+        .map_err(|error| match error {
+            RunError::Scenario(message) => {
+                RunError::Scenario(format!("{}: {message}", bin.display()))
+            }
+            RunError::Cleanup(error) => RunError::Cleanup(io::Error::new(
+                error.kind(),
+                format!("{}: {error}", bin.display()),
+            )),
+        })
     }
 
     fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
@@ -539,7 +558,7 @@ mod ab {
         #[cfg(target_os = "linux")]
         let mut counters = counters::open();
         let t0 = Instant::now();
-        let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
         let hasher = thread::spawn(move || hash_output(out));
@@ -792,12 +811,7 @@ mod ab {
                     } else {
                         kept[i].path()
                     };
-                    let r = run_once(bins[i], &sc.args, cache, &err).map_err(|e| match e {
-                        RunError::Scenario(message) => {
-                            RunError::Scenario(format!("{}: {message}", bins[i].display()))
-                        }
-                        other => other,
-                    })?;
+                    let r = run_once(bins[i], &sc.args, cache, &err)?;
                     row.runs[i].push(r);
                 }
             }
@@ -1073,6 +1087,36 @@ mod ab {
             // SAFETY: this test is the only test that starts children.
             unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
             enable_subreaper().unwrap();
+            // The shared boundary identifies either binary once for execution
+            // and spawn failures; keep child-spawning assertions in this test.
+            {
+                let root = tempfile::tempdir().unwrap();
+                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
+                    .map(|dir| dir.join("false"))
+                    .find(|path| path.is_file())
+                    .expect("the false utility");
+                for name in ["before", "after", "missing"] {
+                    let bin = root.path().join(name);
+                    if name != "missing" {
+                        std::os::unix::fs::symlink(&false_bin, &bin).unwrap();
+                    }
+                    let result = run_once(
+                        &bin,
+                        &["eval".into()],
+                        root.path(),
+                        &root.path().join("stderr"),
+                    );
+                    let Err(RunError::Scenario(message)) = result else {
+                        panic!("execution failure lost its scenario classification");
+                    };
+                    let context = format!("{}: ", bin.display());
+                    assert_eq!(message.matches(context.as_str()).count(), 1);
+                    assert!(message.starts_with(&context));
+                    if name != "missing" {
+                        assert!(message.contains("exit status"));
+                    }
+                }
+            }
             assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
             let t = Instant::now();
@@ -1108,15 +1152,51 @@ mod ab {
             assert!(reap_leftovers(Duration::ZERO, Duration::ZERO, |_| unreachable!()).unwrap());
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
 
-            // A partially failed sweep still leaves the outer reaper responsible for exits.
+            // Exhausting discovery is harmless only once the last child is confirmed gone.
             let mut last = Command::new("sleep").arg("30").spawn().unwrap();
-            let err = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |_| {
-                last.kill()?;
-                Err(io::Error::from_raw_os_error(libc::EPERM))
-            })
-            .unwrap_err();
-            assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+            assert!(
+                !reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |_| {
+                    last.kill()?;
+                    // Keep the killed exit waitable before simulating expired discovery.
+                    let mut info = MaybeUninit::uninit();
+                    // SAFETY: this test owns last; leave its exit for the outer reaper.
+                    assert_eq!(
+                        unsafe {
+                            libc::waitid(
+                                libc::P_PID,
+                                last.id(),
+                                info.as_mut_ptr(),
+                                libc::WEXITED | libc::WNOWAIT,
+                            )
+                        },
+                        0
+                    );
+                    kill_leftovers(Instant::now())
+                })
+                .unwrap()
+            );
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
+            // Stopping discovery does not excuse a child that is still running.
+            let mut live = Command::new("sleep").arg("30").spawn().unwrap();
+            let result = reap_leftovers(Duration::ZERO, Duration::from_millis(20), |_| {
+                kill_leftovers(Instant::now())
+            });
+            live.kill().unwrap();
+            live.wait().unwrap();
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+
+            // Real errors, including an I/O timeout, survive even after the last exit.
+            for errno in [libc::EPERM, libc::ETIMEDOUT] {
+                let mut last = Command::new("sleep").arg("30").spawn().unwrap();
+                let err = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |_| {
+                    last.kill()?;
+                    Err(io::Error::from_raw_os_error(errno))
+                })
+                .unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(errno));
+                assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
 
             // No optional task children file: discover only the listed owned PID.
             let procfs = tempfile::tempdir().unwrap();
@@ -1155,14 +1235,56 @@ mod ab {
 
             // Reject even coincident numbers from distinct namespaces, as bytes.
             fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
-            assert!(check_proc_namespace(procfs.path()).is_err());
+            assert!(check_proc_namespace(procfs.path(), true).is_err());
             fs::write(&status, b"Name:\tbad-\xff\n").unwrap();
-            assert!(check_proc_namespace(procfs.path()).is_err());
+            assert!(check_proc_namespace(procfs.path(), true).is_err());
             fs::remove_file(&status).unwrap();
             assert_eq!(
-                check_proc_namespace(procfs.path()).unwrap_err().kind(),
+                check_proc_namespace(procfs.path(), true)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::NotFound
             );
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn preflight_rejects_known_mismatches_without_requiring_discovery() {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            let procfs = tempfile::tempdir().unwrap();
+            let root = procfs.path();
+            let own = process::id().to_string();
+            fs::create_dir(root.join(&own)).unwrap();
+            symlink(&own, root.join("self")).unwrap();
+            let status = root.join("self/status");
+            fs::write(&status, b"Name:\tlegacy\n").unwrap();
+            check_proc_namespace(root, false).unwrap();
+            assert!(check_proc_namespace(root, true).is_err());
+            fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            check_proc_namespace(root, true).unwrap();
+            fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
+            assert!(check_proc_namespace(root, false).is_err());
+            assert!(check_proc_namespace(root, true).is_err());
+            fs::set_permissions(&status, fs::Permissions::from_mode(0o000)).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            let denied = check_proc_namespace(root, true);
+            fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            fs::remove_file(&status).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            assert_eq!(
+                check_proc_namespace(root, true).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            fs::remove_file(root.join("self")).unwrap();
+            symlink(
+                (u64::from(process::id()) + 1).to_string(),
+                root.join("self"),
+            )
+            .unwrap();
+            assert!(check_proc_namespace(root, false).is_err());
         }
 
         #[test]

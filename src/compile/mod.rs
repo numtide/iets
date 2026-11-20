@@ -325,17 +325,12 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        if let Some(s) = outermost_with {
-            self.note_capture(s);
-        }
         // Globals live in Nix's static base env, a lexical scope, so they
         // beat any enclosing `with` (`with { true = 1; }; true` is `true`).
         if let Some(w) = self.globals.table.get(&sym) {
             return Some(Ir::Const(*w));
         }
-        if withs.is_empty() {
-            return None;
-        }
+        self.note_capture(outermost_with?);
         Some(
             Ir::WithVar {
                 sym,

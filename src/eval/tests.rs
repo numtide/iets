@@ -136,6 +136,20 @@ fn every_empty_list_and_set_is_one_object() {
     assert_eq!([items[1], items[3]], [attrs, attrs]);
 }
 
+#[rstest]
+#[case::global("with { true = false; }; x: true", true)]
+#[case::dynamic("with { y = 1; }; x: y", false)]
+#[case::lexical("let y = 1; in with {}; x: y", false)]
+#[case::inner_with("x: with { y = 1; }; y", true)]
+fn lambda_captures_enclosing_scopes(#[case] src: &str, #[case] closed: bool) {
+    let mut ev = Evaluator::new();
+    let word = ev.eval_string(src, b"/").and_then(|w| ev.force(w)).unwrap();
+    let crate::runtime::Value::Lambda(lambda) = word.view() else {
+        panic!("expected a lambda");
+    };
+    assert_eq!(lambda.lam.closed, closed);
+}
+
 #[test]
 fn arithmetic_and_strings() {
     assert_eq!(eval_str("1 + 2 * 3 - 4 / 2"), "5");

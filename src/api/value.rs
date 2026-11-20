@@ -214,14 +214,9 @@ impl<'e> Eval<'e> {
         Eval { ev }
     }
 
-    /// The evaluator itself, for the parts of the library that take one.
-    /// A value may still borrow this evaluator's session.
-    ///
+    /// Shared access keeps the evaluator in place while its values are live.
     /// ```compile_fail,E0594
-    /// use iets::api::value::Eval;
-    /// use iets::eval::Evaluator;
-    ///
-    /// fn replace(e: &mut Eval<'_>, other: Evaluator) {
+    /// fn replace(e: &mut iets::api::value::Eval<'_>, other: iets::eval::Evaluator) {
     ///     *e.evaluator() = other;
     /// }
     /// ```

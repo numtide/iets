@@ -1520,8 +1520,10 @@ mod tests {
 
     use std::collections::HashSet;
     use std::iter;
+    use std::sync::Arc;
     use std::thread::Builder;
 
+    use crate::eval::EvalConfig;
     use crate::print;
 
     const SRC: &str = "let f = a: with { x = a; }; [ x 1 true null \"s\" ./p 2.5 ]; in f 3\n";
@@ -1560,21 +1562,18 @@ mod tests {
         let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
         cache.min_size = 0;
         cache.stats = false;
-        let cache = std::sync::Arc::new(cache);
-        let mut first = crate::eval::EvalConfig::new()
+        let cache = Arc::new(cache);
+        let mut first = EvalConfig::new()
             .pure(false)
             .system("right")
             .ir_cache(Some(cache.clone()))
             .build();
-        let mut second = crate::eval::EvalConfig::new()
+        let mut second = EvalConfig::new()
             .pure(false)
             .system("left\0right")
             .ir_cache(Some(cache.clone()))
             .build();
-        let mut cold = crate::eval::EvalConfig::new()
-            .pure(false)
-            .system("left\0right")
-            .build();
+        let mut cold = EvalConfig::new().pure(false).system("left\0right").build();
         let source = b"builtins.currentSystem";
         let a = b"/t/f.nix\0left";
         let b = b"/t/f.nix";

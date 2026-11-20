@@ -1670,7 +1670,7 @@ mod tests {
 
     #[cfg(feature = "stats2")]
     #[test]
-    fn union_census_counts_distinct_keys_and_physical_bytes() {
+    fn union_census_counts_distinct_keys_and_initialized_bytes() {
         let mut arena = Arena::new();
         let leaf: Vec<_> = (0..8).map(|i| (i, 0)).collect();
         let union = build(&mut arena, &[leaf.clone(), leaf]);
@@ -1704,6 +1704,8 @@ mod tests {
         assert_eq!(capacity, 4);
         // A second arena in this session models the publishing worker.
         let mut worker = Arena::new();
+        #[cfg(feature = "stats2")]
+        let bytes_before = arena.stats.bytes[Stat::AttrsUpd as usize];
         let w = arena.alloc_union_with_hook(a, b, || {
             worker.flat(a);
         });
@@ -1713,11 +1715,13 @@ mod tests {
         assert_eq!(out.leaves, 2);
         assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
         #[cfg(feature = "stats2")]
-        assert_eq!(
-            out.initialized_bytes(),
-            AttrsObj::union_bytes(2),
-            "the census excludes the reserved but uninitialized pointer tail"
-        );
+        {
+            assert_eq!(
+                arena.stats.bytes[Stat::AttrsUpd as usize] - bytes_before,
+                AttrsObj::union_bytes(capacity) as u64
+            );
+            assert_eq!(out.initialized_bytes(), AttrsObj::union_bytes(2));
+        }
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

@@ -26,6 +26,7 @@ use crate::provenance::SourceMap;
 use crate::runtime::heap::Heap;
 use crate::settings::Settings;
 use crate::stdout::Stdout;
+use crate::store::locate::References;
 use crate::{config, error, treestore};
 
 #[derive(Default)]
@@ -51,6 +52,8 @@ pub struct Session {
     pub jobs: Run,
     /// nix.conf, read once per run: it cannot change under an evaluation.
     pub nix_conf: OnceLock<config::Config>,
+    /// References reported by this session's eval store.
+    pub(crate) references: References,
     /// Store path to local tree, for the commands that build the map while
     /// the evaluation is live (`crate::provenance`).
     pub source_map: OnceLock<SourceMap>,

@@ -630,8 +630,9 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// `inherit (subject) sym`.
-    fn inherit_from(&mut self, subject: IrRef, sym: Sym, pos: Pos) -> IrRef {
+    /// Selects the inherited name from its source slot in the current frame.
+    fn inherit_from(&mut self, idx: u32, sym: Sym, pos: Pos) -> IrRef {
+        let subject = self.alloc(Ir::Local { depth: 0, idx });
         let ir = if sym == self.sym_rev_count {
             let path = self.arena.alloc_vec(vec![AttrElemIr::Static(sym)]);
             self.mk_select(subject, path, None, pos)
@@ -991,64 +992,28 @@ impl<'a> Compiler<'a> {
             ..
         } = m;
         let mut binds: Vec<BindIr> = Vec::with_capacity(statics.len());
-        let mut deferred_from: Vec<(usize, Sym, Pos, usize)> = Vec::new();
-        for (sym, def, bpos) in statics {
-            match def {
-                Def::Expr(e) => {
-                    let value = self.value_expr(e, Some(sym))?;
-                    binds.push(BindIr {
-                        sym,
-                        value,
-                        pos: bpos,
-                        scope: BindScope::Own,
-                    });
-                }
+        for (sym, def, pos) in statics {
+            let (value, scope) = match def {
+                Def::Expr(e) => (self.value_expr(e, Some(sym))?, BindScope::Own),
                 Def::Nested(n) => {
                     let a = self.lower_attrs(*n)?;
-                    let value = self.alloc(Ir::Attrs(a));
-                    binds.push(BindIr {
-                        sym,
-                        value,
-                        pos: bpos,
-                        scope: BindScope::Own,
-                    });
+                    (self.alloc(Ir::Attrs(a)), BindScope::Own)
                 }
-                Def::Inherit(var) => {
-                    let value = self.var_ir(var, bpos)?;
-                    binds.push(BindIr {
-                        sym,
-                        value,
-                        pos: bpos,
-                        scope: BindScope::Own,
-                    });
-                }
+                Def::Inherit(var) => (self.var_ir(var, pos)?, BindScope::Own),
                 Def::InheritFrom(fi, name) => {
-                    deferred_from.push((fi, name, bpos, binds.len()));
-                    // placeholder, patched below
-                    binds.push(BindIr {
-                        sym,
-                        value: self.alloc(Ir::Const(Word::NULL)),
-                        pos: bpos,
-                        scope: BindScope::From,
-                    });
+                    (self.inherit_from(fi as u32, name, pos), BindScope::From)
                 }
-            }
+            };
+            binds.push(BindIr {
+                sym,
+                value,
+                pos,
+                scope,
+            });
         }
         let mut from: Vec<IrRef> = Vec::with_capacity(from_exprs.len());
         for e in &from_exprs {
             from.push(self.expr(*e)?);
-        }
-        if !deferred_from.is_empty() {
-            self.scopes.push(Scope::frame(FxHashMap::default()));
-            // the from-env has `from.len()` anonymous slots at depth 0
-            for (fi, name, bpos, bi) in deferred_from {
-                let subject = self.alloc(Ir::Local {
-                    depth: 0,
-                    idx: fi as u32,
-                });
-                binds[bi].value = self.inherit_from(subject, name, bpos);
-            }
-            self.scopes.pop();
         }
         let dynamic = self.lower_dynamics(dynamics)?;
         binds.sort_by_key(|b| b.sym);
@@ -1154,11 +1119,8 @@ impl<'a> Compiler<'a> {
                 }
                 Def::Inherit(_) => (outer_vals[i].unwrap(), BindScope::Outer),
                 Def::InheritFrom(fi, name) => {
-                    let subject = self.alloc(Ir::Local {
-                        depth: 0,
-                        idx: at + (nbinds + fi) as u32,
-                    });
-                    (self.inherit_from(subject, name, bpos), BindScope::Own)
+                    let idx = at + (nbinds + fi) as u32;
+                    (self.inherit_from(idx, name, bpos), BindScope::Own)
                 }
             };
             binds.push(BindIr {

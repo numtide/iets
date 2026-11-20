@@ -69,7 +69,7 @@ pub struct Compiler<'a> {
     /// Set when a `~/` path literal was compiled; the evaluator then records `$HOME`.
     pub used_home: Cell<bool>,
     /// Lint levels; `None` for an embedded source, which is never linted.
-    lints: Option<&'a lint::Config>,
+    lints: Option<&'a [Level; lint::N]>,
     /// The warnings the compile produced; the evaluator reports them.
     pub diags: Vec<lint::Diag>,
     sym_builtins: Sym,
@@ -178,7 +178,7 @@ impl<'a> Compiler<'a> {
             base,
             home: env::var_os("HOME").map(|h| h.into_encoded_bytes()),
             used_home: Cell::new(false),
-            lints,
+            lints: lints.map(|c| &c.levels),
             diags: Vec::new(),
             sym_builtins,
             sym_rev_count,
@@ -207,7 +207,7 @@ impl<'a> Compiler<'a> {
     #[inline]
     fn lint_level(&self, id: LintId) -> Level {
         match self.lints {
-            Some(c) => c.level(id),
+            Some(levels) => levels[id as usize],
             None => Level::Off,
         }
     }

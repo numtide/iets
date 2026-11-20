@@ -57,17 +57,6 @@ impl CorePkgs {
     pub const PREFIX: &[u8] = b"/__corepkgs__/";
 }
 
-/// Where a compiled text comes from, which decides its `Files` entry.
-#[derive(Clone, Copy, PartialEq)]
-enum Origin {
-    /// A file: one entry per path.
-    File,
-    /// A text a pseudo-path names (`«string»`, `«arg»`): one entry per text.
-    Text,
-    /// An embedded text: one entry per text, never linted.
-    Internal,
-}
-
 pub struct FileInfo {
     pub path: Vec<u8>,
     pub base: u32,
@@ -924,7 +913,9 @@ impl Evaluator {
         base_dir: &[u8],
         extra_scope: Option<&[Sym]>,
     ) -> EvalResult<IrRef> {
-        self.compile_source_inner(path, src, base_dir, extra_scope, Origin::Text)
+        let file = self.files.add_text(path, &src);
+        let lints = self.compile_lints(path);
+        self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
 
@@ -936,14 +927,17 @@ impl Evaluator {
         base_dir: &[u8],
         extra_scope: Option<&[Sym]>,
     ) -> EvalResult<IrRef> {
-        self.compile_source_inner(path, src, base_dir, extra_scope, Origin::File)
+        let file = self.add_file(path, &src);
+        let lints = self.compile_lints(path);
+        self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
 
     /// `compile_source` for an embedded source (corepkgs, `call-flake.nix`):
     /// never linted.
     pub fn compile_internal(&mut self, path: &[u8], src: &[u8]) -> EvalResult<IrRef> {
-        self.compile_source_inner(path, src.to_vec(), b"/", None, Origin::Internal)
+        let file = self.files.add_text(path, src);
+        self.compile_source_inner(file, src, b"/", None, None)
             .map(|(ir, _, _)| ir)
     }
 
@@ -951,23 +945,18 @@ impl Evaluator {
     /// the lint diagnostics, already reported.
     fn compile_source_inner(
         &mut self,
-        path: &[u8],
-        src: Vec<u8>,
+        file: FileId,
+        src: &[u8],
         base_dir: &[u8],
         extra_scope: Option<&[Sym]>,
-        origin: Origin,
+        lints: Option<&lint::Config>,
     ) -> EvalResult<(IrRef, bool, Vec<Diag>)> {
-        let file = match origin {
-            Origin::File => self.add_file(path, &src),
-            Origin::Text | Origin::Internal => self.files.add_text(path, &src),
-        };
         let base = self.files[file.0 as usize].base;
-        let ast = syntax::parse(&src, file, &mut self.interner)
+        let ast = syntax::parse(src, file, &mut self.interner)
             .map_err(|e| Error::boxed(ErrorKind::Parse, e.msg, Pos(base + e.span.start)))?;
         self.files[file.0 as usize].set_allows(ast.allows.clone());
         let t0 = Instant::now();
         let before = self.arena.bytes_allocated;
-        let lints = (origin != Origin::Internal).then(|| self.config_for_file(path));
         let mut c = Compiler::new(
             &ast,
             &mut self.arena,
@@ -975,7 +964,7 @@ impl Evaluator {
             &self.globals,
             base,
             base_dir,
-            lints.as_ref(),
+            lints,
         );
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
@@ -1023,13 +1012,13 @@ impl Evaluator {
             return self.compile_path(path, src, base_dir, None);
         }
         let t0 = Instant::now();
-        let lint_key = self.config_for_file(path).compile_key();
+        let lints = self.compile_lints(path);
         let key = cache.key(
             path,
             &src,
             self.current_system,
             &self.store_dir,
-            &lint_key,
+            &lints.compile_key(),
             self.pure(),
         );
         let file = self.add_file(path, &src);
@@ -1062,7 +1051,7 @@ impl Evaluator {
             }
         }
         let (ir, used_home, diags) =
-            self.compile_source_inner(path, src, base_dir, None, Origin::File)?;
+            self.compile_source_inner(file, &src, base_dir, None, Some(&lints))?;
         let t1 = Instant::now();
         let allows = self.files[file.0 as usize].allows();
         if !used_home && let Some(bytes) = cache::serialize(self, ir, base, &diags, allows) {

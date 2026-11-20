@@ -438,8 +438,9 @@ impl AttrsObj {
         size_of::<Self>() + size_of::<UnionTail>() + leaves * size_of::<&Self>()
     }
 
+    /// Initialized header and payload bytes, excluding a union's unused allocation tail.
     #[cfg(feature = "stats2")]
-    pub(crate) fn allocated_bytes(&self) -> usize {
+    pub(crate) fn initialized_bytes(&self) -> usize {
         if self.is_union() {
             Self::union_bytes(self.leaves as usize)
         } else {
@@ -1711,6 +1712,12 @@ mod tests {
         // uninitialized pointer slots and must not be dereferenced.
         assert_eq!(out.leaves, 2);
         assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
+        #[cfg(feature = "stats2")]
+        assert_eq!(
+            out.initialized_bytes(),
+            AttrsObj::union_bytes(2),
+            "the census excludes the reserved but uninitialized pointer tail"
+        );
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

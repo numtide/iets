@@ -118,8 +118,8 @@ struct Merged {
 enum Def {
     Expr(ExprId),
     Nested(Box<Merged>),
-    Inherit(Sym),
-    InheritFrom(usize, Sym),
+    Inherit,
+    InheritFrom(usize),
 }
 
 impl Merged {
@@ -815,7 +815,7 @@ impl<'a> Compiler<'a> {
             BindKind::Inherit { from: None, names } => {
                 for (name, span) in ast.names(*names) {
                     let p = Pos(self.base + span.start);
-                    self.add_static(m, *name, Def::Inherit(*name), p)?;
+                    self.add_static(m, *name, Def::Inherit, p)?;
                 }
                 Ok(())
             }
@@ -827,7 +827,7 @@ impl<'a> Compiler<'a> {
                 m.from_exprs.push(*e);
                 for (name, span) in ast.names(*names) {
                     let p = Pos(self.base + span.start);
-                    self.add_static(m, *name, Def::InheritFrom(idx, *name), p)?;
+                    self.add_static(m, *name, Def::InheritFrom(idx), p)?;
                 }
                 Ok(())
             }
@@ -999,10 +999,8 @@ impl<'a> Compiler<'a> {
                     let a = self.lower_attrs(*n)?;
                     (self.alloc(Ir::Attrs(a)), BindScope::Own)
                 }
-                Def::Inherit(var) => (self.var_ir(var, pos)?, BindScope::Own),
-                Def::InheritFrom(fi, name) => {
-                    (self.inherit_from(fi as u32, name, pos), BindScope::From)
-                }
+                Def::Inherit => (self.var_ir(sym, pos)?, BindScope::Own),
+                Def::InheritFrom(fi) => (self.inherit_from(fi as u32, sym, pos), BindScope::From),
             };
             binds.push(BindIr {
                 sym,
@@ -1093,9 +1091,9 @@ impl<'a> Compiler<'a> {
         // `inherit x` values resolve in the enclosing scope, so compile them
         // before pushing the new frame.
         let mut outer_vals: Vec<Option<IrRef>> = Vec::with_capacity(statics.len());
-        for (_, def, bpos) in &statics {
+        for (sym, def, bpos) in &statics {
             outer_vals.push(match def {
-                Def::Inherit(var) => Some(self.var_ir(*var, *bpos)?),
+                Def::Inherit => Some(self.var_ir(*sym, *bpos)?),
                 _ => None,
             });
         }
@@ -1117,10 +1115,10 @@ impl<'a> Compiler<'a> {
                     let a = self.lower_attrs(*n)?;
                     (self.alloc(Ir::Attrs(a)), BindScope::Own)
                 }
-                Def::Inherit(_) => (outer_vals[i].unwrap(), BindScope::Outer),
-                Def::InheritFrom(fi, name) => {
+                Def::Inherit => (outer_vals[i].unwrap(), BindScope::Outer),
+                Def::InheritFrom(fi) => {
                     let idx = at + (nbinds + fi) as u32;
-                    (self.inherit_from(idx, name, bpos), BindScope::Own)
+                    (self.inherit_from(idx, sym, bpos), BindScope::Own)
                 }
             };
             binds.push(BindIr {

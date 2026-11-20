@@ -139,8 +139,9 @@ needed for rustix on recent Linux until nixpkgs includes it.
 cases natively with Gungraun's `--test` and then under Valgrind. Build-time counts
 are discarded. CI measures outside derivations, using the candidate's locked
 inputs for both executables. It publishes the runner's instruction/thread
-output directly and uploads JSON/raw profiles. The baseline may have stripped
-debug information; retain debug information on both sides for source annotation.
+output directly and uploads JSON/raw profiles. Both CI comparisons use the same
+two release packages. For source annotation, run the local harness with debug
+information retained on both sides.
 
 For an unbounded whole-Nixpkgs evaluation, explicitly disable the default 4 GiB
 worker-process restart threshold. `--max-memory-size 0` selects one shared

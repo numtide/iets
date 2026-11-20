@@ -51,8 +51,9 @@ jobs:
         if: ${{ !cancelled() && steps.environment.outcome == 'success' && steps.base.outcome == 'success' }}
         run: |
           set -o pipefail
-          IETS_BENCH_BIN="$PWD/result-base/bin/iets" \
+          IETS_BENCH_BIN="$(realpath result-base/bin/iets)" \
             ./result-callgrind/bin/iets-bench-callgrind --save-baseline=base --save-summary=json
+          IETS_BENCH_BIN="$(realpath result-candidate/bin/iets)" \
           ./result-callgrind/bin/iets-bench-callgrind \
             --baseline=base --callgrind-limits='Ir=5%' --callgrind-metrics=Ir \
             --show-intermediate --save-summary=json 2>&1 | tee callgrind.txt

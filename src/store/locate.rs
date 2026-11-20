@@ -19,16 +19,16 @@ struct Slot {
     answer: OnceLock<BTreeSet<StorePath>>,
 }
 
-/// What the store answered for a path, kept for the life of the process: the
-/// references of a valid store path never change.
-static REFERENCES: Mutex<Option<HashMap<String, Arc<Slot>>>> = Mutex::new(None);
+#[derive(Default)]
+pub(crate) struct References(Mutex<HashMap<String, Arc<Slot>>>);
 
-fn slot(full: &str) -> (Arc<Slot>, bool) {
-    let mut kept = REFERENCES.lock().expect("references cache");
-    let table = kept.get_or_insert_with(HashMap::new);
-    match table.entry(full.to_string()) {
-        Entry::Occupied(e) => (e.get().clone(), false),
-        Entry::Vacant(e) => (e.insert(Arc::default()).clone(), true),
+impl References {
+    fn slot(&self, full: &str) -> (Arc<Slot>, bool) {
+        let mut table = self.0.lock().expect("references cache");
+        match table.entry(full.to_string()) {
+            Entry::Occupied(e) => (e.get().clone(), false),
+            Entry::Vacant(e) => (e.insert(Arc::default()).clone(), true),
+        }
     }
 }
 
@@ -37,7 +37,7 @@ fn slot(full: &str) -> (Arc<Slot>, bool) {
 /// context, and swallows `queryPathInfo`'s error the same way.
 pub fn references_of(path: &StorePath) -> BTreeSet<StorePath> {
     let full = path.to_string();
-    let (s, _) = slot(&full);
+    let (s, _) = Session::current().references.slot(&full);
     // a failed prefetch queries again
     s.answer
         .get_or_init(|| {
@@ -57,7 +57,7 @@ pub fn prefetch_references(path: StorePath, session: Arc<Session>) {
         return;
     }
     let full = path.to_string();
-    let (s, new) = slot(&full);
+    let (s, new) = session.references.slot(&full);
     if new && STARTED.fetch_add(1, Ordering::Relaxed) < MAX_PREFETCH {
         thread::spawn(move || {
             let _entered = session.enter();

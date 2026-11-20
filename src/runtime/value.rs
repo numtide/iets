@@ -1395,19 +1395,8 @@ impl Arena {
             return w;
         }
         let a = self.alloc_attrs_as(entries.len(), bucket);
-        let slots = a.attrs_mut();
-        for (slot, (sym, pos, w)) in slots.iter_mut().zip(entries) {
-            // SAFETY: writing into uninitialised arena memory of the right type.
-            unsafe {
-                ptr::write(
-                    slot,
-                    Attr {
-                        sym: *sym,
-                        pos: *pos,
-                        cell: Cell::new(*w),
-                    },
-                )
-            };
+        for (i, &(sym, pos, w)) in (0..a.len_raw() as usize).zip(entries) {
+            a.init(i, sym, pos, w);
         }
         Word::from_ref(a)
     }
@@ -1545,17 +1534,6 @@ impl Arena {
             op,
             args,
         }))
-    }
-}
-
-impl AttrsObj {
-    #[inline]
-    pub(crate) fn attrs_mut(&mut self) -> &'static mut [Attr] {
-        // SAFETY: see `attrs`; exclusive access through `&mut self`.
-        unsafe {
-            let p = (self as *mut AttrsObj).add(1) as *mut Attr;
-            slice::from_raw_parts_mut(p, self.len_raw() as usize)
-        }
     }
 }
 

@@ -988,12 +988,20 @@ pub fn hash_derivation_modulo_with(
     mask_outputs: bool,
     inputs: &ModuloInputs,
 ) -> Result<Arc<DrvHash>, DrvError> {
-    let hash = with_aterm_buf(|s| {
-        drv.unparse_from(s, mask_outputs, Some(&inputs.inputs2), inputs.tail.as_ref())?;
-        Ok::<_, DrvError>(hash_bytes(HashAlgo::Sha256, s))
-    })?;
+    let hash = modulo_hash(drv, mask_outputs, inputs)?;
     let hashes = drv.outputs.keys().map(|k| (k.clone(), hash)).collect();
     Ok(Arc::new(DrvHash::new(hashes, inputs.kind)))
+}
+
+fn modulo_hash(
+    drv: &Derivation,
+    mask_outputs: bool,
+    inputs: &ModuloInputs,
+) -> Result<Hash, DrvError> {
+    with_aterm_buf(|s| {
+        drv.unparse_from(s, mask_outputs, Some(&inputs.inputs2), inputs.tail.as_ref())?;
+        Ok(hash_bytes(HashAlgo::Sha256, s))
+    })
 }
 
 /// Mirrors derivations.cc:pathDerivationModulo (memoized by .drv path).
@@ -1038,8 +1046,7 @@ pub fn finalize_with_inputs(
     cache: &mut DrvHashCache,
     loader: &mut DrvLoader<'_>,
 ) -> Result<Option<ModuloInputs>, DrvError> {
-    let mut modulo: Option<ModuloInputs> = None;
-    let mut hashes_modulo: Option<Arc<DrvHash>> = None;
+    let mut masked = None;
     let keys = drv.env.len();
     let names: Vec<String> = drv.outputs.keys().cloned().collect();
     for name in names {
@@ -1047,17 +1054,16 @@ pub fn finalize_with_inputs(
         let actual = match out {
             DerivationOutput::Fixed { .. } => drv.fixed_output_path(&name)?,
             DerivationOutput::InputAddressed(_) | DerivationOutput::Deferred => {
-                let hm = match hashes_modulo {
-                    Some(ref h) => h,
+                let (inputs, h) = match &masked {
+                    Some(pair) => pair,
                     None => {
                         let mut inputs = modulo_inputs(drv, cache, loader)?;
                         inputs.tail = Some(drv.aterm_tail()?);
-                        let h = hash_derivation_modulo_with(drv, true, &inputs)?;
-                        modulo = Some(inputs);
-                        hashes_modulo.insert(h)
+                        let h = modulo_hash(drv, true, &inputs)?;
+                        masked.insert((inputs, h))
                     }
                 };
-                match hm.kind {
+                match inputs.kind {
                     DrvHashKind::Deferred => {
                         if let DerivationOutput::InputAddressed(p) = out {
                             return Err(DrvError(format!(
@@ -1067,9 +1073,6 @@ pub fn finalize_with_inputs(
                         continue;
                     }
                     DrvHashKind::Regular => {
-                        let h = hm.hashes.get(&name).ok_or_else(|| {
-                            DrvError(format!("derivation produced no hash for output '{name}'"))
-                        })?;
                         let path = make_output_path(&name, h, &drv.name)?;
                         if let DerivationOutput::InputAddressed(p) = &out
                             && *p != path
@@ -1098,6 +1101,7 @@ pub fn finalize_with_inputs(
             Some(_) => {}
         }
     }
+    let mut modulo = masked.map(|(inputs, _)| inputs);
     // the tail has no hole for an env key added above
     if drv.env.len() != keys
         && let Some(m) = &mut modulo

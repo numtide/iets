@@ -38,7 +38,7 @@ because a word made up from bits would let a safe call read any address.
 | Derivation roots of a value | `api::installable::drv_roots`; `get_drvs`/`get_drvs_at` for the `recurseForDerivations` walk; `to_install` for `meta.outputsToInstall`; `to_derivation` for the drv path alone |
 | Derivations as Nix's JSON | `api::drvshow::show(ev, roots, recursive)`, the `nix derivation show` document; `recursive` walks the input-drv closure |
 | Derivations of another run | `api::build::drvs_in_dir(dir)` over an `EvalArgs::dump_drvs` directory; `api::build::drv_info(path, aterm)` for one |
-| Outputs to build | `api::build_targets(wanted, roots)` |
+| Outputs to build per derivation | `api::build::root_outputs(roots, wanted)` |
 | Upload plan | `api::build::plan(ev, roots)`, or `plan_with(roots, Inputs { drvs, sources, fetched })` over tables you hold; empty tables read every drv from `/nix/store` |
 | Where the builds go | `api::build::transport(flag, &api::build::config())` |
 | Build | `api::build::Dispatch::open(&transport, &options, plan, prov, style)`, then `submit`, `upload_only`, `missing` or `realise`; `overrides(map)` for `--source STOREPATH=LOCAL` |

@@ -176,15 +176,16 @@ if let Err(e) = api::installable::drv_roots(ev, value, &mut found) {
     api::report(ev, &e);
     return Err("evaluation failed".into());
 }
-let (roots, outputs) = api::build_targets(&[], &found);
+let requests = api::build::root_outputs(&found, &[]);
+let roots: Vec<_> = requests.iter().map(|(r, _)| r.clone()).collect();
 let plan = api::build::plan(ev, &roots)?;
 let transport = api::build::transport(Some("daemon"), &api::build::config())?;
 let prov = iets::provenance::Provenance::snapshot(ev);
 let options = api::build::Options::default();
 let mut d = api::build::Dispatch::open(&transport, &options, plan, prov, Style::detect())?;
-let targets = roots
-    .iter()
-    .map(|r| Target::new(r.name(), r.clone(), outputs.clone()))
+let targets = requests
+    .into_iter()
+    .map(|(r, outputs)| Target::new(r.name(), r.clone(), outputs))
     .collect();
 for o in d.submit(targets)? {
     for path in o.outputs.values() {

@@ -66,7 +66,8 @@ fn eval_and_build(ev: &mut Evaluator, a: EvalArgs, url: String) -> u8 {
         return 1;
     }
     // `--out` would add wanted outputs; the roots' string context is enough here.
-    let (root_paths, outputs) = api::build_targets(&[], &roots);
+    let requests = api::build::root_outputs(&roots, &[]);
+    let root_paths: Vec<_> = requests.iter().map(|(r, _)| r.clone()).collect();
     let prov = iets::provenance::Provenance::snapshot(ev);
 
     // Every derivation and source this evaluation created, straight from
@@ -105,9 +106,9 @@ fn eval_and_build(ev: &mut Evaluator, a: EvalArgs, url: String) -> u8 {
             return 1;
         }
     };
-    let targets: Vec<Target> = root_paths
-        .iter()
-        .map(|r| Target::new(r.name(), r.clone(), outputs.clone()))
+    let targets: Vec<Target> = requests
+        .into_iter()
+        .map(|(r, outputs)| Target::new(r.name(), r.clone(), outputs))
         .collect();
     let outcomes = match d.submit(&mut PlanUpload::new(&plan, &locate), targets) {
         Ok(o) => o,

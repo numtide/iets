@@ -88,7 +88,7 @@ derivations is built whole, each member to its own verdict: 'iets build
                         fetched, do not build; --json: as JSON on stdout
   --json                print {\"outcomes\"} on stdout, not the paths
   -k, --keep-going      one root: build what a failure does not block
-  --out NAME            build the output NAME only (repeatable)
+  --out NAME            request NAME from each root (repeatable)
   --fetch-to DIR        copy the outputs from the builder to DIR
   -o, --out-link PATH   bring the outputs into the local store and link
                         them at PATH, PATH-1, ... (GC roots)

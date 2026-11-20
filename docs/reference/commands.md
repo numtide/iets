@@ -175,7 +175,7 @@ to evaluate stops the run before anything builds.
 | `--dry-run` | upload the closure, print the plan, build nothing |
 | `--json` | print the outcomes as one JSON object instead of the paths |
 | `-k`, `--keep-going` | with one root: build everything a failure does not block |
-| `--out NAME` | build the output `NAME` only; repeatable |
+| `--out NAME` | request `NAME` from each derivation, plus any outputs its string contexts name; repeatable |
 | `--fetch-to DIR` | copy the outputs from the builder into `DIR` |
 | `-o`, `--out-link PATH` | bring the outputs into the local store and link them at `PATH`, `PATH-1`, ... |
 | `--source SP=LOCAL` | with a `DRV` argument: the local tree of the input source `SP` |

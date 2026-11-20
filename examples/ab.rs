@@ -1243,8 +1243,6 @@ mod ab {
         #[cfg(target_os = "linux")]
         use std::os::unix::process::ExitStatusExt;
         #[cfg(target_os = "linux")]
-        use std::path::absolute;
-        #[cfg(target_os = "linux")]
         use std::str;
         #[cfg(target_os = "linux")]
         use std::thread::sleep;
@@ -1345,15 +1343,11 @@ mod ab {
             // and spawn failures; keep child-spawning assertions in this test.
             {
                 let root = tempfile::tempdir().unwrap();
-                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
-                    .map(|dir| dir.join("false"))
-                    .find(|path| path.is_file())
-                    .expect("the false utility");
-                let false_bin = absolute(false_bin).unwrap();
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {
-                        symlink(&false_bin, &bin).unwrap();
+                        fs::write(&bin, b"#!/bin/sh\nexit 1\n").unwrap();
+                        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
                     }
                     let result = run_once(
                         &bin,

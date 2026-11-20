@@ -246,6 +246,7 @@ mod ab {
         eof: &mpsc::Receiver<io::Result<()>>,
         deadline: Instant,
     ) -> Result<(), RunError> {
+        let mut final_poll = false;
         loop {
             // recv_timeout takes a relative duration. Recheck the absolute deadline
             // so a paused receiver cannot start a second full wait when it resumes.
@@ -258,6 +259,9 @@ mod ab {
                         .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                // EOF can queue while a timed-out receiver is paused. Check it
+                // once with a zero timeout before reporting the absolute limit.
+                Err(mpsc::RecvTimeoutError::Timeout) if !final_poll => final_poll = true,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err(RunError::Cleanup(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -1220,6 +1224,10 @@ mod ab {
 
         #[test]
         fn a_writer_can_outlive_the_child_tree() {
+            let (notify, eof) = mpsc::channel();
+            notify.send(Ok(())).unwrap();
+            wait_for_stdout(&eof, Instant::now()).unwrap();
+
             let (reader, writer) = UnixStream::pair().unwrap();
             let (notify, eof) = mpsc::channel();
             let hasher = thread::spawn(move || hash_output(reader, notify));

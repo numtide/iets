@@ -304,9 +304,7 @@ pub fn fetch_tarball_builtin(ev: &mut Evaluator, args: &[Word], pos: Pos) -> Eva
         ("narHash".into(), AttrVal::Str(hash.to_sri())),
     ]);
     source::ensure_readable(ev, &sp, &hash, &attrs, pos)?;
-    let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
-    let ctx = ev.arena.alloc_slice(&[Ctx::Opaque(full)]);
-    Ok(ev.arena.mk_string_static(full, ctx))
+    Ok(paths::store_path_string(ev, &sp))
 }
 
 /// What primops/fetchTree.cc:fetch reads from its argument: a URL string, or
@@ -412,9 +410,7 @@ pub fn fetchurl_builtin(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResu
     };
     let expected = paths::parse_sha256_allow_empty(sha256.as_bytes(), pos)?;
     let sp = source::fetch_file(ev, &a.url, &name, expected, pos)?;
-    let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
-    let ctx = ev.arena.alloc_slice(&[Ctx::Opaque(full)]);
-    Ok(ev.arena.mk_string_static(full, ctx))
+    Ok(paths::store_path_string(ev, &sp))
 }
 
 /// util.cc:baseNameOf: the last component, past one trailing `/`.
@@ -471,9 +467,7 @@ pub fn emit_tree_attrs(
 ) -> EvalResult<Word> {
     let (sp, a) = (&tree.path, &tree.attrs);
     let mut entries: Vec<(Sym, Pos, Word)> = Vec::with_capacity(10);
-    let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
-    let ctx = ev.arena.alloc_slice(&[Ctx::Opaque(full)]);
-    let out_path = ev.arena.mk_string_static(full, ctx);
+    let out_path = paths::store_path_string(ev, sp);
     entries.push((ev.s.out_path, pos, out_path));
     let counted = source.filter(|s| tree_level(ev, LintId::RevCount, s) != Level::Off);
     let source = source.filter(|s| tree_level(ev, LintId::TreeMetaInDrv, s) != Level::Off);

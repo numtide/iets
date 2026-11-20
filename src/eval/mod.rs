@@ -1017,15 +1017,12 @@ impl Evaluator {
         if path.starts_with(CorePkgs::PREFIX) {
             return self.compile_internal(path, &src);
         }
-        // The cache key derives relative literals' base from the file name.
-        // Public callers can supply another base; compile those without it.
-        if base_dir != dir_of(path) {
-            return self.compile_path(path, src, base_dir, None);
-        }
         let Some(cache) = self.ir_cache.clone() else {
             return self.compile_path(path, src, base_dir, None);
         };
-        if src.len() < cache.min_size {
+        // The key assumes the file's directory resolves relative literals.
+        // Public callers can supply another base; compile those without it.
+        if src.len() < cache.min_size || base_dir != dir_of(path) {
             return self.compile_path(path, src, base_dir, None);
         }
         let t0 = Instant::now();

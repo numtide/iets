@@ -100,6 +100,7 @@ let
       --config 'profile.release.debug="line-tables-only"' ${what}
   '';
   fuzzers = craneLib.mkCargoDerivation (fuzzerArgs // {
+    doInstallCargoArtifacts = false;
     # the dummy bins of the deps cannot link without libFuzzer
     cargoArtifacts = craneLib.buildDepsOnly (fuzzerArgs // { buildPhaseCargoCommand = fuzzerBuild "--lib"; });
     buildPhaseCargoCommand = fuzzerBuild (lib.concatMapStringsSep " " (t: "--bin ${t}") (builtins.attrNames targets));

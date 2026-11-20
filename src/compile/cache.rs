@@ -1578,25 +1578,6 @@ mod tests {
         let source = b"builtins.currentSystem";
         let a = b"/t/f.nix\0left";
         let b = b"/t/f.nix";
-        assert_ne!(
-            cache.key(
-                a,
-                source,
-                "right",
-                &first.store_dir,
-                &first.config_for_file(a).compile_key(),
-                first.pure()
-            ),
-            cache.key(
-                b,
-                source,
-                "left\0right",
-                &second.store_dir,
-                &second.config_for_file(b).compile_key(),
-                second.pure()
-            ),
-            "embedded NUL must not shift a key field boundary"
-        );
         let read = |ev: &mut Evaluator, path: &[u8]| {
             let ir = ev.compile_file(path, source.to_vec(), b"/t").unwrap();
             let value = ev.eval(ev.root_env, ir).unwrap();

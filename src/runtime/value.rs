@@ -430,6 +430,24 @@ impl ListObj {
 }
 
 impl AttrsObj {
+    fn flat_bytes(entries: usize) -> usize {
+        size_of::<Self>() + entries * size_of::<Attr>()
+    }
+
+    fn union_bytes(leaves: usize) -> usize {
+        size_of::<Self>() + size_of::<UnionTail>() + leaves * size_of::<&Self>()
+    }
+
+    /// Initialized header and payload bytes, excluding a union's unused allocation tail.
+    #[cfg(feature = "stats2")]
+    pub(crate) fn initialized_bytes(&self) -> usize {
+        if self.is_union() {
+            Self::union_bytes(self.leaves as usize)
+        } else {
+            Self::flat_bytes(self.len_raw() as usize)
+        }
+    }
+
     /// The entries as one sorted slice. A union must have been flattened
     /// (`Arena::flat`) by the caller; iteration without a copy is `iter()`.
     #[inline]
@@ -1252,9 +1270,9 @@ impl Arena {
 
     /// `alloc_attrs` with a stats bucket naming the producer.
     pub(crate) fn alloc_attrs_as(&mut self, n: usize, bucket: Stat) -> &'static mut AttrsObj {
-        self.stats
-            .note(bucket, size_of::<AttrsObj>() + n * size_of::<Attr>());
-        let p = self.alloc_raw(size_of::<AttrsObj>() + n * size_of::<Attr>(), 8) as *mut AttrsObj;
+        let size = AttrsObj::flat_bytes(n);
+        self.stats.note(bucket, size);
+        let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header plus n attrs.
         unsafe {
             p.write(AttrsObj {
@@ -1273,12 +1291,26 @@ impl Arena {
     /// `a // b` as a union over the flat leaves of both sides; the caller
     /// checked the leaf budget (`leaf_count`).
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
+        self.alloc_union_with_hook(a, b, || {})
+    }
+
+    /// The no-op hook is eliminated in production; tests use it to publish a
+    /// flat copy between sizing and copying, as another worker can do.
+    #[inline]
+    fn alloc_union_with_hook(
+        &mut self,
+        a: &'static AttrsObj,
+        b: &'static AttrsObj,
+        hook: impl FnOnce(),
+    ) -> Word {
         let n = leaf_count(a) + leaf_count(b);
         debug_assert!(n <= MAX_LEAVES as usize);
-        let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
+        hook();
+        let size = AttrsObj::union_bytes(n);
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header, tail and n pointers.
+        // Publishing a flat copy can only reduce the number of leaves.
         unsafe {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
@@ -1298,12 +1330,13 @@ impl Arena {
                     leaves = leaves.add(1);
                 });
             }
+            // A worker may have flattened an operand since capacity was
+            // measured. Only the initialized leaf pointers belong in the view.
+            (*p).leaves = leaves.offset_from(tail.add(1).cast()) as u8;
             #[cfg(feature = "stats2")]
-            self.stats.census.note_attrs(
-                p,
-                Stat::AttrsUpd.attrs_origin(),
-                a.len_unmarked() + b.len_unmarked(),
-            );
+            self.stats
+                .census
+                .note_attrs(p, Stat::AttrsUpd.attrs_origin(), (*p).len_unmarked());
             Word::from_ref(&*p)
         }
     }
@@ -1355,6 +1388,8 @@ impl Arena {
             }
         }
         out.len.store(n as u32, Ordering::Relaxed);
+        #[cfg(feature = "stats2")]
+        self.stats.census.shrink_attrs(out.origin, cap, n);
         // SAFETY: nothing was allocated since `out`, and `out` never had
         // more than `n` of its `cap` entries written.
         unsafe { self.shrink_last((cap - n) * size_of::<Attr>(), Stat::AttrsUpd) };
@@ -1633,10 +1668,60 @@ mod tests {
         acc.unwrap()
     }
 
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn union_census_counts_distinct_keys_and_initialized_bytes() {
+        let mut arena = Arena::new();
+        let leaf: Vec<_> = (0..8).map(|i| (i, 0)).collect();
+        let union = build(&mut arena, &[leaf.clone(), leaf]);
+        arena.flat(union);
+        let census = &arena.stats.census;
+        let origin = Stat::AttrsUpd.attrs_origin() as usize;
+        assert_eq!(census.attrs_hist[origin][census::size_bucket(8)], 2);
+        let mut report = String::new();
+        census.report(&mut report);
+        let upd = report
+            .lines()
+            .find(|line| line.trim_start().starts_with("upd:"))
+            .unwrap();
+        let bytes = arena.stats.bytes[Stat::AttrsUpd as usize].to_string();
+        assert_eq!(upd.split_whitespace().nth(1), Some(bytes.as_str()));
+    }
+
     fn observed(a: &'static AttrsObj) -> Vec<(u32, i64)> {
         a.iter()
             .map(|e| (e.sym.0, e.cell.get().imm_int_value()))
             .collect()
+    }
+
+    #[test]
+    fn union_header_uses_written_leaves_when_flattening_changes_capacity() {
+        let mut arena = Arena::new();
+        let sets = vec![vec![(1, 10)], vec![(2, 20)], vec![(3, 30)]];
+        let a = build(&mut arena, &sets);
+        let b = build(&mut arena, &[vec![(2, 99)]]);
+        let capacity = leaf_count(a) + leaf_count(b);
+        assert_eq!(capacity, 4);
+        // A second arena in this session models the publishing worker.
+        let mut worker = Arena::new();
+        #[cfg(feature = "stats2")]
+        let bytes_before = arena.stats.bytes[Stat::AttrsUpd as usize];
+        let w = arena.alloc_union_with_hook(a, b, || {
+            worker.flat(a);
+        });
+        let out = unsafe { &*w.ptr::<AttrsObj>() };
+        // Check the header before traversing: the old value would expose
+        // uninitialized pointer slots and must not be dereferenced.
+        assert_eq!(out.leaves, 2);
+        assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
+        #[cfg(feature = "stats2")]
+        {
+            assert_eq!(
+                arena.stats.bytes[Stat::AttrsUpd as usize] - bytes_before,
+                AttrsObj::union_bytes(capacity) as u64
+            );
+            assert_eq!(out.initialized_bytes(), AttrsObj::union_bytes(2));
+        }
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

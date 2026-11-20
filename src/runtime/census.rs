@@ -225,6 +225,12 @@ impl Census {
         self.attrs.push(a);
     }
 
+    pub(crate) fn shrink_attrs(&mut self, origin: u8, from: usize, to: usize) {
+        let row = &mut self.attrs_hist[origin as usize];
+        row[size_bucket(from)] -= 1;
+        row[size_bucket(to)] += 1;
+    }
+
     pub(crate) fn note_list(&mut self, l: *const ListObj) {
         self.lists.push(l);
     }
@@ -399,7 +405,7 @@ impl Census {
         for a in &self.attrs {
             let a = unsafe { &**a };
             let o = a.origin as usize;
-            let bytes = (8 + 16 * a.len()) as u64;
+            let bytes = a.initialized_bytes() as u64;
             total_bytes[o] += bytes;
             let sel = a.flags & 0x7f;
             if a.flags & 0x80 != 0 {
@@ -414,7 +420,7 @@ impl Census {
         }
         let _ = writeln!(
             out,
-            "attrsets use: producer: total bytes / never selected nor iterated (bytes) / selected once only / iterated"
+            "attrsets use: producer: initialized bytes (unused union tail excluded) / never selected nor iterated (bytes) / selected once only / iterated"
         );
         for o in 0..10 {
             if total_bytes[o] == 0 {

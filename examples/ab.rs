@@ -374,10 +374,9 @@ mod ab {
         // hide a child from the top-level listing. Check both sources.
         let mut result = Ok(());
         let signal = |pid| {
-            // SAFETY: only a live child returns zero. This is the sole reaper,
-            // so an exit between the check and kill cannot recycle its PID.
-            if pid > 0 && unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) } == 0 {
-                // SAFETY: the PID above names our child in this namespace.
+            // Leave exits for the outer reaper, which tracks newly adopted children.
+            if pid > 0 && children_remain_for(libc::P_PID, pid as libc::id_t)? {
+                // SAFETY: this is our child; the sole reaper cannot recycle its PID.
                 if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
                     let e = io::Error::last_os_error();
                     if e.raw_os_error() != Some(libc::ESRCH) {
@@ -476,12 +475,16 @@ mod ab {
 
     /// Check ownership without reaping another exit or extending grace.
     fn children_remain() -> io::Result<bool> {
+        children_remain_for(libc::P_ALL, 0)
+    }
+
+    fn children_remain_for(kind: libc::idtype_t, id: libc::id_t) -> io::Result<bool> {
         let mut info = MaybeUninit::uninit();
         // SAFETY: info is writable and its contents are discarded.
         if unsafe {
             libc::waitid(
-                libc::P_ALL,
-                0,
+                kind,
+                id,
                 info.as_mut_ptr(),
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             )
@@ -1344,6 +1347,54 @@ mod ab {
             unknown.kill().unwrap();
             unknown.wait().unwrap();
             fs::set_permissions(procfs.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            // A sweep must leave a parent's exit visible to the outer reaper,
+            // so its newly adopted child gets the bounded final direct pass.
+            let mut parent = Command::new("sh")
+                .args(["-c", "sleep 30 >&- 2>&- & echo $!; wait"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut child_pid = String::new();
+            BufReader::new(parent.stdout.take().unwrap())
+                .read_line(&mut child_pid)
+                .unwrap();
+            let grandchild: libc::pid_t = child_pid.trim().parse().unwrap();
+            let expired = Instant::now();
+            let mut sweeps = 0;
+            let result = reap_leftovers(expired, expired, |deadline| {
+                sweeps += 1;
+                let pid = if sweeps == 1 {
+                    parent.kill().unwrap();
+                    wait_until_exited(parent.id());
+                    parent.id()
+                } else {
+                    grandchild as u32
+                };
+                fs::write(task.join("children"), pid.to_string()).unwrap();
+                kill_leftovers_in(procfs.path(), deadline)?;
+                if sweeps == 2 {
+                    wait_until_exited(grandchild as u32);
+                }
+                Ok(())
+            });
+            let mut status = 0;
+            // SAFETY: this PID names our adopted child; status is writable.
+            let reaped = unsafe { libc::waitpid(grandchild, &mut status, libc::WNOHANG) };
+            if reaped == 0 {
+                // SAFETY: clean up the live child before a failing assertion.
+                unsafe {
+                    libc::kill(grandchild, libc::SIGKILL);
+                    libc::waitpid(grandchild, ptr::null_mut(), 0);
+                }
+            }
+            assert_eq!(sweeps, 2);
+            assert_eq!(reaped, grandchild);
+            assert!(libc::WIFSIGNALED(status));
+            assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+            // A signalled zombie is not ECHILD: accounting must still fail.
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(!children_remain().unwrap());
+
             // An overdue sweep signals known children but skips the PID-table scan.
             let mut known = Command::new("sleep").arg("30").spawn().unwrap();
             let mut fallback = Command::new("true").spawn().unwrap();

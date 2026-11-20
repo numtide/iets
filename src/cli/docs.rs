@@ -41,7 +41,7 @@ const fn in_repo(quadrant: &'static str, topic: &'static str, about: &'static st
 }
 
 /// Every page, embedded ones first.
-pub const PAGES: &[Page] = &[
+pub static PAGES: &[Page] = &[
     embedded(
         "commands",
         "every command, its flags and its exit codes",

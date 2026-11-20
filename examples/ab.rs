@@ -246,6 +246,13 @@ mod ab {
         eof: &mpsc::Receiver<io::Result<()>>,
         deadline: Instant,
     ) -> Result<(), RunError> {
+        poll_stdout_until(deadline, |wait| eof.recv_timeout(wait))
+    }
+
+    fn poll_stdout_until(
+        deadline: Instant,
+        mut recv: impl FnMut(Duration) -> Result<io::Result<()>, mpsc::RecvTimeoutError>,
+    ) -> Result<(), RunError> {
         let mut final_poll = false;
         loop {
             // recv_timeout takes a relative duration. Recheck the absolute deadline
@@ -253,7 +260,7 @@ mod ab {
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .min(REAP_INTERVAL);
-            match eof.recv_timeout(wait) {
+            match recv(wait) {
                 Ok(result) => {
                     return result
                         .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
@@ -337,6 +344,11 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn enable_subreaper() -> io::Result<()> {
+        // An inherited SIG_IGN lets the kernel reap and recycle a checked child PID.
+        // SAFETY: SIG_DFL is a valid disposition for SIGCHLD.
+        if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
         // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag.
         if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
             return Err(io::Error::last_os_error());
@@ -377,7 +389,7 @@ mod ab {
         // Some kernels omit the per-thread children files, while hidepid can
         // hide a child from the top-level listing. Check both sources.
         let mut result = Ok(());
-        let signal = |pid| {
+        let signal = |pid, observe_ready| {
             // Leave exits for the outer reaper, which tracks newly adopted children.
             if pid > 0 && children_remain_for(libc::P_PID, pid as libc::id_t)? {
                 // SAFETY: this is our child; the sole reaper cannot recycle its PID.
@@ -387,7 +399,9 @@ mod ab {
                         return Err(e);
                     }
                 }
-                return Ok(matches!(children_state(libc::P_ALL, 0), Ok(Some(true))));
+                return Ok(
+                    observe_ready && matches!(children_state(libc::P_ALL, 0), Ok(Some(true)))
+                );
             }
             Ok(false)
         };
@@ -439,7 +453,7 @@ mod ab {
                             .ok()
                             .and_then(|s| s.parse().ok())
                         {
-                            match signal(pid) {
+                            match signal(pid, !overdue && !*waitable) {
                                 Ok(ready) => *waitable |= ready,
                                 Err(e) => *result = Err(e),
                             }
@@ -487,7 +501,9 @@ mod ab {
                     }
                 };
                 if let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) {
-                    match signal(pid) {
+                    // A complete view needs no retry. If it later becomes
+                    // incomplete, that checkpoint also checks global readiness.
+                    match signal(pid, !direct && pass == 0 && !waitable) {
                         Ok(ready) => waitable |= ready,
                         Err(e) => result = Err(e),
                     }
@@ -498,7 +514,8 @@ mod ab {
             }
             // A slow table scan can pass a grandchild before its parent exits.
             // Reserve part of the same grace for one retry only after
-            // an exit is waitable; a still-live child does not restart the scan.
+            // an exit is waitable. This can leave a later PID unvisited when
+            // the direct child lists are incomplete and the deadline expires.
             restart = None;
         }
         result
@@ -549,18 +566,20 @@ mod ab {
         deadline: Instant,
         sweep: impl FnMut(Instant) -> io::Result<()>,
     ) -> io::Result<bool> {
-        reap_with_final_polls(until, deadline, 256, sweep)
+        reap_with_final_polls(until, deadline, 256, thread::sleep, sweep)
     }
 
     fn reap_with_final_polls(
         until: Instant,
         deadline: Instant,
         mut final_polls: usize,
+        mut sleep: impl FnMut(Duration),
         mut sweep: impl FnMut(Instant) -> io::Result<()>,
     ) -> io::Result<bool> {
         let mut clean = true;
         let mut sweep_error = None;
         let mut reaped_since_sweep = false;
+        let mut just_swept = false;
         let mut final_sweep_done = false;
         // Drain exits already pending at the deadline, even if several arrived
         // between polls. Bound the work if descendants keep producing exits.
@@ -577,7 +596,10 @@ mod ab {
                     _ => return Err(e),
                 }
             }
-            reaped_since_sweep |= pid > 0;
+            if pid > 0 {
+                reaped_since_sweep = true;
+                just_swept = false;
+            }
             if now >= until {
                 // Always attempt the first sweep, even if the deadline has passed.
                 let first_sweep = pid == 0 && clean;
@@ -618,17 +640,20 @@ mod ab {
                         )
                     }));
                 }
-                if pid == 0 {
+                if pid == 0 && !just_swept {
                     // A killed process's children come to us in turn.
                     reaped_since_sweep = false;
                     if let Err(e) = sweep(deadline) {
                         sweep_error = Some(e);
                     }
+                    just_swept = true;
+                    continue;
                 }
             }
             if pid == 0 {
+                just_swept = false;
                 let next = if clean { until } else { deadline };
-                thread::sleep(REAP_INTERVAL.min(next.saturating_duration_since(Instant::now())));
+                sleep(REAP_INTERVAL.min(next.saturating_duration_since(Instant::now())));
             }
         }
     }
@@ -1219,14 +1244,23 @@ mod ab {
         use std::os::unix::process::ExitStatusExt;
         #[cfg(target_os = "linux")]
         use std::str;
+        #[cfg(target_os = "linux")]
+        use std::thread::sleep;
 
         use super::*;
 
         #[test]
         fn a_writer_can_outlive_the_child_tree() {
             let (notify, eof) = mpsc::channel();
-            notify.send(Ok(())).unwrap();
-            wait_for_stdout(&eof, Instant::now()).unwrap();
+            poll_stdout_until(Instant::now(), |wait| {
+                assert!(wait.is_zero());
+                let result = eof.recv_timeout(wait);
+                if matches!(result, Err(mpsc::RecvTimeoutError::Timeout)) {
+                    notify.send(Ok(())).unwrap();
+                }
+                result
+            })
+            .unwrap();
 
             let (reader, writer) = UnixStream::pair().unwrap();
             let (notify, eof) = mpsc::channel();
@@ -1301,19 +1335,19 @@ mod ab {
         #[cfg(target_os = "linux")]
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
+            // SAFETY: this test owns child cleanup and immediately sets up the subreaper.
+            let previous = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            assert_ne!(previous, libc::SIG_ERR);
             enable_subreaper().unwrap();
             // The shared boundary identifies either binary once for execution
             // and spawn failures; keep child-spawning assertions in this test.
             {
                 let root = tempfile::tempdir().unwrap();
-                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
-                    .map(|dir| dir.join("false"))
-                    .find(|path| path.is_file())
-                    .expect("the false utility");
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {
-                        symlink(&false_bin, &bin).unwrap();
+                        fs::write(&bin, b"#!/bin/sh\nexit 1\n").unwrap();
+                        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
                     }
                     let result = run_once(
                         &bin,
@@ -1375,6 +1409,25 @@ mod ab {
                 assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
 
+            // A sweep can make an exit ready. Reap it before waiting another interval.
+            let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+            let mut sleeps = 0;
+            let now = Instant::now();
+            let complete = reap_with_final_polls(
+                now,
+                now + CLEANUP_GRACE,
+                256,
+                |_| sleeps += 1,
+                |_| {
+                    child.kill()?;
+                    wait_until_exited(child.id());
+                    Ok(())
+                },
+            );
+            assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            assert!(!complete.unwrap());
+            assert_eq!(sleeps, 0, "slept with a waitable exit after the sweep");
+
             // Two pending exits exhaust a reduced poll budget before a live sibling.
             let ready = [(); 2].map(|_| Command::new("true").spawn().unwrap());
             for child in &ready {
@@ -1383,7 +1436,7 @@ mod ab {
             let mut live = Command::new("sleep").arg("30").spawn().unwrap();
             let expired = Instant::now();
             let mut sweeps = 0;
-            let error = reap_with_final_polls(expired, expired, 1, |_| {
+            let error = reap_with_final_polls(expired, expired, 1, sleep, |_| {
                 sweeps += 1;
                 live.kill()?;
                 wait_until_exited(live.id());
@@ -1400,7 +1453,7 @@ mod ab {
                 wait_until_exited(child.id());
             }
             let mut sweeps = 0;
-            let complete = reap_with_final_polls(expired, expired, 0, |_| {
+            let complete = reap_with_final_polls(expired, expired, 0, sleep, |_| {
                 sweeps += 1;
                 for child in &mut ready {
                     let _ = child.try_wait();
@@ -1483,7 +1536,7 @@ mod ab {
                 let grandchild: libc::pid_t = child_pid.trim().parse().unwrap();
                 let expired = Instant::now();
                 let mut sweeps = 0;
-                let result = reap_with_final_polls(expired, expired, polls, |deadline| {
+                let result = reap_with_final_polls(expired, expired, polls, sleep, |deadline| {
                     sweeps += 1;
                     let pid = if sweeps == 1 {
                         parent.kill().unwrap();

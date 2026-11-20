@@ -92,8 +92,8 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
     let s_outputs = ev.sym(b"outputs");
     let mut ctx: Vec<Ctx> = orig.ctx.to_vec();
     for a in attrs.iter() {
-        let name: Vec<u8> = ev.interner.name(a.sym).to_vec();
-        let sp = str::from_utf8(&name)
+        let name = ev.interner.name(a.sym);
+        let sp = str::from_utf8(name)
             .ok()
             .and_then(|n| StorePath::parse(n).ok());
         let Some(sp) = sp else {
@@ -101,10 +101,9 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 ErrorKind::Eval,
                 a.pos,
                 "context key '\"{}\"' is not a store path",
-                String::from_utf8_lossy(&name)
+                String::from_utf8_lossy(name)
             );
         };
-        let full = ev.arena.alloc_bytes(&name);
         let v = ev.force_attrs(
             a.cell.get(),
             a.pos,
@@ -117,7 +116,7 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 "while evaluating the `path` attribute of a string context",
             )?
         {
-            ctx.push(Ctx::Opaque(full));
+            ctx.push(Ctx::Opaque(name));
         }
         if let Some(aa) = v.get(s_all)
             && ev.force_bool(
@@ -131,10 +130,10 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                     ErrorKind::Eval,
                     a.pos,
                     "tried to add all-outputs context of \"{}\", which is not a derivation, to a string",
-                    String::from_utf8_lossy(&name)
+                    String::from_utf8_lossy(name)
                 );
             }
-            ctx.push(Ctx::DrvDeep(full));
+            ctx.push(Ctx::DrvDeep(name));
         }
         if let Some(oa) = v.get(s_outputs) {
             let l = ev.force_list(
@@ -147,7 +146,7 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                     ErrorKind::Eval,
                     a.pos,
                     "tried to add derivation output context of \"{}\", which is not a derivation, to a string",
-                    String::from_utf8_lossy(&name)
+                    String::from_utf8_lossy(name)
                 );
             }
             for c in l.cells() {
@@ -156,7 +155,7 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                     oa.pos,
                     "while evaluating an output name within a string context",
                 )?;
-                ctx.push(Ctx::Built { drv: full, output });
+                ctx.push(Ctx::Built { drv: name, output });
             }
         }
     }

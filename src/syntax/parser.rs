@@ -150,9 +150,8 @@ impl<'a> Parser<'a> {
 
     /// One more level of nesting, or Nix's stack-overflow error.
     #[inline]
-    fn deeper(&mut self) -> R<()> {
-        self.depth += 1;
-        if self.depth > MAX_PARSE_DEPTH {
+    fn nested(&mut self, parse: impl FnOnce(&mut Self) -> R<ExprId>) -> R<ExprId> {
+        if self.depth == MAX_PARSE_DEPTH {
             let t = self.peek();
             return Err(self.error_at(
                 t.start,
@@ -160,7 +159,10 @@ impl<'a> Parser<'a> {
                 "stack overflow (possible infinite recursion)".into(),
             ));
         }
-        Ok(())
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
     }
 
     pub fn parse_file(mut self, file: FileId) -> R<Ast> {
@@ -303,10 +305,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self) -> R<ExprId> {
-        self.deeper()?;
-        let r = self.parse_function_inner();
-        self.depth -= 1;
-        r
+        self.nested(Self::parse_function_inner)
     }
 
     fn parse_function_inner(&mut self) -> R<ExprId> {
@@ -595,9 +594,7 @@ impl<'a> Parser<'a> {
         let mut lhs = match t.kind {
             Tok::Bang => {
                 self.bump();
-                self.deeper()?;
-                let e = self.parse_op(BP_NOT + 1)?;
-                self.depth -= 1;
+                let e = self.nested(|p| p.parse_op(BP_NOT + 1))?;
                 self.add(
                     Expr::Unary {
                         op: UnOp::Not,
@@ -609,9 +606,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Minus => {
                 self.bump();
-                self.deeper()?;
-                let e = self.parse_op(BP_NEG + 1)?;
-                self.depth -= 1;
+                let e = self.nested(|p| p.parse_op(BP_NEG + 1))?;
                 self.add(
                     Expr::Unary {
                         op: UnOp::Neg,
@@ -639,7 +634,11 @@ impl<'a> Parser<'a> {
                     self.add(Expr::HasAttr { subject: lhs, path }, start, self.last_end)
                 }
                 Some(op) => {
-                    let rhs = self.parse_op(if assoc == Assoc::Right { bp } else { bp + 1 })?;
+                    let rhs = if assoc == Assoc::Right {
+                        self.nested(|p| p.parse_op(bp))?
+                    } else {
+                        self.parse_op(bp + 1)?
+                    };
                     self.add(Expr::Binary { op, lhs, rhs }, start, self.last_end)
                 }
             };
@@ -703,7 +702,7 @@ impl<'a> Parser<'a> {
                 let mut default = None;
                 if self.peek().kind == Tok::Or {
                     self.bump();
-                    default = Some(self.parse_select()?);
+                    default = Some(self.nested(Self::parse_select)?);
                 }
                 Ok(self.add(
                     Expr::Select {
@@ -735,10 +734,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_simple(&mut self) -> R<ExprId> {
-        self.deeper()?;
-        let r = self.parse_simple_inner();
-        self.depth -= 1;
-        r
+        self.nested(Self::parse_simple_inner)
     }
 
     fn parse_simple_inner(&mut self) -> R<ExprId> {

@@ -244,27 +244,40 @@ mod ab {
 
     fn wait_for_stdout(
         eof: &mpsc::Receiver<io::Result<()>>,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<(), RunError> {
-        eof.recv_timeout(timeout)
-            .map_err(|e| {
-                RunError::Cleanup(match e {
-                    mpsc::RecvTimeoutError::Timeout => io::Error::new(
+        loop {
+            // recv_timeout takes a relative duration. Recheck the absolute deadline
+            // so a paused receiver cannot start a second full wait when it resumes.
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(REAP_INTERVAL);
+            match eof.recv_timeout(wait) {
+                Ok(result) => {
+                    return result
+                        .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(RunError::Cleanup(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "benchmark stdout did not close after the run-on limit",
-                    ),
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        io::Error::other("benchmark stdout reader disconnected")
-                    }
-                })
-            })?
-            .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")))
+                    )));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(RunError::Cleanup(io::Error::other(
+                        "benchmark stdout reader disconnected",
+                    )));
+                }
+            }
+        }
     }
 
     /// How long processes a run left behind may go on before they are killed.
     const LEFTOVER_LIMIT: Duration = Duration::from_secs(60);
 
     const CLEANUP_GRACE: Duration = Duration::from_secs(2);
+    const REAP_INTERVAL: Duration = Duration::from_millis(10);
 
     const COUNTERS: [&str; 5] = [
         "instructions",
@@ -370,58 +383,71 @@ mod ab {
             }
             Ok(())
         };
-        // Allow a small direct-list pass if the first sweep starts overdue.
-        // Count task entries too, since many threads may have no children.
-        let mut remaining = 32usize;
-        let mut allow_direct = || {
-            if overdue {
-                if remaining == 0 {
-                    return false;
+        let signal_direct = |result: &mut io::Result<()>| {
+            // Allow a small direct-list pass if the first sweep starts overdue.
+            // Count task entries too, since many threads may have no children.
+            let mut remaining = 32usize;
+            let mut allow_direct = || {
+                if overdue {
+                    if remaining == 0 {
+                        return false;
+                    }
+                    remaining -= 1;
+                    true
+                } else {
+                    Instant::now() < deadline
                 }
-                remaining -= 1;
-                true
-            } else {
-                Instant::now() < deadline
+            };
+            if let Ok(threads) = fs::read_dir(procfs.join("self/task")) {
+                let mut field = Vec::new();
+                for task in threads {
+                    if !allow_direct() {
+                        return;
+                    }
+                    let Ok(file) = task.and_then(|task| File::open(task.path().join("children")))
+                    else {
+                        continue;
+                    };
+                    // procfs emits space-separated decimal PIDs, including a trailing space.
+                    let mut children = BufReader::new(file);
+                    loop {
+                        if !allow_direct() {
+                            return;
+                        }
+                        field.clear();
+                        match children.read_until(b' ', &mut field) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        if let Some(pid) = str::from_utf8(field.trim_ascii())
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            && let Err(e) = signal(pid)
+                        {
+                            *result = Err(e);
+                        }
+                    }
+                }
             }
         };
-        if let Ok(threads) = fs::read_dir(procfs.join("self/task")) {
-            let mut field = Vec::new();
-            for task in threads {
-                if !allow_direct() {
-                    return result;
-                }
-                let Ok(file) = task.and_then(|task| File::open(task.path().join("children")))
-                else {
-                    continue;
-                };
-                // procfs emits space-separated decimal PIDs, including a trailing space.
-                let mut children = BufReader::new(file);
-                loop {
-                    if !allow_direct() {
-                        return result;
-                    }
-                    field.clear();
-                    match children.read_until(b' ', &mut field) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                    if let Some(pid) = str::from_utf8(field.trim_ascii())
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        && let Err(e) = signal(pid)
-                    {
-                        result = Err(e);
-                    }
-                }
-            }
-        }
+        signal_direct(&mut result);
         if Instant::now() >= deadline {
             return result;
         }
-        // Bound the system-wide fallback, which scales with unrelated processes.
+        // A parent we signaled may exit during a long scan of unrelated PIDs.
+        // Revisit the direct lists without restarting the fallback or its deadline.
+        let mut revisit = Instant::now() + REAP_INTERVAL;
         for entry in fs::read_dir(procfs)? {
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 break;
+            }
+            if now >= revisit {
+                signal_direct(&mut result);
+                if Instant::now() >= deadline || matches!(children_remain(), Ok(false)) {
+                    break;
+                }
+                revisit = Instant::now() + REAP_INTERVAL;
             }
             let entry = match entry {
                 Ok(entry) => entry,
@@ -540,9 +566,7 @@ mod ab {
             }
             if pid == 0 {
                 let next = if clean { until } else { deadline };
-                thread::sleep(
-                    Duration::from_millis(10).min(next.saturating_duration_since(Instant::now())),
-                );
+                thread::sleep(REAP_INTERVAL.min(next.saturating_duration_since(Instant::now())));
             }
         }
     }
@@ -623,11 +647,9 @@ mod ab {
         let clean = reap_leftovers(run_on_deadline, cleanup_deadline, kill_leftovers)
             .map_err(RunError::Cleanup)?;
         // A process outside our child tree can still hold a pipe writer.
-        // Only bound the read; sorting the completed output may take longer.
-        wait_for_stdout(
-            &eof,
-            cleanup_deadline.saturating_duration_since(Instant::now()),
-        )?;
+        // Bound the wait for a writer. A queued EOF is usable immediately,
+        // and sorting the completed output may take longer.
+        wait_for_stdout(&eof, cleanup_deadline)?;
         let out = hasher
             .join()
             .expect("the hash thread")
@@ -1135,11 +1157,11 @@ mod ab {
             let (notify, eof) = mpsc::channel();
             let hasher = thread::spawn(move || hash_output(reader, notify));
             assert!(matches!(
-                wait_for_stdout(&eof, Duration::ZERO),
+                wait_for_stdout(&eof, Instant::now()),
                 Err(RunError::Cleanup(e)) if e.kind() == io::ErrorKind::TimedOut
             ));
             drop(writer);
-            wait_for_stdout(&eof, Duration::from_secs(10)).unwrap();
+            wait_for_stdout(&eof, Instant::now() + Duration::from_secs(10)).unwrap();
             assert_eq!(
                 hasher.join().unwrap(),
                 Some(<[u8; 32]>::from(Sha256::digest([])))
@@ -1159,7 +1181,7 @@ mod ab {
             let (notify, eof) = mpsc::channel();
             let digest = hash_output(reader, notify);
             assert!(matches!(
-                wait_for_stdout(&eof, Duration::ZERO),
+                wait_for_stdout(&eof, Instant::now()),
                 Err(RunError::Scenario(e)) if e == "read benchmark stdout: injected read failure"
             ));
             assert!(digest.is_none());

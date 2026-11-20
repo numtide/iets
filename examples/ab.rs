@@ -565,18 +565,20 @@ mod ab {
         deadline: Instant,
         sweep: impl FnMut(Instant) -> io::Result<()>,
     ) -> io::Result<bool> {
-        reap_with_final_polls(until, deadline, 256, sweep)
+        reap_with_final_polls(until, deadline, 256, thread::sleep, sweep)
     }
 
     fn reap_with_final_polls(
         until: Instant,
         deadline: Instant,
         mut final_polls: usize,
+        mut sleep: impl FnMut(Duration),
         mut sweep: impl FnMut(Instant) -> io::Result<()>,
     ) -> io::Result<bool> {
         let mut clean = true;
         let mut sweep_error = None;
         let mut reaped_since_sweep = false;
+        let mut just_swept = false;
         let mut final_sweep_done = false;
         // Drain exits already pending at the deadline, even if several arrived
         // between polls. Bound the work if descendants keep producing exits.
@@ -593,7 +595,10 @@ mod ab {
                     _ => return Err(e),
                 }
             }
-            reaped_since_sweep |= pid > 0;
+            if pid > 0 {
+                reaped_since_sweep = true;
+                just_swept = false;
+            }
             if now >= until {
                 // Always attempt the first sweep, even if the deadline has passed.
                 let first_sweep = pid == 0 && clean;
@@ -634,17 +639,20 @@ mod ab {
                         )
                     }));
                 }
-                if pid == 0 {
+                if pid == 0 && !just_swept {
                     // A killed process's children come to us in turn.
                     reaped_since_sweep = false;
                     if let Err(e) = sweep(deadline) {
                         sweep_error = Some(e);
                     }
+                    just_swept = true;
+                    continue;
                 }
             }
             if pid == 0 {
+                just_swept = false;
                 let next = if clean { until } else { deadline };
-                thread::sleep(REAP_INTERVAL.min(next.saturating_duration_since(Instant::now())));
+                sleep(REAP_INTERVAL.min(next.saturating_duration_since(Instant::now())));
             }
         }
     }
@@ -1237,6 +1245,8 @@ mod ab {
         use std::path::absolute;
         #[cfg(target_os = "linux")]
         use std::str;
+        #[cfg(target_os = "linux")]
+        use std::thread::sleep;
 
         use super::*;
 
@@ -1404,6 +1414,25 @@ mod ab {
                 assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
 
+            // A sweep can make an exit ready. Reap it before waiting another interval.
+            let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+            let mut sleeps = 0;
+            let now = Instant::now();
+            let complete = reap_with_final_polls(
+                now,
+                now + CLEANUP_GRACE,
+                256,
+                |_| sleeps += 1,
+                |_| {
+                    child.kill()?;
+                    wait_until_exited(child.id());
+                    Ok(())
+                },
+            );
+            assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            assert!(!complete.unwrap());
+            assert_eq!(sleeps, 0, "slept with a waitable exit after the sweep");
+
             // Two pending exits exhaust a reduced poll budget before a live sibling.
             let ready = [(); 2].map(|_| Command::new("true").spawn().unwrap());
             for child in &ready {
@@ -1412,7 +1441,7 @@ mod ab {
             let mut live = Command::new("sleep").arg("30").spawn().unwrap();
             let expired = Instant::now();
             let mut sweeps = 0;
-            let error = reap_with_final_polls(expired, expired, 1, |_| {
+            let error = reap_with_final_polls(expired, expired, 1, sleep, |_| {
                 sweeps += 1;
                 live.kill()?;
                 wait_until_exited(live.id());
@@ -1429,7 +1458,7 @@ mod ab {
                 wait_until_exited(child.id());
             }
             let mut sweeps = 0;
-            let complete = reap_with_final_polls(expired, expired, 0, |_| {
+            let complete = reap_with_final_polls(expired, expired, 0, sleep, |_| {
                 sweeps += 1;
                 for child in &mut ready {
                     let _ = child.try_wait();
@@ -1512,7 +1541,7 @@ mod ab {
                 let grandchild: libc::pid_t = child_pid.trim().parse().unwrap();
                 let expired = Instant::now();
                 let mut sweeps = 0;
-                let result = reap_with_final_polls(expired, expired, polls, |deadline| {
+                let result = reap_with_final_polls(expired, expired, polls, sleep, |deadline| {
                     sweeps += 1;
                     let pid = if sweeps == 1 {
                         parent.kill().unwrap();

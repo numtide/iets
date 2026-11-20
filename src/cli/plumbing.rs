@@ -282,29 +282,20 @@ struct Roots {
 /// `roots` of a `resolve` or the `drvs` of a `plan`, and its `drvDir` when it
 /// has one. No output name means every output, as `!*` does in the worker
 /// protocol.
-fn roots(args: &[String], stdin: bool, drvs: Option<PathBuf>) -> Roots {
+fn roots(args: &[String], stdin: bool, drvs: Option<PathBuf>, wanted: &[String]) -> Roots {
     let mut drv_dir = drvs;
-    let mut out: Vec<Target> = Vec::new();
-    let mut at: HashMap<StorePath, usize> = HashMap::new();
+    let mut found = Vec::new();
     let mut add = |drv: &str, output: Option<&str>| {
         let drv = StorePath::parse(drv)
             .unwrap_or_else(|e| arg_error(format!("'{drv}' is not a store path: {}", e.0)));
-        let wanted: Vec<String> = (output.into_iter())
-            .flat_map(|o| o.split(',').filter(|o| !o.is_empty()).map(String::from))
-            .collect();
-        match at.get(&drv).map(|&i| &mut out[i]) {
-            Some(t) => {
-                for o in wanted {
-                    if !t.outputs.contains(&o) {
-                        t.outputs.push(o);
-                    }
-                }
-            }
-            None => {
-                let name = drv.name().to_string();
-                at.insert(drv.clone(), out.len());
-                out.push(Target::new(&name, drv, wanted));
-            }
+        let names = output
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty());
+        let start = found.len();
+        found.extend(names.map(|name| (drv.clone(), Some(name.to_owned()))));
+        if found.len() == start {
+            found.push((drv, None));
         }
     };
     if stdin {
@@ -344,11 +335,18 @@ fn roots(args: &[String], stdin: bool, drvs: Option<PathBuf>) -> Roots {
         };
         add(drv, output);
     }
-    if out.is_empty() {
+    if found.is_empty() {
         arg_error("nothing to do: give DRV... or --roots -")
     }
     Roots {
-        targets: out,
+        targets: apibuild::root_outputs(&found, wanted)
+            .into_iter()
+            .map(|(drv, outputs)| Target {
+                attr: drv.name().to_owned(),
+                drv,
+                outputs,
+            })
+            .collect(),
         drv_dir,
     }
 }
@@ -402,7 +400,7 @@ fn split_flags(
 
 fn op_plan(argv: &[String]) -> i32 {
     let (args, stdin, drvs) = split_flags(argv, |_, _| false);
-    let r = roots(&args, stdin, drvs);
+    let r = roots(&args, stdin, drvs, &[]);
     let plan = match plan_of(&r) {
         Ok(p) => p,
         Err(e) => return e.report(),
@@ -434,7 +432,7 @@ fn op_missing(argv: &[String]) -> i32 {
         }
         _ => false,
     });
-    let r = roots(&args, stdin, drvs);
+    let r = roots(&args, stdin, drvs, &[]);
     match missing(&r, url.as_deref(), status) {
         Ok(v) => {
             render::bytes(&render::json(&v, false));
@@ -555,14 +553,7 @@ fn op_build(argv: &[String]) -> i32 {
         }
         _ => false,
     });
-    let mut r = roots(&args, stdin, drvs);
-    for t in &mut r.targets {
-        for name in &o.outputs {
-            if !t.outputs.contains(name) {
-                t.outputs.push(name.clone());
-            }
-        }
-    }
+    let r = roots(&args, stdin, drvs, &o.outputs);
     match build(&o, r) {
         Ok(code) => code,
         Err(e) => e.report(),

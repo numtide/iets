@@ -323,11 +323,14 @@ mod ab {
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path) -> io::Result<()> {
         let own_pid = process::id().to_string();
-        let status = fs::read_to_string(procfs.join("self/status"))?;
+        let status = fs::read(procfs.join("self/status"))?;
         // An ancestor namespace can assign us the same numeric PID. NStgid
         // lists one PID per namespace from the procfs mount down to our own.
-        let same_namespace = match status.lines().find_map(|s| s.strip_prefix("NStgid:")) {
-            Some(ids) => ids.split_whitespace().eq([own_pid.as_str()]),
+        let same_namespace = match status
+            .split(|&b| b == b'\n')
+            .find_map(|s| s.strip_prefix(b"NStgid:"))
+        {
+            Some(ids) => ids.trim_ascii() == own_pid.as_bytes(),
             // Kernels built without PID namespaces omit both interfaces.
             None => {
                 !procfs.join("self/ns/pid").try_exists()?
@@ -1129,7 +1132,9 @@ mod ab {
             let status = procfs.path().join("self/status");
             fs::write(&status, format!("NStgid:\t{own_pid}\t{own_pid}\n")).unwrap();
             assert!(kill_leftovers_in(procfs.path()).is_err());
-            fs::write(status, format!("NStgid:\t{own_pid}\n")).unwrap();
+            let mut same_namespace = b"Name:\tinvalid-\xff\nNStgid:\t".to_vec();
+            same_namespace.extend_from_slice(own_pid.as_bytes());
+            fs::write(status, same_namespace).unwrap();
             let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
             fs::write(task.join("children"), hidden.id().to_string()).unwrap();
             assert!(

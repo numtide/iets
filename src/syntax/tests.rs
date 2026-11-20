@@ -205,6 +205,10 @@ fn operator_precedence() {
     assert_eq!(dump_src("-f a"), "(neg (apply f a))");
     assert_eq!(dump_src("f -a"), "(- f a)");
     assert_eq!(dump_src("a.b or c d"), "(apply (select a (b) (or c)) d)");
+    assert_eq!(
+        dump_src("a.b or c.d or e"),
+        "(select a (b) (or (select c (d) (or e))))"
+    );
     assert_eq!(dump_src("f or x"), "(apply f or x)");
     assert_eq!(dump_src("a |> f |> g"), "(apply g (apply f a))");
     assert_eq!(dump_src("g <| f <| a"), "(apply g (apply f a))");
@@ -691,6 +695,10 @@ fn deep_nesting_cases() {
         ("x: ", "1", ""),
         ("-", "1", ""),
         ("!", "true", ""),
+        ("a.b or ", "0", ""),
+        ("true -> ", "false", ""),
+        ("{} // ", "{}", ""),
+        ("[] ++ ", "[]", ""),
     ] {
         let n = 60_000;
         let mut src = String::with_capacity(n * 4);
@@ -701,10 +709,18 @@ fn deep_nesting_cases() {
         for _ in 0..n {
             src.push_str(close);
         }
+        let error = parse(src.as_bytes(), FileId(0), &mut Interner::new())
+            .err()
+            .unwrap_or_else(|| panic!("parsed deeply nested {open:?}"));
         assert_eq!(
-            parse_err(&src),
-            "stack overflow (possible infinite recursion)",
+            error.msg, "stack overflow (possible infinite recursion)",
             "for {open:?}"
         );
     }
+    // Left-associative operators are parsed in a loop at one level.
+    let flat = "1 + ".repeat(60_000) + "0";
+    assert!(parse(flat.as_bytes(), FileId(0), &mut Interner::new()).is_ok());
+    // The function and simple-expression frames leave room for 49,998 prefixes.
+    let near_limit = "!".repeat(49_998) + "1 + 1";
+    assert!(parse(near_limit.as_bytes(), FileId(0), &mut Interner::new()).is_ok());
 }

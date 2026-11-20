@@ -357,11 +357,15 @@ mod ab {
             .find_map(|s| s.strip_prefix(b"NStgid:"))
         {
             Some(ids) => ids.trim_ascii() == own_pid.as_bytes(),
-            // Kernels built without PID namespaces omit both interfaces.
-            None => {
-                !procfs.join("self/ns/pid").try_exists()?
-                    && fs::read_link(procfs.join("self"))? == Path::new(&own_pid)
-            }
+            // Before Linux 4.1, compare our namespace to that of PID 1
+            // in this mount. Without PID namespaces only the self link exists.
+            None => match fs::read_link(procfs.join("self/ns/pid")) {
+                Ok(ours) => ours == fs::read_link(procfs.join("1/ns/pid"))?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    fs::read_link(procfs.join("self"))? == Path::new(&own_pid)
+                }
+                Err(e) => return Err(e),
+            },
         };
         if !same_namespace {
             return Err(io::Error::other("/proc uses a different PID namespace"));
@@ -510,6 +514,7 @@ mod ab {
     ) -> io::Result<bool> {
         let mut clean = true;
         let mut sweep_error = None;
+        let mut reaped_since_sweep = false;
         // Drain exits already pending at the deadline, even if several arrived
         // between polls. Bound the work if descendants keep producing exits.
         loop {
@@ -525,6 +530,7 @@ mod ab {
                     _ => return Err(e),
                 }
             }
+            reaped_since_sweep |= pid > 0;
             if now >= until {
                 // Always attempt the first sweep, even if the deadline has passed.
                 let first_sweep = pid == 0 && clean;
@@ -541,13 +547,13 @@ mod ab {
                         if !children_remain()? {
                             return Ok(clean);
                         }
-                        if clean {
-                            // No earlier sweep ran. This last attempt may reap
-                            // every remaining child or signal one still running.
-                            sweep(deadline)?;
-                            if !children_remain()? {
-                                return Ok(false);
-                            }
+                    }
+                    // Reaping a parent can expose a child after the previous
+                    // sweep. Give it the same bounded direct-list attempt.
+                    if clean || reaped_since_sweep {
+                        sweep(deadline)?;
+                        if !children_remain()? {
+                            return Ok(false);
                         }
                     }
                     return Err(sweep_error.unwrap_or_else(|| {
@@ -559,6 +565,7 @@ mod ab {
                 }
                 if pid == 0 {
                     // A killed process's children come to us in turn.
+                    reaped_since_sweep = false;
                     if let Err(e) = sweep(deadline) {
                         sweep_error = Some(e);
                     }

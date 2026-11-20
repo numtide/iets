@@ -222,31 +222,43 @@ mod ab {
     }
 
     /// Independent of line order, which eval-jobs's workers do not keep.
-    fn hash_output(r: impl Read, eof: mpsc::Sender<()>) -> [u8; 32] {
-        let mut lines: Vec<[u8; 32]> = BufReader::new(r)
-            .split(b'\n')
-            .map_while(Result::ok)
-            .map(|l| Sha256::digest(mask_stats(&l)).into())
-            .collect();
-        let _ = eof.send(());
+    fn hash_output(r: impl Read, eof: mpsc::Sender<io::Result<()>>) -> Option<[u8; 32]> {
+        let mut lines: Vec<[u8; 32]> = Vec::new();
+        for line in BufReader::new(r).split(b'\n') {
+            match line {
+                Ok(line) => lines.push(Sha256::digest(mask_stats(&line)).into()),
+                Err(e) => {
+                    let _ = eof.send(Err(e));
+                    return None;
+                }
+            }
+        }
+        let _ = eof.send(Ok(()));
         lines.sort_unstable();
         let mut h = Sha256::new();
         for l in &lines {
             h.update(l);
         }
-        h.finalize().into()
+        Some(h.finalize().into())
     }
 
-    fn wait_for_stdout(eof: &mpsc::Receiver<()>, timeout: Duration) -> io::Result<()> {
-        eof.recv_timeout(timeout).map_err(|e| match e {
-            mpsc::RecvTimeoutError::Timeout => io::Error::new(
-                io::ErrorKind::TimedOut,
-                "benchmark stdout did not close after the run-on limit",
-            ),
-            mpsc::RecvTimeoutError::Disconnected => {
-                io::Error::other("benchmark stdout reader disconnected")
-            }
-        })
+    fn wait_for_stdout(
+        eof: &mpsc::Receiver<io::Result<()>>,
+        timeout: Duration,
+    ) -> Result<(), RunError> {
+        eof.recv_timeout(timeout)
+            .map_err(|e| {
+                RunError::Cleanup(match e {
+                    mpsc::RecvTimeoutError::Timeout => io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "benchmark stdout did not close after the run-on limit",
+                    ),
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        io::Error::other("benchmark stdout reader disconnected")
+                    }
+                })
+            })?
+            .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")))
     }
 
     /// How long processes a run left behind may go on before they are killed.
@@ -432,8 +444,30 @@ mod ab {
         Ok(())
     }
 
+    /// Check ownership without reaping another exit or extending grace.
+    fn children_remain() -> io::Result<bool> {
+        let mut info = MaybeUninit::uninit();
+        // SAFETY: info is writable and its contents are discarded.
+        if unsafe {
+            libc::waitid(
+                libc::P_ALL,
+                0,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == -1
+        {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ECHILD) {
+                return Ok(false);
+            }
+            return Err(e);
+        }
+        Ok(true)
+    }
+
     /// Processes the run left behind, which are ours as the subreaper. False
-    /// when a live child exceeded the run-on limit.
+    /// when cleanup required a sweep after the run-on limit.
     fn reap_leftovers(
         until: Instant,
         deadline: Instant,
@@ -478,29 +512,17 @@ mod ab {
                     }
                     if pid != 0 {
                         // An exit or EINTR leaves the remaining count unknown.
-                        // Check without consuming another exit or extending grace.
-                        let mut info = MaybeUninit::uninit();
-                        // SAFETY: info is writable and its contents are discarded.
-                        if unsafe {
-                            libc::waitid(
-                                libc::P_ALL,
-                                0,
-                                info.as_mut_ptr(),
-                                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                            )
-                        } == -1
-                        {
-                            let e = io::Error::last_os_error();
-                            if e.raw_os_error() == Some(libc::ECHILD) {
-                                return Ok(clean);
-                            }
-                            return Err(e);
+                        if !children_remain()? {
+                            return Ok(clean);
                         }
-                    }
-                    if clean {
-                        // Exits exhausted the budget before we observed a live child.
-                        // waitid confirmed children remain, so attempt one sweep.
-                        sweep(deadline)?;
+                        if clean {
+                            // No earlier sweep ran. This last attempt may reap
+                            // every remaining child or signal one still running.
+                            sweep(deadline)?;
+                            if !children_remain()? {
+                                return Ok(false);
+                            }
+                        }
                     }
                     return Err(sweep_error.unwrap_or_else(|| {
                         io::Error::new(
@@ -605,9 +627,11 @@ mod ab {
         wait_for_stdout(
             &eof,
             cleanup_deadline.saturating_duration_since(Instant::now()),
-        )
-        .map_err(RunError::Cleanup)?;
-        let out = hasher.join().expect("the hash thread");
+        )?;
+        let out = hasher
+            .join()
+            .expect("the hash thread")
+            .expect("stdout reached EOF");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
         let counts = counters.as_deref_mut().and_then(counters::read);
@@ -621,7 +645,7 @@ mod ab {
         }
         if !clean {
             return Err(format!(
-                "processes still ran {}s after it exited",
+                "child cleanup was required {}s after it exited",
                 LEFTOVER_LIMIT.as_secs()
             )
             .into());
@@ -1110,13 +1134,35 @@ mod ab {
             let (reader, writer) = UnixStream::pair().unwrap();
             let (notify, eof) = mpsc::channel();
             let hasher = thread::spawn(move || hash_output(reader, notify));
-            assert_eq!(
-                wait_for_stdout(&eof, Duration::ZERO).unwrap_err().kind(),
-                io::ErrorKind::TimedOut
-            );
+            assert!(matches!(
+                wait_for_stdout(&eof, Duration::ZERO),
+                Err(RunError::Cleanup(e)) if e.kind() == io::ErrorKind::TimedOut
+            ));
             drop(writer);
             wait_for_stdout(&eof, Duration::from_secs(10)).unwrap();
-            assert_eq!(hasher.join().unwrap(), <[u8; 32]>::from(Sha256::digest([])));
+            assert_eq!(
+                hasher.join().unwrap(),
+                Some(<[u8; 32]>::from(Sha256::digest([])))
+            );
+        }
+
+        #[test]
+        fn stdout_error_after_a_complete_line_is_reported() {
+            struct Broken;
+            impl Read for Broken {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    Err(io::Error::other("injected read failure"))
+                }
+            }
+
+            let reader = b"complete line\n".as_slice().chain(Broken);
+            let (notify, eof) = mpsc::channel();
+            let digest = hash_output(reader, notify);
+            assert!(matches!(
+                wait_for_stdout(&eof, Duration::ZERO),
+                Err(RunError::Scenario(e)) if e == "read benchmark stdout: injected read failure"
+            ));
+            assert!(digest.is_none());
         }
 
         #[test]
@@ -1207,6 +1253,22 @@ mod ab {
             live.kill().unwrap();
             live.wait().unwrap();
             assert_eq!((error.kind(), sweeps), (io::ErrorKind::TimedOut, 1));
+
+            // A final PID-specific sweep can reap the last waitable child.
+            let mut ready = [(); 2].map(|_| Command::new("true").spawn().unwrap());
+            for child in &ready {
+                wait_until_exited(child.id());
+            }
+            let mut sweeps = 0;
+            let complete = reap_with_final_polls(expired, expired, 0, |_| {
+                sweeps += 1;
+                for child in &mut ready {
+                    let _ = child.try_wait();
+                }
+                Ok(())
+            });
+            assert_eq!(sweeps, 1);
+            assert!(!complete.unwrap());
 
             // Model a procfs listing that omits a live child PID.
             let procfs = tempfile::tempdir().unwrap();

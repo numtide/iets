@@ -309,7 +309,9 @@ impl Dispatcher {
             Some(o) => {
                 let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
                 let (held, valid) = already_built(&mut *self.backend, &roots, o, &mut on_event)?;
-                up.roots_answered(&roots, &valid);
+                if !held {
+                    up.roots_answered(&roots, &valid);
+                }
                 held
             }
             None => false,

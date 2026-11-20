@@ -66,16 +66,16 @@ pub trait Uploader {
     /// asks, so neither walk costs anything there.
     fn drvs(&self, roots: &[StorePath], deep: bool) -> Result<Vec<Drv>>;
 
-    /// The store was asked about `roots` already and holds `valid` of them.
+    /// The store for the upcoming upload was asked about `roots` already and
+    /// holds `valid` of them.
     fn roots_answered(&mut self, roots: &[StorePath], valid: &HashSet<String>);
 }
 
-/// A closure planned once, shipped on the first call.
+/// A closure planned once, uploaded as each batch needs it.
 pub struct PlanUpload<'a> {
     pub plan: &'a Plan,
     pub locate: &'a Locator<'a>,
-    done: bool,
-    answered: Option<HashSet<String>>,
+    answered: Option<(Vec<StorePath>, HashSet<String>)>,
 }
 
 impl<'a> PlanUpload<'a> {
@@ -83,7 +83,6 @@ impl<'a> PlanUpload<'a> {
         PlanUpload {
             plan,
             locate,
-            done: false,
             answered: None,
         }
     }
@@ -96,14 +95,18 @@ impl Uploader for PlanUpload<'_> {
         roots: &[StorePath],
         on_event: &mut dyn FnMut(Event),
     ) -> Result<Stats> {
-        if self.done || roots.is_empty() {
+        let answered = self.answered.take();
+        if roots.is_empty() {
             return Ok(Stats::default());
         }
-        self.done = true;
         let t0 = Instant::now();
         let plan = self.plan;
         let mut queried = 0;
-        let missing = plan.query_missing(roots, self.answered.as_ref(), &mut |paths| {
+        let valid = answered
+            .as_ref()
+            .filter(|(asked, _)| asked == roots)
+            .map(|(_, valid)| valid);
+        let missing = plan.query_missing(roots, valid, &mut |paths| {
             queried += paths.len();
             b.query_valid(&paths.iter().collect::<Vec<_>>(), on_event)
         })?;
@@ -146,8 +149,8 @@ impl Uploader for PlanUpload<'_> {
         })
     }
 
-    fn roots_answered(&mut self, _roots: &[StorePath], valid: &HashSet<String>) {
-        self.answered = Some(valid.clone());
+    fn roots_answered(&mut self, roots: &[StorePath], valid: &HashSet<String>) {
+        self.answered = Some((roots.to_vec(), valid.clone()));
     }
 
     /// The plan is the closure of every root, in post-order already.

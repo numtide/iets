@@ -558,27 +558,16 @@ impl AttrsObj {
             census::note_get(1, 0);
             return flat.get_flat(sym);
         }
+        let mut leaves = self.leaf_sets().iter().rev();
         #[cfg(feature = "stats2")]
-        {
-            let (probes, hit) = self.probes(sym);
-            census::note_get(if hit { 2 } else { 4 }, probes);
-        }
-        for leaf in self.leaf_sets().iter().rev() {
-            if let Some(a) = leaf.get_flat(sym) {
-                return Some(a);
-            }
-        }
-        None
-    }
-
-    /// Leaves a lookup of `sym` on this union probes, and whether it hits.
-    #[cfg(feature = "stats2")]
-    fn probes(&self, sym: Sym) -> (u64, bool) {
-        let leaves = self.leaf_sets().iter().rev();
-        match leaves.clone().position(|l| l.get_flat(sym).is_some()) {
-            Some(i) => (i as u64 + 1, true),
-            None => (leaves.len() as u64, false),
-        }
+        let count = leaves.len();
+        let hit = leaves.find_map(|leaf| leaf.get_flat(sym));
+        #[cfg(feature = "stats2")]
+        census::note_get(
+            if hit.is_some() { 2 } else { 4 },
+            (count - leaves.len()) as u64,
+        );
+        hit
     }
 
     #[inline]

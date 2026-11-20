@@ -110,15 +110,19 @@ impl Drop for FilesInner {
     }
 }
 
+/// Includes the file's end-of-input position.
+fn source_span(len: usize) -> u32 {
+    assert!(len < u32::MAX as usize, "sources exceed 4 GiB");
+    len as u32 + 1
+}
+
 impl FilesInner {
     /// Appends `info`, its line table already made outside the lock.
-    fn push(&self, a: &mut Adder, mut info: FileInfo, src_len: usize) -> FileId {
+    fn push(&self, a: &mut Adder, mut info: FileInfo, span: u32) -> FileId {
         let n = self.len.load(Ordering::Relaxed);
         assert!(n < interner::MAX_SYMS, "too many files");
         let base = a.next_base;
-        a.next_base = base
-            .checked_add(src_len as u32 + 1)
-            .expect("sources exceed 4 GiB");
+        a.next_base = base.checked_add(span).expect("sources exceed 4 GiB");
         info.base = base;
         let p: *const FileInfo = self.heap.keep(info);
         // SAFETY: `n` is below the mapping's length, and only the holder of
@@ -172,6 +176,7 @@ impl Files {
     /// path reads the same text. The line table is made outside the lock;
     /// a racing add of the same path keeps the first.
     pub fn add(&self, path: &[u8], src: &[u8]) -> FileId {
+        let span = source_span(src.len());
         if let Some(id) = self.0.adder.lock().unwrap().ids.get(path) {
             return *id;
         }
@@ -180,7 +185,7 @@ impl Files {
         if let Some(id) = a.ids.get(path) {
             return *id;
         }
-        let id = self.0.push(&mut a, info, src.len());
+        let id = self.0.push(&mut a, info, span);
         a.ids.insert(path.to_vec(), id);
         id
     }
@@ -188,9 +193,9 @@ impl Files {
     /// Register a text that `path` only names (`«string»`, `«arg»`): two
     /// texts may share a name.
     pub fn add_text(&self, path: &[u8], src: &[u8]) -> FileId {
+        let span = source_span(src.len());
         let info = FileInfo::new(path.to_vec(), src, 0);
-        self.0
-            .push(&mut self.0.adder.lock().unwrap(), info, src.len())
+        self.0.push(&mut self.0.adder.lock().unwrap(), info, span)
     }
 
     pub fn get(&self, i: usize) -> Option<&'static FileInfo> {
@@ -383,5 +388,24 @@ impl Totals {
             counts: array::from_fn(|i| self.kind_counts.0[i].load(Ordering::Relaxed)),
             kind_bytes: array::from_fn(|i| self.kind_bytes.0[i].load(Ordering::Relaxed)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_span_includes_eof() {
+        assert_eq!(source_span(0), 1);
+        assert_eq!(source_span(u32::MAX as usize - 1), u32::MAX);
+    }
+
+    #[rstest::rstest]
+    #[case(u32::MAX as usize)]
+    #[case((u32::MAX as usize).saturating_add(1))]
+    #[should_panic(expected = "sources exceed 4 GiB")]
+    fn oversized_source_is_rejected(#[case] len: usize) {
+        source_span(len);
     }
 }

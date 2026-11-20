@@ -742,6 +742,11 @@ fn newline_starts_matches_line_starts() {
 
 #[test]
 fn masks64_matches_the_scalar_masks() {
+    for i in 0..64 {
+        let mut b = [b'\n'; 64];
+        b[i] = b'\r';
+        assert_eq!(super::masks64(&b), super::masks64_scalar(&b));
+    }
     // every lane of a block once `\n`, `\r`, a high byte and a plain one
     let mut x = 0x9e37_79b9_7f4a_7c15u64;
     for _ in 0..20_000 {

@@ -3,6 +3,24 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Sym(pub u32);
 
+/// Symbols of one compiled file, in the order its parser and compiler first
+/// requested them. The IR writer uses the same indices for symbol operands.
+#[derive(Default)]
+pub(crate) struct FileSymbols {
+    ids: FxHashMap<Sym, u32>,
+    pub order: Vec<Sym>,
+}
+
+impl FileSymbols {
+    pub fn id(&mut self, sym: Sym) -> u32 {
+        *self.ids.entry(sym).or_insert_with(|| {
+            let id = self.order.len() as u32;
+            self.order.push(sym);
+            id
+        })
+    }
+}
+
 use std::collections::{HashMap, HashSet};
 
 pub use crate::parallel::interner::Interner;

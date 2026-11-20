@@ -344,6 +344,107 @@ fn uncacheable_runs_write_nothing(work: Work) {
 }
 
 #[rstest]
+fn ir_hit_replays_symbol_order_from_folded_source(work: Work) {
+    let seed = work.write(
+        "seed.nix",
+        &format!(
+            "# {}\nbuiltins.length or {{ throwKeyXYZ = 1; mismatchKeyXYZ = 2; }}",
+            "pad".repeat(128)
+        ),
+    );
+    work.write(
+        "left.nix",
+        "{ mismatchKeyXYZ = 1; throwKeyXYZ = throw \"evaluated\"; }",
+    );
+    work.write("right.nix", "{ mismatchKeyXYZ = 2; throwKeyXYZ = 0; }");
+    work.write(
+        "mismatch-first.nix",
+        "{ mismatchKeyXYZ = 0; throwKeyXYZ = 0; }",
+    );
+    let root = work.write("run.nix",
+        "builtins.seq (import ./seed.nix) (builtins.tryEval ((import ./left.nix) == (import ./right.nix))).success");
+    let eval = |pre: Option<&str>, min_size: Option<&str>, want: &str| {
+        let mut c = work.iets();
+        c.env("IETS_IR_STATS", "1")
+            .args(["eval", "--impure", "--json", "--no-tracing-cache"]);
+        if let Some(min) = min_size {
+            c.env("IETS_IR_MIN", min);
+        } else {
+            c.arg("--no-ir-cache");
+        }
+        let expr = match pre {
+            Some(pre) => format!("builtins.seq (import {}) (import {root})", work.s(pre)),
+            None => format!("import {root}"),
+        };
+        let out = hermetic::ok(c.args(["-E", &expr]));
+        assert_eq!(stdout(&out), want, "{expr}");
+        stderr(&out)
+    };
+
+    // The seed's folded-away fallback introduces the throw key first. The
+    // order of these two keys decides which cell equality forces first.
+    eval(None, None, "false");
+    eval(Some("mismatch-first.nix"), None, "true");
+    // Both keys already exist, in the opposite order, while the entry is
+    // written. Only seed.nix is large enough for the cache on these runs.
+    let first = eval(Some("mismatch-first.nix"), Some("256"), "true");
+    assert!(
+        first.contains(&format!("ir-cache store {seed} ")),
+        "{first}"
+    );
+    for (pre, want) in [(None, "false"), (Some("mismatch-first.nix"), "true")] {
+        let mixed = eval(pre, Some("256"), want);
+        assert!(mixed.contains(&format!("ir-cache load {seed} ")), "{mixed}");
+    }
+    eval(None, Some("0"), "false");
+    let warm = eval(None, Some("0"), "false");
+    for rel in ["run.nix", "seed.nix", "left.nix", "right.nix"] {
+        let path = work.s(rel);
+        assert!(warm.contains(&format!("ir-cache load {path} ")), "{warm}");
+    }
+}
+
+#[rstest]
+fn compiler_only_names_follow_the_current_binding_order(work: Work) {
+    // The parser keeps each escaped indented string as a dynamic name.
+    // The compiler folds it to a symbol while lowering the enclosing let.
+    let seed = work.write("seed.nix", &format!(
+        "# {}\nlet orderA = {{ ${{''throw''$marker''}} = 0; }}; orderB = {{ ${{''unequal''$marker''}} = 0; }}; in 1",
+        "pad".repeat(128)
+    ));
+    work.write("prefix.nix", "{ orderB = 0; orderA = 0; }");
+    work.write(
+        "left.nix",
+        r#"{ "unequal$marker" = 1; "throw$marker" = throw "evaluated"; }"#,
+    );
+    work.write(
+        "right.nix",
+        r#"{ "unequal$marker" = 2; "throw$marker" = 0; }"#,
+    );
+    let root = work.write("run.nix",
+        "builtins.seq (import ./seed.nix) (builtins.tryEval ((import ./left.nix) == (import ./right.nix))).success");
+    let first = format!(
+        "builtins.seq (import {}) (import {root})",
+        work.s("prefix.nix")
+    );
+    let second = format!("import {root}");
+    for (expr, want) in [(first.as_str(), "true"), (second.as_str(), "false")] {
+        let mut c = work.iets();
+        c.env("IETS_IR_MIN", "256").env("IETS_IR_STATS", "1").args([
+            "eval",
+            "--impure",
+            "--json",
+            "--no-tracing-cache",
+            "-E",
+            expr,
+        ]);
+        let out = hermetic::ok(&mut c);
+        assert_eq!(stdout(&out), want);
+        assert!(!stderr(&out).contains(&format!("ir-cache load {seed} ")));
+    }
+}
+
+#[rstest]
 fn flags_that_turn_the_cache_off(work: Work) {
     let main = main_nix(&work);
     let main = strs(&main);

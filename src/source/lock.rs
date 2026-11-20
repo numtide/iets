@@ -27,6 +27,11 @@ impl Lock {
             .flat_map(|m| m.keys().map(String::as_str))
     }
 
+    pub(crate) fn has_root_input(&self, name: &[u8]) -> bool {
+        str::from_utf8(name)
+            .is_ok_and(|name| self.json["nodes"][&self.root]["inputs"].get(name).is_some())
+    }
+
     /// `(node name, locked attrs)` of every node but the root that the root
     /// reaches, as `nix flake prefetch-inputs` visits them.
     pub fn reached_inputs(&self) -> impl Iterator<Item = (&str, &serde_json::Map<String, Value>)> {

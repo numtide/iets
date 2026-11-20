@@ -351,12 +351,6 @@ mod ab {
         first_error: &mut Option<io::Error>,
     ) -> io::Result<()> {
         let mut signal = |pid: libc::pid_t| -> io::Result<()> {
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "child discovery deadline",
-                ));
-            }
             let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
             // SAFETY: writable exit info; WNOWAIT leaves exits for the sole outer reaper.
             if unsafe {
@@ -383,6 +377,7 @@ mod ab {
             }
             Ok(())
         };
+        // Budget exhaustion stops discovery; the outer reap decides whether children remain.
         let mut complete = false;
         if let Ok(tasks) = fs::read_dir(procfs.join("self/task")) {
             complete = true;
@@ -390,7 +385,7 @@ mod ab {
             for task in tasks {
                 found = true;
                 if Instant::now() >= deadline {
-                    return Err(io::ErrorKind::TimedOut.into());
+                    return Ok(());
                 }
                 let kids = task.and_then(|t| fs::read_to_string(t.path().join("children")));
                 match kids {
@@ -400,6 +395,9 @@ mod ab {
                             .filter_map(|p| p.parse::<libc::pid_t>().ok())
                             .filter(|&p| p > 0)
                         {
+                            if Instant::now() >= deadline {
+                                return Ok(());
+                            }
                             signal(pid)?;
                         }
                     }
@@ -412,7 +410,7 @@ mod ab {
             // Optional task children files may be absent. Scan only on cleanup/progress.
             for entry in fs::read_dir(procfs)? {
                 if Instant::now() >= deadline {
-                    return Err(io::ErrorKind::TimedOut.into());
+                    return Ok(());
                 }
                 let name = entry?.file_name();
                 if let Some(pid) = name
@@ -1108,15 +1106,51 @@ mod ab {
             assert!(reap_leftovers(Duration::ZERO, Duration::ZERO, |_| unreachable!()).unwrap());
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
 
-            // A partially failed sweep still leaves the outer reaper responsible for exits.
+            // Exhausting discovery is harmless only once the last child is confirmed gone.
             let mut last = Command::new("sleep").arg("30").spawn().unwrap();
-            let err = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |_| {
-                last.kill()?;
-                Err(io::Error::from_raw_os_error(libc::EPERM))
-            })
-            .unwrap_err();
-            assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+            assert!(
+                !reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |_| {
+                    last.kill()?;
+                    // Keep the killed exit waitable before simulating expired discovery.
+                    let mut info = MaybeUninit::uninit();
+                    // SAFETY: this test owns last; leave its exit for the outer reaper.
+                    assert_eq!(
+                        unsafe {
+                            libc::waitid(
+                                libc::P_PID,
+                                last.id(),
+                                info.as_mut_ptr(),
+                                libc::WEXITED | libc::WNOWAIT,
+                            )
+                        },
+                        0
+                    );
+                    kill_leftovers(Instant::now())
+                })
+                .unwrap()
+            );
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
+            // Stopping discovery does not excuse a child that is still running.
+            let mut live = Command::new("sleep").arg("30").spawn().unwrap();
+            let result = reap_leftovers(Duration::ZERO, Duration::from_millis(20), |_| {
+                kill_leftovers(Instant::now())
+            });
+            live.kill().unwrap();
+            live.wait().unwrap();
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+
+            // Real errors, including an I/O timeout, survive even after the last exit.
+            for errno in [libc::EPERM, libc::ETIMEDOUT] {
+                let mut last = Command::new("sleep").arg("30").spawn().unwrap();
+                let err = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |_| {
+                    last.kill()?;
+                    Err(io::Error::from_raw_os_error(errno))
+                })
+                .unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(errno));
+                assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
 
             // No optional task children file: discover only the listed owned PID.
             let procfs = tempfile::tempdir().unwrap();

@@ -241,7 +241,7 @@ pub fn missing_top_down<N: Copy + Eq + Hashable>(
 
 impl Plan {
     /// The plan's paths in the closure of `roots` that the store lacks
-    /// (`missing_top_down`). A valid drv answers for all it references.
+    /// (`missing_top_down`). A valid path answers for its references.
     pub fn query_missing<'a>(
         &'a self,
         roots: &[StorePath],
@@ -253,19 +253,13 @@ impl Plan {
             .iter()
             .chain(self.drvs.iter().map(Object::store_path))
             .collect();
-        let refs: HashMap<&StorePath, Vec<&StorePath>> = self
+        let drv_refs: HashMap<_, _> = self
             .drvs
             .iter()
             .filter_map(|o| match o {
                 Object::Drv {
                     path, references, ..
-                } => Some((
-                    path,
-                    references
-                        .iter()
-                        .filter_map(|r| planned.get(r).copied())
-                        .collect(),
-                )),
+                } => Some((path, references)),
                 Object::Source { .. } | Object::Closure { .. } => None,
             })
             .collect();
@@ -274,10 +268,14 @@ impl Plan {
         missing_top_down(
             roots.map(want).collect(),
             &|p| {
-                Ok(refs
+                let refs = drv_refs
                     .get(p)
+                    .copied()
+                    .or_else(|| self.origins.get(p)?.text_refs());
+                Ok(refs
                     .into_iter()
                     .flatten()
+                    .filter_map(|r| planned.get(r))
                     .map(|&r| want(r))
                     .collect())
             },

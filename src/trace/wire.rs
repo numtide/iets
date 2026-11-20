@@ -13,6 +13,7 @@ use crate::store::narinfo::{Fetched, NarInfo};
 use crate::store::path::StorePath;
 use crate::store::source::{Accepted, SourceKind, SourceOrigin, Src, SrcPath};
 use crate::syntax::symbol::FxHashMap;
+use crate::varint::{put_u64, read_u64};
 
 const VERSION: u8 = 7;
 
@@ -29,16 +30,8 @@ impl Enc {
         self.0.push(b);
     }
 
-    fn u64(&mut self, mut n: u64) {
-        loop {
-            let b = (n & 0x7f) as u8;
-            n >>= 7;
-            if n == 0 {
-                self.0.push(b);
-                return;
-            }
-            self.0.push(b | 0x80);
-        }
+    fn u64(&mut self, n: u64) {
+        put_u64(&mut self.0, n);
     }
 
     fn i64(&mut self, n: i64) {
@@ -99,19 +92,12 @@ impl<'a> Dec<'a> {
     }
 
     fn u64(&mut self) -> R<u64> {
-        let mut n = 0u64;
-        let mut shift = 0;
-        loop {
-            let b = self.u8()?;
-            if shift >= 64 {
-                return Err(());
-            }
-            n |= u64::from(b & 0x7f) << shift;
-            if b & 0x80 == 0 {
-                return Ok(n);
-            }
-            shift += 7;
-        }
+        read_u64(self.b, &mut self.i).ok_or(())
+    }
+
+    fn count(&mut self) -> R<usize> {
+        let n = usize::try_from(self.u64()?).map_err(|_| ())?;
+        (n <= self.b.len() - self.i).then_some(n).ok_or(())
     }
 
     fn i64(&mut self) -> R<i64> {
@@ -119,13 +105,10 @@ impl<'a> Dec<'a> {
     }
 
     fn bytes(&mut self) -> R<&'a [u8]> {
-        let n = self.u64()? as usize;
-        let s = self
-            .b
-            .get(self.i..self.i.checked_add(n).ok_or(())?)
-            .ok_or(())?;
+        let n = self.count()?;
+        let start = self.i;
         self.i += n;
-        Ok(s)
+        Ok(&self.b[start..self.i])
     }
 
     fn vec(&mut self) -> R<Vec<u8>> {
@@ -149,7 +132,7 @@ impl<'a> Dec<'a> {
     }
 
     fn list(&mut self) -> R<Vec<Vec<u8>>> {
-        let n = self.u64()? as usize;
+        let n = self.count()?;
         let mut v = Vec::with_capacity(n.min(1 << 16));
         for _ in 0..n {
             v.push(self.vec()?);
@@ -344,7 +327,7 @@ pub fn encode_readset(obs: &[Obs]) -> Vec<u8> {
 
 pub fn decode_readset(b: &[u8]) -> Option<Vec<Obs>> {
     let mut d = Dec::new(b).ok()?;
-    let n = d.u64().ok()? as usize;
+    let n = d.count().ok()?;
     let mut v = Vec::with_capacity(n.min(1 << 20));
     for _ in 0..n {
         v.push(get_obs(&mut d).ok()?);
@@ -387,7 +370,7 @@ fn store_path(b: &[u8]) -> R<StorePath> {
 
 pub fn decode_drvs(b: &[u8]) -> Option<FxHashMap<StorePath, DrvInfo>> {
     let mut d = Dec::new(b).ok()?;
-    let n = d.u64().ok()? as usize;
+    let n = d.count().ok()?;
     let mut m = FxHashMap::with_capacity_and_hasher(n.min(1 << 20), Default::default());
     for _ in 0..n {
         let p = store_path(d.bytes().ok()?).ok()?;
@@ -437,7 +420,7 @@ pub fn encode_fetched(fetched: &HashMap<StorePath, Arc<Fetched>>) -> Vec<u8> {
 
 pub fn decode_fetched(b: &[u8]) -> Option<HashMap<StorePath, Arc<Fetched>>> {
     let mut d = Dec::new(b).ok()?;
-    let n = d.u64().ok()? as usize;
+    let n = d.count().ok()?;
     let mut m = HashMap::with_capacity(n.min(1 << 20));
     for _ in 0..n {
         let store = String::from_utf8(d.vec().ok()?).ok()?;
@@ -531,7 +514,7 @@ fn read_accepted(d: &mut Dec<'_>) -> Option<Accepted> {
 
 pub fn decode_sources(b: &[u8]) -> Option<HashMap<StorePath, SourceOrigin>> {
     let mut d = Dec::new(b).ok()?;
-    let n = d.u64().ok()? as usize;
+    let n = d.count().ok()?;
     let mut m = HashMap::with_capacity(n.min(1 << 20));
     for _ in 0..n {
         let p = store_path(d.bytes().ok()?).ok()?;
@@ -595,7 +578,7 @@ pub fn encode_roots(roots: &[(StorePath, Option<String>)]) -> Vec<u8> {
 
 pub fn decode_roots(b: &[u8]) -> Option<Vec<(StorePath, Option<String>)>> {
     let mut d = Dec::new(b).ok()?;
-    let n = d.u64().ok()? as usize;
+    let n = d.count().ok()?;
     let mut v = Vec::with_capacity(n.min(1 << 16));
     for _ in 0..n {
         let p = store_path(d.bytes().ok()?).ok()?;
@@ -614,6 +597,17 @@ mod tests {
     use std::path::Path;
 
     use crate::store::nar;
+
+    #[test]
+    fn trace_count_must_fit_the_remaining_payload() {
+        assert!(decode_readset(&[7, 0x80, 0]).unwrap().is_empty());
+        let mut overflow = vec![VERSION];
+        overflow.extend([0x80; 9]);
+        overflow.push(2); // 2^64 records would wrap to an empty readset
+        assert!(decode_readset(&overflow).is_none());
+        let mut d = Dec::new(&[7, 0x80, 0x80, 0x40]).unwrap();
+        assert!(d.count().is_err());
+    }
 
     #[test]
     fn readset_roundtrip() {

@@ -9,9 +9,20 @@ use crate::syntax::symbol::Sym;
 
 pub type IrRef = &'static Ir;
 
+/// The IR cache stores a folded name so the next evaluator can rebind it.
+/// Its current value can be identical to a literal, e.g. `nixPath` and `[]`.
+#[derive(Clone, Copy)]
+pub enum ConstOrigin {
+    Literal,
+    Global(Sym),
+    Builtin(Sym),
+}
+
 pub enum Ir {
-    /// Literal, or pre-resolved builtin.
-    Const(Word),
+    /// Evaluation reads the already resolved word for any origin.
+    Const(Word, ConstOrigin),
+    /// A named constant whose current value still needs evaluation.
+    LazyConst(Word, ConstOrigin),
     /// Lexically bound variable: walk `depth` envs up, take slot `idx`.
     Local {
         depth: u32,
@@ -98,6 +109,20 @@ pub enum Ir {
     Sub(IrRef, IrRef, Pos),
     Mul(IrRef, IrRef, Pos),
     Div(IrRef, IrRef, Pos),
+}
+
+impl Ir {
+    pub(crate) fn named(w: Word, origin: ConstOrigin) -> Self {
+        if w.is_thunk() {
+            Self::LazyConst(w, origin)
+        } else {
+            Self::Const(w, origin)
+        }
+    }
+
+    pub(crate) const fn literal(w: Word) -> Self {
+        Self::Const(w, ConstOrigin::Literal)
+    }
 }
 
 pub enum AttrElemIr {

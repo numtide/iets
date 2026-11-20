@@ -281,6 +281,75 @@ fn a_copy_in_place_misses(work: Work) {
     assert!(c2.status.contains("miss ("), "{}", c2.status);
 }
 
+#[rstest]
+fn ir_cache_rebinds_nix_path_and_preserves_literal_lists(work: Work) {
+    let file = work.write(
+        "path.nix",
+        "map builtins.length [ builtins.nixPath __nixPath [] (let __nixPath = []; in __nixPath) ]",
+    );
+    let eval = |search: &[&str], event: &str, expected: &str| {
+        let mut cmd = work.iets();
+        cmd.env("IETS_IR_MIN", "0")
+            .env("IETS_IR_STATS", "1")
+            .args(["eval", "--impure", "--json", "--no-tracing-cache"])
+            .args(search)
+            .arg("-f")
+            .arg(&file);
+        let output = hermetic::ok(&mut cmd);
+        let err = stderr(&output);
+        assert!(err.contains(&format!("ir-cache {event} {file} ")), "{err}");
+        assert_eq!(stdout(&output), expected);
+    };
+    eval(&[], "store", "[0,0,0,0]");
+    eval(&["-I", &work.s(".")], "load", "[1,1,0,0]");
+    eval(&[], "load", "[0,0,0,0]");
+}
+
+#[rstest]
+fn an_ir_hit_forces_rebound_lazy_names_only_on_demand(work: Work) {
+    let file = work.write(
+        "src/clock.nix",
+        "{ clock = builtins.currentTime + 7; alias = __currentTime + 7; stable = 3; }",
+    );
+    let eval = |expr: &str, flags: &[&str]| {
+        let mut cmd = work.iets();
+        cmd.env("IETS_IR_MIN", "0")
+            .env("IETS_IR_STATS", "1")
+            .args(["eval", "--impure", "--json", "--timings"])
+            .args(flags)
+            .args(["-E", expr]);
+        let out = hermetic::ok(&mut cmd);
+        (stdout(&out), stderr(&out))
+    };
+    let source = format!("(import {file})");
+    let used = format!("{source}.clock - builtins.currentTime");
+    // The writer already sees currentTime in WHNF when compiling the import.
+    let seed = format!("builtins.seq builtins.currentTime ({used})");
+    assert_eq!(eval(&seed, &["--no-tracing-cache"]).0, "7");
+    assert_eq!(eval(&used, &["--no-ir-cache", "--no-tracing-cache"]).0, "7");
+    let load = format!("ir-cache load {file} ");
+    for _ in 0..2 {
+        let (value, err) = eval(&used, &[]);
+        assert_eq!(value, "7");
+        assert!(err.contains(&load), "{err}");
+        assert!(!err.contains("cache: hit"), "{err}");
+    }
+
+    let alias = format!("{source}.alias - builtins.currentTime");
+    assert_eq!(eval(&alias, &["--no-cache"]).0, "7");
+    let (value, err) = eval(&alias, &["--no-tracing-cache"]);
+    assert_eq!(value, "7");
+    assert!(err.contains(&load), "{err}");
+
+    // Merely decoding the potentially impure name must leave this run cacheable.
+    let stable = format!("{source}.stable");
+    let (value, err) = eval(&stable, &[]);
+    assert_eq!(value, "3");
+    assert!(err.contains(&load), "{err}");
+    let (_, err) = eval(&stable, &[]);
+    assert!(err.contains("cache: hit"), "{err}");
+}
+
 /// The compiled-file cache folds `builtins.currentSystem` into an entry, and
 /// `--pure-eval` removes that name, so an impure run must not answer a pure one.
 #[rstest]

@@ -118,13 +118,14 @@ literal compile from source, and small files (`IETS_IR_MIN`) aren't cached, beca
 the load costs what the compile costs.
 
 The key holds the build id, so a new binary never reads an old entry. It
-also holds everything the compiler folds out of the evaluator's
-configuration, because a folded constant is stored by content: the system,
-the store directory, the compile-time lint levels, and `pure-eval`. Without
-`pure-eval` in the key, an impure run's entry would answer a pure run, and
-`builtins.currentSystem or "fallback"` would give the system. Every other
-constant is stored by name and looked up in the live tables on load, so the
-search path follows the run.
+also holds the system, the store directory, the compile-time lint levels,
+and `pure-eval`. Purity changes which names exist when the compiler folds
+an expression such as `builtins.currentSystem or "fallback"`. The entry
+stores literals by content and folded names by symbol. On load,
+`builtins.nixPath` takes its value from the current evaluator, even if the
+search path was empty when the entry was written. If the rebound value is
+still lazy, as `builtins.currentTime` can be, evaluating that expression
+forces it. Loading the IR leaves it untouched.
 
 `eval-jobs` uses no other cache, so its effect is easy to see. On
 `nixos/release-small.nix` with four workers on a 16-core EPYC:

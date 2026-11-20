@@ -73,24 +73,33 @@ fn shared_source_copy_reports_at_each_paths_first_demand() {
     .unwrap();
     let file = d.path().join("copies.nix");
     let copies = "  \"${./a/tree}\"\n  \"${./b/tree}\"\n".repeat(48);
-    fs::write(&file, format!("[\n{copies}]")).unwrap();
     for lint in ["dir-copy-unfiltered", "git-in-source", "large-source-copy"] {
-        let setting = format!("{lint}=warn");
-        let check = |workers| {
-            run(
-                file.to_str().unwrap(),
-                true,
-                &[
-                    "--lint",
-                    "all=off",
-                    "--lint",
-                    &setting,
-                    "--workers",
-                    workers,
-                ],
-            )
+        let check = |source: String, level: &str| {
+            fs::write(&file, source).unwrap();
+            let setting = format!("{lint}={level}");
+            let at = |workers| {
+                run(
+                    file.to_str().unwrap(),
+                    true,
+                    &[
+                        "--lint",
+                        "all=off",
+                        "--lint",
+                        &setting,
+                        "--workers",
+                        workers,
+                    ],
+                )
+            };
+            let serial = at("1");
+            let parallel = at("8");
+            assert_eq!(
+                (parallel.rc, &parallel.out, &parallel.err),
+                (serial.rc, &serial.out, &serial.err)
+            );
+            serial
         };
-        let serial = check("1");
+        let serial = check(format!("[\n{copies}]"), "warn");
         assert_eq!(serial.rc, 0, "{}", serial.err);
         assert_eq!(count(&serial.err, &format!("warning: [{lint}]")), 2);
         assert!(
@@ -98,10 +107,17 @@ fn shared_source_copy_reports_at_each_paths_first_demand() {
             "{}",
             serial.err
         );
-        let parallel = check("8");
-        assert_eq!(
-            (parallel.rc, parallel.out, parallel.err),
-            (serial.rc, serial.out, serial.err)
+
+        let repeated = "  \"${./a/tree}\"\n".repeat(48);
+        let allowed = check(format!("[\n# iets: allow {lint}\n{repeated}]"), "error");
+        assert_eq!(allowed.rc, 0, "{}", allowed.err);
+        assert!(!allowed.err.contains(&format!("[{lint}]")));
+        let denied = check(format!("[\n{repeated}]"), "error");
+        assert_eq!(denied.rc, 1, "{}", denied.err);
+        assert!(
+            denied.err.contains(&format!("[{lint}]")) && denied.err.contains("copies.nix:2:3"),
+            "{}",
+            denied.err
         );
     }
 }

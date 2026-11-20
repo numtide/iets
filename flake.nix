@@ -20,6 +20,7 @@
         commonArgs = { pname = "iets"; inherit version; strictDeps = true; };
         sources = final.callPackage ./nix/sources.nix { };
         iets = final.callPackage ./nix/iets.nix { };
+        optimizations = final.callPackage ./nix/pgo.nix { };
         ietsStatic = (scopeFor pkgs.pkgsStatic).iets;
         # only a check builds it: the dev profile, as a missing cfg fails in any
         # profile and LTO is the slowest compile of the suite
@@ -60,6 +61,8 @@
           (scope.callPackages ./nix/packages.nix { })
           { default = scope.iets; }))
         { x86_64-linux = { inherit release; }; };
+      experiments = forAll (scope: onLinux scope
+        (lib.filterAttrs (_: lib.isDerivation) scope.optimizations) { });
       # every package and dev shell, so that CI pushes them to the cache; the
       # fuzz campaigns run for an hour each
       checks = lib.mapAttrs (system: scope:

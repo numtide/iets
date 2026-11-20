@@ -118,9 +118,11 @@ $ iets eval --impure $nixpkgs -A hello.name
   `cannot evaluate a function that has an argument without a value ('NAME')`.
 - A function whose arguments end in `...` gets every `--arg`, named or not.
 
-Without an attribute path, the top level is called only when you give an
-`--arg`, as in `nix-instantiate --eval FILE`. `search` and every native
-command work the same way. Classic mode follows each Nix command.
+Without an attribute path, `iets eval` calls the top level only when you
+give it an argument, as in `nix-instantiate --eval FILE`. Native
+`iets search` calls a file or expression whose top-level function takes
+an attribute-set pattern (such as `{ ... }: body`), using an empty set
+when you supply no arguments. A function such as `args: body` stays unapplied. Classic mode follows each Nix command.
 
 The lint flags are in `docs/reference/lints.md`. Pure evaluation is in
 `docs/explanation/evaluation.md`.
@@ -299,8 +301,8 @@ installable, as in Nix.
   `legacyPackages` and stops everywhere else; `iets search` skips
   anywhere. A feature iets does not have is not an evaluation error: under
   classic mode, it falls back to the real `nix`.
-- `iets search` calls the top level with your `--arg`s, so a package set
-  that is a function, such as nixpkgs' own `default.nix`, works as it is.
+- `iets search` calls top-level functions that take an attribute-set pattern
+  with your `--arg`s, so nixpkgs' own `default.nix` works as it is.
   `nix search` does not do that.
 
 A flake installable searches `packages.<system>` and

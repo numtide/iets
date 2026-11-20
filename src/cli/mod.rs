@@ -173,6 +173,14 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
             "--extra-experimental-features" | "--experimental-features" => {
                 next();
             }
+            // the settings they alias, as classic mode's `-j` and `--cores`.
+            // Read here, in order, so the value of `--argstr` is not one
+            "-j" | "--max-jobs" if help::command() == Some("build") => {
+                f.overrides.push(setting(s, "max-jobs", next()))
+            }
+            "--cores" if help::command() == Some("build") => {
+                f.overrides.push(setting(s, "cores", next()))
+            }
             // a synonym for the positional FILE, in the native namespace
             // only: classic mode's argv stays Nix's
             "-f" | "--file" if help::command().is_some() => {
@@ -198,6 +206,16 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
     a.attrs = f.attrs;
     a.attr = a.attrs.last().cloned();
     a
+}
+
+/// `SETTING = value` for `flag`, which aliases `SETTING`. The value is checked
+/// as the setting's, an integer or for `max-jobs` also `auto`, so a bad one
+/// stops the run at the flag.
+fn setting(flag: &str, setting: &str, value: String) -> (String, String) {
+    if let Err(e) = config::check_value(setting, &value) {
+        arg_error(format!("{flag}: {e}"))
+    }
+    (setting.into(), value)
 }
 
 /// The input a positional argument (or `-f`) names: a flake reference when

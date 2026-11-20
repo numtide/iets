@@ -127,9 +127,6 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         "--dry-run" => b.dry_run = true,
         "--json" => b.json = true,
         "-k" | "--keep-going" => b.keep_going = true,
-        // the settings they alias, so they reach the daemon as `--option` does
-        "-j" | "--max-jobs" => rest.extend(setting(s, "max-jobs", next())),
-        "--cores" => rest.extend(setting(s, "cores", next())),
         "--fetch-to" => b.fetch_to = Some(next().into()),
         "-o" | "--out-link" => b.out_link = Some(next()),
         "--out" => b.outputs.push(next()),
@@ -146,16 +143,6 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
     b.root_key = root_key(&installables(&a));
     b.overrides = a.overrides.clone();
     (b, a)
-}
-
-/// `--option SETTING VALUE` for `flag`, which aliases `SETTING`. The value is
-/// checked as the setting's, an integer or for `max-jobs` also `auto`, so a
-/// bad one stops the run at the flag.
-fn setting(flag: &str, setting: &str, value: String) -> [String; 3] {
-    if let Err(e) = config::check_value(setting, &value) {
-        arg_error(format!("{flag}: {e}"))
-    }
-    ["--option".into(), setting.into(), value]
 }
 
 /// One `EvalArgs` per installable, sorted and without repeats, so every order

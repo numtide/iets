@@ -491,6 +491,21 @@ fn the_daemon_gets_the_build_settings() {
         .unwrap();
     assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
     assert!(stderr(&bad).contains("'max-jobs'"), "{}", stderr(&bad));
+
+    // a value shaped like one of these flags is the value of the flag before it
+    let named = s
+        .iets()
+        .args(["build", "--builder", "daemon", "--dry-run"])
+        .args(["--argstr", "name", "--cores", "-E"])
+        .arg("{ name }: derivation { inherit name; system = \"x\"; builder = \"x\"; }")
+        .output()
+        .unwrap();
+    assert!(named.status.success(), "{}", stderr(&named));
+    assert!(
+        stderr(&named).contains("---cores.drv"),
+        "{}",
+        stderr(&named)
+    );
 }
 
 /// What a connection was told is valid stays valid until it closes.

@@ -305,6 +305,7 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn enable_subreaper() -> io::Result<()> {
+        check_proc_namespace(Path::new("/proc"), false)?;
         // An inherited SIG_IGN would let checked child PIDs be recycled.
         // SAFETY: SIG_DFL is a valid SIGCHLD disposition; this runner is the sole reaper.
         if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
@@ -318,16 +319,27 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
-    fn check_proc_namespace(procfs: &Path) -> io::Result<()> {
-        let status = fs::read(procfs.join("self/status"))?;
+    fn check_proc_namespace(procfs: &Path, require_proof: bool) -> io::Result<()> {
         let own = process::id().to_string();
-        // A procfs mounted in an ancestor namespace exposes different PID numbers.
-        // Require one NStgid, even when two namespaces happen to assign equal numbers.
-        if status
-            .split(|&b| b == b'\n')
-            .find_map(|s| s.strip_prefix(b"NStgid:"))
-            .is_some_and(|ids| ids.trim_ascii() == own.as_bytes())
+        // At startup reject visible mismatches, but defer unavailable proof until
+        // discovery. Equal PID numbers alone do not authorize signaling.
+        let matches = if !require_proof
+            && fs::read_link(procfs.join("self")).is_ok_and(|pid| pid != Path::new(&own))
         {
+            false
+        } else {
+            let status = match fs::read(procfs.join("self/status")) {
+                Ok(status) => status,
+                Err(_) if !require_proof => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            // An ancestor mount can assign equal numeric PIDs in two namespaces.
+            status
+                .split(|&b| b == b'\n')
+                .find_map(|s| s.strip_prefix(b"NStgid:"))
+                .map_or(!require_proof, |ids| ids.trim_ascii() == own.as_bytes())
+        };
+        if matches {
             Ok(())
         } else {
             Err(io::Error::other(
@@ -338,7 +350,7 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
-        check_proc_namespace(procfs)?;
+        check_proc_namespace(procfs, true)?;
         let mut first_error = None;
         let scan = signal_listed_children(procfs, deadline, &mut first_error);
         first_error.map_or(scan, Err)
@@ -1223,14 +1235,56 @@ mod ab {
 
             // Reject even coincident numbers from distinct namespaces, as bytes.
             fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
-            assert!(check_proc_namespace(procfs.path()).is_err());
+            assert!(check_proc_namespace(procfs.path(), true).is_err());
             fs::write(&status, b"Name:\tbad-\xff\n").unwrap();
-            assert!(check_proc_namespace(procfs.path()).is_err());
+            assert!(check_proc_namespace(procfs.path(), true).is_err());
             fs::remove_file(&status).unwrap();
             assert_eq!(
-                check_proc_namespace(procfs.path()).unwrap_err().kind(),
+                check_proc_namespace(procfs.path(), true)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::NotFound
             );
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn preflight_rejects_known_mismatches_without_requiring_discovery() {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            let procfs = tempfile::tempdir().unwrap();
+            let root = procfs.path();
+            let own = process::id().to_string();
+            fs::create_dir(root.join(&own)).unwrap();
+            symlink(&own, root.join("self")).unwrap();
+            let status = root.join("self/status");
+            fs::write(&status, b"Name:\tlegacy\n").unwrap();
+            check_proc_namespace(root, false).unwrap();
+            assert!(check_proc_namespace(root, true).is_err());
+            fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            check_proc_namespace(root, true).unwrap();
+            fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
+            assert!(check_proc_namespace(root, false).is_err());
+            assert!(check_proc_namespace(root, true).is_err());
+            fs::set_permissions(&status, fs::Permissions::from_mode(0o000)).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            let denied = check_proc_namespace(root, true);
+            fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            fs::remove_file(&status).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            assert_eq!(
+                check_proc_namespace(root, true).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            fs::remove_file(root.join("self")).unwrap();
+            symlink(
+                (u64::from(process::id()) + 1).to_string(),
+                root.join("self"),
+            )
+            .unwrap();
+            assert!(check_proc_namespace(root, false).is_err());
         }
 
         #[test]

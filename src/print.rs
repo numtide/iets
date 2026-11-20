@@ -335,26 +335,8 @@ pub fn json_escape_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
 }
 
-/// Shortest round-trip float, like nlohmann::json.
-pub fn json_float(f: f64) -> String {
-    if !f.is_finite() {
-        return "null".into();
-    }
-    let sci = format!("{f:e}");
-    let plain = || {
-        let s = format!("{f}");
-        if s.contains('.') { s } else { format!("{s}.0") }
-    };
-    let Some((mant, exp)) = split_sci(&sci) else {
-        return plain();
-    };
-    if (-4..15).contains(&exp) {
-        plain()
-    } else {
-        let sign = if exp < 0 { '-' } else { '+' };
-        format!("{mant}e{sign}{:02}", exp.abs())
-    }
-}
+mod json_float;
+pub use json_float::json_float;
 
 /// `printValueAsJSON`. Counts against the call depth like Nix's
 /// `addCallDepth`, so deep structures fail with a stack overflow error.

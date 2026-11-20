@@ -1225,6 +1225,8 @@ mod ab {
         #[cfg(target_os = "linux")]
         use std::os::unix::process::ExitStatusExt;
         #[cfg(target_os = "linux")]
+        use std::path::absolute;
+        #[cfg(target_os = "linux")]
         use std::str;
 
         use super::*;
@@ -1324,7 +1326,7 @@ mod ab {
                     .map(|dir| dir.join("false"))
                     .find(|path| path.is_file())
                     .expect("the false utility");
-                let false_bin = std::path::absolute(false_bin).unwrap();
+                let false_bin = absolute(false_bin).unwrap();
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {

@@ -245,9 +245,11 @@ fn run(ev: &mut Evaluator, a: EvalArgs, o: Opts) -> Result<(), Box<Error>> {
                 installable::get_drvs_at(ev, v, args, &mut rs, &mut seen, &start)?;
                 for r in rs {
                     // the walk records the path it reached each derivation by
-                    let at = (ev.drv.drvs.get(&r.drv))
-                        .and_then(|i| i.attr)
-                        .or_else(|| attr.clone());
+                    let at = {
+                        let drvs = ev.drv.drvs.lock();
+                        drvs.get(&r.drv).and_then(|i| i.attr.clone())
+                    }
+                    .or_else(|| attr.clone());
                     roots.push(root_json(&r.drv, Some(r.output), at));
                 }
             }

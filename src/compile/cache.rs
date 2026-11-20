@@ -1587,6 +1587,21 @@ mod tests {
             2,
             "alternate bases cannot replace the ordinary entry"
         );
+
+        // Starting with a custom base must not write an entry under the normal key.
+        let custom_dir = dir.path().join("custom-first");
+        let mut custom_cache = IrCache::locate(Some(custom_dir.to_str().unwrap()), false).unwrap();
+        custom_cache.min_size = 0;
+        custom_cache.stats = false;
+        let custom_cache = std::sync::Arc::new(custom_cache);
+        let mut custom_first = crate::eval::EvalConfig::new()
+            .ir_cache(Some(custom_cache.clone()))
+            .build();
+        assert_eq!(read(&mut custom_first, b"/other"), b"/other/payload");
+        assert_eq!(read(&mut custom_first, b"/t"), b"/t/payload");
+        assert_eq!(custom_cache.hits(), 0);
+        assert_eq!(read(&mut custom_first, b"/t"), b"/t/payload");
+        assert_eq!(custom_cache.hits(), 1);
     }
 
     /// Every case runs against one evaluator: building one and compiling

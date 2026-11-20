@@ -397,6 +397,11 @@ impl<'a> Compiler<'a> {
                     self.global_ref(self.interner.name(*first), pos)?;
                 }
                 if let Some(folded) = self.fold_builtins_select(*subject, path, default.is_none()) {
+                    if let Some(d) = default {
+                        // Binding visits the fallback even when the selected
+                        // builtin is known to exist. Its value stays lazy.
+                        self.expr_inner(*d)?;
+                    }
                     return Ok(folded);
                 }
                 let subject = self.expr(*subject)?;

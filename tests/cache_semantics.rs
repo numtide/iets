@@ -594,3 +594,33 @@ fn search_uses_the_cache(work: Work) {
     assert_eq!(o.status.code(), Some(2));
     assert!(stderr(&o).contains("--workers wants a number >= 1"));
 }
+
+#[rstest]
+fn folded_builtin_selections_bind_their_fallback(work: Work) {
+    work.write("clock.nix", "builtins.currentTime or missingAbc");
+    let eval = |expr: &str| {
+        work.iets()
+            .current_dir(work.dir.path())
+            .env("IETS_IR_MIN", "0")
+            .args(["eval", "--impure", "--no-tracing-cache", "--json", "-E"])
+            .arg(expr)
+            .output()
+            .unwrap()
+    };
+    for expr in [
+        "builtins.seq builtins.currentTime (import ./clock.nix)",
+        "import ./clock.nix",
+        "builtins.true or missingAbc",
+    ] {
+        let out = eval(expr);
+        assert!(!out.status.success(), "{expr} produced {}", stdout(&out));
+        assert!(
+            stderr(&out).contains("undefined variable 'missingAbc'"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    let out = eval(r#"builtins.true or (throw "unreachable")"#);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "true");
+}

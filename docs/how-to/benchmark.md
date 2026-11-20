@@ -68,6 +68,11 @@ Setup/teardown are outside that boundary. The production allocator is retained;
 commands are not exact phase subtractions, and instructions do not establish
 elapsed time, syscall cost or parallel scaling.
 
+Valgrind can also change CPU feature detection. On an Intel host with SHA
+extensions, the same release and fixed-output fixture used hardware SHA-256
+natively and software SHA-256 under Callgrind. Check the native profile before
+using a simulated hotspot to choose an optimization.
+
 Raw profiles and JSON summaries are retained under `target/gungraun/<target-triple>`.
 `--show-intermediate` exposes process/thread fragments as well as totals.
 `--output-format=json` emits machine-readable summaries directly; no extra

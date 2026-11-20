@@ -39,6 +39,11 @@ impl Deque {
 
     /// Owner only. Returns false when full.
     pub fn push(&self, a: u64, b: u64) -> bool {
+        self.push_with(a, b, || {})
+    }
+
+    /// Runs the callback only for a successful push, before thieves can see it.
+    pub(super) fn push_with(&self, a: u64, b: u64, before_publish: impl FnOnce()) -> bool {
         let bot = self.bottom.0.load(Ordering::Relaxed);
         let top = self.top.0.load(Ordering::Acquire);
         if bot - top >= self.cap as i64 {
@@ -47,6 +52,7 @@ impl Deque {
         let s = self.slot(bot);
         self.buf[s].store(a, Ordering::Relaxed);
         self.buf[s + 1].store(b, Ordering::Relaxed);
+        before_publish();
         fence(Ordering::Release);
         self.bottom.0.store(bot + 1, Ordering::Relaxed);
         true
@@ -125,6 +131,23 @@ mod tests {
         }
         assert_eq!(d.pop(), None);
         assert_eq!(d.steal(), None);
+    }
+
+    #[test]
+    fn an_accepted_push_calls_back_before_a_thief_can_see_the_entry() {
+        let d = Deque::new(2);
+        assert!(d.push(1, 2));
+        let mut called = false;
+        assert!(d.push_with(3, 4, || {
+            called = true;
+            assert_eq!(d.steal(), Some((1, 2)));
+            assert_eq!(d.steal(), None);
+        }));
+        assert!(called);
+        assert!(d.push(5, 6));
+        assert!(!d.push_with(7, 8, || panic!("full deque accepted a push")));
+        assert_eq!(d.steal(), Some((3, 4)));
+        assert_eq!(d.steal(), Some((5, 6)));
     }
 
     #[test]

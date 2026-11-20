@@ -535,3 +535,54 @@ fn a_large_query_does_not_stall() {
     let valid = rx.recv_timeout(Duration::from_secs(60)).expect("stalled");
     assert!(valid.is_empty());
 }
+
+/// A floating content-addressed derivation with a floating input. Nix's daemon
+/// resolves it, builds the resolved derivation, and may know the output only
+/// by that one: the path the run prints and links comes from the verdict.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_floating_output_with_a_floating_input() {
+    let s = store!(("extra-experimental-features", "ca-derivations"));
+    let case = s.write(
+        "c10/case.nix",
+        r#"let
+  mk = name: script: extra: derivation ({
+    inherit name;
+    system = "@SYSTEM@";
+    builder = "@SHELL@";
+    args = [ "-c" script ];
+    __contentAddressed = true;
+    outputHashMode = "recursive";
+    outputHashAlgo = "sha256";
+  } // extra);
+  a = mk "iets-ca-a-@NONCE@" "echo a > $out" { };
+in
+mk "iets-ca-b-@NONCE@" "read -r l < $a; echo \"$l b\" > $out" { inherit a; }
+"#,
+    );
+    let link = s.dir().join("c10/result");
+    let o = s
+        .iets()
+        .args([
+            "build",
+            "--builder",
+            "daemon",
+            "--no-tracing-cache",
+            "--json",
+        ])
+        .arg("--out-link")
+        .arg(&link)
+        .arg(&case)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: Value = serde_json::from_slice(o.stdout.trim_ascii()).unwrap();
+    let out = v["outcomes"][0]["outputs"]["out"].as_str().unwrap();
+    assert!(out.starts_with(s.store_dir().to_str().unwrap()), "{v}");
+    assert_eq!(fs::read_to_string(out).unwrap(), "a b\n");
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new(out));
+
+    // the second run finds everything built and still names the path
+    let o = build(&s, &["--builder", "daemon", &case.to_string_lossy()]);
+    assert_eq!(stdout(&o).trim(), out);
+}

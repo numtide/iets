@@ -122,20 +122,9 @@ impl BuildResult {
         res.cpu_system_us = read_opt_u64(r)?;
         let n = read_u64(r)?;
         for _ in 0..n {
-            let key = read_str(r)?;
-            let json = read_str(r)?;
-            let name = key
-                .split_once('!')
-                .map_or(key.clone(), |(_, n)| n.to_string());
-            let path = serde_json::from_str::<serde_json::Value>(&json)
-                .ok()
-                .and_then(|v| {
-                    v.get("outPath")
-                        .and_then(|p| p.as_str().map(str::to_string))
-                });
-            if let Some(path) = path {
-                res.built_outputs.insert(name, path);
-            }
+            wire::drv_output(&read_str(r)?)?;
+            let (name, path) = wire::realisation(read_str(r)?.as_bytes())?;
+            res.built_outputs.insert(name, path.to_string());
         }
         Ok(res)
     }
@@ -324,12 +313,11 @@ mod tests {
         write_u64(&mut bytes, 12345).unwrap();
         write_u64(&mut bytes, 0).unwrap(); // cpuSystem absent
         write_u64(&mut bytes, 1).unwrap(); // one built output
-        write_str(&mut bytes, b"sha256:0000!out").unwrap();
-        write_str(
-            &mut bytes,
-            br#"{"id":"sha256:0000!out","outPath":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo"}"#,
-        )
-        .unwrap();
+        // common-protocol.cc:Serialise<Realisation>: `outPath` is a base name
+        let id = "sha256:4ab29c33e1fd9f3e3e1ebf6e0da0e8f8c3a5e3a73c92c4e9d6e8c04b1a5f2b3d!out";
+        write_str(&mut bytes, id.as_bytes()).unwrap();
+        let real = format!(r#"{{"id":"{id}","outPath":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo"}}"#);
+        write_str(&mut bytes, real.as_bytes()).unwrap();
 
         let res = BuildResult::read(&mut bytes.as_slice()).unwrap();
         assert!(res.success());

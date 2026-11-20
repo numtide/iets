@@ -79,7 +79,7 @@ the same way. `iets eval-jobs` uploads in batches while the walk runs.
 | a ready set | one `BuildPathsWithResults` | a `Want` on the `Schedule` stream and one `BuildDerivation` per derivation of the set's closure, `max-builds` in flight |
 | build parallelism | the daemon's, `-j` through `SetOptions` | the client's, in flight, placed by the scheduler |
 | log lines | attributed by the daemon's activity ids | by the call, which knows its derivation |
-| output paths | `QueryDerivationOutputMap` | statically, from the derivations |
+| output paths | `builtOutputs` of each root's build result | `builtOutputs` of each root's build result, statically for a root the store holds |
 | out-links | the local daemon, the closure copied back first | the local daemon substitutes from its caches; the rest by `FetchNars` |
 
 The stdout of classic mode is byte for byte the real nix's
@@ -163,12 +163,12 @@ rejects the op.
 5. **`BuildPathsWithResults`** in normal mode on `<root drv>!<out1,out2>`
    (`!*` without `--out`), the `DerivedPath` string that protocol >= 1.30
    reads, one entry per root in the same request. A failed status is that
-   root's verdict. `--no-build` and `--dry-run` stop before this step. The
-   substitution of step 3 still runs, or the derivations could not
-   register.
-6. **`QueryDerivationOutputMap`** for each root that built and has an
-   output with no static path: its output paths.
-7. **`NarFromPath`** for each wanted output with `--fetch-to DIR`,
+   root's verdict. A success names the root's output paths in
+   `builtOutputs`, as `nix-build` reads them; a success without a wanted
+   output fails that root. `--no-build` and `--dry-run` stop before this
+   step. The substitution of step 3 still runs, or the derivations could
+   not register.
+6. **`NarFromPath`** for each wanted output with `--fetch-to DIR`,
    restored into `DIR`.
 
 ### Events and timings

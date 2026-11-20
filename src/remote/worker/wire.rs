@@ -211,18 +211,19 @@ pub fn derived_path(s: &str) -> io::Result<String> {
 }
 
 /// realisation.cc:DrvOutput::parse: a prefixed hash, `!`, an output name
-/// that is not checked.
-pub fn drv_output(s: &str) -> io::Result<()> {
-    let (hash, _) = s
+/// that is not checked. Returns the output name.
+pub fn drv_output(s: &str) -> io::Result<&str> {
+    let (hash, name) = s
         .split_once('!')
         .ok_or_else(|| bad(&format!("invalid derivation output id {s}")))?;
     Hash::parse_any(hash, None).map_err(|e| bad(&e.to_string()))?;
-    Ok(())
+    Ok(name)
 }
 
 /// `common-protocol.cc:Serialise<Realisation>`: the JSON of realisation.cc,
 /// `outPath` a store path's base name, `signatures` if there, and `id`.
-pub fn realisation(raw: &[u8]) -> io::Result<()> {
+/// Returns the output name of `id` and the store path of `outPath`.
+pub fn realisation(raw: &[u8]) -> io::Result<(String, StorePath)> {
     let bad_json = |why: &str| bad(&format!("while parsing a realisation object: {why}"));
     let v: serde_json::Value = serde_json::from_slice(raw).map_err(|e| bad_json(&e.to_string()))?;
     let o = v.as_object().ok_or_else(|| bad_json("not an object"))?;
@@ -232,7 +233,8 @@ pub fn realisation(raw: &[u8]) -> io::Result<()> {
             .as_str()
             .ok_or_else(|| bad_json(&format!("'{key}' is not a string")))
     };
-    StorePath::from_base_name(string("outPath")?).map_err(|e| bad(&e.to_string()))?;
+    let out_path =
+        StorePath::from_base_name(string("outPath")?).map_err(|e| bad(&e.to_string()))?;
     if let Some(sigs) = o.get("signatures") {
         for s in sigs
             .as_array()
@@ -244,7 +246,8 @@ pub fn realisation(raw: &[u8]) -> io::Result<()> {
             )?;
         }
     }
-    drv_output(string("id")?)
+    let name = drv_output(string("id")?)?;
+    Ok((name.to_string(), out_path))
 }
 
 /// Mirrors serialise.hh:FramedSink: the payload of `AddMultipleToStore` goes out as
@@ -554,7 +557,10 @@ mod tests {
         let out = "0c6ld7f4z8xbwgaz1mqk5c5bkwlhypzb-hello-2.12.3";
         let id = format!("sha256:{hex}!out");
         let ok = format!(r#"{{"id":"{id}","outPath":"{out}","signatures":["k:dGVzdA=="]}}"#);
-        assert!(realisation(ok.as_bytes()).is_ok());
+        assert_eq!(
+            realisation(ok.as_bytes()).unwrap(),
+            ("out".to_string(), StorePath::from_base_name(out).unwrap())
+        );
         let null_sigs = format!(r#"{{"id":"{id}","outPath":"{out}","signatures":null}}"#);
         assert!(realisation(null_sigs.as_bytes()).is_err());
         let full = format!(r#"{{"id":"{id}","outPath":"/nix/store/{out}"}}"#);

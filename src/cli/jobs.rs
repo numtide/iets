@@ -42,8 +42,8 @@ struct JobsArgs {
     /// `--max-memory-size MB`: worker processes restarted above it;
     /// `0` is one process with no ceiling.
     max_memory: u64,
-    /// `--arg-from-stdin NAME`: what was read, for the worker argv.
-    stdin_args: Vec<(String, String)>,
+    /// The argv index of each parsed `--arg-from-stdin` and the value it read.
+    stdin_args: Vec<(usize, String)>,
     worker: bool,
     flake: bool,
     /// Its own flag, not `EvalArgs::pure`: nix-eval-jobs.cc lets it beat `--flake`.
@@ -143,11 +143,12 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
                 rest.extend(["--argstr".to_string(), name, contents]);
             }
             "--arg-from-stdin" => {
+                let flag = i;
                 let name = arg(&mut i);
                 let contents = io::read_to_string(io::stdin())
                     .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
-                rest.extend(["--argstr".to_string(), name.clone(), contents.clone()]);
-                j.stdin_args.push((name, contents));
+                rest.extend(["--argstr".to_string(), name, contents.clone()]);
+                j.stdin_args.push((flag, contents));
             }
             "--include" => {
                 rest.push("-I".to_string());
@@ -160,26 +161,24 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
     (j, rest)
 }
 
-/// A worker process's arguments: `argv` with every `--arg-from-stdin`
+/// A worker process's arguments: `argv` with each parsed `--arg-from-stdin`
 /// replaced by the `--argstr` the main process read for it. A worker's
 /// stdin is the collector's pipe, so it cannot read the value itself.
 fn worker_argv(argv: &[String], j: &JobsArgs) -> Vec<String> {
     // `--iets-option` left `argv` before this command saw it, and a worker
     // reads its own settings, so the triples go back on here
     let mut out: Vec<String> = Session::current().settings().option_argv();
-    let mut read = j.stdin_args.iter();
-    let mut i = 0;
-    while i < argv.len() {
-        if argv[i] == "--arg-from-stdin" {
-            if let Some((name, contents)) = read.next() {
-                out.extend(["--argstr".to_string(), name.clone(), contents.clone()]);
-            }
-            i += 2;
-            continue;
-        }
-        out.push(argv[i].clone());
-        i += 1;
+    let mut start = 0;
+    for &(flag, ref contents) in &j.stdin_args {
+        out.extend_from_slice(&argv[start..flag]);
+        out.extend([
+            "--argstr".to_string(),
+            argv[flag + 1].clone(),
+            contents.clone(),
+        ]);
+        start = flag + 2;
     }
+    out.extend_from_slice(&argv[start..]);
     out
 }
 

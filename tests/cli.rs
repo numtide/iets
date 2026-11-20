@@ -381,6 +381,38 @@ fn eval_json_forces_without_strict(bin: Iets) {
     assert_eq!(stdout(&o), r#"{"a":[2]}"#);
 }
 
+#[rstest]
+fn eval_can_read_its_own_drv_with_and_without_the_cache(bin: Iets) {
+    let tmp = tempdir().unwrap();
+    let name = tmp
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_start_matches('.');
+    let expr = format!(
+        r#"let
+        d = derivation {{ name = "eval-{name}"; system = "x86_64-linux"; builder = "/bin/sh"; }};
+        p = builtins.unsafeDiscardStringContext d.drvPath;
+    in [ (builtins.pathExists p) (builtins.substring 0 7 (builtins.readFile p)) ]"#
+    );
+    for mode in [
+        vec!["--no-cache"],
+        vec!["--cache-dir", tmp.path().to_str().unwrap()],
+    ] {
+        let output = bin
+            .cmd()
+            .args(["eval", "--impure", "--workers", "1", "--json"])
+            .args(mode)
+            .args(["-E", &expr])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(stdout(&output), r#"[true,"Derive("]"#);
+    }
+}
+
 /// Nix's currentSystem is the host's unless `system` says otherwise.
 #[rstest]
 fn current_system_is_the_hosts(bin: Iets) {

@@ -322,7 +322,19 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path) -> io::Result<()> {
-        if fs::read_link(procfs.join("self"))? != Path::new(&process::id().to_string()) {
+        let own_pid = process::id().to_string();
+        let status = fs::read_to_string(procfs.join("self/status"))?;
+        // An ancestor namespace can assign us the same numeric PID. NStgid
+        // lists one PID per namespace from the procfs mount down to our own.
+        let same_namespace = match status.lines().find_map(|s| s.strip_prefix("NStgid:")) {
+            Some(ids) => ids.split_whitespace().eq([own_pid.as_str()]),
+            // Kernels built without PID namespaces omit both interfaces.
+            None => {
+                !procfs.join("self/ns/pid").try_exists()?
+                    && fs::read_link(procfs.join("self"))? == Path::new(&own_pid)
+            }
+        };
+        if !same_namespace {
             return Err(io::Error::other("/proc uses a different PID namespace"));
         }
         // Some kernels omit the per-thread children files, while hidepid can
@@ -511,6 +523,15 @@ mod ab {
             }
             let e = io::Error::last_os_error();
             if e.kind() != io::ErrorKind::Interrupted {
+                // The measurement has failed, but adopted descendants can
+                // still be running even when wait4 reports ECHILD.
+                if let Err(cleanup) = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, kill_leftovers)
+                {
+                    return Err(RunError::Cleanup(io::Error::new(
+                        e.kind(),
+                        format!("wait4: {e}; leftover cleanup: {cleanup}"),
+                    )));
+                }
                 return Err(RunError::Cleanup(e));
             }
         };
@@ -1103,8 +1124,12 @@ mod ab {
             let procfs = tempfile::tempdir().unwrap();
             let own_pid = process::id().to_string();
             symlink(&own_pid, procfs.path().join("self")).unwrap();
-            let task = procfs.path().join(own_pid).join("task/1");
+            let task = procfs.path().join(&own_pid).join("task/1");
             fs::create_dir_all(&task).unwrap();
+            let status = procfs.path().join("self/status");
+            fs::write(&status, format!("NStgid:\t{own_pid}\t{own_pid}\n")).unwrap();
+            assert!(kill_leftovers_in(procfs.path()).is_err());
+            fs::write(status, format!("NStgid:\t{own_pid}\n")).unwrap();
             let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
             fs::write(task.join("children"), hidden.id().to_string()).unwrap();
             assert!(

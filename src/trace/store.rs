@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::io::{self, Read};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::cachefs;
@@ -64,7 +65,7 @@ impl Part {
 /// before any part is decoded.
 pub struct Entry {
     data: Vec<u8>,
-    slots: Vec<(u8, u64, u64)>,
+    slots: Vec<(u8, Range<usize>)>,
 }
 
 impl Entry {
@@ -86,12 +87,13 @@ impl Entry {
         let table = data.get(HEADER..payload)?;
         let mut slots = Vec::with_capacity(count);
         for s in table.as_chunks::<SLOT>().0 {
-            let at = u64::from_le_bytes(s[1..9].try_into().ok()?);
-            let n = u64::from_le_bytes(s[9..17].try_into().ok()?);
-            if at < payload as u64 || at.checked_add(n)? > data.len() as u64 {
+            let at = usize::try_from(u64::from_le_bytes(s[1..9].try_into().ok()?)).ok()?;
+            let n = usize::try_from(u64::from_le_bytes(s[9..17].try_into().ok()?)).ok()?;
+            let end = at.checked_add(n)?;
+            if at < payload || end > data.len() {
                 return None;
             }
-            slots.push((s[0], at, n));
+            slots.push((s[0], at..end));
         }
         Some(Entry { data, slots })
     }
@@ -104,12 +106,16 @@ impl Entry {
         Entry::parse(f, md.len(), &key)
     }
 
+    fn parts(&self) -> impl ExactSizeIterator<Item = (u8, &[u8])> {
+        self.slots
+            .iter()
+            .map(|(tag, range)| (*tag, &self.data[range.clone()]))
+    }
+
     /// The bytes of one part, from this generation of the entry.
     pub fn part(&self, part: Part) -> Option<Vec<u8>> {
-        let (_, at, n) = *self.slots.iter().find(|(t, ..)| *t == part.tag())?;
-        let at = usize::try_from(at).ok()?;
-        let n = usize::try_from(n).ok()?;
-        Some(self.data.get(at..at.checked_add(n)?)?.to_vec())
+        let (_, bytes) = self.parts().find(|(tag, _)| *tag == part.tag())?;
+        Some(bytes.to_vec())
     }
 }
 
@@ -167,39 +173,59 @@ impl Store {
     /// the store lock. `false` when a sibling writer held that lock: the
     /// entry stays the generation it was and the next run misses.
     pub fn publish(&self, key: &str, parts: &[(Part, &[u8])]) -> io::Result<bool> {
+        self.publish_parts(key, parts.iter().map(|(p, bytes)| (p.tag(), *bytes)))
+    }
+
+    /// Publish the new read set with every other part of the validated generation.
+    pub(super) fn refresh_readset(
+        &self,
+        key: &str,
+        entry: &Entry,
+        readset: &[u8],
+    ) -> io::Result<bool> {
+        let parts = entry.parts().map(|(tag, bytes)| {
+            if tag == Part::Readset.tag() {
+                (tag, readset)
+            } else {
+                (tag, bytes)
+            }
+        });
+        self.publish_parts(key, parts)
+    }
+
+    fn publish_parts<'a>(
+        &self,
+        key: &str,
+        parts: impl ExactSizeIterator<Item = (u8, &'a [u8])>,
+    ) -> io::Result<bool> {
         let count = u8::try_from(parts.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
         let head = [VERSION, count];
+        let mut table = Vec::with_capacity(parts.len() * SLOT);
+        let mut chunks: Vec<&[u8]> = Vec::with_capacity(parts.len() + 3);
+        chunks.push(&head);
+        let mut at = (HEADER + parts.len() * SLOT) as u64;
+        for (tag, bytes) in parts {
+            table.push(tag);
+            table.extend_from_slice(&at.to_le_bytes());
+            table.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            at += bytes.len() as u64;
+            chunks.push(bytes);
+        }
         // an entry over the cap is one no reader will open (cachefs::MAX_ENTRY),
         // so write nothing rather than seconds of bytes that are dead on arrival
-        let total = (HEADER + parts.len() * SLOT) as u64
-            + parts.iter().map(|(_, b)| b.len() as u64).sum::<u64>();
-        if total > cachefs::MAX_ENTRY {
+        if at > cachefs::MAX_ENTRY {
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
                 format!(
-                    "cache entry is {total} bytes, over the {} byte limit",
+                    "cache entry is {at} bytes, over the {} byte limit",
                     cachefs::MAX_ENTRY
                 ),
             ));
         }
-        let mut table = Vec::with_capacity(parts.len() * SLOT);
-        let mut at = (HEADER + parts.len() * SLOT) as u64;
-        for (p, bytes) in parts {
-            table.push(p.tag());
-            table.extend_from_slice(&at.to_le_bytes());
-            table.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-            at += bytes.len() as u64;
-        }
-        let mut covered: Vec<&[u8]> = Vec::with_capacity(parts.len() + 2);
-        covered.push(&head);
-        covered.push(&table);
-        covered.extend(parts.iter().map(|(_, b)| *b));
-        let sum = cachefs::checksum(key, &covered);
-        let mut chunks: Vec<&[u8]> = Vec::with_capacity(parts.len() + 3);
-        chunks.push(&head);
-        chunks.push(&sum);
-        chunks.push(&table);
-        chunks.extend(parts.iter().map(|(_, b)| *b));
+        chunks.insert(1, &table);
+        let sum = cachefs::checksum(key, &chunks);
+        // The checksum follows the header and covers the table and payloads too.
+        chunks.insert(1, &sum);
         let dir = self.entry_dir(key);
         let Some(_lock) = cachefs::try_write_lock(&self.root)? else {
             return Ok(false);

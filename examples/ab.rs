@@ -246,6 +246,7 @@ mod ab {
         eof: &mpsc::Receiver<io::Result<()>>,
         deadline: Instant,
     ) -> Result<(), RunError> {
+        let mut final_poll = false;
         loop {
             // recv_timeout takes a relative duration. Recheck the absolute deadline
             // so a paused receiver cannot start a second full wait when it resumes.
@@ -258,6 +259,9 @@ mod ab {
                         .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                // EOF can queue while a timed-out receiver is paused. Check it
+                // once with a zero timeout before reporting the absolute limit.
+                Err(mpsc::RecvTimeoutError::Timeout) if !final_poll => final_poll = true,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err(RunError::Cleanup(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -594,7 +598,9 @@ mod ab {
                     // Reaping a parent can expose a child after the previous
                     // sweep. Give it the same bounded direct-list attempt.
                     if !final_sweep_done && (clean || reaped_since_sweep) {
-                        sweep(deadline)?;
+                        if let Err(e) = sweep(deadline) {
+                            sweep_error = Some(e);
+                        }
                         clean = false;
                         final_sweep_done = true;
                         if !children_remain()? {
@@ -1218,6 +1224,10 @@ mod ab {
 
         #[test]
         fn a_writer_can_outlive_the_child_tree() {
+            let (notify, eof) = mpsc::channel();
+            notify.send(Ok(())).unwrap();
+            wait_for_stdout(&eof, Instant::now()).unwrap();
+
             let (reader, writer) = UnixStream::pair().unwrap();
             let (notify, eof) = mpsc::channel();
             let hasher = thread::spawn(move || hash_output(reader, notify));
@@ -1453,9 +1463,14 @@ mod ab {
 
             // A sweep must leave a parent's exit visible to the outer reaper,
             // so its newly adopted child gets the bounded final direct pass.
-            for (polls, make_waitable, complete) in
-                [(1, true, false), (2, true, true), (2, false, false)]
-            {
+            for (polls, make_waitable, sweep_fails, complete) in [
+                (1, true, false, false),
+                (2, true, false, true),
+                (2, false, false, false),
+                (1, true, true, false),
+                (2, true, true, true),
+                (2, false, true, false),
+            ] {
                 let mut parent = Command::new("sh")
                     .args(["-c", "sleep 30 >&- 2>&- & echo $!; wait"])
                     .stdout(Stdio::piped())
@@ -1484,6 +1499,9 @@ mod ab {
                     if sweeps == 2 && make_waitable {
                         wait_until_exited(grandchild as u32);
                     }
+                    if sweeps == 2 && sweep_fails {
+                        return Err(io::Error::from_raw_os_error(libc::EPERM));
+                    }
                     Ok(())
                 });
                 let mut status = 0;
@@ -1499,11 +1517,20 @@ mod ab {
                 }
                 assert_eq!(sweeps, 2);
                 if complete {
+                    assert!(
+                        result.is_ok(),
+                        "a final sweep error prevented ready-exit draining: {result:?}"
+                    );
                     assert!(!result.unwrap());
                     assert_eq!(reaped, -1);
                     assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
                 } else {
-                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+                    let expected = if sweep_fails {
+                        io::ErrorKind::PermissionDenied
+                    } else {
+                        io::ErrorKind::TimedOut
+                    };
+                    assert_eq!(result.unwrap_err().kind(), expected);
                     assert_eq!(reaped, if make_waitable { grandchild } else { 0 });
                     if make_waitable {
                         assert!(libc::WIFSIGNALED(status));

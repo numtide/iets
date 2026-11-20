@@ -357,32 +357,49 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
+    fn child_is_waitable(pid: libc::pid_t) -> io::Result<bool> {
+        let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: writable exit info; WNOWAIT leaves exits for the sole outer reaper.
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: initialized above; WNOHANG leaves si_signo zero for a live child.
+        Ok(unsafe { info.assume_init() }.si_signo != 0)
+    }
+
+    #[cfg(target_os = "linux")]
     fn signal_listed_children(
         procfs: &Path,
         deadline: Instant,
         first_error: &mut Option<io::Error>,
     ) -> io::Result<()> {
         let mut signal = |pid: libc::pid_t| -> io::Result<()> {
-            let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
-            // SAFETY: writable exit info; WNOWAIT leaves exits for the sole outer reaper.
-            if unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid as libc::id_t,
-                    info.as_mut_ptr(),
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            } == -1
-            {
-                let e = io::Error::last_os_error();
-                if e.raw_os_error() != Some(libc::ECHILD) {
-                    first_error.get_or_insert(e);
+            match child_is_waitable(pid) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => {
+                    if e.raw_os_error() != Some(libc::ECHILD) {
+                        first_error.get_or_insert(e);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
             // SAFETY: this is our unreaped child, under the checked SIGCHLD disposition.
             if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
                 let e = io::Error::last_os_error();
+                // A child may exit after the probe, losing signal permission first.
+                if e.raw_os_error() == Some(libc::EPERM) && child_is_waitable(pid).unwrap_or(false)
+                {
+                    return Ok(());
+                }
                 if e.raw_os_error() != Some(libc::ESRCH) {
                     first_error.get_or_insert(e);
                 }
@@ -1122,6 +1139,7 @@ mod ab {
             }
             assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
+            assert!(!child_is_waitable(direct.id() as libc::pid_t).unwrap());
             let t = Instant::now();
             Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
@@ -1152,8 +1170,15 @@ mod ab {
                 },
                 0
             );
+            assert!(child_is_waitable(last.id() as libc::pid_t).unwrap());
             assert!(reap_leftovers(Duration::ZERO, Duration::ZERO, |_| unreachable!()).unwrap());
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            assert_eq!(
+                child_is_waitable(last.id() as libc::pid_t)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::ECHILD)
+            );
 
             // Exhausting discovery is harmless only once the last child is confirmed gone.
             let mut last = Command::new("sleep").arg("30").spawn().unwrap();

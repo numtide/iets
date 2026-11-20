@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::ignored;
 use crate::log;
-use crate::print::lexicographic_order;
+use crate::print::{lexicographic_entries, lexicographic_order};
 use crate::runtime::Word;
 use crate::session::{self, Session};
 use crate::sys::process;
@@ -75,7 +75,7 @@ pub fn run_worker(
 ) -> Result<()> {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
-    let chunk_depth = config().opts.chunk_depth;
+    let opts = config().opts;
     let flush = |inst: &mut Option<Instantiator>| -> Result<()> {
         if let Some(i) = inst.take() {
             i.finish()?;
@@ -101,7 +101,7 @@ pub fn run_worker(
             .iter()
             .fold(FNV_BASIS, |h, n| fnv_step(h, n.as_bytes()));
         let depth = path.len() as u32;
-        let response: Vec<u8> = if depth == chunk_depth && !admit(hash, depth, false) {
+        let response: Vec<u8> = if depth == opts.chunk_depth && !admit(hash, depth, false) {
             MSG_OK.into()
         } else {
             let (t, alloc) = (Instant::now(), ev.arena.bytes_allocated);
@@ -121,13 +121,29 @@ pub fn run_worker(
                     MSG_OK.into()
                 }
                 Ok(Node::Recurse(attrs)) => {
-                    let names = lexicographic_order(ev, attrs);
+                    // Paths outside this partition return immediately, before lookup or
+                    // forcing. Leave them out of the collector's work queue altogether.
+                    let at_boundary = opts.chunks > 1 && depth + 1 == opts.chunk_depth;
+                    let names = if at_boundary {
+                        let selected = attrs.iter().filter(|a| {
+                            let name = ev.interner.name_str(a.sym);
+                            admit(fnv_step(hash, name.as_bytes()), depth + 1, false)
+                        });
+                        json_str_list(
+                            lexicographic_entries(ev, selected)
+                                .map(|a| ev.interner.name_str(a.sym)),
+                        )
+                    } else {
+                        json_str_list(
+                            lexicographic_order(ev, attrs).map(|a| ev.interner.name_str(a.sym)),
+                        )
+                    };
                     let mut v = b"{\"attr\":".to_vec();
                     v.extend(json_str(&attr_join(&path)));
                     v.extend_from_slice(b",\"attrPath\":");
                     v.extend(json_str_list(path.iter()));
                     v.extend_from_slice(b",\"attrs\":");
-                    v.extend(json_str_list(names.map(|a| ev.interner.name_str(a.sym))));
+                    v.extend(names);
                     v.push(b'}');
                     v
                 }

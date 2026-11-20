@@ -374,10 +374,9 @@ mod ab {
         // hide a child from the top-level listing. Check both sources.
         let mut result = Ok(());
         let signal = |pid| {
-            // SAFETY: only a live child returns zero. This is the sole reaper,
-            // so an exit between the check and kill cannot recycle its PID.
-            if pid > 0 && unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) } == 0 {
-                // SAFETY: the PID above names our child in this namespace.
+            // Leave exits for the outer reaper, which tracks newly adopted children.
+            if pid > 0 && children_remain_for(libc::P_PID, pid as libc::id_t)? {
+                // SAFETY: this is our child; the sole reaper cannot recycle its PID.
                 if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
                     let e = io::Error::last_os_error();
                     if e.raw_os_error() != Some(libc::ESRCH) {
@@ -476,12 +475,16 @@ mod ab {
 
     /// Check ownership without reaping another exit or extending grace.
     fn children_remain() -> io::Result<bool> {
+        children_remain_for(libc::P_ALL, 0)
+    }
+
+    fn children_remain_for(kind: libc::idtype_t, id: libc::id_t) -> io::Result<bool> {
         let mut info = MaybeUninit::uninit();
         // SAFETY: info is writable and its contents are discarded.
         if unsafe {
             libc::waitid(
-                libc::P_ALL,
-                0,
+                kind,
+                id,
                 info.as_mut_ptr(),
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             )

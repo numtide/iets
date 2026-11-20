@@ -314,6 +314,22 @@ fn a_pure_run_never_reads_an_impure_entry(work: Work) {
 }
 
 #[rstest]
+fn compiling_a_home_path_reports_no_ir_publication(work: Work) {
+    let file = work.write("home.nix", "toString ~/example");
+    let output = work
+        .iets()
+        .env("IETS_IR_MIN", "0")
+        .env("IETS_IR_STATS", "1")
+        .args(["eval", "--impure", "--no-tracing-cache", &file])
+        .output()
+        .unwrap();
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert!(err.contains(&format!("ir-cache compile {file} ")), "{err}");
+    assert!(!err.contains("ir-cache store "), "{err}");
+}
+
+#[rstest]
 fn uncacheable_runs_write_nothing(work: Work) {
     let r = work.eval(&["-E", "builtins.currentTime > 0"]);
     assert!(r.status.contains("not written"), "{}", r.status);

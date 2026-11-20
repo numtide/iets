@@ -102,6 +102,8 @@ pub fn find_store_prefix(text: &str) -> Option<(usize, usize)> {
         .min()
 }
 
+const STORE_PATH_HASH_BYTES: usize = 20;
+
 /// Mirrors path.hh:StorePath::HashLen (base32 characters).
 pub const HASH_PART_LEN: usize = 32;
 
@@ -187,9 +189,14 @@ impl StorePath {
     /// Mirrors path.cc:StorePath::StorePath(const Hash &, std::string_view name).
     pub fn new(hash: &Hash, name: &str) -> Result<StorePath, StorePathError> {
         check_name(name)?;
+        if hash.bytes().len() != STORE_PATH_HASH_BYTES {
+            return Err(StorePathError(format!(
+                "store path hash must be {STORE_PATH_HASH_BYTES} bytes, got {}",
+                hash.bytes().len()
+            )));
+        }
         let mut base_name = String::with_capacity(HASH_PART_LEN + 1 + name.len());
         hash::nix32_encode_into(&mut base_name, hash.bytes());
-        debug_assert_eq!(base_name.len(), HASH_PART_LEN);
         base_name.push('-');
         base_name.push_str(name);
         Ok(StorePath { base_name })
@@ -302,7 +309,10 @@ pub fn make_store_path(ty: &str, hash: &Hash, name: &str) -> Result<StorePath, S
 }
 
 fn from_payload(payload: &str, name: &str) -> Result<StorePath, StorePathError> {
-    let h = compress_hash(&hash_bytes(HashAlgo::Sha256, payload.as_bytes()), 20);
+    let h = compress_hash(
+        &hash_bytes(HashAlgo::Sha256, payload.as_bytes()),
+        STORE_PATH_HASH_BYTES,
+    );
     StorePath::new(&h, name)
 }
 
@@ -468,6 +478,20 @@ pub fn hash_placeholder(output_name: &str) -> String {
 mod tests {
     use super::resolve_store_dir as resolve;
     use rstest::rstest;
+
+    #[test]
+    fn store_path_hash_width_is_checked() {
+        for algo in [HashAlgo::Md5, HashAlgo::Sha256] {
+            assert!(StorePath::new(&hash_bytes(algo, b"x"), "x").is_err());
+        }
+        let sha256 = hash_bytes(HashAlgo::Sha256, b"x");
+        for hash in [hash_bytes(HashAlgo::Sha1, b"x"), compress_hash(&sha256, 20)] {
+            let path = StorePath::new(&hash, "x").unwrap();
+            assert_eq!(path.hash_part(), hash.to_nix32());
+            assert_eq!(path.name(), "x");
+            assert_eq!(StorePath::from_base_name(path.base_name()).unwrap(), path);
+        }
+    }
 
     #[test]
     fn the_host_picks_the_store_directory() {

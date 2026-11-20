@@ -1294,10 +1294,16 @@ mod ab {
             assert!(check_proc_namespace(root, false).is_err());
             assert!(check_proc_namespace(root, true).is_err());
             fs::set_permissions(&status, fs::Permissions::from_mode(0o000)).unwrap();
-            check_proc_namespace(root, false).unwrap();
-            let denied = check_proc_namespace(root, true);
+            // CAP_DAC_OVERRIDE can keep mode-000 files readable.
+            if let Err(e) = fs::read(&status) {
+                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+                check_proc_namespace(root, false).unwrap();
+                assert_eq!(
+                    check_proc_namespace(root, true).unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+            }
             fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
-            assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             fs::remove_file(&status).unwrap();
             check_proc_namespace(root, false).unwrap();
             assert_eq!(

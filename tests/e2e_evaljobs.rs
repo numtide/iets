@@ -497,6 +497,48 @@ fn every_line_has_stats(bin: Iets) {
     );
 }
 
+/// A write that fails (here a full disk) fails the run: the output is not
+/// the whole job set. With worker processes and in one process.
+#[cfg(target_os = "linux")]
+#[rstest]
+fn a_failed_write_fails_the_run(bin: Iets, #[values("4096", "0")] max_memory: &str) {
+    assert_write_failure(ci(&bin).args(["--max-memory-size", max_memory, "ci.nix"]));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_write_of_a_withheld_aggregate_fails_the_run() {
+    let Some(store) = Store::start_with(&[]) else {
+        return;
+    };
+    // This named aggregate is the only result. It is written during finish.
+    assert_write_failure(
+        store
+            .iets()
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs"))
+            .args([
+                "eval-jobs",
+                "--impure",
+                "--constituents",
+                "--select",
+                "j: { inherit (j.failures) missingOnly; }",
+                "aggregates.nix",
+            ]),
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn assert_write_failure(command: &mut Command) {
+    let full = File::options().write(true).open("/dev/full").unwrap();
+    let o = command.stdout(full).output().unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("error: cannot write to stdout: No space left on device"),
+        "{}",
+        stderr(&o)
+    );
+}
+
 /// `--verbose` and `--debug` are one warning each, from the main process;
 /// `--max-jobs` and `--quiet` hold (docs/reference/divergences.md).
 #[rstest]

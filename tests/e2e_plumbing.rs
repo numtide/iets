@@ -230,6 +230,39 @@ fn build() {
 }
 
 #[test]
+fn a_bare_root_keeps_every_output_in_a_resolve_pipeline() {
+    let s = store!();
+    s.write(
+        "mixed.nix",
+        r#"
+        let a = derivation {
+          name = "mixed"; system = "@SYSTEM@"; builder = "@SHELL@";
+          outputs = [ "out" "dev" "doc" ];
+          args = [ "-c" "echo @NONCE@ > $out; echo b > $dev; echo c > $doc" ];
+        }; in [ a.dev.outPath a ]
+    "#,
+    );
+    let outputs = |flags: &[&str]| {
+        let result = pipe(
+            s.iets()
+                .args(["plumbing", "resolve", "--dump-drvs", "dump", "mixed.nix"]),
+            s.iets()
+                .args(["plumbing", "build", "--roots", "-"])
+                .args(flags),
+        );
+        assert!(result.status.success(), "{}", e2e::stderr(&result));
+        parse(&result)["outcomes"][0]["outputs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(outputs(&[]), ["dev", "doc", "out"]);
+    assert_eq!(outputs(&["--out", "out"]), ["dev", "out"]);
+}
+
+#[test]
 fn composition() {
     let s = store!();
     let hello = instantiate(&s, "hello.nix", HELLO);

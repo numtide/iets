@@ -254,3 +254,84 @@ fn no_build_uploads_every_installable() {
     assert!(r.status.success(), "{}", stderr(&r));
     assert!(stderr(&r).contains("query: 2 paths"), "{}", stderr(&r));
 }
+
+#[test]
+fn each_root_builds_its_own_outputs() {
+    let s = store!();
+    let file = s.write(
+        "outputs.nix",
+        r#"
+        let mk = name: derivation {
+          inherit name; outputs = [ "out" "dev" "doc" ];
+          system = "@SYSTEM@"; builder = "@SHELL@";
+          args = [ "-c" "echo a > $out; echo b > $dev; echo c > $doc" ];
+        };
+        a = mk "pick-a"; b = mk "pick-b"; c = mk "pick-c";
+        in { inherit a b c; selected = [ a.dev.outPath b.doc.outPath c c.dev.outPath ]; }
+    "#,
+    );
+    let file = file.to_str().unwrap();
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--json", "--timings", file, "-A", "selected"];
+        args.extend_from_slice(extra);
+        let r = build(&s, &args);
+        assert!(r.status.success(), "{}", stderr(&r));
+        r
+    };
+    let dry = run(&["--dry-run"]);
+    assert_eq!(json(&dry)["willBuild"].as_array().unwrap().len(), 3);
+    let keys = |r: &Output| -> Vec<Vec<String>> {
+        json(r)["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["outputs"].as_object().unwrap().keys().cloned().collect())
+            .collect()
+    };
+    let warm = run(&[]);
+    assert!(stderr(&warm).contains("eval: skipped"), "{}", stderr(&warm));
+    assert_eq!(
+        keys(&warm),
+        [vec!["dev"], vec!["doc"], vec!["dev", "doc", "out"]]
+    );
+    let nix = e2e::ok(s.nix("nix").args([
+        "build",
+        "--no-link",
+        "--json",
+        "-f",
+        file,
+        "a^dev",
+        "b^doc",
+        "c^*",
+    ]));
+    let nix = json(&nix);
+    for ours in json(&warm)["outcomes"].as_array().unwrap() {
+        let reference = nix
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["drvPath"] == ours["drv"])
+            .unwrap();
+        assert_eq!(ours["outputs"], reference["outputs"]);
+    }
+    let cold_eval = run(&["--no-tracing-cache"]);
+    assert_eq!(keys(&cold_eval), keys(&warm));
+    let extra = run(&["--out", "out"]);
+    assert_eq!(
+        keys(&extra),
+        [vec!["dev", "out"], vec!["doc", "out"], vec!["dev", "out"]]
+    );
+    // A missing doc output of a must not put a back in a dry-run plan.
+    let a = json(&warm)["outcomes"][0]["drv"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outputs = s.nix_store(&["-q", "--outputs", &a]);
+    let doc = outputs
+        .lines()
+        .find(|p| p.ends_with("-pick-a-doc"))
+        .unwrap();
+    s.nix_store(&["--delete", doc]);
+    let dry = run(&["--dry-run"]);
+    assert_eq!(json(&dry)["willBuild"], serde_json::json!([]));
+}

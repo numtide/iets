@@ -344,6 +344,11 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn enable_subreaper() -> io::Result<()> {
+        // An inherited SIG_IGN lets the kernel reap and recycle a checked child PID.
+        // SAFETY: SIG_DFL is a valid disposition for SIGCHLD.
+        if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
         // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag.
         if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
             return Err(io::Error::last_os_error());
@@ -1317,6 +1322,9 @@ mod ab {
         #[cfg(target_os = "linux")]
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
+            // SAFETY: this test owns child cleanup and immediately sets up the subreaper.
+            let previous = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            assert_ne!(previous, libc::SIG_ERR);
             enable_subreaper().unwrap();
             // The shared boundary identifies either binary once for execution
             // and spawn failures; keep child-spawning assertions in this test.

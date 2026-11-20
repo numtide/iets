@@ -135,6 +135,25 @@ fn an_input_is_silent_until_the_scope_or_the_inputs_table_opens_it(scratch: Scra
 }
 
 #[rstest]
+fn a_source_copy_lint_enabled_only_in_the_input(scratch: Scratch) {
+    fs::create_dir(scratch.work.join("plain")).unwrap();
+    fs::write(
+        scratch.work.join("root/iets.toml"),
+        "[lint]\ndir-copy-unfiltered = \"off\"\n[lint.inputs.dep]\ndir-copy-unfiltered = \"warn\"\n",
+    )
+    .unwrap();
+    let r = eval(&scratch, "inputCopy", &[]);
+    assert_eq!(r.rc, 0, "{}", r.stderr);
+    assert_eq!(
+        r.stderr.matches("warning: [dir-copy-unfiltered]").count(),
+        1,
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("/dep/flake.nix:3:"), "{}", r.stderr);
+}
+
+#[rstest]
 fn a_copy_under_the_root_or_an_input_is_not_a_recopy(scratch: Scratch) {
     let r = eval(&scratch, "file", &COPIES);
     assert!(

@@ -134,6 +134,23 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_push_calls_back_before_a_thief_can_see_the_entry() {
+        let d = Deque::new(2);
+        assert!(d.push(1, 2));
+        let mut called = false;
+        assert!(d.push_with(3, 4, || {
+            called = true;
+            assert_eq!(d.steal(), Some((1, 2)));
+            assert_eq!(d.steal(), None);
+        }));
+        assert!(called);
+        assert!(d.push(5, 6));
+        assert!(!d.push_with(7, 8, || panic!("full deque accepted a push")));
+        assert_eq!(d.steal(), Some((3, 4)));
+        assert_eq!(d.steal(), Some((5, 6)));
+    }
+
+    #[test]
     fn concurrent_sum() {
         let d = Arc::new(Deque::new(1024));
         let sum = Arc::new(AtomicU64::new(0));

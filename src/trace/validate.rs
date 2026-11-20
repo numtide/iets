@@ -43,13 +43,9 @@ enum Outcome {
     Changed(String),
 }
 
-fn os(p: &[u8]) -> PathBuf {
-    sys::path_from_internal(p)
-}
-
 /// A recorded path as the user's system writes it.
 fn lossy(p: &[u8]) -> String {
-    os(p).to_string_lossy().into_owned()
+    sys::native_path(p).to_string_lossy().into_owned()
 }
 
 /// Why a path no longer reads: it is not there, or it is there and the read
@@ -93,7 +89,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             ino,
             hash,
         } => {
-            let at = os(path);
+            let at = sys::native_path(path);
             let m = match fs::metadata(&at) {
                 Ok(m) => m,
                 Err(e) => return unreadable(path, &e),
@@ -122,7 +118,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             }
             Outcome::Refresh(file_obs(path, &m, *hash))
         }
-        Obs::Dir { path, hash } => match dir_hash(&os(path), dirs) {
+        Obs::Dir { path, hash } => match dir_hash(&sys::native_path(path), dirs) {
             Ok(now) => {
                 if now == *hash {
                     Outcome::Same
@@ -133,7 +129,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             Err(e) => unreadable(path, &e),
         },
         Obs::Stat { path, follow, kind } => {
-            let now = stat_kind(&os(path), *follow);
+            let now = stat_kind(&sys::native_path(path), *follow);
             match (now, *kind) {
                 (now, was) if now == was => Outcome::Same,
                 (Kind::Missing, _) => Outcome::Changed(format!("{} is gone", lossy(path))),
@@ -155,8 +151,8 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
         } => {
             let accepted: Option<HashSet<PathBuf>> = filtered
                 .as_ref()
-                .map(|f| f.accepted.iter().map(|p| os(p)).collect());
-            let root_p = os(root);
+                .map(|f| f.accepted.iter().map(|p| sys::path_from_internal(p)).collect());
+            let root_p = sys::native_path(root);
             match tree_fingerprint(&root_p, accepted.as_ref()) {
                 Ok((sh, _)) if sh == *stat_hash => return Outcome::Same,
                 Ok(_) => {}
@@ -189,7 +185,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             })
         }
         Obs::Canon { path, target } => {
-            let now = sys::fs::canonicalize(&os(path))
+            let now = sys::fs::canonicalize(&sys::native_path(path))
                 .ok()
                 .map(|p| p.as_os_str().as_bytes().to_vec());
             if now == *target {
@@ -208,7 +204,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             };
             Outcome::Changed(format!("environment variable ${} {what}", lossy(name)))
         }
-        Obs::Cmd { dir, query, hash } => match run_query(&os(dir), *query) {
+        Obs::Cmd { dir, query, hash } => match run_query(&sys::native_path(dir), *query) {
             Ok((status, out)) if cmd_hash(status, &out) == *hash => Outcome::Same,
             _ => Outcome::Changed(format!(
                 "the output of `{}` in {} changed",

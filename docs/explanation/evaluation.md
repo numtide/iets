@@ -125,11 +125,12 @@ the bytes instead of by their hash cost 6 % and 12 %, so the hash stayed.
 
 ## ATerm text
 
-A derivation's ATerm text is kept only for the runs that read it back:
-instantiation, the tracing cache, `build` and `print-dev-env`. Everything
-else handles a derivation with no ATerm, which is also the state of a
-derivation read from `/nix/store`. It was 331 MB of heap on outpaths, and
-dropping it took peak RSS from 7,680 MB to 7,219 MB.
+A derivation's ATerm text is kept for instantiation, the tracing cache,
+`build` and `print-dev-env`. Native `eval` also keeps it because an
+expression can test or read its own `.drv` file through the virtual store.
+This applies with `--no-cache` too. Retention costs memory on large
+evaluations. On outpaths the ATerms occupied 331 MB of heap, and dropping
+them took peak RSS from 7,680 MB to 7,219 MB.
 
 ## Memory
 

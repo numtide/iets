@@ -30,6 +30,7 @@ mod ab {
     use std::fs::{self, File};
     use std::io::{BufRead, BufReader, Read};
     use std::mem::MaybeUninit;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
     use std::ptr;
@@ -380,11 +381,12 @@ mod ab {
         let counts = counters.as_deref_mut().and_then(counters::read);
         #[cfg(not(target_os = "linux"))]
         let counts = None;
-        if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+        let status = process::ExitStatus::from_raw(status);
+        if !status.success() {
             let err = fs::read_to_string(stderr).unwrap_or_default();
             let tail: Vec<&str> = err.lines().rev().take(5).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            return Err(format!("exit status {status}:\n{}", tail.join("\n")));
+            return Err(format!("{status}:\n{}", tail.join("\n")));
         }
         if !clean {
             return Err(format!(

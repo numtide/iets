@@ -36,7 +36,7 @@ pub mod pack;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use std::{fs, io, result, str, thread};
@@ -76,10 +76,10 @@ pub struct StoredTree {
     tree: Tree,
     nar_hash: Hash,
     nar_size: u64,
-    /// Whether this run's read set already names the entry. One observation
-    /// covers every read of it, so the flag turns a nixpkgs-sized input's
-    /// thousands of reads into a single record and one atomic per read.
-    recorded: AtomicBool,
+    /// The read set that last recorded this tree. Independent evaluators can
+    /// share the tree through a session. Interleaved recorders may each see a
+    /// tree more than once, and `Trace::take` deduplicates those observations.
+    recorded_by: AtomicU64,
 }
 
 impl StoredTree {
@@ -88,7 +88,7 @@ impl StoredTree {
             tree,
             nar_hash,
             nar_size,
-            recorded: AtomicBool::new(false),
+            recorded_by: AtomicU64::new(0),
         }
     }
 
@@ -583,11 +583,14 @@ pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
 /// version that says the entry can still be read, is the whole check: there is
 /// nothing per file to stat and nothing to rehash (docs/explanation/caching.md).
 pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
-    if ev.trace().is_on() && !tree.recorded.swap(true, Ordering::Relaxed) {
+    if let Some(id) = ev.trace().readset_id()
+        && tree.recorded_by.load(Relaxed) != id
+    {
         ev.trace().record(Obs::Input {
             entry: name.as_bytes().to_vec(),
             version: spool::INDEX_VERSION,
         });
+        tree.recorded_by.store(id, Relaxed);
     }
 }
 
@@ -597,8 +600,12 @@ mod tests {
     use rstest::rstest;
     use tempfile::tempdir;
 
+    use crate::env::Env;
+    use crate::eval::EvalConfig;
     use crate::store::hash::{HashAlgo, hash_bytes};
     use crate::store::nar::dump_string;
+    use crate::store::source::SrcPath;
+    use crate::trace::validate::validate;
 
     #[test]
     fn a_staged_directory_goes_when_it_is_dropped() {
@@ -777,6 +784,38 @@ mod tests {
         let mut spool = spool::Spool::scratch().unwrap();
         io::Write::write_all(&mut spool, bytes).unwrap();
         Tree::file(spool).unwrap()
+    }
+
+    #[test]
+    fn evaluators_sharing_a_session_each_record_the_stored_input() {
+        let dir = tempdir().unwrap();
+        let session = Session::with_env(Env::isolated());
+        let _entered = session.enter();
+        session.set_cache_dir(dir.path().to_str().unwrap());
+        let root = root().unwrap();
+        let name = put_in(&root, &[("a", b"one")]);
+        let source = SrcPath::spool(&name, b"a");
+        let expected = Obs::Input {
+            entry: name.as_bytes().to_vec(),
+            version: spool::INDEX_VERSION,
+        };
+        let mut recorded = Vec::new();
+        for _ in 0..2 {
+            let ev = EvalConfig::new()
+                .session(session.clone())
+                .trace(true)
+                .build();
+            for _ in 0..2 {
+                assert_eq!(source.read(&ev, true).unwrap(), b"one");
+                let obs = ev.trace().take();
+                assert_eq!(obs.as_slice(), std::slice::from_ref(&expected));
+                recorded.push(obs);
+            }
+        }
+        fs::remove_file(root.join(name)).unwrap();
+        for mut obs in recorded {
+            assert!(validate(&mut obs, 1).is_err());
+        }
     }
 
     /// A download is named by the hash of its bytes, as `nix eval` names

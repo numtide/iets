@@ -1397,10 +1397,8 @@ mod ab {
 
             // An overdue sweep signals known children but skips the PID-table scan.
             let mut known = Command::new("sleep").arg("30").spawn().unwrap();
-            let mut fallback = Command::new("true").spawn().unwrap();
-            wait_until_exited(fallback.id());
-            let mut distant = Command::new("true").spawn().unwrap();
-            wait_until_exited(distant.id());
+            let mut fallback = Command::new("sleep").arg("30").spawn().unwrap();
+            let mut distant = Command::new("sleep").arg("30").spawn().unwrap();
             fs::write(
                 task.join("children"),
                 format!("{} {}{}", known.id(), "0 ".repeat(1024), distant.id()),
@@ -1421,8 +1419,13 @@ mod ab {
                 thread::sleep(Duration::from_millis(5));
             };
             assert_eq!(status.signal(), Some(libc::SIGKILL));
-            assert!(distant.wait().unwrap().success());
-            assert!(fallback.wait().unwrap().success());
+            let untouched = [&mut distant, &mut fallback].map(|child| {
+                let status = child.try_wait().unwrap();
+                child.kill().unwrap();
+                child.wait().unwrap();
+                status.is_none()
+            });
+            assert_eq!(untouched, [true, true]);
             let t = Instant::now();
             // This direct child belongs to the test thread. Orphans that sh
             // leaves behind can belong to the process leader instead.

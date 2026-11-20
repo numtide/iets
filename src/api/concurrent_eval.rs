@@ -5,12 +5,16 @@
 use crate::api::run::Run;
 use crate::api::testkit::eval;
 use crate::api::{self, EvalArgs, Input};
+use crate::env::Env;
+use crate::eval::EvalConfig;
 use crate::lint::Level;
 use crate::parallel::fiber::MAIN_STACK;
+use crate::parallel::try_run;
 use crate::session::Session;
 use crate::sys::tmp;
 use rstest::rstest;
 use std::path::Path;
+use std::sync::Arc;
 use std::{env, fs, thread};
 
 const SLOW: &str = "slow = n: builtins.foldl' (a: b: a + b) 0 (builtins.genList (x: x) n);";
@@ -506,6 +510,24 @@ fn every_case_has_a_test() {
     for n in names {
         assert!(src.contains(&format!("(\"{n}\")]")), "no #[case] for {n}");
     }
+}
+
+#[test]
+fn failed_helper_stack_releases_the_session() {
+    let env = Env::isolated().with([("IETS_FIBER_STACK_MB", "0")]);
+    let session = Session::with_env(env);
+    let weak = Arc::downgrade(&session);
+    {
+        let _entered = session.enter();
+        let ev = EvalConfig::default().build();
+        // A zero-sized helper stack fails to map; the main stack is independent.
+        try_run(2, ev, |_| {}).expect("the main fiber runs");
+    }
+    drop(session);
+    assert!(
+        weak.upgrade().is_none(),
+        "a failed helper retained the session"
+    );
 }
 
 const ALLOC: &str = "let xs = builtins.genList (i: builtins.genList (j: { a = j; b = toString (i + j); }) 3000) 300; in builtins.length (builtins.deepSeq xs xs)";

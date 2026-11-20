@@ -1509,7 +1509,7 @@ impl Arena {
         }
         for (i, a) in src.attrs_raw().iter().enumerate() {
             // SAFETY: exclusive access to the fresh set during the fill.
-            unsafe { (*out).init(i, a.sym, a.pos, Word::thunk_map_from_ref(&*desc, i)) };
+            unsafe { (*out).init(i, a.sym, Pos::NONE, Word::thunk_map_from_ref(&*desc, i)) };
         }
         Word::from_ref(out_ref)
     }

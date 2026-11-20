@@ -46,6 +46,18 @@ nix run .#bench-callgrind -- '*::evaluation::*::fixed_derivations' \
   --callgrind-args='--cache-sim=no --dump-instr=yes' --callgrind-metrics=Ir
 ```
 
+To profile ordinary derivations with producer inputs, run:
+
+```sh
+nix run .#bench-callgrind -- '*::evaluation::*::producer_inputs' --save-summary=json
+```
+
+Each of 32 consumers depends on four shared tools, three rotating producers
+and one individual leaf. All 256 edges select the producer's `out` output.
+The case exercises input-context parsing and derivation hashing. Its measurement
+also includes constructing the 84 recipes and hashing the ordered consumer
+paths. Teardown checks that path digest against C++ Nix.
+
 Four component cases share generated literal input with 2,000 nested bindings:
 
 | Filter suffix | Command |

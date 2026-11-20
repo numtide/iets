@@ -26,6 +26,7 @@ fn command() -> Command {
 #[bench::strings(args = ("strings.nix"), teardown = check_output(50_000))]
 #[bench::attrs(args = ("attrs.nix"), teardown = check_output(2_003))]
 #[bench::derivations(args = ("derivations.nix"), teardown = check_derivations())]
+#[bench::producer_inputs(args = ("producer-inputs.nix"), teardown = check_output("c7a9060d2092cd2ca7ce5d5d303dd3e1f4bd4ac4d249496771bc0fc27a3f4ec9"))]
 #[bench::fixed_derivations(args = ("fixed-derivations.nix"), teardown = check_output("54e5be761db238fac542a7f7bd5d635b4d10f0989eb246e18754031c7c9e5dcc"))]
 fn evaluate(fixture: &str) -> Command {
     let workloads = env::var_os("IETS_BENCH_WORKLOADS")

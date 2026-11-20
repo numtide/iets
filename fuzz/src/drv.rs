@@ -16,7 +16,6 @@ use crate::oracle::{self, Oracle};
 use crate::{Divergence, Target, Verdict, classify, known, no_panic};
 use iets::store::drv::Derivation;
 use libfuzzer_sys::arbitrary::Unstructured;
-use std::collections::BTreeSet;
 use std::{env, fs};
 
 pub const KINDS: &[&str] = &[
@@ -301,12 +300,7 @@ pub fn generate(u: &mut Unstructured) -> Vec<u8> {
     } else {
         out.extend_from_slice(b"Derive([");
     }
-    // one name per output: iets keeps the last of two and Nix the first, an
-    // iets bug that would otherwise fill every campaign (divergences.md,
-    // "Reading a .drv file")
-    let mut names = keys(u, 3, NAMES);
-    let mut seen = BTreeSet::new();
-    names.retain(|n| seen.insert(n.clone()));
+    let names = keys(u, 3, NAMES);
     for (i, name) in names.iter().enumerate() {
         if i > 0 {
             out.push(b',');

@@ -152,10 +152,6 @@ names them.
   `parseStorePath` makes it canonical first (`canonPath`,
   `store-dir-config.cc`), so it reads the path. iets refuses it with `is
   not in the Nix store`. (`store-path-not-canonical`)
-- **Two outputs with one name:** Nix keeps the first
-  (`drv.outputs.emplace`, `derivations.cc`), iets keeps the last. This is
-  an iets bug. `drv-gen` gives each output its own name, and
-  the entry `drv-duplicate-output` hides every difference in the outputs.
 
 ## `builtins.genericClosure`
 

@@ -600,7 +600,7 @@ impl AttrsObj {
         #[cfg(feature = "stats2")]
         mark_byte(&self.flags, |f| f | 0x80);
         let mut it = AttrIter {
-            leaves: [&[]; SENTINEL + 1],
+            leaves: [&[]; MAX_LEAVES as usize],
             keys: [u64::MAX; SENTINEL + 1],
             tree: [0; MAX_LEAVES as usize],
             n: 1,
@@ -621,7 +621,7 @@ impl AttrsObj {
     }
 }
 
-/// The leaf slot that stands for an exhausted stream while the tree is built.
+/// The extra key slot used as a placeholder while the tree is built.
 const SENTINEL: usize = MAX_LEAVES as usize;
 
 /// Merging iterator over the flat leaves of a set, lowest priority first; on
@@ -632,7 +632,7 @@ const SENTINEL: usize = MAX_LEAVES as usize;
 /// `(sym + 1) << 3 | (7 - i)`, which puts the last leaf first on equal syms. Key
 /// 0 is the sentinel and `u64::MAX` an exhausted leaf, so neither ties with a head.
 pub struct AttrIter {
-    leaves: [&'static [Attr]; SENTINEL + 1],
+    leaves: [&'static [Attr]; MAX_LEAVES as usize],
     keys: [u64; SENTINEL + 1],
     tree: [u8; MAX_LEAVES as usize],
     n: usize,
@@ -698,7 +698,8 @@ impl Iterator for AttrIter {
         let sym = (item.sym.0 as u64 + 1) << 3;
         loop {
             let v = self.tree[0] as usize;
-            if self.keys[v] & !7 != sym {
+            // After build, even the winner of an exhausted tree is a real leaf.
+            if self.keys[..MAX_LEAVES as usize][v] & !7 != sym {
                 break;
             }
             self.leaves[v] = &self.leaves[v][1..];
@@ -1672,6 +1673,41 @@ mod tests {
                 let flat = arena.flat(a);
                 assert_eq!(observed(flat), want, "flat n={n} round={round}");
                 assert_eq!(flat.len_raw() as usize, want.len());
+            }
+        }
+    }
+
+    #[test]
+    fn exhausted_union_winners_are_real_leaves() {
+        for n in 1..=usize::from(MAX_LEAVES) {
+            for mask in 0..(1usize << n) {
+                let mut arena = Arena::new();
+                let sets: Vec<_> = (0..n)
+                    .map(|i| {
+                        if mask & (1 << i) == 0 {
+                            Vec::new()
+                        } else {
+                            vec![
+                                (0, i as i64),
+                                (i as u32 + 1, i as i64),
+                                (u32::MAX, i as i64),
+                            ]
+                        }
+                    })
+                    .collect();
+                let set = build(&mut arena, &sets);
+                let want = reference(&sets);
+                let mut iter = set.iter();
+                let mut entries = want.iter();
+                let check = |e: &Attr| (e.sym.0, e.cell.get().imm_int_value());
+                for _ in 0..mask % (want.len() + 1) {
+                    assert_eq!(iter.next().map(check), entries.next().copied());
+                }
+                arena.flat(set);
+                assert!(iter.by_ref().map(check).eq(entries.copied()));
+                assert!(iter.next().is_none());
+                assert!(iter.next().is_none());
+                assert_eq!(observed(set), want);
             }
         }
     }

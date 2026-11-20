@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::str;
 
+use crate::json_string::{self, StringError};
 use crate::print::{json_escape_str, json_float};
 
 use super::drv::DrvError;
@@ -207,11 +208,11 @@ impl Parser<'_> {
     }
 
     fn string(&mut self) -> Result<String, DrvError> {
-        match crate::json_string::decode(self.s, &mut self.i) {
+        match json_string::decode(self.s, &mut self.i) {
             Ok(text) => Ok(text),
             Err(e) => {
                 // This reader reports malformed hex at the start of its four digits.
-                if let crate::json_string::StringError::Hex { start } = e {
+                if let StringError::Hex { start } = e {
                     self.i = start;
                 }
                 self.err(&format!(

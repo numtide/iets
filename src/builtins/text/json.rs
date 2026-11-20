@@ -2,6 +2,7 @@
 //! parser with nlohmann::json's acceptance rules (`json-to-value.cc`).
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::json_string;
 use crate::print;
 use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
 use crate::syntax::lexer;
@@ -253,7 +254,7 @@ impl Parser<'_> {
     }
 
     fn string(&mut self) -> EvalResult<Vec<u8>> {
-        let text = match crate::json_string::decode(self.s, &mut self.i) {
+        let text = match json_string::decode(self.s, &mut self.i) {
             Ok(text) => text,
             Err(e) => {
                 return self.err(&format!(

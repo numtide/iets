@@ -93,7 +93,8 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             ino,
             hash,
         } => {
-            let m = match fs::metadata(os(path)) {
+            let at = os(path);
+            let m = match fs::metadata(&at) {
                 Ok(m) => m,
                 Err(e) => return unreadable(path, &e),
             };
@@ -106,13 +107,13 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             }
             if m.len() == *size
                 && mtime_ns(&m) == *mt
-                && ctime_ns(&os(path), &m) == *ct
-                && file_id(&os(path), &m) == (*dev, *ino)
+                && ctime_ns(&at, &m) == *ct
+                && file_id(&at, &m) == (*dev, *ino)
             {
                 return Outcome::Same;
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let now = match file_sha256(&os(path)) {
+            let now = match file_sha256(&at) {
                 Ok(h) => h,
                 Err(e) => return unreadable(path, &e),
             };

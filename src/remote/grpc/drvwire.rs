@@ -63,8 +63,7 @@ pub fn write_basic_derivation(
             }
         }
     }
-    let srcs: Vec<String> = input_srcs.iter().map(StorePath::to_string).collect();
-    write_strs(w, &srcs)?;
+    wire::write_paths(w, input_srcs)?;
     write_str(w, drv.platform.as_bytes())?;
     write_str(w, drv.builder.as_bytes())?;
     write_strs(w, &drv.args)?;

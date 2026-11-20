@@ -737,9 +737,13 @@ impl TreeFp {
     }
 
     fn stat(&mut self, p: &Path, rel: &[u8]) {
-        match hash_tree_stat(&mut self.stat_h, p, rel) {
-            Ok((_, mtime)) => self.newest = self.newest.max(mtime),
-            Err(_) => self.ok = false,
+        let Ok(st) = fs::symlink_metadata(p) else {
+            self.ok = false;
+            return;
+        };
+        self.newest = self.newest.max(mtime_secs(&st));
+        if hash_tree_stat(&mut self.stat_h, p, rel, &st).is_err() {
+            self.ok = false;
         }
     }
 
@@ -757,21 +761,20 @@ fn hash_tree_entry(h: &mut Sha256, rel: &[u8], kind: Kind) {
     h.update([kind.to_u8()]);
 }
 
-fn hash_tree_stat(h: &mut Sha256, path: &Path, rel: &[u8]) -> io::Result<(Kind, i64)> {
-    let st = fs::symlink_metadata(path)?;
+fn hash_tree_stat(h: &mut Sha256, path: &Path, rel: &[u8], st: &fs::Metadata) -> io::Result<Kind> {
     let kind = Kind::of_file_type(&st.file_type());
     hash_tree_entry(h, rel, kind);
     h.update(st.len().to_le_bytes());
-    h.update(mtime_ns(&st).to_le_bytes());
-    let (dev, ino) = file_id(path, &st);
-    h.update(ctime_ns(path, &st).to_le_bytes());
+    h.update(mtime_ns(st).to_le_bytes());
+    let (dev, ino) = file_id(path, st);
+    h.update(ctime_ns(path, st).to_le_bytes());
     h.update(dev.to_le_bytes());
     h.update(ino.to_le_bytes());
-    h.update(exec_bit(&st).to_le_bytes());
+    h.update(exec_bit(st).to_le_bytes());
     if kind == Kind::Symlink {
         h.update(fs::read_link(path)?.as_os_str().as_bytes());
     }
-    Ok((kind, mtime_secs(&st)))
+    Ok(kind)
 }
 
 /// Walks `root` like the NAR dump does (sorted entries, no descent into
@@ -799,7 +802,8 @@ fn walk_fp(
     if depth > 64 {
         return Err(io::Error::other("tree too deep"));
     }
-    let (kind, _) = hash_tree_stat(stat_h, path, rel)?;
+    let st = fs::symlink_metadata(path)?;
+    let kind = hash_tree_stat(stat_h, path, rel, &st)?;
     if kind == Kind::Directory {
         let mut entries = read_dir_kinds(path)?;
         entries.sort();

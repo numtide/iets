@@ -712,6 +712,10 @@ pub struct TreeFp {
 }
 
 impl TreeFp {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.ok
+    }
+
     pub(crate) fn newest(&self) -> i64 {
         self.newest
     }

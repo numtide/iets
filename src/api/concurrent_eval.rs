@@ -544,3 +544,82 @@ fn concurrent_eval_sums_arena_use_over_workers() {
         "arena total follows the worker count: {one} at 1, {four} at 4"
     );
 }
+
+#[test]
+fn shared_catchable_failures_emit_their_effect_once() {
+    // Demand the same cell via separate expressions. The function, list and
+    // map cases also exercise the application and mapped-entry thunk paths.
+    for (bindings, access) in [
+        ("x = boom 0;", "x"),
+        ("xs = map boom [ 0 ];", "(builtins.head xs)"),
+        ("xs = builtins.mapAttrs (_: boom) { a = 0; };", "xs.a"),
+        ("xs = builtins.zipAttrsWith (_: boom) [{ a = 0; }];", "xs.a"),
+        ("x = builtins.trace \"force-x\" (assert false; null);", "x"),
+    ] {
+        let expr = format!(
+            "let boom = _: builtins.trace \"force-x\" (throw \"boom\"); {bindings} in
+             [ (builtins.tryEval {access}).success
+               (builtins.tryEval (builtins.seq {access} 123)).success
+               (builtins.tryEval {access}).success 0 ]"
+        );
+        for workers in WORKERS {
+            let (out, rc, err) = eval(args(&case("caught", true, &expr), workers, None));
+            assert_eq!(rc, 0, "{err}");
+            assert_eq!(out.trim(), "[ false false false 0 ]");
+            assert_eq!(
+                err.lines().filter(|l| *l == "trace: force-x").count(),
+                1,
+                "{workers} workers, {access}: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rethrow_keeps_the_first_callers_trace_and_isolates_later_callers() {
+    let expr = include_str!("../../tests/lang/eval-fail-memoised-error-trace-not-mutated.nix");
+    for workers in WORKERS {
+        let (out, rc, err) = eval(args(&case("rethrow", true, expr), workers, None));
+        assert_ne!(rc, 0, "{out}");
+        let contexts: Vec<_> = err
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("… forcing "))
+            .collect();
+        // iets displays the inner trace first.
+        assert_eq!(contexts, ["b", "d"], "{workers} workers: {err}");
+    }
+}
+
+#[test]
+fn failure_in_an_error_context_does_not_replace_the_original_thunk_error() {
+    let expr = r#"let
+      a = throw "first";
+      b = throw "second";
+      outer = builtins.addErrorContext (builtins.addErrorContext "context for b" b) a;
+    in builtins.seq (builtins.tryEval outer) (builtins.addErrorContext "last" a)"#;
+    for workers in WORKERS {
+        let (out, rc, err) = eval(args(&case("nested", true, expr), workers, None));
+        assert_ne!(rc, 0, "{out}");
+        assert!(err.contains("error: first"), "{err}");
+        assert!(err.lines().any(|line| line.trim() == "… last"), "{err}");
+        assert!(!err.contains("… context for b"), "{err}");
+    }
+}
+
+#[test]
+fn helper_try_eval_cannot_choose_the_first_callers_context() {
+    let expr = r#"let SLOW
+      x = throw "shared";
+      tries = builtins.genList (i: if i == 0 then
+        builtins.seq (slow 50000) (builtins.tryEval (builtins.addErrorContext "first" x))
+        else builtins.tryEval (builtins.addErrorContext "later" x)) 64;
+    in builtins.deepSeq tries (builtins.addErrorContext "last" x)"#;
+    for workers in WORKERS {
+        let (out, rc, err) = eval(args(&case("speculative", true, expr), workers, None));
+        assert_ne!(rc, 0, "{out}");
+        let frames: Vec<_> = err.lines().map(str::trim).collect();
+        assert!(frames.contains(&"… first"), "{err}");
+        assert!(frames.contains(&"… last"), "{err}");
+        assert!(!frames.contains(&"… later"), "{err}");
+    }
+}

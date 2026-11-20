@@ -280,6 +280,14 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
             }
         }
     };
+    if let Some(index) = payload.failed_index() {
+        thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
+        if !ev.par.is_main {
+            ev.par.cancelled = true;
+            return Err(cancelled());
+        }
+        return Err(ev.session().failed_thunks.rethrow(index));
+    }
     if SAMPLE_POS.load(Ordering::Relaxed) && ev.par.is_main && w.thunk_kind() == Kind::Thunk {
         let p = eval::ir_pos(w.as_thunk().ir());
         MAIN_POS.store(p.0 as u64, Ordering::Relaxed);
@@ -328,16 +336,25 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
                 Ok(v)
             }
         }
-        Err(e) => {
+        Err(mut e) => {
             if !ev.par.is_main && e.kind != ErrorKind::Cancelled {
                 slot_ref(ev).runtime().note_failed(key);
+                // The first demand supplies the exception's caller frames.
+                // A speculative tryEval must leave that demand for main.
+                if e.is_catchable() {
+                    ev.par.cancelled = true;
+                    e = cancelled();
+                }
             }
-            // a `tryEval` above may catch the error and keep its value: the
-            // thunk that forced this one carries what it did
             if ev.par.cancelled || e.kind == ErrorKind::Cancelled || ev.par.frames == 0 {
                 ev.par.fx.0.truncate(mark);
             }
-            thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
+            let state = if ev.par.is_main && !ev.par.cancelled {
+                ev.failed_thunk_state(payload, &mut e)
+            } else {
+                payload
+            };
+            thunk::publish(unsafe { slot_mut(ev) }, cell, state);
             Err(e)
         }
     }

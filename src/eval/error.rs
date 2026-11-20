@@ -1,5 +1,6 @@
 use crate::store::hash::Hash;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 /// Byte offset into the concatenation of all loaded sources; the evaluator
 /// maps it back to a file and a local offset. 4 bytes so `Attr` and every IR
@@ -76,6 +77,39 @@ pub struct Error {
     /// The fix, when it is certain; the text shows it only for a usage or
     /// unsupported error (docs/reference/errors.md).
     pub hint: Option<String>,
+    // The original exception keeps collecting caller frames as it unwinds.
+    // A rethrow starts a separate exception, with a copy of those frames.
+    recorded: Option<Arc<Mutex<Error>>>,
+}
+
+/// A thunk state stores a session-local index of the original exception.
+#[derive(Default)]
+pub(crate) struct FailedThunks(Mutex<Vec<Arc<Mutex<Error>>>>);
+
+impl FailedThunks {
+    pub(crate) fn record(&self, error: &mut Error) -> usize {
+        let mut entries = self.0.lock().unwrap();
+        if let Some(saved) = &error.recorded
+            && let Some(last) = entries.last()
+            && Arc::ptr_eq(saved, last)
+        {
+            return entries.len() - 1;
+        }
+        let saved = match &error.recorded {
+            Some(saved) => Arc::clone(saved),
+            None => {
+                let saved = Arc::new(Mutex::new(error.detached()));
+                error.recorded = Some(Arc::clone(&saved));
+                saved
+            }
+        };
+        entries.push(saved);
+        entries.len() - 1
+    }
+
+    pub(crate) fn rethrow(&self, index: usize) -> Box<Error> {
+        Box::new(self.0.lock().unwrap()[index].lock().unwrap().detached())
+    }
 }
 
 impl Error {
@@ -86,6 +120,7 @@ impl Error {
             pos,
             trace: Vec::new(),
             hint: None,
+            recorded: None,
         }
     }
 
@@ -121,7 +156,22 @@ impl Error {
     }
 
     pub fn add_trace(&mut self, pos: Pos, msg: impl Into<String>) {
-        self.trace.push((pos, msg.into()));
+        let msg = msg.into();
+        if let Some(r) = &self.recorded {
+            r.lock().unwrap().trace.push((pos, msg.clone()));
+        }
+        self.trace.push((pos, msg));
+    }
+
+    fn detached(&self) -> Self {
+        Self {
+            kind: self.kind,
+            pos: self.pos,
+            msg: self.msg.clone(),
+            hint: self.hint.clone(),
+            trace: self.trace.clone(),
+            recorded: None,
+        }
     }
 
     /// Errors that `tryEval` turns into `{ success = false; }`.

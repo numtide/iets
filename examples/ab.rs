@@ -514,7 +514,8 @@ mod ab {
             }
             // A slow table scan can pass a grandchild before its parent exits.
             // Reserve part of the same grace for one retry only after
-            // an exit is waitable; a still-live child does not restart the scan.
+            // an exit is waitable. This can leave a later PID unvisited when
+            // the direct child lists are incomplete and the deadline expires.
             restart = None;
         }
         result

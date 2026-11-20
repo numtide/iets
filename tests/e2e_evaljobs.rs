@@ -586,3 +586,28 @@ fn iets_options_reach_the_workers(bin: Iets) {
     ok(&mut c);
     assert!(cache.exists());
 }
+
+#[rstest]
+fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
+    let input = tempfile::NamedTempFile::new().unwrap();
+    fs::write(input.path(), "do []\nexit\n").unwrap();
+    let expr = r#"builtins.listToAttrs (map (name: { inherit name; value = throw "unused"; }) [ "c" "b" "a" ])"#;
+    for (depth, names) in [("1", vec!["a", "c"]), ("2", vec!["a", "b", "c"])] {
+        let output = ok(ci(&bin)
+            .args([
+                "--worker",
+                "--chunks",
+                "2",
+                "--chunk",
+                "0",
+                "--chunk-depth",
+                depth,
+                "--expr",
+                expr,
+            ])
+            .stdin(File::open(input.path()).unwrap()));
+        let text = std::str::from_utf8(&output.stdout).unwrap();
+        let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(response["attrs"], serde_json::json!(names));
+    }
+}

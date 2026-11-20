@@ -14,7 +14,6 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs, thread};
 
-use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, listen, socket};
 use tempfile::TempDir;
 
 use crate::hermetic::{self, Iets};
@@ -45,26 +44,8 @@ pub fn which(prog: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn daemon_ready(socket: &Path) -> bool {
+pub(super) fn daemon_ready(socket: &Path) -> bool {
     UnixStream::connect(socket).is_ok()
-}
-
-#[test]
-fn daemon_readiness_requires_a_listener() {
-    let dir = tempfile::Builder::new()
-        .prefix("iets-ready.")
-        .tempdir_in(fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let path = dir.path().join("socket");
-    assert!(!daemon_ready(&path));
-    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
-    bind(&fd, &SocketAddrUnix::new(&path).unwrap()).unwrap();
-    assert!(path.exists());
-    assert!(!daemon_ready(&path));
-    listen(&fd, 1).unwrap();
-    assert!(daemon_ready(&path));
-    drop(fd);
-    assert!(!daemon_ready(&path));
 }
 
 /// `prog` on `PATH` in the real store, out of any profile.

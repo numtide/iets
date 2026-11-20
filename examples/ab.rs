@@ -383,10 +383,13 @@ mod ab {
                         return Err(e);
                     }
                 }
+                return Ok(matches!(children_state(libc::P_ALL, 0), Ok(Some(true))));
             }
-            Ok(())
+            Ok(false)
         };
-        let signal_direct = |result: &mut io::Result<()>| {
+        let signal_direct = |result: &mut io::Result<()>, waitable: &mut bool| {
+            let mut complete = true;
+            let mut found = false;
             // Allow a small direct-list pass if the first sweep starts overdue.
             // Count task entries too, since many threads may have no children.
             let mut remaining = 32usize;
@@ -405,65 +408,94 @@ mod ab {
                 let mut field = Vec::new();
                 for task in threads {
                     if !allow_direct() {
-                        return;
+                        return false;
                     }
                     let Ok(file) = task.and_then(|task| File::open(task.path().join("children")))
                     else {
+                        complete = false;
                         continue;
                     };
+                    found = true;
                     // procfs emits space-separated decimal PIDs, including a trailing space.
                     let mut children = BufReader::new(file);
                     loop {
                         if !allow_direct() {
-                            return;
+                            return false;
                         }
                         field.clear();
                         match children.read_until(b' ', &mut field) {
-                            Ok(0) | Err(_) => break,
+                            Ok(0) => break,
+                            Err(_) => {
+                                complete = false;
+                                break;
+                            }
                             Ok(_) => {}
                         }
                         if let Some(pid) = str::from_utf8(field.trim_ascii())
                             .ok()
                             .and_then(|s| s.parse().ok())
-                            && let Err(e) = signal(pid)
                         {
-                            *result = Err(e);
+                            match signal(pid) {
+                                Ok(ready) => *waitable |= ready,
+                                Err(e) => *result = Err(e),
+                            }
                         }
                     }
                 }
             }
+            complete && found
         };
-        signal_direct(&mut result);
+        let mut waitable = false;
+        let mut direct = signal_direct(&mut result, &mut waitable);
         if Instant::now() >= deadline {
             return result;
         }
         // A parent we signaled may exit during a long scan of unrelated PIDs.
-        // Revisit the direct lists without restarting the fallback or its deadline.
+        // Revisit the direct lists during a slow process-table pass.
         let mut revisit = Instant::now() + REAP_INTERVAL;
-        for entry in fs::read_dir(procfs)? {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            if now >= revisit {
-                signal_direct(&mut result);
-                if Instant::now() >= deadline || matches!(children_remain(), Ok(false)) {
+        let mut restart = None;
+        for pass in 0..2 {
+            for entry in fs::read_dir(procfs)? {
+                let now = Instant::now();
+                if now >= deadline {
                     break;
                 }
-                revisit = Instant::now() + REAP_INTERVAL;
-            }
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    result = Err(e);
-                    continue;
+                if !direct && waitable && pass == 0 && restart.is_none() {
+                    restart = Some(now + deadline.saturating_duration_since(now) / 2);
                 }
-            };
-            if let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok())
-                && let Err(e) = signal(pid)
-            {
-                result = Err(e);
+                if restart.is_some_and(|at| now >= at) {
+                    break;
+                }
+                if now >= revisit {
+                    direct &= signal_direct(&mut result, &mut waitable);
+                    let state = children_state(libc::P_ALL, 0);
+                    waitable |= matches!(&state, Ok(Some(true)));
+                    if Instant::now() >= deadline || matches!(state, Ok(None)) {
+                        break;
+                    }
+                    revisit = Instant::now() + REAP_INTERVAL;
+                }
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        result = Err(e);
+                        continue;
+                    }
+                };
+                if let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+                    match signal(pid) {
+                        Ok(ready) => waitable |= ready,
+                        Err(e) => result = Err(e),
+                    }
+                }
             }
+            if direct || !waitable || Instant::now() >= deadline {
+                break;
+            }
+            // A slow table scan can pass a grandchild before its parent exits.
+            // Reserve part of the same grace for one retry only after
+            // an exit is waitable; a still-live child does not restart the scan.
+            restart = None;
         }
         result
     }
@@ -479,8 +511,13 @@ mod ab {
     }
 
     fn children_remain_for(kind: libc::idtype_t, id: libc::id_t) -> io::Result<bool> {
-        let mut info = MaybeUninit::uninit();
-        // SAFETY: info is writable and its contents are discarded.
+        children_state(kind, id).map(|state| state.is_some())
+    }
+
+    // None means no children; Some reports whether an exit is ready to reap.
+    fn children_state(kind: libc::idtype_t, id: libc::id_t) -> io::Result<Option<bool>> {
+        let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: info is writable and remains initialized when no exit is ready.
         if unsafe {
             libc::waitid(
                 kind,
@@ -492,11 +529,13 @@ mod ab {
         {
             let e = io::Error::last_os_error();
             if e.raw_os_error() == Some(libc::ECHILD) {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(e);
         }
-        Ok(true)
+        // SAFETY: waitid initializes the exit information on success; the zeroed
+        // value supplies si_signo = 0 when WNOHANG finds no waitable child.
+        Ok(Some(unsafe { info.assume_init() }.si_signo != 0))
     }
 
     /// Processes the run left behind, which are ours as the subreaper. False
@@ -518,6 +557,7 @@ mod ab {
         let mut clean = true;
         let mut sweep_error = None;
         let mut reaped_since_sweep = false;
+        let mut final_sweep_done = false;
         // Drain exits already pending at the deadline, even if several arrived
         // between polls. Bound the work if descendants keep producing exits.
         loop {
@@ -553,10 +593,16 @@ mod ab {
                     }
                     // Reaping a parent can expose a child after the previous
                     // sweep. Give it the same bounded direct-list attempt.
-                    if clean || reaped_since_sweep {
+                    if !final_sweep_done && (clean || reaped_since_sweep) {
                         sweep(deadline)?;
+                        clean = false;
+                        final_sweep_done = true;
                         if !children_remain()? {
                             return Ok(false);
+                        }
+                        if final_polls > 0 {
+                            final_polls -= 1;
+                            continue;
                         }
                     }
                     return Err(sweep_error.unwrap_or_else(|| {
@@ -600,6 +646,15 @@ mod ab {
                 .join()
                 .expect("the run thread")
         })
+        .map_err(|error| match error {
+            RunError::Scenario(message) => {
+                RunError::Scenario(format!("{}: {message}", bin.display()))
+            }
+            RunError::Cleanup(error) => RunError::Cleanup(io::Error::new(
+                error.kind(),
+                format!("{}: {error}", bin.display()),
+            )),
+        })
     }
 
     fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
@@ -622,7 +677,7 @@ mod ab {
         #[cfg(target_os = "linux")]
         let mut counters = counters::open();
         let t0 = Instant::now();
-        let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
         let (notify_eof, eof) = mpsc::channel();
@@ -894,10 +949,7 @@ mod ab {
                     } else {
                         kept[i].path()
                     };
-                    let r = run_once(bins[i], &sc.args, cache, &err).map_err(|e| match e {
-                        RunError::Scenario(msg) => format!("{}: {msg}", bins[i].display()).into(),
-                        fatal => fatal,
-                    })?;
+                    let r = run_once(bins[i], &sc.args, cache, &err)?;
                     row.runs[i].push(r);
                 }
             }
@@ -1240,6 +1292,47 @@ mod ab {
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
             enable_subreaper().unwrap();
+            // The shared boundary identifies either binary once for execution
+            // and spawn failures; keep child-spawning assertions in this test.
+            {
+                let root = tempfile::tempdir().unwrap();
+                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
+                    .map(|dir| dir.join("false"))
+                    .find(|path| path.is_file())
+                    .expect("the false utility");
+                for name in ["before", "after", "missing"] {
+                    let bin = root.path().join(name);
+                    if name != "missing" {
+                        symlink(&false_bin, &bin).unwrap();
+                    }
+                    let result = run_once(
+                        &bin,
+                        &["eval".into()],
+                        root.path(),
+                        &root.path().join("stderr"),
+                    );
+                    let Err(RunError::Scenario(message)) = result else {
+                        panic!("execution failure lost its scenario classification");
+                    };
+                    let context = format!("{}: ", bin.display());
+                    assert_eq!(message.matches(context.as_str()).count(), 1);
+                    assert!(message.starts_with(&context));
+                    if name != "missing" {
+                        assert!(message.contains("exit status"));
+                    }
+                }
+            }
+            // The ownership probe must distinguish a live child from its pending exit.
+            {
+                let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+                let id = child.id() as libc::id_t;
+                assert_eq!(children_state(libc::P_PID, id).unwrap(), Some(false));
+                child.kill().unwrap();
+                wait_until_exited(child.id());
+                assert_eq!(children_state(libc::P_PID, id).unwrap(), Some(true));
+                assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+                assert_eq!(children_state(libc::P_PID, id).unwrap(), None);
+            }
             // Make two children waitable after grace expires, before the next poll.
             let mut last = [(); 2].map(|_| Command::new("sleep").arg("30").spawn().unwrap());
             let clean = reap_after(Duration::ZERO, Duration::from_millis(1), |_| {
@@ -1282,7 +1375,9 @@ mod ab {
             let mut sweeps = 0;
             let error = reap_with_final_polls(expired, expired, 1, |_| {
                 sweeps += 1;
-                live.kill()
+                live.kill()?;
+                wait_until_exited(live.id());
+                Ok(())
             })
             .unwrap_err();
             live.kill().unwrap();
@@ -1347,53 +1442,76 @@ mod ab {
             unknown.kill().unwrap();
             unknown.wait().unwrap();
             fs::set_permissions(procfs.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            // A kernel without task children files still permits PID-table cleanup.
+            fs::remove_file(task.join("children")).unwrap();
+            let mut listed = Command::new("sleep").arg("30").spawn().unwrap();
+            let listed_entry = procfs.path().join(listed.id().to_string());
+            fs::create_dir(&listed_entry).unwrap();
+            kill_leftovers_in(procfs.path(), Instant::now() + CLEANUP_GRACE).unwrap();
+            assert_eq!(listed.wait().unwrap().signal(), Some(libc::SIGKILL));
+            fs::remove_dir(listed_entry).unwrap();
+
             // A sweep must leave a parent's exit visible to the outer reaper,
             // so its newly adopted child gets the bounded final direct pass.
-            let mut parent = Command::new("sh")
-                .args(["-c", "sleep 30 >&- 2>&- & echo $!; wait"])
-                .stdout(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut child_pid = String::new();
-            BufReader::new(parent.stdout.take().unwrap())
-                .read_line(&mut child_pid)
-                .unwrap();
-            let grandchild: libc::pid_t = child_pid.trim().parse().unwrap();
-            let expired = Instant::now();
-            let mut sweeps = 0;
-            let result = reap_leftovers(expired, expired, |deadline| {
-                sweeps += 1;
-                let pid = if sweeps == 1 {
-                    parent.kill().unwrap();
-                    wait_until_exited(parent.id());
-                    parent.id()
+            for (polls, make_waitable, complete) in
+                [(1, true, false), (2, true, true), (2, false, false)]
+            {
+                let mut parent = Command::new("sh")
+                    .args(["-c", "sleep 30 >&- 2>&- & echo $!; wait"])
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut child_pid = String::new();
+                BufReader::new(parent.stdout.take().unwrap())
+                    .read_line(&mut child_pid)
+                    .unwrap();
+                let grandchild: libc::pid_t = child_pid.trim().parse().unwrap();
+                let expired = Instant::now();
+                let mut sweeps = 0;
+                let result = reap_with_final_polls(expired, expired, polls, |deadline| {
+                    sweeps += 1;
+                    let pid = if sweeps == 1 {
+                        parent.kill().unwrap();
+                        wait_until_exited(parent.id());
+                        parent.id()
+                    } else if make_waitable {
+                        grandchild as u32
+                    } else {
+                        0
+                    };
+                    fs::write(task.join("children"), pid.to_string()).unwrap();
+                    kill_leftovers_in(procfs.path(), deadline)?;
+                    if sweeps == 2 && make_waitable {
+                        wait_until_exited(grandchild as u32);
+                    }
+                    Ok(())
+                });
+                let mut status = 0;
+                // SAFETY: this PID names our adopted child; status is writable.
+                let reaped = unsafe { libc::waitpid(grandchild, &mut status, libc::WNOHANG) };
+                let error = io::Error::last_os_error();
+                if reaped == 0 {
+                    // SAFETY: clean up the live child before a failing assertion.
+                    unsafe {
+                        libc::kill(grandchild, libc::SIGKILL);
+                        libc::waitpid(grandchild, ptr::null_mut(), 0);
+                    }
+                }
+                assert_eq!(sweeps, 2);
+                if complete {
+                    assert!(!result.unwrap());
+                    assert_eq!(reaped, -1);
+                    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
                 } else {
-                    grandchild as u32
-                };
-                fs::write(task.join("children"), pid.to_string()).unwrap();
-                kill_leftovers_in(procfs.path(), deadline)?;
-                if sweeps == 2 {
-                    wait_until_exited(grandchild as u32);
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+                    assert_eq!(reaped, if make_waitable { grandchild } else { 0 });
+                    if make_waitable {
+                        assert!(libc::WIFSIGNALED(status));
+                        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+                    }
                 }
-                Ok(())
-            });
-            let mut status = 0;
-            // SAFETY: this PID names our adopted child; status is writable.
-            let reaped = unsafe { libc::waitpid(grandchild, &mut status, libc::WNOHANG) };
-            if reaped == 0 {
-                // SAFETY: clean up the live child before a failing assertion.
-                unsafe {
-                    libc::kill(grandchild, libc::SIGKILL);
-                    libc::waitpid(grandchild, ptr::null_mut(), 0);
-                }
+                assert!(!children_remain().unwrap());
             }
-            assert_eq!(sweeps, 2);
-            assert_eq!(reaped, grandchild);
-            assert!(libc::WIFSIGNALED(status));
-            assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
-            // A signalled zombie is not ECHILD: accounting must still fail.
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-            assert!(!children_remain().unwrap());
 
             // An overdue sweep signals known children but skips the PID-table scan.
             let mut known = Command::new("sleep").arg("30").spawn().unwrap();

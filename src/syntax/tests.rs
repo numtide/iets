@@ -337,6 +337,7 @@ fn allow_comments() {
     let src =
         "# iets: allow fod\n\n# plain\n  with a; [\n  (with b; x) # iets: allow fod, ifd\n]\n";
     let (a, notes) = parse_allows(src);
+    assert_eq!(parse_allows(&src.replace('\n', "\r")).0, a);
     assert!(notes.is_empty());
     let l = a.lines();
     assert_eq!(l.len(), 2);

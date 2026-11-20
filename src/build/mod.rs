@@ -276,19 +276,25 @@ impl Dispatcher {
     /// Uploads what the batch needs and builds it in one op. Targets whose
     /// drv was already dispatched are dropped.
     pub fn submit(&mut self, up: &mut dyn Uploader, batch: Vec<Target>) -> Result<Vec<Outcome>> {
+        let mut pending = HashSet::new();
         let batch: Vec<Target> = batch
             .into_iter()
-            .filter(|t| self.seen.insert(t.drv.clone()))
+            .filter(|t| !self.seen.contains(&t.drv) && pending.insert(t.drv.clone()))
             .collect();
         if batch.is_empty() {
             return Ok(Vec::new());
         }
-        let out = self.submit_once(up, &batch)?;
+        let out = self.submit_once(up, &batch, pending)?;
         self.exit = (out.iter()).fold(self.exit, |e, o| log::combine_exit(e, o.exit));
         Ok(out)
     }
 
-    fn submit_once(&mut self, up: &mut dyn Uploader, batch: &[Target]) -> Result<Vec<Outcome>> {
+    fn submit_once(
+        &mut self,
+        up: &mut dyn Uploader,
+        batch: &[Target],
+        pending: HashSet<StorePath>,
+    ) -> Result<Vec<Outcome>> {
         let by_drv: HashMap<String, String> = (batch.iter())
             .map(|t| (t.drv.to_string(), t.attr.clone()))
             .collect();
@@ -308,17 +314,19 @@ impl Dispatcher {
             }
             None => false,
         };
+        if !held {
+            let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
+            let stats = up.upload(&mut *self.backend, &roots, &mut on_event)?;
+            self.upload.merge(stats);
+        }
+        // A failed preflight never dispatched a build. Once submitted, a transport
+        // error can leave the remote outcome unknown.
+        self.seen.extend(pending);
         let status = match held {
             true => (by_drv.keys())
                 .map(|d| (d.clone(), backend::Status::ok()))
                 .collect(),
             false => {
-                let stats = {
-                    let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
-                    up.upload(&mut *self.backend, &roots, &mut on_event)?
-                };
-                self.upload.merge(stats);
-
                 let jobs: Vec<backend::Job> = batch.iter().map(backend::Job::from).collect();
                 let drvs = |deep: bool| up.drvs(&roots, deep);
                 let b = backend::Batch {

@@ -590,7 +590,8 @@ impl Runtime {
     fn push_ready(&self, w: &mut Worker, slot: *mut Slot) {
         self.pending_ready.0.fetch_add(1, Ordering::SeqCst);
         if !self.lanes[w.idx].ready.push(slot as u64, 0) {
-            self.overflow.lock().unwrap().push(slot);
+            let mut overflow = self.overflow.lock().unwrap();
+            overflow.push(slot);
             self.overflow_len.0.fetch_add(1, Ordering::Release);
         }
         self.notify();
@@ -635,8 +636,9 @@ impl Runtime {
     /// Owner push from the worker currently running the caller.
     pub fn submit_urgent(&self, w: &Worker, t: Task) -> bool {
         let (a, b) = t.pack();
-        if self.lanes[w.idx].urgent.push(a, b) {
+        if self.lanes[w.idx].urgent.push_with(a, b, || {
             self.pending_tasks.0.fetch_add(1, Ordering::SeqCst);
+        }) {
             self.notify();
             true
         } else {

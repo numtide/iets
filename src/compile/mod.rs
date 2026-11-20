@@ -389,23 +389,20 @@ impl<'a> Compiler<'a> {
                 default,
             } => {
                 let path = ast.elems(*path);
-                if let Expr::Var(s) = ast.expr(*subject)
-                    && *s == self.sym_builtins
-                    && self.lexical_lookup(*s).is_none()
-                    && let Some(AttrElem::Static(first)) = path.first()
+                let (subject, path) = if let Some(word) =
+                    self.builtin_select_head(*subject, path, default.is_none(), pos)?
                 {
-                    self.global_ref(self.interner.name(*first), pos)?;
-                }
-                if let Some(folded) = self.fold_builtins_select(*subject, path, default.is_none()) {
-                    if let Some(d) = default {
-                        // Binding visits the fallback even when the selected
-                        // builtin is known to exist. Its value stays lazy.
-                        self.expr_inner(*d)?;
+                    if path.len() == 1 {
+                        if let Some(d) = default {
+                            self.expr_inner(*d)?;
+                        }
+                        return Ok(Ir::Const(word));
                     }
-                    return Ok(folded);
-                }
-                let subject = self.expr(*subject)?;
-                let path = self.attr_path(path)?;
+                    let rest = self.attr_path(&path[1..])?;
+                    (self.alloc(Ir::Const(word)), rest)
+                } else {
+                    (self.expr(*subject)?, self.attr_path(path)?)
+                };
                 let default = match default {
                     Some(d) => Some(self.expr(*d)?),
                     None => None,
@@ -565,41 +562,33 @@ impl<'a> Compiler<'a> {
         None
     }
 
-    /// `builtins.x` where `builtins` is the global: fold to the constant.
-    fn fold_builtins_select(
+    /// The first field of an unshadowed global `builtins` selection.
+    fn builtin_select_head(
         &mut self,
         subject: ExprId,
         path: &[AttrElem],
         strict: bool,
-    ) -> Option<Ir> {
-        let Expr::Var(s) = self.ast.expr(subject) else {
-            return None;
+        pos: Pos,
+    ) -> CResult<Option<Word>> {
+        let Expr::Var(sym) = self.ast.expr(subject) else {
+            return Ok(None);
         };
-        if *s != self.sym_builtins || self.lexical_lookup(*s).is_some() {
-            return None;
-        }
-        if self.scopes.iter().any(|s| matches!(s, Scope::With)) {
-            return None;
-        }
-        let b = self.globals.builtins?;
-        let AttrElem::Static(first) = path.first()? else {
-            return None;
+        let Some(AttrElem::Static(first)) = path.first() else {
+            return Ok(None);
         };
-        let attr = b.get(*first)?;
-        let w = attr.cell.get();
-        if w.is_thunk() {
-            return None;
+        if *sym != self.sym_builtins || self.lexical_lookup(*sym).is_some() {
+            return Ok(None);
         }
-        if path.len() == 1 {
-            return Some(Ir::Const(w));
+        self.global_ref(self.interner.name(*first), pos)?;
+        if (!strict && path.len() != 1) || self.scopes.iter().any(|s| matches!(s, Scope::With)) {
+            return Ok(None);
         }
-        if !strict {
-            return None;
-        }
-        let rest = self.attr_path(&path[1..]).ok()?;
-        let subject = self.alloc(Ir::Const(w));
-        let pos = self.pos(subject_pos_hack(path));
-        Some(self.mk_select(subject, rest, None, pos))
+        Ok(self
+            .globals
+            .builtins
+            .and_then(|b| b.get(*first))
+            .map(|attr| attr.cell.get())
+            .filter(|word| !word.is_thunk()))
     }
 
     /// One static element stays inline as `Select1`; anything else is boxed.
@@ -1374,10 +1363,6 @@ fn frame_end(body: IrRef, end: u32) -> u32 {
         Ir::Let(l) if l.base != LetIr::OWN_ENV => l.base + (l.binds.len() + l.from.len()) as u32,
         _ => end,
     }
-}
-
-fn subject_pos_hack(_path: &[AttrElem]) -> ExprId {
-    ExprId(0)
 }
 
 impl Ir {

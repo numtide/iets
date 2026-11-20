@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
+use crate::compile::Compiler;
+use crate::lint::{Config, Level};
 use crate::print;
+use crate::syntax::{self, ast::FileId};
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -623,6 +626,18 @@ fn a_second_pseudo_file_keeps_its_own_positions() {
 }
 
 #[test]
+fn folded_builtin_select_keeps_the_selections_position() {
+    let mut ev = Evaluator::new();
+    let e = ev
+        .eval_string(
+            "let unrelated = 123; in\n  builtins.langVersion.missing",
+            b"/",
+        )
+        .unwrap_err();
+    assert_eq!(ev.describe_pos(e.pos), "«string»:2:3");
+}
+
+#[test]
 fn update_forces_the_right_operand_first() {
     assert_eq!(
         eval_str("builtins.tryEval (1 // throw \"x\")"),
@@ -754,4 +769,25 @@ fn masks64_matches_the_scalar_masks() {
         }
         assert_eq!(super::masks64(&b), super::masks64_scalar(&b), "{b:?}");
     }
+}
+
+#[test]
+fn failed_builtin_selection_tail_is_bound_once() {
+    let mut ev = Evaluator::new();
+    let source = b"builtins.langVersion.${builtins.langVersion.${if builtins.currentTime == 0 then missing else 1}}";
+    let ast = syntax::parse(source, FileId(0), &mut ev.interner).unwrap();
+    let mut lints = Config::default();
+    lints.set("impure-builtin", Level::Warn).unwrap();
+    let mut compiler = Compiler::new(
+        &ast,
+        &mut ev.arena,
+        &mut ev.interner,
+        &ev.globals,
+        0,
+        b"/",
+        Some(&lints),
+    );
+    let error = compiler.compile_root(None).err().unwrap();
+    assert!(error.msg.contains("undefined variable 'missing'"));
+    assert_eq!(compiler.diags.len(), 1);
 }

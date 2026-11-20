@@ -10,6 +10,8 @@
 //! `NIXPKGS` names the nixpkgs tree, by default the flake's locked input.
 //! Exits 1 when a run fails, the outputs differ, or with `--threshold` when
 //! a slowdown or more memory has its whole interval past it.
+//! Hardware counters are omitted unless every event ran for its entire enabled
+//! time; multiplexed counts are not treated as totals or scaled estimates.
 
 use std::process::ExitCode;
 
@@ -276,9 +278,8 @@ mod ab {
                     let mut attr = [0u64; 16];
                     attr[0] = 128 << 32; // type PERF_TYPE_HARDWARE, size
                     attr[1] = config;
-                    // PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING:
-                    // multiplexed events need scaling by their actual scheduled time.
-                    attr[4] = 1 | 1 << 1;
+                    // PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING
+                    attr[4] = 3;
                     // disabled, inherit, exclude_kernel, exclude_hv, enable_on_exec
                     attr[5] = 1 | 1 << 1 | 1 << 5 | 1 << 6 | 1 << 12;
                     // SAFETY: attr is a perf_event_attr of the size it names.
@@ -292,42 +293,41 @@ mod ab {
         }
 
         pub fn read(files: &mut [File]) -> Option<Vec<f64>> {
-            files
-                .iter_mut()
-                .map(|f| {
-                    let mut b = [0u8; 24];
-                    f.read_exact(&mut b).ok()?;
-                    scaled(
-                        u64::from_ne_bytes(b[..8].try_into().unwrap()),
-                        u64::from_ne_bytes(b[8..16].try_into().unwrap()),
-                        u64::from_ne_bytes(b[16..].try_into().unwrap()),
-                    )
-                })
-                .collect()
+            files.iter_mut().map(read_counter).collect()
         }
 
-        fn scaled(value: u64, enabled: u64, running: u64) -> Option<f64> {
-            // Zero scheduled time means unavailable, not zero instructions.
-            (running > 0 && running <= enabled)
-                .then(|| value as f64 * (enabled as f64 / running as f64))
+        fn read_counter(mut f: impl Read) -> Option<f64> {
+            let mut b = [0u8; 24];
+            f.read_exact(&mut b).ok()?;
+            let value = u64::from_ne_bytes(b[..8].try_into().ok()?);
+            let enabled = u64::from_ne_bytes(b[8..16].try_into().ok()?);
+            let running = u64::from_ne_bytes(b[16..].try_into().ok()?);
+            // A partial count is not a total. Scaling assumes the measured
+            // phases represent the unmeasured ones, which a short run need not do.
+            (enabled != 0 && running == enabled).then_some(value as f64)
         }
 
         #[cfg(test)]
         mod tests {
-            use super::scaled;
+            use super::*;
 
-            #[test]
-            fn full_and_partial_pmu_coverage() {
-                assert_eq!(scaled(120, 1000, 1000), Some(120.0));
-                assert_eq!(scaled(30, 1000, 250), Some(120.0));
+            fn sample(value: u64, enabled: u64, running: u64) -> Vec<u8> {
+                [value, enabled, running]
+                    .into_iter()
+                    .flat_map(u64::to_ne_bytes)
+                    .collect()
             }
 
             #[test]
-            fn an_unscheduled_event_is_not_a_zero_count() {
-                assert_eq!(scaled(0, 1000, 0), None);
-                assert_eq!(scaled(0, 0, 0), None);
-                assert_eq!(scaled(0, 1000, 1000), Some(0.0));
-                assert_eq!(scaled(120, 500, 1000), None);
+            fn only_complete_counts_are_totals() {
+                assert_eq!(read_counter(&sample(42, 100, 100)[..]), Some(42.0));
+                // A fully observed event can legitimately have no occurrences.
+                assert_eq!(read_counter(&sample(0, 100, 100)[..]), Some(0.0));
+                assert_eq!(read_counter(&sample(42, 100, 99)[..]), None);
+                assert_eq!(read_counter(&sample(0, 100, 0)[..]), None);
+                assert_eq!(read_counter(&sample(0, 0, 0)[..]), None);
+                assert_eq!(read_counter(&sample(42, 99, 100)[..]), None);
+                assert_eq!(read_counter(&sample(42, 100, 100)[..23]), None);
             }
         }
     }
@@ -419,7 +419,13 @@ mod ab {
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
-        let counts = counters.as_deref_mut().and_then(counters::read);
+        let counts = counters.as_deref_mut().and_then(|files| {
+            let counts = counters::read(files);
+            if counts.is_none() {
+                eprintln!("ab: hardware counters were incomplete; omitting this run's counters");
+            }
+            counts
+        });
         #[cfg(not(target_os = "linux"))]
         let counts = None;
         if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
@@ -824,8 +830,6 @@ mod ab {
                 if mem.lo > t {
                     slow.push("MORE MEMORY");
                 }
-                // Inherited, multiplexed PMU readings are descriptive estimates.
-                // Use Callgrind for instruction regression gates.
                 if !slow.is_empty() {
                     row.status = [slow.join(", "), row.status.clone()]
                         .join(" ")

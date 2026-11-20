@@ -18,8 +18,9 @@ and whole Nixpkgs jobsets, which can need more than 20 GiB. `--only` filters
 scenario names. `NIXPKGS` overrides the locked input. Cold means evaluator
 caches, not a cold OS page cache. The runner alternates pairs, checks output
 parity and reports intervals; `--threshold` gates wall time and peak RSS.
-Hardware counters are descriptive estimates scaled by PMU enabled/running time;
-unscheduled events are omitted and short-run coverage can still be poor.
+The native runner reports hardware counters for a run only when every event
+ran for its full, nonzero enabled time. A missing counter set also omits the
+scenario’s counter intervals. Wall time and peak RSS remain available.
 
 For repeatable instruction comparisons, use Gungraun's built-in baselines,
 regression gates and per-thread reporting:

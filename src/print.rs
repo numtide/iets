@@ -424,26 +424,8 @@ pub fn json_escape_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
 }
 
-/// Shortest round-trip float, like nlohmann::json.
-pub fn json_float(f: f64) -> String {
-    if !f.is_finite() {
-        return "null".into();
-    }
-    let sci = format!("{f:e}");
-    let plain = || {
-        let s = format!("{f}");
-        if s.contains('.') { s } else { format!("{s}.0") }
-    };
-    let Some((mant, exp)) = split_sci(&sci) else {
-        return plain();
-    };
-    if (-4..15).contains(&exp) {
-        plain()
-    } else {
-        let sign = if exp < 0 { '-' } else { '+' };
-        format!("{mant}e{sign}{:02}", exp.abs())
-    }
-}
+mod json_float;
+pub use json_float::json_float;
 
 /// `printValueAsJSON`. Counts against the call depth like Nix's
 /// `addCallDepth`, so deep structures fail with a stack overflow error.
@@ -559,6 +541,20 @@ fn print_json_inner(
 mod tests {
     use super::{format_g, json_float};
     use rstest::rstest;
+
+    #[rstest]
+    #[case(1e23, "9.999999999999999e+22")]
+    #[case(-2.1861718343533215e-172, "-2.1861718343533216e-172")]
+    #[case(5.319342696817445e-196, "5.3193426968174445e-196")]
+    #[case(f64::from_bits(0x01a03d85a2cb5768), "7.578250078125e-301")]
+    #[case(f64::MAX, "1.7976931348623157e+308")]
+    #[case(1e-5, "1e-05")]
+    #[case(1e-4, "0.0001")]
+    #[case(1e14, "100000000000000.0")]
+    #[case(1e15, "1e+15")]
+    fn nix_json_digits(#[case] value: f64, #[case] expected: &str) {
+        assert_eq!(json_float(value), expected);
+    }
 
     #[rstest]
     #[case(f64::NAN, "nan", "null")]

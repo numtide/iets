@@ -319,18 +319,6 @@ iets has no such `Value`, so it uses the slot. Using the list itself would
 turn the difference around, because Nix prints `let x = [ x ]; in x`
 as `[ [ «repeated» ] ]`, which needs two slots for one list.
 
-## The digits of a float in `toJSON`
-
-`builtins.toJSON` writes a float with the fewest digits that read back to
-the same double. Nix writes it with nlohmann's JSON library, whose Grisu2
-algorithm gives that shortest form for most doubles but not for all:
-`builtins.toJSON 4.200000000001e17` is `"4.2000000000009997e+17"` in Nix
-and `"4.200000000001e+17"` in iets. Both read back to the same double, but
-the bytes differ, so a JSON file that holds such a float has another hash.
-Matching Nix needs a port of Grisu2.
-
-`fuzz/divergences.toml` holds this case as `json-float-digits`.
-
 ## The limits of a run
 
 Both evaluators stop on a program that asks for too much, with the same

@@ -1042,7 +1042,7 @@ impl Evaluator {
                 .stats
                 .note(Stat::Ir, self.arena.bytes_allocated - before);
             if loaded.is_none() {
-                cache.discard(&key);
+                cache.discard_rejected(&key, Some(&bytes));
             }
             if let Some((ir, diags, allows)) = loaded {
                 self.files[file.0 as usize].set_allows(allows);

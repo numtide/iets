@@ -493,17 +493,17 @@ pub fn get_drvs_at(
         return Ok(());
     }
     if let Some(attrs) = v.as_attrs() {
-        let mut names: Vec<(Vec<u8>, Word)> = attrs
+        let mut names: Vec<(&[u8], Word)> = attrs
             .iter()
-            .map(|a| (ev.interner.name(a.sym).to_vec(), a.cell.get()))
+            .map(|a| (ev.interner.name(a.sym), a.cell.get()))
             .collect();
-        names.sort_by(|a, b| a.0.cmp(&b.0));
+        names.sort_by_key(|(name, _)| *name);
         let recurse_sym = ev.sym(b"recurseForDerivations");
         for (name, child) in names {
-            if !is_attr_path_component(&name) {
+            if !is_attr_path_component(name) {
                 continue;
             }
-            let sub = join_attr(attr, &name);
+            let sub = join_attr(attr, name);
             let child = ev.force(child)?;
             if one_derivation(ev, child, out, seen, &sub)? {
                 continue;

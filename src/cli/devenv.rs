@@ -6,7 +6,7 @@ use crate::api::installable::{self, drv_roots};
 use crate::api::{self, build};
 use crate::build::backend::{Backend, Batch, Job, Worker};
 use crate::build::upload::{PlanUpload, Uploader};
-use crate::builtins::derivation::{DrvInfo, load_drv_traced};
+use crate::builtins::derivation::{DrvInfo, load_drv, load_drv_traced};
 use crate::cli::help::{arg_error, each_arg};
 use crate::cli::{
     self, EvalArgs, Input, Run, abs_path, cwd, evaluate, parse_eval_args, render, report, run_for,
@@ -18,7 +18,6 @@ use crate::provenance::Provenance;
 use crate::remote::event::Event;
 use crate::remote::worker::{self, Connection, Transport, failed_event};
 use crate::session::Session;
-use crate::store::drv::Derivation;
 use crate::store::nar;
 use crate::store::path::{StorePath, store_dir};
 use crate::store::source::SourceOrigin;
@@ -557,10 +556,7 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
     let eval_time = t0.elapsed();
 
     let r = (|| -> error::Result<DevEnv> {
-        let shell = match ev.drv.drvs.get(&shell_path).and_then(|i| i.aterm) {
-            Some(aterm) => Derivation::parse(&aterm, Derivation::name_from_path(&shell_path)?),
-            None => load_drv_traced(ev.trace(), &shell_path),
-        }?;
+        let shell = load_drv(ev, &shell_path)?;
         let trace = ev.trace().clone();
         let mut loader = move |p: &StorePath| load_drv_traced(&trace, p);
         let env_drv =

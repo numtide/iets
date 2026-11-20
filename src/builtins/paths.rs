@@ -9,10 +9,10 @@ use crate::sys::errno;
 use crate::sys::{self, OsStrExt};
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::from_utf8;
 use std::sync::Arc;
-use std::{fs, io};
 
 use super::Registry;
 use super::store_hooks::{self, At, Follow};
@@ -23,7 +23,7 @@ use crate::flake::{self, flakeref};
 use crate::lint::{LintId, coerce, purity};
 use crate::runtime::{self, Ctx, Value, Word, ctx_to_arena};
 use crate::source;
-use crate::store::drv::Derivation;
+use crate::store::drv::load_derivation_from_store;
 use crate::store::hash::{Hash, HashAlgo, Hasher, hash_bytes};
 use crate::store::locate;
 use crate::store::nar::FileType;
@@ -227,11 +227,10 @@ fn built_output_present(ev: &Evaluator, drv: &[u8], output: &[u8]) -> Option<Sto
         return None;
     }
     let path = StorePath::parse(drv).ok()?;
-    let aterm = match ev.drv.drvs.lock().get(&path).and_then(|i| i.aterm.clone()) {
-        Some(a) => a.to_vec(),
-        None => fs::read(path.to_string()).ok()?,
-    };
-    let parsed = Derivation::parse(&aterm, Derivation::name_from_path(&path).ok()?).ok()?;
+    let parsed = ev
+        .drv
+        .read_derivation(&path, load_derivation_from_store)
+        .ok()?;
     let output = from_utf8(output).ok()?;
     let out = parsed
         .outputs

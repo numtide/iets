@@ -249,6 +249,7 @@ mod ab {
 
     /// How long processes a run left behind may go on before they are killed.
     const LEFTOVER_LIMIT: Duration = Duration::from_secs(60);
+    const REAP_INTERVAL: Duration = Duration::from_millis(10);
     const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
     const COUNTERS: [&str; 5] = [
@@ -358,12 +359,17 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn child_is_waitable(pid: libc::pid_t) -> io::Result<bool> {
+        waitable_child(libc::P_PID, pid as libc::id_t)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn waitable_child(which: libc::idtype_t, id: libc::id_t) -> io::Result<bool> {
         let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
         // SAFETY: writable exit info; WNOWAIT leaves exits for the sole outer reaper.
         if unsafe {
             libc::waitid(
-                libc::P_PID,
-                pid as libc::id_t,
+                which,
+                id,
                 info.as_mut_ptr(),
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             )
@@ -407,48 +413,49 @@ mod ab {
             Ok(())
         };
         // Budget exhaustion stops discovery; the outer reap decides whether children remain.
-        let mut complete = false;
         if let Ok(tasks) = fs::read_dir(procfs.join("self/task")) {
-            complete = true;
-            let mut found = false;
             for task in tasks {
-                found = true;
                 if Instant::now() >= deadline {
                     return Ok(());
                 }
-                let kids = task.and_then(|t| fs::read_to_string(t.path().join("children")));
-                match kids {
-                    Ok(kids) => {
-                        for pid in kids
-                            .split_whitespace()
-                            .filter_map(|p| p.parse::<libc::pid_t>().ok())
-                            .filter(|&p| p > 0)
-                        {
-                            if Instant::now() >= deadline {
-                                return Ok(());
-                            }
-                            signal(pid)?;
+                if let Ok(kids) = task.and_then(|t| fs::read_to_string(t.path().join("children"))) {
+                    for pid in kids
+                        .split_whitespace()
+                        .filter_map(|p| p.parse::<libc::pid_t>().ok())
+                        .filter(|&p| p > 0)
+                    {
+                        if Instant::now() >= deadline {
+                            return Ok(());
                         }
+                        signal(pid)?;
                     }
-                    Err(_) => complete = false,
                 }
             }
-            complete &= found;
         }
-        if !complete {
-            // Optional task children files may be absent. Scan only on cleanup/progress.
-            for entry in fs::read_dir(procfs)? {
-                if Instant::now() >= deadline {
-                    return Ok(());
+        // Even readable task lists may omit live children. The outer reaper
+        // calls this bounded sweep only at cleanup or after reaping an exit.
+        let mut next_poll = Instant::now();
+        for entry in fs::read_dir(procfs)? {
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            if now >= next_poll {
+                match waitable_child(libc::P_ALL, 0) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(e) if e.raw_os_error() == Some(libc::ECHILD) => return Ok(()),
+                    Err(e) => return Err(e),
                 }
-                let name = entry?.file_name();
-                if let Some(pid) = name
-                    .to_str()
-                    .and_then(|s| s.parse::<libc::pid_t>().ok())
-                    .filter(|&p| p > 0)
-                {
-                    signal(pid)?;
-                }
+                next_poll = now + REAP_INTERVAL;
+            }
+            let name = entry?.file_name();
+            if let Some(pid) = name
+                .to_str()
+                .and_then(|s| s.parse::<libc::pid_t>().ok())
+                .filter(|&p| p > 0)
+            {
+                signal(pid)?;
             }
         }
         Ok(())
@@ -531,9 +538,7 @@ mod ab {
             if Instant::now() >= deadline {
                 return Err(sweep_error.unwrap_or_else(|| io::ErrorKind::TimedOut.into()));
             }
-            thread::sleep(
-                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
-            );
+            thread::sleep(REAP_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
         }
     }
 
@@ -1114,7 +1119,9 @@ mod ab {
                 let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
                     .map(|dir| dir.join("false"))
                     .find(|path| path.is_file())
-                    .expect("the false utility");
+                    .expect("the false utility")
+                    .canonicalize()
+                    .unwrap();
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {
@@ -1141,10 +1148,19 @@ mod ab {
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
             assert!(!child_is_waitable(direct.id() as libc::pid_t).unwrap());
             let t = Instant::now();
-            Command::new("sh")
-                // a leftover with a child of its own, which comes to us once it is killed
-                .args(["-c", "(sleep 30 & wait) &"])
-                .status()
+            // The subshell reports its child, then closes the pipes before waiting.
+            let nested = Command::new("sh")
+                .args([
+                    "-c",
+                    "(sleep 30 >/dev/null 2>&1 & echo $!; exec >/dev/null 2>&1; wait) &",
+                ])
+                .output()
+                .unwrap();
+            assert!(nested.status.success());
+            let nested: libc::pid_t = str::from_utf8(&nested.stdout)
+                .unwrap()
+                .trim()
+                .parse()
                 .unwrap();
             assert!(
                 !reap_leftovers(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap()
@@ -1154,6 +1170,10 @@ mod ab {
                 direct.wait().unwrap_err().raw_os_error(),
                 Some(libc::ECHILD)
             );
+
+            // SAFETY: signal zero only probes the reported process.
+            assert_eq!(unsafe { libc::kill(nested, 0) }, -1);
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
 
             // A successful last wait can return after the deadline without any children left.
             let mut last = Command::new("true").spawn().unwrap();
@@ -1226,29 +1246,34 @@ mod ab {
                 assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
 
-            // No optional task children file: discover only the listed owned PID.
+            // Missing and readable task lists can both omit a live child.
             let procfs = tempfile::tempdir().unwrap();
             fs::create_dir_all(procfs.path().join("self/task/1")).unwrap();
             let own = process::id();
             let status = procfs.path().join("self/status");
             fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
             fs::create_dir(procfs.path().join(own.to_string())).unwrap();
-            let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
-            let listed = procfs.path().join(hidden.id().to_string());
-            fs::create_dir(&listed).unwrap();
-            let result = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |deadline| {
-                kill_leftovers_in(procfs.path(), deadline)
-            });
-            if result.is_err() {
-                let _ = hidden.kill();
-                let _ = hidden.wait();
+            for readable in [false, true] {
+                if readable {
+                    fs::write(procfs.path().join("self/task/1/children"), "").unwrap();
+                }
+                let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
+                let listed = procfs.path().join(hidden.id().to_string());
+                fs::create_dir(&listed).unwrap();
+                let result = reap_leftovers(Duration::ZERO, CLEANUP_GRACE, |deadline| {
+                    kill_leftovers_in(procfs.path(), deadline)
+                });
+                if result.is_err() {
+                    let _ = hidden.kill();
+                    let _ = hidden.wait();
+                }
+                assert!(!result.unwrap());
+                assert_eq!(
+                    hidden.wait().unwrap_err().raw_os_error(),
+                    Some(libc::ECHILD)
+                );
+                fs::remove_dir(listed).unwrap();
             }
-            assert!(!result.unwrap());
-            assert_eq!(
-                hidden.wait().unwrap_err().raw_os_error(),
-                Some(libc::ECHILD)
-            );
-            fs::remove_dir(listed).unwrap();
 
             // A child omitted from both discovery sources must fail boundedly.
             let mut unknown = Command::new("sleep").arg("30").spawn().unwrap();

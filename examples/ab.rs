@@ -377,7 +377,7 @@ mod ab {
         // Some kernels omit the per-thread children files, while hidepid can
         // hide a child from the top-level listing. Check both sources.
         let mut result = Ok(());
-        let signal = |pid| {
+        let signal = |pid, observe_ready| {
             // Leave exits for the outer reaper, which tracks newly adopted children.
             if pid > 0 && children_remain_for(libc::P_PID, pid as libc::id_t)? {
                 // SAFETY: this is our child; the sole reaper cannot recycle its PID.
@@ -387,7 +387,9 @@ mod ab {
                         return Err(e);
                     }
                 }
-                return Ok(matches!(children_state(libc::P_ALL, 0), Ok(Some(true))));
+                return Ok(
+                    observe_ready && matches!(children_state(libc::P_ALL, 0), Ok(Some(true)))
+                );
             }
             Ok(false)
         };
@@ -439,7 +441,7 @@ mod ab {
                             .ok()
                             .and_then(|s| s.parse().ok())
                         {
-                            match signal(pid) {
+                            match signal(pid, !overdue && !*waitable) {
                                 Ok(ready) => *waitable |= ready,
                                 Err(e) => *result = Err(e),
                             }
@@ -487,7 +489,9 @@ mod ab {
                     }
                 };
                 if let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) {
-                    match signal(pid) {
+                    // A complete view needs no retry. If it later becomes
+                    // incomplete, that checkpoint also checks global readiness.
+                    match signal(pid, !direct && pass == 0 && !waitable) {
                         Ok(ready) => waitable |= ready,
                         Err(e) => result = Err(e),
                     }

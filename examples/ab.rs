@@ -5,7 +5,10 @@
 //!
 //! Each scenario runs at least `--rounds` rounds (6), and more, up to
 //! `--max-rounds` (20), until each interval is narrower than the threshold
-//! (2 % without one).
+//! (2 % without one). Set both round counts equal for a fixed sample size.
+//! The reported coverage is per interval, assuming independent paired ratios
+//! with a common median. Adaptive stopping and testing several intervals can
+//! change the error rate.
 //!
 //! `NIXPKGS` names the nixpkgs tree, by default the flake's locked input.
 //! Exits 1 when a run fails, the outputs differ, or with `--threshold` when
@@ -421,7 +424,7 @@ mod ab {
     }
 
     /// The median and a distribution-free interval for it: the k-th
-    /// smallest and largest value, with the largest k that covers 95 %.
+    /// smallest and largest value, targeting 95 % coverage at fixed n.
     struct Interval {
         median: f64,
         lo: f64,
@@ -750,7 +753,7 @@ mod ab {
 
         let mut failed = false;
         let mut table: Vec<[String; 5]> = Vec::new();
-        let mut coverage: f64 = 1.0;
+        let mut coverage: Option<f64> = None;
         let mut json_rows = Vec::new();
         for row in &mut rows {
             if row.status.starts_with("FAILED") {
@@ -768,7 +771,7 @@ mod ab {
             let [Some(wall), Some(mem), instr] = intervals(&row.runs) else {
                 unreachable!()
             };
-            coverage = coverage.min(wall.coverage);
+            coverage = Some(coverage.map_or(wall.coverage, |c| c.min(wall.coverage)));
             if let Some(t) = o.threshold {
                 let t = 1.0 + t / 100.0;
                 let mut slow = Vec::new();
@@ -830,10 +833,12 @@ mod ab {
         for r in &table {
             line(shown.iter().map(|&c| r[c].as_str()).collect());
         }
-        println!(
-            "\nIntervals cover the median change with at least {:.0} %.",
-            coverage * 100.0
-        );
+        if let Some(coverage) = coverage {
+            println!(
+                "\nMinimum nominal coverage per interval at fixed sample sizes is {:.2} % (independent pairs). No adjustment for adaptive stopping or multiple comparisons.",
+                coverage * 100.0
+            );
+        }
 
         if let Some(path) = &o.json {
             let doc = json!(json_rows);

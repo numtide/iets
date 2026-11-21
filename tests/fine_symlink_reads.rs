@@ -129,7 +129,11 @@ fn symlink_reads_invalidate_only_their_consumers() {
     )
     .unwrap();
     assert!(!check(&runner, &root).status.success());
-    fs::write(&flat, text.replace(evidence, "")).unwrap();
+    fs::write(
+        &flat,
+        text.replace("V\tend-serial-symlink-v1\n", "V\tend-serial-v2\n"),
+    )
+    .unwrap();
     assert!(!awk().status.success());
 }
 
@@ -203,4 +207,59 @@ fn an_intermediate_retarget_changes_the_import_and_tree() {
     )
     .unwrap();
     assert_eq!(dirty(&check(&runner, &root), 1), [0, 1]);
+}
+
+#[test]
+fn a_torn_symlink_reader_cannot_borrow_the_next_jobs_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    fs::write(root.join("target"), "observed").unwrap();
+    fs::write(root.join("endsJ"), "ordinary").unwrap();
+    symlink("target", root.join("link")).unwrap();
+    fs::write(
+        root.join("jobs.nix"),
+        "[ (builtins.readFile ./link) (builtins.readFile ./endsJ) 7 ]",
+    )
+    .unwrap();
+    assert_eq!(
+        evaluate(&bin(), &root, true),
+        serde_json::json!(["observed", "ordinary", 7])
+    );
+    let reader = fs::read_to_string(root.join("jobs/0")).unwrap();
+    let clean = fs::read_to_string(root.join("jobs/1")).unwrap();
+    assert!(reader.lines().any(|s| s.starts_with("R\t?\tvolatile")));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
+    let check = |text: &str| {
+        fs::write(root.join("delta"), "1\tV\t2\n").unwrap();
+        fs::write(root.join("flat"), text).unwrap();
+        Command::new("awk")
+            .arg("-f")
+            .arg(&script)
+            .arg(root.join("delta"))
+            .arg(root.join("flat"))
+            .output()
+            .unwrap()
+    };
+    let name = "reader with spaces/J";
+    let next = "clean Ω : J";
+    let intact = check(&format!("J\t{name}\n{reader}J\t{next}\n{clean}"));
+    assert!(intact.status.success(), "{}", hermetic::stderr(&intact));
+    assert_eq!(
+        stdout(&intact)
+            .lines()
+            .map(|s| s.split('\t').next().unwrap())
+            .collect::<Vec<_>>(),
+        [name]
+    );
+    // A complete header is not evidence that its observations were published.
+    let header = reader.split_once('\n').unwrap().0;
+    assert!(!check(&format!("J\t{name}\n{header}\n")).status.success());
+    // Tear the producer's actual volatile record and hide the following J boundary.
+    let at = reader.find("R\t?\tvolatile").unwrap();
+    let torn = check(&format!("J\t{name}\n{}RJ\t{next}\n{clean}", &reader[..at]));
+    assert!(
+        !torn.status.success(),
+        "accepted incomplete symlink reader: {}",
+        stdout(&torn)
+    );
 }

@@ -503,6 +503,7 @@ dependencies = [
  "sha1",
  "sha2",
  "tar",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

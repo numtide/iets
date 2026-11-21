@@ -229,12 +229,13 @@ fn git_directory_changes_reach_negative_lookups(
     let changes = home.join("incr/fchg");
     fs::create_dir(&changes).unwrap();
     // Existing V2 files predate the directory fix and must be regenerated.
-    fs::write(changes.join("100.txt"), "V\t2\n").unwrap();
+    if keep {
+        fs::write(changes.join("100.txt"), "V\t2\n").unwrap();
+    }
     run(Command::new("bash")
         .env("HOME", home)
         .arg(incremental.join("fchg.sh")));
     let delta = fs::read_to_string(changes.join("100.txt")).unwrap();
-    assert!(delta.contains("# fchg 3"));
     let changes = home.join("changes");
     fs::write(
         &changes,
@@ -276,4 +277,5 @@ fn git_directory_changes_reach_negative_lookups(
         .collect();
     jobs.sort_unstable();
     assert_eq!(jobs, expected);
+    assert!(delta.contains("# fchg 3"));
 }

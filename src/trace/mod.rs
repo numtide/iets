@@ -687,7 +687,7 @@ pub fn read_dir_kinds(p: &Path) -> io::Result<Vec<(Vec<u8>, Kind)>> {
     for e in fs::read_dir(p)? {
         let e = e?;
         let kind = Kind::of_file_type(&e.file_type()?);
-        out.push((e.file_name().as_bytes().to_vec(), kind));
+        out.push((e.file_name().into_encoded_bytes(), kind));
     }
     Ok(out)
 }
@@ -782,13 +782,13 @@ pub fn tree_fingerprint(
 ) -> io::Result<(Digest32, Digest32)> {
     let mut stat_h = Sha256::new();
     let mut seen_h = Sha256::new();
-    walk_fp(root, b"", accepted, &mut stat_h, &mut seen_h, 0)?;
+    walk_fp(root, &mut Vec::new(), accepted, &mut stat_h, &mut seen_h, 0)?;
     Ok((stat_h.finalize().into(), seen_h.finalize().into()))
 }
 
 fn walk_fp(
     path: &Path,
-    rel: &[u8],
+    rel: &mut Vec<u8>,
     accepted: Option<&HashSet<PathBuf>>,
     stat_h: &mut Sha256,
     seen_h: &mut Sha256,
@@ -800,7 +800,7 @@ fn walk_fp(
     let st = fs::symlink_metadata(path)?;
     let kind = Kind::of(&Ok(st.clone()));
     stat_h.update((rel.len() as u64).to_le_bytes());
-    stat_h.update(rel);
+    stat_h.update(rel.as_slice());
     stat_h.update([kind.to_u8()]);
     stat_h.update(st.len().to_le_bytes());
     stat_h.update(mtime_ns(&st).to_le_bytes());
@@ -817,17 +817,20 @@ fn walk_fp(
         Kind::Directory => {
             let mut entries = read_dir_kinds(path)?;
             entries.sort();
+            let parent_len = rel.len();
+            let mut child = PathBuf::new();
             for (name, ekind) in entries {
-                let child = path.join(OsStr::from_bytes(&name));
-                let mut crel = rel.to_vec();
-                crel.push(b'/');
-                crel.extend_from_slice(&name);
-                seen_h.update((crel.len() as u64).to_le_bytes());
-                seen_h.update(&crel);
+                path.clone_into(&mut child);
+                child.push(OsStr::from_bytes(&name));
+                rel.push(b'/');
+                rel.extend_from_slice(&name);
+                seen_h.update((rel.len() as u64).to_le_bytes());
+                seen_h.update(rel.as_slice());
                 seen_h.update([ekind.to_u8()]);
                 if accepts(accepted, &child) {
-                    walk_fp(&child, &crel, accepted, stat_h, seen_h, depth + 1)?;
+                    walk_fp(&child, rel, accepted, stat_h, seen_h, depth + 1)?;
                 }
+                rel.truncate(parent_len);
             }
         }
         _ => {}

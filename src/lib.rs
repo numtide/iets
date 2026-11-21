@@ -26,6 +26,7 @@ pub mod fetch;
 pub(crate) mod flake;
 pub mod ignored;
 pub mod jobs;
+mod json_string;
 pub mod lint;
 pub mod log;
 pub mod nixbin;

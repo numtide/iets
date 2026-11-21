@@ -4,6 +4,7 @@ use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
 use crate::print;
+use crate::store::json::normalise_structured_attrs;
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -574,7 +575,35 @@ fn fetchurl_checks_its_argument_like_nix() {
 }
 
 #[test]
+fn json_string_crosses_a_raw_block() {
+    let pad = "a".repeat(256);
+    let doc = format!(r#"{{"key":"{pad}😀\u0021"}}"#);
+    assert_eq!(
+        eval_str(&format!("(builtins.fromJSON ''{doc}'').key")),
+        format!(r#""{pad}😀!""#)
+    );
+    assert_eq!(
+        normalise_structured_attrs(doc.as_bytes()).unwrap(),
+        format!(r#"{{"key":"{pad}😀!"}}"#)
+    );
+    let mut invalid = doc.into_bytes();
+    let lead = invalid.iter().position(|&b| b == 0xf0).unwrap();
+    invalid[lead + 2] = b'"';
+    assert_eq!(
+        normalise_structured_attrs(&invalid).unwrap_err().0,
+        format!(
+            "cannot process __json attribute: [json.exception.parse_error.101] parse error at line 1, column {}: syntax error while parsing value - invalid string: ill-formed UTF-8 byte",
+            lead + 2
+        )
+    );
+}
+
+#[test]
 fn from_json_and_toml_reject_null_bytes() {
+    assert!(
+        eval_err(r#"builtins.fromJSON "\"\\u0000\\q\"""#)
+            .ends_with("forbidden character after backslash")
+    );
     let msg = |s: &str| {
         format!(
             "input string '{s}' cannot be represented as Nix string because it contains null bytes"

@@ -343,11 +343,12 @@ pub struct Evaluator {
     pub nr_function_calls: u64,
     pub nr_store_adds: u64,
     pub t_compile: Duration,
-    /// Where those counters and `drv.nr_derivations` go when this fiber
-    /// finishes a task. Shared, so a stats line covers every fiber.
+    /// Where `drv.nr_derivations`, and with `IETS_STATS` those counters, go
+    /// when this fiber finishes a task. Shared, so a count covers every fiber.
     totals: Arc<Totals>,
-    /// `IETS_STATS`: a stats line will read the arena totals, so a switch
-    /// folds into them. Nothing else does, so a normal run skips the fold.
+    /// `IETS_STATS`: a stats line will read the arena totals and the
+    /// counters, so a switch folds them. Nothing else does, so a normal run
+    /// skips the fold (`fold_counters` keeps the derivations).
     fold_arenas: bool,
     /// One shared context-free string per symbol, made on first use.
     sym_strings: SymWords,
@@ -727,6 +728,8 @@ impl EvalConfig {
         if !self.pure {
             prefetch_store_entries(&self.search_path, &self.session);
         }
+        // the evaluator's session, which a stats line reads too
+        let fold_arenas = self.session.settings().stats >= 1;
         let mut arena = Arena::in_heap(self.session.heap.clone());
         let mut interner = Interner::in_heap(self.session.heap.clone());
         for name in NIX_STATIC_SYMBOLS {
@@ -784,7 +787,7 @@ impl EvalConfig {
             nr_store_adds: 0,
             t_compile: Duration::ZERO,
             totals: Default::default(),
-            fold_arenas: Session::current().settings().stats >= 1,
+            fold_arenas,
             sym_strings: SymWords::new(),
             src_to_store: Default::default(),
             known: Default::default(),
@@ -3385,7 +3388,8 @@ impl Evaluator {
 impl Evaluator {
     /// Thunks, calls, derivations and compile time of the whole run: this
     /// fiber's own counters plus every fiber that folded into the totals.
-    /// Read it, not the fields, to report a number.
+    /// Read it, not the fields, to report a number. Without `IETS_STATS`
+    /// only the derivations are folded, so only they cover the whole run.
     pub fn counts(&self) -> Counts {
         let t = self.totals.get();
         Counts {
@@ -3460,9 +3464,19 @@ impl Evaluator {
     }
 
     /// Move this fiber's counters into the run's totals. The scheduler
-    /// calls it when a fiber finishes a task, which is why the counters
-    /// themselves need no atomics.
+    /// calls it when a fiber finishes a task or parks, which is why the
+    /// counters themselves need no atomics. Only a stats line reads the
+    /// thunks, calls, store adds and compile time, so a run without stats
+    /// folds the derivations alone, and only when there are any: the totals
+    /// are one line every worker writes, on every fiber switch.
     pub fn fold_counters(&mut self) {
+        if !self.fold_arenas {
+            if self.drv.nr_derivations != 0 {
+                self.totals.add_derivations(self.drv.nr_derivations);
+                self.drv.nr_derivations = 0;
+            }
+            return;
+        }
         self.totals.add(Counts {
             thunks: self.nr_thunks,
             calls: self.nr_function_calls,

@@ -27,7 +27,7 @@ for ((n = $1; n <= $2; n++)); do
   until awk '{ exit !($1 < 1.0 && $2 < 1.5) }' /proc/loadavg; do sleep 10; done
   sed "s/^/$n\t/" fchg/$n.txt > $R/step.chg
   t=$(now)
-  $I fine-check $R/step.chg $(cut -f2 $R/owners | sort -u) > $R/inv
+  $I fine-check $R/step.chg $(cut -f2 $R/owners | sort -u) > $R/inv || exit 1
   check=$(since $t)
   $Z/zstdcat drvs/$b.txt.zst | gawk -F'\t' '$2 != "ERR"' > $R/want
   # invalid owned jobs that still exist, and jobs not owned yet; the rest of the owned jobs are kept

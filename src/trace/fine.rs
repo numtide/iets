@@ -19,13 +19,18 @@
 //! which its state word holds (`Word::traced`). So one evaluation of many
 //! jobs that share thunks still gives each job all that it depends on.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs;
+use std::io::{self, Write as _};
 use std::panic::Location;
 use std::path::PathBuf;
+use std::str::from_utf8;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
+use crate::argv;
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
 };
@@ -933,14 +938,14 @@ pub fn position(path: &[u8], off: u32) {
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
     let line = match o {
-        Obs::File { path, hash, .. } => format!("F\t{}\t{}", lossy(path), hex(hash)),
-        Obs::Dir { path, hash } => format!("D\t{}\t{}", lossy(path), hex(hash)),
-        Obs::Stat { path, kind, .. } => format!("S\t{}\t{}", lossy(path), kind_name(*kind)),
-        Obs::Tree { root, nar_hash, .. } => format!("T\t{}\t{}", lossy(root), hex(nar_hash)),
-        Obs::Canon { path, .. } => format!("C\t{}", lossy(path)),
-        Obs::Env { name, .. } => format!("E\t{}", lossy(name)),
-        Obs::Cmd { dir, .. } => format!("Q\t{}", lossy(dir)),
-        Obs::Input { entry, .. } => format!("I\t{}", lossy(entry)),
+        Obs::File { path, hash, .. } => format!("F\t{}\t{}", path_field(path), hex(hash)),
+        Obs::Dir { path, hash } => format!("D\t{}\t{}", path_field(path), hex(hash)),
+        Obs::Stat { path, kind, .. } => format!("S\t{}\t{}", path_field(path), kind_name(*kind)),
+        Obs::Tree { root, nar_hash, .. } => format!("T\t{}\t{}", path_field(root), hex(nar_hash)),
+        Obs::Canon { path, .. } => format!("C\t{}", path_field(path)),
+        Obs::Env { name, .. } => format!("E\t{}", path_field(name)),
+        Obs::Cmd { dir, .. } => format!("Q\t{}", path_field(dir)),
+        Obs::Input { entry, .. } => format!("I\t{}", path_field(entry)),
     };
     with(|s| s.record(O::Out(line)));
 }
@@ -1209,10 +1214,7 @@ impl Walk<'_> {
             let Ir::Region { id, body } = b.value else {
                 unreachable!("a split bind is a region");
             };
-            let sub = format!(
-                "{path}/{ord}.{}",
-                String::from_utf8_lossy(self.names.name(b.sym))
-            );
+            let sub = format!("{path}/{ord}.{}", name_field(self.names.name(b.sym)));
             self.in_bind_env(b, rec, from, |w| {
                 w.region(*id, sub, scope_tag(b.scope), body)
             });
@@ -1426,9 +1428,31 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
-    String::from_utf8_lossy(b)
+/// Fields are byte strings. Common identifiers and paths stay readable; a
+/// leading '~' introduces hex, including the empty name (just '~'). A slash
+/// is structural only in region paths, so it must be escaped inside a name.
+fn field(bytes: &[u8], allow_slash: bool) -> Cow<'_, str> {
+    if !bytes.is_empty()
+        && bytes.iter().all(|&c| {
+            c.is_ascii_alphanumeric() || b"._+-".contains(&c) || (allow_slash && c == b'/')
+        })
+    {
+        Cow::Borrowed(from_utf8(bytes).expect("ASCII field"))
+    } else {
+        Cow::Owned(format!("~{}", hex(bytes)))
+    }
 }
+
+fn path_field(bytes: &[u8]) -> Cow<'_, str> {
+    field(bytes, true)
+}
+
+fn name_field(bytes: &[u8]) -> Cow<'_, str> {
+    field(bytes, false)
+}
+
+// Word zero is the unused stamp of the null trace on disk.
+const NAME_FORMAT: u32 = u32::from_le_bytes(*b"nam2");
 
 impl State {
     /// The observations of `entries` and of the traces they read, each once.
@@ -1460,7 +1484,7 @@ impl State {
 
     fn region_line(&self, id: u32) -> String {
         match self.regions.get(&id) {
-            Some(r) => format!("R\t{}\t{}\t{}", lossy(&r.file), r.path, hex(&r.hash)),
+            Some(r) => format!("R\t{}\t{}\t{}", path_field(&r.file), r.path, hex(&r.hash)),
             None => format!("R\t?\t{id}\t"),
         }
     }
@@ -1470,16 +1494,19 @@ impl State {
             Prov::Lit(l) => match self.lits.get(l) {
                 Some(l) => format!(
                     "P\t{i}\tlit\t{}\t{}\t{}",
-                    lossy(&l.file),
+                    path_field(&l.file),
                     l.region,
                     l.ordinal
                 ),
                 None => format!("P\t{i}\tlit?\t{l}"),
             },
-            Prov::Dir(d) => format!("P\t{i}\tdir\t{}", lossy(d)),
+            Prov::Dir(d) => format!("P\t{i}\tdir\t{}", path_field(d)),
             Prov::Union(a, b) => format!("P\t{i}\tu\t{a}\t{b}"),
             Prov::Remove(a, names) => {
-                let names: Vec<_> = names.iter().map(|n| ev.interner.name_str(*n)).collect();
+                let names: Vec<_> = names
+                    .iter()
+                    .map(|n| name_field(ev.interner.name(*n)))
+                    .collect();
                 format!("P\t{i}\tx\t{a}\t{}", names.join(" "))
             }
         }
@@ -1499,15 +1526,21 @@ impl State {
                 ev.describe_pos(crate::eval::Pos((f >> 32) as u32))
             );
         }
-        format!("A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line())
+        format!(
+            "A\t{p}\t{}:{}\t{}\t{}",
+            at.file(),
+            at.line(),
+            nix.escape_debug(),
+            st.escape_debug()
+        )
     }
 
     fn obs_line(&self, ev: &Evaluator, id: u32) -> String {
         match &self.obs[id as usize] {
             O::Region(r) => self.region_line(*r),
-            O::Key(p, k) => format!("K\t{p}\t{}", ev.interner.name_str(*k)),
+            O::Key(p, k) => format!("K\t{p}\t{}", name_field(ev.interner.name(*k))),
             O::All(p) => self.all_line(ev, *p),
-            O::Pos(f, off) => format!("X\t{}\t{off}", lossy(f)),
+            O::Pos(f, off) => format!("X\t{}\t{off}", path_field(f)),
             O::Out(l) => l.clone(),
         }
     }
@@ -1516,7 +1549,7 @@ impl State {
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
     fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
-        let mut out = String::new();
+        let mut out = String::from("V\t2\n");
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1562,14 +1595,14 @@ impl State {
             }
         }
         for (p, k) in keys {
-            let _ = writeln!(out, "K\t{p}\t{}", ev.interner.name_str(k));
+            let _ = writeln!(out, "K\t{p}\t{}", name_field(ev.interner.name(k)));
         }
         for p in alls {
             out.push_str(&self.all_line(ev, p));
             out.push('\n');
         }
         for (f, off) in pos {
-            let _ = writeln!(out, "X\t{}\t{off}", lossy(f));
+            let _ = writeln!(out, "X\t{}\t{off}", path_field(f));
         }
         for l in outs {
             out.push_str(l);
@@ -1590,19 +1623,19 @@ impl State {
         std::fs::create_dir_all(dir)?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
-            // a name may hold a newline, and a line is an id
-            o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
+            o.push_str(&self.obs_line(ev, id));
             o.push('\n');
         }
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
-            p.push_str(&self.prov_line(ev, i).replace('\n', "\\n"));
+            p.push_str(&self.prov_line(ev, i));
             p.push('\n');
         }
         std::fs::write(dir.join("provs"), p)?;
         let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("nodes"))?);
-        for x in &self.nodes {
+        w.write_all(&NAME_FORMAT.to_le_bytes())?;
+        for x in &self.nodes[1..] {
             std::io::Write::write_all(&mut w, &x.to_le_bytes())?;
         }
         std::io::Write::flush(&mut w)?;
@@ -1614,7 +1647,7 @@ impl State {
                 parent.to_string()
             };
             let fp = self.fps[i].map_or("-".to_string(), |h| hex(&h));
-            let name = ev.interner.name_str(*sym).replace(['\t', '\n'], " ");
+            let name = name_field(ev.interner.name(*sym));
             let (h, k, b) = (self.head[i], self.kind[i], self.born[i]);
             let _ = writeln!(
                 q,
@@ -1711,19 +1744,24 @@ fn kind_name(k: Kind) -> &'static str {
 pub fn regions_main(argv: &[String]) -> i32 {
     start(None);
     let mut ev = Evaluator::new();
+    println!("V\t2");
     for arg in argv {
         let (f, at) = arg.split_once('=').unwrap_or((arg, arg));
-        let path = crate::compile::canon_path(at.as_bytes());
-        let src = match std::fs::read(f) {
+        let at_bytes = argv::bytes(at);
+        let path = crate::compile::canon_path(&at_bytes);
+        let at = path_field(&at_bytes);
+        let src = match std::fs::read(argv::os(f)) {
             Ok(s) => s,
             Err(e) => {
                 errln!("{f}: {e}");
+                println!("E\t{at}");
                 continue;
             }
         };
         let dir = crate::eval::dir_of(&path).to_vec();
         if let Err(e) = ev.compile_file(&path, src, &dir) {
-            println!("E\t{at}\t{}", e.msg);
+            errln!("{f}: {}", e.msg);
+            println!("E\t{at}");
             continue;
         }
         with(|s| {
@@ -1735,7 +1773,11 @@ pub fn regions_main(argv: &[String]) -> i32 {
             let mut ls: Vec<_> = s.lits.values().filter(|l| *l.file == *path).collect();
             ls.sort_by(|a, b| (&a.region, a.ordinal).cmp(&(&b.region, b.ordinal)));
             for l in ls {
-                let mut keys: Vec<_> = l.keys.iter().map(|k| ev.interner.name_str(*k)).collect();
+                let mut keys: Vec<_> = l
+                    .keys
+                    .iter()
+                    .map(|k| name_field(ev.interner.name(*k)))
+                    .collect();
                 keys.sort();
                 println!("L\t{at}\t{}\t{}\t{}", l.region, l.ordinal, keys.join(" "));
             }
@@ -1772,9 +1814,11 @@ fn bit(s: u8) -> u128 {
 
 impl Changes {
     /// `step\tCHANGE...` lines, as `fchg.sh` writes them.
-    fn read(text: &str) -> Changes {
+    fn read(file: &str) -> io::Result<Changes> {
+        let text = fs::read_to_string(file)?;
         let mut c = Changes::default();
         let mut idx: FxHashMap<String, u8> = FxHashMap::default();
+        let mut versioned = FxHashSet::default();
         for line in text.lines() {
             let f: Vec<&str> = line.split('\t').collect();
             if f.len() < 3 {
@@ -1801,6 +1845,15 @@ impl Changes {
                 *m.entry(k.to_string()).or_insert(0) |= bit(s)
             };
             match (f[1], f.len()) {
+                ("V", 3) if f[2] == "3" => {
+                    versioned.insert(s);
+                }
+                ("V", _) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unsupported change format; regenerate the changes",
+                    ));
+                }
                 ("CR", 4..) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
                 ("CF", _) => or(&mut c.files, f[2]),
                 ("CL", 6..) => c
@@ -1824,7 +1877,13 @@ impl Changes {
                 _ => {}
             }
         }
-        c
+        if idx.len() != versioned.len() || versioned.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing change format; regenerate the changes",
+            ));
+        }
+        Ok(c)
     }
 }
 
@@ -1850,12 +1909,21 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
 }
 
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+    let bytes = std::fs::read(path)?;
+    if !bytes.starts_with(&NAME_FORMAT.to_le_bytes()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incompatible fine trace name format; regenerate the trace",
+        ));
+    }
+    let mut words: Vec<_> = bytes
         .as_chunks::<4>()
         .0
         .iter()
         .map(|b| u32::from_le_bytes(*b))
-        .collect())
+        .collect();
+    words[0] = 0;
+    Ok(words)
 }
 
 /// The steps each job of the trace graph in `dir` must be evaluated again
@@ -2866,9 +2934,8 @@ fn serve() -> i32 {
                 }
                 Err(e) => format!("error {file}: {e}\n"),
             },
-            ["check", file, dest] => match std::fs::read_to_string(file) {
-                Ok(t) => {
-                    let c = Changes::read(&t);
+            ["check", file, dest] => match Changes::read(file) {
+                Ok(c) => {
                     let res = s.check(&c);
                     let mut o = String::new();
                     let mut suspects: FxHashSet<u32> = FxHashSet::default();
@@ -2948,8 +3015,8 @@ pub fn check_main(argv: &[String]) -> i32 {
         errln!("usage: iets fine-check CHANGES [--skip TEXT] DAG...");
         return 2;
     };
-    let c = match std::fs::read_to_string(changes) {
-        Ok(t) => Changes::read(&t),
+    let c = match Changes::read(changes) {
+        Ok(c) => c,
         Err(e) => {
             errln!("{changes}: {e}");
             return 1;

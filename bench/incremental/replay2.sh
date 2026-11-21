@@ -36,7 +36,7 @@ batch() {
   local d=$1
   { head_of $B
     gawk -f qpaths.awk "$2"
-    gawk -F'\t' '{ s = ""; for (i = 2; i <= NF; i++) { x = $i; gsub(/\\/, "\\\\", x); gsub(/"/, "\\\"", x); gsub(/\$/, "\\$", x); s = s " \"" x "\"" } print "  (q [" s " ])" }' "$3"
+    LC_ALL=C gawk -F '\t' -v fmt=fields -f qpaths.awk "$3"
     echo "]"; } > $d.nix
   rm -rf $d
   IETS_FINE_TRACE= IETS_FINE_DAG=$d $I eval --strict --impure --no-ir-cache --no-tracing-cache --workers 1 \

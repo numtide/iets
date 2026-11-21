@@ -399,7 +399,11 @@ other failure. This follows `diff(1)`. Every error has its code from
   are paired by name, so `hello` on one side pairs with `hello` on the
   other, and each pair is compared the same way, one level deeper. What is
   left over is added or removed. When both sides have the same input but
-  want different outputs of it, the pair gets a `wanted` field.
+  want different outputs of it, the pair gets a `wanted` field. For a
+  dynamic input, its key is a JSON Pointer to the output chain: `/out/first` means the
+  derivation reached through `out` and then `first`. Wanted outputs are
+  comma-separated names, or JSON array text if a name is empty or contains
+  a comma.
 
 The walk stops after `--depth` levels, and at a pair it has already shown,
 printing `(stopped: …; use --all)`.

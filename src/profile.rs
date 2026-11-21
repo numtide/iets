@@ -700,9 +700,19 @@ mod tests {
 
     #[test]
     fn a_wait_is_not_cpu_time() {
+        let before = thread_cpu_time().as_micros() as u64;
         cpu_us_since_sample();
+        let after = thread_cpu_time().as_micros() as u64;
         thread::sleep(Duration::from_millis(50));
-        assert!(cpu_us_since_sample() < 10_000);
+        // GetThreadTimes can advance in 15.625 ms steps on Windows. Check
+        // against the CPU clock itself rather than assuming finer precision.
+        let lower = thread_cpu_time().as_micros() as u64 - after;
+        let elapsed = cpu_us_since_sample();
+        let upper = thread_cpu_time().as_micros() as u64 - before;
+        assert!(
+            (lower..=upper).contains(&elapsed),
+            "{lower} <= {elapsed} <= {upper}"
+        );
         let start = thread_cpu_time();
         while thread_cpu_time() - start < Duration::from_millis(20) {}
         assert!(cpu_us_since_sample() >= 20_000);

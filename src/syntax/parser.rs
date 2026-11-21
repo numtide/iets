@@ -80,12 +80,17 @@ fn starts_simple(kind: Tok) -> bool {
 
 /// Move `stack[mark..]` to the end of `table` and describe where it went.
 fn commit<T: Copy>(table: &mut Vec<T>, stack: &mut Vec<T>, mark: usize) -> Range {
-    let start = table.len() as u32;
-    table.extend_from_slice(&stack[mark..]);
+    let range = append(table, &stack[mark..]);
     stack.truncate(mark);
+    range
+}
+
+fn append<T: Copy>(table: &mut Vec<T>, items: &[T]) -> Range {
+    let start = table.len() as u32;
+    table.extend_from_slice(items);
     Range {
         start,
-        len: table.len() as u32 - start,
+        len: items.len() as u32,
     }
 }
 
@@ -183,12 +188,7 @@ impl<'a> Parser<'a> {
             let (mask, bad) = allow::parse_comment(text);
             self.ast.allows.add(a.line.start, a.line.end, mask);
             for (off, msg) in bad {
-                let start = self.ast.bytes.len() as u32;
-                self.ast.bytes.extend_from_slice(msg.as_bytes());
-                let msg = Range {
-                    start,
-                    len: msg.len() as u32,
-                };
+                let msg = append(&mut self.ast.bytes, msg.as_bytes());
                 self.ast.notes.push(Note::UnknownAllow {
                     at: a.text.start + off,
                     msg,
@@ -282,20 +282,13 @@ impl<'a> Parser<'a> {
 
     /// Store `b` in the bytes table.
     fn lit(&mut self, b: &[u8]) -> StrPart {
-        let start = self.ast.bytes.len() as u32;
-        self.ast.bytes.extend_from_slice(b);
-        StrPart::Lit(Range {
-            start,
-            len: b.len() as u32,
-        })
+        StrPart::Lit(append(&mut self.ast.bytes, b))
     }
 
     /// One-part string over `b`.
     fn single_str(&mut self, b: &[u8]) -> Range {
-        let mark = self.sc_parts.len();
-        let p = self.lit(b);
-        self.sc_parts.push(p);
-        commit(&mut self.ast.parts, &mut self.sc_parts, mark)
+        let part = self.lit(b);
+        append(&mut self.ast.parts, &[part])
     }
 
     pub fn parse_expr(&mut self) -> R<ExprId> {
@@ -892,10 +885,13 @@ impl<'a> Parser<'a> {
             let empty = self.ast.bytes.len() == start;
             match end {
                 StrEnd::Close => {
-                    if !empty || self.sc_parts.len() == mark {
+                    self.last_end = self.lx.pos() as u32;
+                    if self.sc_parts.len() == mark {
+                        return Ok(append(&mut self.ast.parts, &[lit]));
+                    }
+                    if !empty {
                         self.sc_parts.push(lit);
                     }
-                    self.last_end = self.lx.pos() as u32;
                     return Ok(commit(&mut self.ast.parts, &mut self.sc_parts, mark));
                 }
                 StrEnd::Interp => {
@@ -927,17 +923,12 @@ impl<'a> Parser<'a> {
             }
         }
         self.last_end = self.lx.pos() as u32;
-        let mark = self.sc_parts.len();
-        let pieces = strip_indentation(
+        Ok(strip_indentation(
             self.src,
             &parts,
             &interps,
             &mut self.ast.bytes,
-            &mut self.sc_parts,
-        );
-        Ok((
-            commit(&mut self.ast.parts, &mut self.sc_parts, mark),
-            pieces,
+            &mut self.ast.parts,
         ))
     }
 
@@ -1212,23 +1203,16 @@ fn parse_int(text: &[u8]) -> Option<i64> {
 /// Port of `ParserState::stripIndentation` from Nix. Token boundaries
 /// matter: only the last token loses a trailing whitespace-only line.
 /// Output text goes to `bytes`, the parts to `out`. Returns how many
-/// pieces Nix keeps: the tokens whose text is not empty, and the
-/// interpolations.
+/// pieces Nix keeps (nonempty tokens and interpolations), along with the
+/// range of parts appended.
 fn strip_indentation(
     src: &[u8],
     parts: &[IndPart],
     interps: &[ExprId],
     bytes: &mut Vec<u8>,
     out: &mut Vec<StrPart>,
-) -> usize {
+) -> (Range, usize) {
     let out_mark = out.len();
-    if parts.is_empty() {
-        out.push(StrPart::Lit(Range {
-            start: bytes.len() as u32,
-            len: 0,
-        }));
-        return 0;
-    }
     let mut at_start = true;
     let mut min_indent = usize::MAX;
     let mut cur_indent = 0usize;
@@ -1332,7 +1316,11 @@ fn strip_indentation(
             len: 0,
         }));
     }
-    pieces
+    let range = Range {
+        start: out_mark as u32,
+        len: (out.len() - out_mark) as u32,
+    };
+    (range, pieces)
 }
 
 fn trim_into(

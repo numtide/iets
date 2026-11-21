@@ -40,14 +40,14 @@ batch() {
     echo "]"; } > $d.nix
   rm -rf $d
   IETS_FINE_TRACE= IETS_FINE_DAG=$d $I eval --strict --impure --no-ir-cache --no-tracing-cache --workers 1 \
-    -E "import $HOME/incr/$d.nix" > $d.out 2> $d.err
+    -E "import $HOME/incr/$d.nix" > $d.out 2> $d.err || return 1
   tr -d '[]' < $d.out | tr ' ' '\n' | grep -v '^$' | tr -d '"' > $d.vals
 }
 
 # round N JOBS QUERIES: evaluates them in up to 8 graphs; appends job, graph, index, drvPath to
 # $R/new-owners and key, fingerprint to $R/fps
 round() {
-  local n=$1 nj nq k c pids=()
+  local n=$1 nj nq k c pid failed=0 pids=()
   nj=$(wc -l < $2) nq=$(wc -l < $3)
   [ $((nj + nq)) -eq 0 ] && return
   k=$(( (nj + nq + 1999) / 2000 )); [ $k -gt 8 ] && k=8
@@ -58,7 +58,8 @@ round() {
     pids+=($!)
   done
   # not a bare `wait`: the checker is a child too
-  wait "${pids[@]}"
+  for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+  [ $failed -eq 0 ] || return 1
   for ((c = 0; c < k; c++)); do
     d=$R/dag-$step-$n-$c
     nj=$(wc -l < $R/j-$n-$c)
@@ -107,7 +108,7 @@ for ((step = $1; step <= $2; step++)); do
     }' $R/chk $R/want $R/owners
   git -C $B checkout -q --detach $b
   t=$(now)
-  round 1 $R/redo1 $R/queries
+  round 1 $R/redo1 $R/queries || exit 1
   ev1=$(since $t)
   # a suspect is kept when every query it read kept its fingerprint
   gawk -F'\t' -v R=$R '
@@ -119,7 +120,7 @@ for ((step = $1; step <= $2; step++)); do
   touch $R/redo2
   t=$(now)
   : > $R/none
-  round 2 $R/redo2 $R/none
+  round 2 $R/redo2 $R/none || exit 1
   ev2=$(since $t)
   wk2=$(gawk -F'\t' 'NR == FNR { want[$1] = $2; next } want[$1] != $4 { w++ } END { print w + 0 }' $R/want $R/kept)
   wr=$(gawk -F'\t' 'NR == FNR { want[$1] = $2; next } want[$1] != $4 { w++; print > "/dev/stderr" } END { print w + 0 }' $R/want $R/new-owners 2> $R/wrong-redo-$step)

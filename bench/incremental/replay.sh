@@ -50,6 +50,7 @@ for ((n = $1; n <= $2; n++)); do
   : > $R/new-owners
   if [ $nredo -gt 0 ]; then
     k=$(( (nredo + 1999) / 2000 )); [ $k -gt 8 ] && k=8
+    pids=()
     for ((c = 0; c < k; c++)); do
       gawk -v c=$c -v k=$k 'NR % k == c' $R/redo > $R/redo-$c
       { echo "let lib = import $B/lib; o = import $B/ci/eval/outpaths.nix { path = $B; systems = [ \"x86_64-linux\" ]; includeBroken = false; }; in map (p: (lib.attrByPath p null o).drvPath) ["
@@ -59,8 +60,11 @@ for ((n = $1; n <= $2; n++)); do
       rm -rf $d
       ( IETS_FINE_TRACE= IETS_FINE_DAG=$d $I eval --strict --impure --no-ir-cache --no-tracing-cache --workers 1 \
           -E "import $HOME/incr/$R/batch-$c.nix" > $R/out-$c 2> $R/err-$c ) &
+      pids+=($!)
     done
-    wait
+    failed=0
+    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+    [ $failed -eq 0 ] || exit 1
     for ((c = 0; c < k; c++)); do
       tr -d '[]' < $R/out-$c | tr ' ' '\n' | grep -v '^$' | tr -d '"' | paste $R/redo-$c - |
         gawk -F'\t' -v d=$R/dag-$n-$c '{ print $1 "\t" d "\t" NR - 1 "\t" $2 }' >> $R/new-owners

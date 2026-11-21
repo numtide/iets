@@ -414,6 +414,62 @@ in { a = d "classic-e2e-two-a"; b = d "classic-e2e-two-b"; }
 }
 
 #[test]
+fn writable_eval_registers_the_printed_store_paths() {
+    let s = store!();
+    let f = Farm::new(&s);
+    let fixture = s.write(
+        "writable.nix",
+        r#"let
+  leaf = builtins.toFile "writable-leaf" "source";
+  drv = name: (derivation { inherit name leaf; system = "@SYSTEM@"; builder = "@SHELL@"; }).drvPath;
+in {
+  text = builtins.toFile "writable-text" (builtins.unsafeDiscardOutputDependency (drv "writable-drv"));
+  first = drv "writable-first";
+  last = throw "later evaluation failed";
+}
+"#,
+    );
+    let eval = |attrs: &[&str]| {
+        f.ours("nix-instantiate")
+            .env("IETS_NIX_FALLBACK", "never")
+            .args(["--eval", "--read-write-mode", "--strict", "--json"])
+            .arg(&fixture)
+            .args(attrs)
+            .output()
+            .unwrap()
+    };
+    let references = |path: &str| {
+        stdout(&e2e::ok(s.nix("nix-store").args([
+            "--query",
+            "--references",
+            path,
+        ])))
+    };
+
+    let out = eval(&["-A", "text"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text: String = serde_json::from_slice(&out.stdout).unwrap();
+    let drv = references(&text);
+    let leaf = references(&drv);
+    assert!(drv.ends_with("-writable-drv.drv"), "{drv}");
+    assert!(leaf.ends_with("-writable-leaf"), "{leaf}");
+    e2e::ok(
+        s.nix("nix-store")
+            .args(["--check-validity", &text, &drv, &leaf]),
+    );
+
+    let out = eval(&["-A", "first", "-A", "last"]);
+    assert!(
+        !out.status.success() && stderr(&out).contains("later evaluation failed"),
+        "{}",
+        stderr(&out)
+    );
+    let first: String = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(first.ends_with("-writable-first.drv"), "{first}");
+    e2e::ok(s.nix("nix-store").args(["--check-validity", &first]));
+}
+
+#[test]
 fn nix_eval_of_a_flake() {
     let s = store!();
     let f = Farm::new(&s);

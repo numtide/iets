@@ -174,6 +174,24 @@ struct ChunkShip {
 const CHUNK: usize = 256 << 10;
 
 impl ChunkShip {
+    fn new(
+        tx: tokio::sync::mpsc::Sender<proto::AddMultipleChunk>,
+        sent: Arc<AtomicU64>,
+    ) -> io::Result<Self> {
+        // store.cc reads the flags from this first, uncompressed message.
+        tx.blocking_send(proto::AddMultipleChunk {
+            repair: false,
+            check_sigs: true,
+            data: Vec::new(),
+        })
+        .map_err(|_| closed())?;
+        Ok(Self {
+            tx,
+            buf: Vec::with_capacity(CHUNK + (1 << 16)),
+            sent,
+        })
+    }
+
     fn ship(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
@@ -248,19 +266,7 @@ fn upload(
             let tx = tx.clone();
             let sent = Arc::clone(&sent);
             s.spawn(session::bind(move || -> io::Result<()> {
-                // store.cc sends the flags alone first; the zstd stream
-                // follows in its own messages.
-                tx.blocking_send(proto::AddMultipleChunk {
-                    repair: false,
-                    check_sigs: true,
-                    data: Vec::new(),
-                })
-                .map_err(|_| closed())?;
-                let ship = ChunkShip {
-                    tx,
-                    buf: Vec::with_capacity(CHUNK + (1 << 16)),
-                    sent,
-                };
+                let ship = ChunkShip::new(tx, sent)?;
                 let mut enc = zstd::stream::write::Encoder::new(ship, 1)?;
                 write_u64(&mut enc, n as u64)?;
                 for o in objects {
@@ -884,11 +890,11 @@ mod tests {
     fn upload_chunks_always_request_signature_checks() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let sent = Arc::new(AtomicU64::new(0));
-        let mut ship = ChunkShip {
-            tx,
-            buf: Vec::new(),
-            sent: Arc::clone(&sent),
-        };
+        let mut ship = ChunkShip::new(tx, Arc::clone(&sent)).unwrap();
+        let first = rx.blocking_recv().unwrap();
+        assert!(first.check_sigs);
+        assert!(!first.repair);
+        assert!(first.data.is_empty());
         ship.flush().unwrap();
         assert!(rx.try_recv().is_err());
         let full = vec![7; CHUNK];

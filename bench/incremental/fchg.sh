@@ -29,9 +29,9 @@ cs=($(git log --first-parent --format=%h --reverse 9dbd131e6c65~1..4e63084a455b)
 pairs() { for ((i = 1; i < ${#cs[@]}; i++)); do echo "$i ${cs[i-1]} ${cs[i]}"; done; echo "w100 ${cs[0]} ${cs[100]}"; for ((i = 10; i <= 100; i += 10)); do echo "w10-$i ${cs[i-10]} ${cs[i]}"; done; }
 pairs | while read -r n a b; do
   out=../fchg/$n.txt
-  if [[ -s $out ]] && grep -Fqx '# fchg 3' "$out"; then continue; fi
+  if [[ -s $out ]] && grep -Fqx $'V\t3' "$out"; then continue; fi
   {
-    printf 'V\t2\n# fchg 3\n'
+    printf 'V\t3\n'
     git diff --no-renames --name-status -z "$a" "$b" | while IFS= read -r -d '' st && IFS= read -r -d '' p; do
       path_change CM "$P/$p"
       q=$p

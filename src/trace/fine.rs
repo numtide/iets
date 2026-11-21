@@ -1845,13 +1845,13 @@ impl Changes {
                 *m.entry(k.to_string()).or_insert(0) |= bit(s)
             };
             match (f[1], f.len()) {
-                ("V", 3) if f[2] == "2" => {
+                ("V", 3) if f[2] == "3" => {
                     versioned.insert(s);
                 }
                 ("V", _) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "unsupported name format; regenerate the changes",
+                        "unsupported change format; regenerate the changes",
                     ));
                 }
                 ("CR", 4..) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
@@ -1880,7 +1880,7 @@ impl Changes {
         if idx.len() != versioned.len() || versioned.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "missing name format; regenerate the changes",
+                "missing change format; regenerate the changes",
             ));
         }
         Ok(c)

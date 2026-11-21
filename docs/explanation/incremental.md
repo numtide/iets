@@ -69,7 +69,8 @@ plus signs and hyphens are written literally. File fields also permit slashes.
 Every other byte string, including the empty name, is written as `~` followed
 by its hexadecimal bytes. This keeps a quoted name containing a slash distinct
 from a nested binding path and a literal `"*"` distinct from a wildcard change.
-Region tables, flat traces and per-step changes carry a `V\t2` record. The DAG
+Region tables and flat traces carry a `V\t2` record; per-step changes carry
+`V\t3`, which also accounts for reads inside removed directories. The DAG
 carries the version in the first word of `nodes`. Regenerate older artifacts
 before comparing revisions or replaying queries.
 

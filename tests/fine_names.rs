@@ -68,7 +68,7 @@ impl Fixture {
             .arg("-f")
             .arg(script)
             .args(["old", "new"]));
-        let mut changes = String::from("1\tV\t2\n");
+        let mut changes = String::from("1\tV\t3\n");
         for line in delta.lines() {
             changes.push_str(&format!("1\t{line}\n"));
         }
@@ -152,7 +152,7 @@ fn nested_and_slash_containing_regions_are_distinct(bin: Iets) {
         !check().status.success(),
         "legacy changes must be regenerated"
     );
-    fs::write(&changes, "1\tV\t2\n").unwrap();
+    fs::write(&changes, "1\tV\t3\n").unwrap();
     let node_file = f.dag.join("nodes");
     let mut data = fs::read(&node_file).unwrap();
     data[..4].fill(0);
@@ -161,14 +161,7 @@ fn nested_and_slash_containing_regions_are_distinct(bin: Iets) {
 }
 
 #[rstest]
-#[case::removed(false, false)]
-#[case::replaced_by_file(true, false)]
-#[case::surviving_directory(false, true)]
-fn git_directory_changes_reach_negative_lookups(
-    bin: Iets,
-    #[case] replace: bool,
-    #[case] keep: bool,
-) {
+fn git_directory_changes_reach_negative_lookups(bin: Iets) {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let repo = home.join("incr/nixpkgs");
@@ -176,14 +169,19 @@ fn git_directory_changes_reach_negative_lookups(
     let traces = home.join("traces");
     let dag = home.join("dag");
     for root in [&repo, &base] {
-        fs::create_dir_all(root.join("gone")).unwrap();
-        fs::write(root.join("gone/child"), "").unwrap();
-        fs::write(root.join("gone/keep"), "").unwrap();
+        for name in ["removed", "replaced", "surviving"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("child"), "").unwrap();
+            fs::write(root.join(name).join("keep"), "").unwrap();
+        }
     }
     fs::create_dir(&traces).unwrap();
     fs::write(
         base.join("jobs.nix"),
-        "let d=builtins.readDir ./gone; in [ (d ? child) (d ? absent) (builtins.attrNames d) ]",
+        "let r=builtins.readDir; a=r ./removed; b=r ./replaced; c=r ./surviving; in [
+         (a ? child) (a ? absent) (builtins.attrNames a)
+         (b ? child) (b ? absent) (builtins.attrNames b)
+         (c ? child) (c ? absent) (builtins.attrNames c) ]",
     )
     .unwrap();
     run(bin
@@ -197,6 +195,7 @@ fn git_directory_changes_reach_negative_lookups(
         run(Command::new("git")
             .current_dir(&repo)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .args([
                 "-c",
                 "user.name=Test",
@@ -210,13 +209,10 @@ fn git_directory_changes_reach_negative_lookups(
     // The generator's historical range includes 101 first-parent revisions.
     for i in 0..101 {
         if i == 100 {
-            fs::remove_file(repo.join("gone/child")).unwrap();
-            if !keep {
-                fs::remove_dir_all(repo.join("gone")).unwrap();
-            }
-            if replace {
-                fs::write(repo.join("gone"), "now a file").unwrap();
-            }
+            fs::remove_dir_all(repo.join("removed")).unwrap();
+            fs::remove_dir_all(repo.join("replaced")).unwrap();
+            fs::write(repo.join("replaced"), "now a file").unwrap();
+            fs::remove_file(repo.join("surviving/child")).unwrap();
             git(&["add", "-A"]);
         }
         git(&["commit", "-qm", "fixture", "--allow-empty"]);
@@ -226,16 +222,15 @@ fn git_directory_changes_reach_negative_lookups(
     }
     git(&["tag", "4e63084a455b"]);
     let incremental = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental");
-    let changes = home.join("incr/fchg");
-    fs::create_dir(&changes).unwrap();
-    // Existing V2 files predate the directory fix and must be regenerated.
-    if keep {
-        fs::write(changes.join("100.txt"), "V\t2\n").unwrap();
-    }
+    let changes_dir = home.join("incr/fchg");
+    fs::create_dir(&changes_dir).unwrap();
+    // The generator must replace pre-fix persisted changes.
+    fs::write(changes_dir.join("100.txt"), "V\t2\n").unwrap();
     run(Command::new("bash")
         .env("HOME", home)
         .arg(incremental.join("fchg.sh")));
-    let delta = fs::read_to_string(changes.join("100.txt")).unwrap();
+    let delta = fs::read_to_string(changes_dir.join("100.txt")).unwrap();
+    assert!(delta.lines().any(|line| line == "V\t3"));
     let changes = home.join("changes");
     fs::write(
         &changes,
@@ -245,7 +240,7 @@ fn git_directory_changes_reach_negative_lookups(
             .collect::<String>(),
     )
     .unwrap();
-    let expected = if keep { vec![0, 2] } else { vec![0, 1, 2] };
+    let expected = [0, 1, 2, 3, 4, 5, 6, 8];
     let actual = run(bin.cmd().arg("fine-check").arg(&changes).arg(&dag));
     let mut jobs: Vec<usize> = actual
         .lines()
@@ -256,7 +251,7 @@ fn git_directory_changes_reach_negative_lookups(
     let flat = home.join("flat");
     fs::write(
         &flat,
-        (0..3)
+        (0..9)
             .map(|i| {
                 format!(
                     "J\t{i}\n{}",
@@ -266,16 +261,60 @@ fn git_directory_changes_reach_negative_lookups(
             .collect::<String>(),
     )
     .unwrap();
-    let actual = run(Command::new("awk")
-        .arg("-f")
-        .arg(incremental.join("fcheck.awk"))
-        .arg(&changes)
-        .arg(flat));
+    let awk = || {
+        let mut cmd = Command::new("awk");
+        cmd.arg("-f")
+            .arg(incremental.join("fcheck.awk"))
+            .arg(&changes)
+            .arg(&flat);
+        cmd
+    };
+    let actual = run(&mut awk());
     let mut jobs: Vec<usize> = actual
         .lines()
         .map(|s| s.split('\t').next().unwrap().parse().unwrap())
         .collect();
     jobs.sort_unstable();
     assert_eq!(jobs, expected);
-    assert!(delta.contains("# fchg 3"));
+    // Direct consumers must reject pre-fix evidence too, without regenerating it.
+    fs::write(&changes, "1\tV\t2\n").unwrap();
+    assert!(
+        !bin.cmd()
+            .arg("fine-check")
+            .arg(&changes)
+            .arg(&dag)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!awk().output().unwrap().status.success());
+    // Exercise each replay's actual error-handling code with the real checker.
+    fs::copy(&changes, home.join("step.chg")).unwrap();
+    fs::write(home.join("owners"), format!("job\t{}\n", dag.display())).unwrap();
+    let replay = fs::read_to_string(incremental.join("replay.sh")).unwrap();
+    let check = replay
+        .lines()
+        .find(|line| line.trim_start().starts_with("$I fine-check "))
+        .unwrap();
+    let replay2 = fs::read_to_string(incremental.join("replay2.sh")).unwrap();
+    let start = replay2.find("srv() {").unwrap();
+    let end = start + replay2[start..].find("\n}\n").unwrap() + 3;
+    let server = format!(
+        "coproc SRV {{ exec \"$I\" fine-check --serve; }}\npid=$SRV_PID\ntrap 'kill $pid 2>/dev/null || :; wait $pid 2>/dev/null || :' EXIT\n{}\nsrv \"load $DAG 0\"\nsrv \"check $R/step.chg $R/chk\"",
+        &replay2[start..end]
+    );
+    let marker = home.join("continued");
+    for code in [check, &server] {
+        let output = Command::new("bash")
+            .env("I", env!("CARGO_BIN_EXE_iets"))
+            .env("R", home)
+            .env("DAG", &dag)
+            .env("MARK", &marker)
+            .args(["-uc", &format!("{code}\nprintf bad > \"$MARK\"")])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "replay accepted stale changes");
+        assert!(!marker.exists(), "replay continued after a checker error");
+    }
 }

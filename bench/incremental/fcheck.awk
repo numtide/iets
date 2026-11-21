@@ -5,7 +5,7 @@ BEGIN { FS = OFS = "\t" }
 NR == FNR {
   s = $1
   step[s] = 1
-  if ($2 == "V" && $3 == "2") version[s] = 1
+  if ($2 == "V" && $3 == "3") version[s] = 1
   else if ($2 == "CR") cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
   else if ($2 == "CF") cf[$3] = cf[$3] " " s
   else if ($2 == "CL") { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }

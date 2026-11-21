@@ -29,10 +29,13 @@ function flush(   s) {
   } else if (job != "") for (s in inv) print job, s, inv[s]
   delete inv; delete pc; serial = complete = 0
 }
-$1 == "J" { flush(); job = $2; first = 1; next }
-first { first = 0; if ($0 == "V\tserial-v2") { serial = 1; next } }
-complete { failed = 1; next }
-serial && $0 == "V\tend-serial-v2" { complete = 1; next }
+$1 == "J" && NF == 2 && $2 != "" { flush(); job = $2; next }
+job != "" && !serial && $0 == "V\tserial-v2" { serial = 1; next }
+serial && !complete && $0 == "V\tend-serial-v2" { complete = 1; next }
+!serial || complete || $1 == "J" || $1 == "V" {
+  print "invalid fine job trace at " FILENAME ":" FNR > "/dev/stderr"
+  failed = 1; exit
+}
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
   if ($3 == "lit") pc[$2] = cl[$4 "\t" $5 "\t" $6]
@@ -49,4 +52,4 @@ $1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }
-END { flush(); if (failed) exit 1 }
+END { if (!failed) flush(); if (failed) exit 1 }

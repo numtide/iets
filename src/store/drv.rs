@@ -296,6 +296,83 @@ impl DerivationOutput {
 }
 
 impl Derivation {
+    /// BLAKE3 of everything the derivation's paths and hashes follow from:
+    /// its name, outputs, inputs (an input `.drv` path fixes that input's
+    /// modulo hash), system, builder, args and env, each length-prefixed.
+    /// Two derivations with the same key have the same ATerm, `.drv` path,
+    /// output paths and modulo hash.
+    pub fn content_key(&self) -> [u8; 32] {
+        // one buffer hashed at once: BLAKE3 compresses whole chunks in
+        // parallel, where small updates went block by block
+        fn put(h: &mut Vec<u8>, b: &[u8]) {
+            h.extend_from_slice(&(b.len() as u64).to_le_bytes());
+            h.extend_from_slice(b);
+        }
+        fn node(h: &mut Vec<u8>, n: &InputNode) {
+            put(h, &(n.outputs.len() as u64).to_le_bytes());
+            for o in &n.outputs {
+                put(h, o.as_bytes());
+            }
+            put(h, &(n.children.len() as u64).to_le_bytes());
+            for (k, c) in &n.children {
+                put(h, k.as_bytes());
+                node(h, c);
+            }
+        }
+        let mut h = Vec::with_capacity(8192);
+        put(&mut h, self.name.as_bytes());
+        put(&mut h, &(self.outputs.len() as u64).to_le_bytes());
+        for (name, out) in &self.outputs {
+            put(&mut h, name.as_bytes());
+            match out {
+                DerivationOutput::InputAddressed(p) => {
+                    put(&mut h, b"ia");
+                    put(&mut h, p.base_name().as_bytes());
+                }
+                DerivationOutput::Fixed { method, hash } => {
+                    put(&mut h, b"fixed");
+                    put(&mut h, method.prefix().as_bytes());
+                    put(&mut h, hash.algo.name().as_bytes());
+                    put(&mut h, hash.bytes());
+                }
+                DerivationOutput::Deferred => put(&mut h, b"deferred"),
+                DerivationOutput::CaFloating { method, algo } => {
+                    put(&mut h, b"ca");
+                    put(&mut h, method.prefix().as_bytes());
+                    put(&mut h, algo.name().as_bytes());
+                }
+            }
+        }
+        put(&mut h, &(self.input_srcs.len() as u64).to_le_bytes());
+        for p in &self.input_srcs {
+            put(&mut h, p.base_name().as_bytes());
+        }
+        put(&mut h, &(self.input_drvs.len() as u64).to_le_bytes());
+        for (p, n) in &self.input_drvs {
+            put(&mut h, p.base_name().as_bytes());
+            node(&mut h, n);
+        }
+        put(&mut h, self.platform.as_bytes());
+        put(&mut h, self.builder.as_bytes());
+        put(&mut h, &(self.args.len() as u64).to_le_bytes());
+        for a in &self.args {
+            put(&mut h, a);
+        }
+        put(&mut h, &(self.env.len() as u64).to_le_bytes());
+        for (k, v) in &self.env {
+            put(&mut h, k.as_bytes());
+            put(&mut h, v);
+        }
+        match &self.structured_attrs {
+            Some(j) => {
+                put(&mut h, b"json");
+                put(&mut h, j.as_bytes());
+            }
+            None => put(&mut h, b"nojson"),
+        }
+        blake3::hash(&h).into()
+    }
+
     /// Mirrors derivations.cc:Derivation::unparse without masking.
     pub fn unparse(&self) -> Result<Vec<u8>, DrvError> {
         self.unparse_with(false, None)
@@ -1110,6 +1187,7 @@ pub fn finalize_with_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
     fn fixture_dir() -> PathBuf {
@@ -1505,5 +1583,39 @@ mod tests {
             e.0,
             "Cannot have an environment variable named '__json'. This key is reserved for encoding structured attrs"
         );
+    }
+
+    /// Different derivations, a different key: every fixture, and edits of
+    /// one that move bytes across a field boundary or between fields.
+    #[test]
+    fn the_content_key_tells_derivations_apart() {
+        let drvs: Vec<Derivation> = fixtures()
+            .iter()
+            .map(|(p, t)| Derivation::parse(t, Derivation::name_from_path(p).unwrap()).unwrap())
+            .collect();
+        let mut keys: HashSet<[u8; 32]> = drvs.iter().map(Derivation::content_key).collect();
+        assert_eq!(keys.len(), drvs.len(), "two fixtures with one key");
+        let base = drvs[0].clone();
+        assert_eq!(base.content_key(), drvs[0].content_key());
+        let edits: [fn(&mut Derivation); 13] = [
+            |d| d.args = vec![b"a".to_vec(), b"b".to_vec()],
+            |d| d.args = vec![b"a".to_vec(), b"c".to_vec()],
+            |d| d.args = vec![b"b".to_vec(), b"a".to_vec()],
+            |d| d.args = vec![b"ac".to_vec()],
+            |d| d.args = vec![b"ab".to_vec()],
+            |d| d.args = vec![b"a".to_vec(), Vec::new(), b"b".to_vec()],
+            |d| d.env.push(("a".into(), b"xb".to_vec())),
+            |d| d.env.push(("ax".into(), b"b".to_vec())),
+            |d| d.env.push(("a".into(), b"xc".to_vec())),
+            |d| d.structured_attrs = Some(String::new()),
+            |d| d.name.push('x'),
+            |d| d.platform.push('x'),
+            |d| d.builder.push('x'),
+        ];
+        for (i, edit) in edits.iter().enumerate() {
+            let mut d = base.clone();
+            edit(&mut d);
+            assert!(keys.insert(d.content_key()), "edit {i} kept a key");
+        }
     }
 }

@@ -687,7 +687,7 @@ pub fn read_dir_kinds(p: &Path) -> io::Result<Vec<(Vec<u8>, Kind)>> {
     for e in fs::read_dir(p)? {
         let e = e?;
         let kind = Kind::of_file_type(&e.file_type()?);
-        out.push((e.file_name().as_bytes().to_vec(), kind));
+        out.push((e.file_name().into_encoded_bytes(), kind));
     }
     Ok(out)
 }

@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::fmt::Display;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -41,6 +42,10 @@ pub fn which(prog: &str) -> Option<PathBuf> {
     env::split_paths(&path)
         .map(|d| d.join(prog))
         .find(|p| p.is_file())
+}
+
+pub(super) fn daemon_ready(socket: &Path) -> bool {
+    UnixStream::connect(socket).is_ok()
 }
 
 /// `prog` on `PATH` in the real store, out of any profile.
@@ -106,7 +111,7 @@ impl Store {
         };
         store.write_pkgs();
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !store.socket().exists() {
+        while !daemon_ready(&store.socket()) {
             let exited = store.daemon.try_wait().unwrap().is_some();
             assert!(
                 !exited && Instant::now() < deadline,
@@ -308,7 +313,7 @@ impl Store {
             root,
         };
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !b.socket().exists() {
+        while !daemon_ready(&b.socket()) {
             let exited = b.daemon.try_wait().unwrap().is_some();
             assert!(
                 !exited && Instant::now() < deadline,

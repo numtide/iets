@@ -14,8 +14,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
-use e2e::{Store, ok, stderr, stdout};
+use e2e::{Store, daemon_ready, ok, stderr, stdout};
 use iets::remote::worker::{Connection, Transport};
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, listen, socket};
 use serde_json::Value;
 
 /// The shared case, with an executable and a symlink in the tree too.
@@ -534,4 +535,22 @@ fn a_large_query_does_not_stall() {
     });
     let valid = rx.recv_timeout(Duration::from_secs(60)).expect("stalled");
     assert!(valid.is_empty());
+}
+
+#[test]
+fn daemon_readiness_requires_a_listener() {
+    let dir = tempfile::Builder::new()
+        .prefix("iets-ready.")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = dir.path().join("socket");
+    assert!(!daemon_ready(&path));
+    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+    bind(&fd, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+    assert!(path.exists());
+    assert!(!daemon_ready(&path));
+    listen(&fd, 1).unwrap();
+    assert!(daemon_ready(&path));
+    drop(fd);
+    assert!(!daemon_ready(&path));
 }

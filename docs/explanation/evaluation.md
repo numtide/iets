@@ -265,9 +265,15 @@ helper, so it costs nothing.
 A lint finding is not a value and is held back instead. One a helper
 produced is parked on the innermost thunk the helper was forcing
 (`parallel::force::defer`). The demand path runs it when it takes that
-thunk's value and drops it otherwise. Cancelling the helper, as `trace` does, was measured at 15 % of the wall
-for lints, and turning the fan-out off in the builtins that stop early costs
-37 % at four workers, so neither is the answer.
+thunk's value and drops it otherwise. Cancelling helpers for all lints cost
+15 % of wall time on nixos-server at four workers. Turning off fan-out in
+builtins that stop early cost 37 %.
+
+Source-copy findings use the first demanded copy of a path. A helper that
+filled the shared path cache could suppress a warning or assign it to a
+different source line. If the unfiltered-directory lint applies, the helper
+stops before hashing. If only a Git or size finding applies, the helper
+discovers it during hashing, and the demand path may hash the same tree again.
 
 Effects come out in the order of the sequential run, as in Nix. A thunk's
 parked effects keep their order, and a read of another speculated thunk

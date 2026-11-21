@@ -20,6 +20,7 @@
 //! jobs that share thunks still gives each job all that it depends on.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
@@ -2502,7 +2503,7 @@ struct Server {
     graphs: Vec<Graph>,
     keys: Keys,
     /// The graphs that `load` started to read.
-    loading: Vec<std::thread::JoinHandle<std::io::Result<Graph>>>,
+    loading: VecDeque<std::thread::JoinHandle<std::io::Result<Graph>>>,
     /// By key, made again after a load or a drop: the graph of the newest
     /// step that read it, plus one, where a check takes its trace; and how
     /// many graphs read it.
@@ -2614,7 +2615,7 @@ impl Server {
 
     /// Takes the graphs that `load` started.
     fn settle(&mut self) -> std::io::Result<()> {
-        for h in std::mem::take(&mut self.loading) {
+        while let Some(h) = self.loading.pop_front() {
             self.graphs.push(h.join().expect("a loader thread")?);
             self.fresh = false;
         }
@@ -2900,7 +2901,7 @@ fn serve() -> i32 {
                 let (dir, step) = (dir.to_string(), step.parse().unwrap_or(0));
                 let paths = Graph::paths(&dir, &mut s.keys);
                 let d = dir.clone();
-                s.loading.push(std::thread::spawn(move || {
+                s.loading.push_back(std::thread::spawn(move || {
                     Graph::load(dir, step, paths)
                         .map_err(|e| std::io::Error::other(format!("{d}: {e}")))
                 }));

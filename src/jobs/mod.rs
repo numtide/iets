@@ -371,13 +371,6 @@ fn coerce_store_path(ev: &mut Evaluator, w: Word, pos: Pos, what: &str) -> EvalR
     let mut ctx = Vec::new();
     let s = ev.coerce_to_string(w, &mut ctx, pos, what, false, false, true)?;
     let s = String::from_utf8_lossy(&s);
-    if !s.starts_with(store_dir()) {
-        return Err(Error::boxed(
-            ErrorKind::Eval,
-            format!("path '{s}' is not in the Nix store"),
-            pos,
-        ));
-    }
     StorePath::parse(&s).map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))
 }
 

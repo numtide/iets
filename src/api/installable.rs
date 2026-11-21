@@ -778,6 +778,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rebuilding_an_equal_derivation_keeps_its_first_attribute() {
+        let mut ev = Evaluator::new();
+        let src = br#"{
+          a = derivation { name = "same"; system = "test"; builder = "/bin/test"; };
+          z = derivation { name = "same"; system = "test"; builder = "/bin/test"; };
+        }"#;
+        let ir = ev
+            .compile_source(b"/aliases.nix", src.to_vec(), b"/", None)
+            .unwrap();
+        let root = ev.eval(ev.root_env, ir).unwrap();
+        let args = ev.empty_attrs();
+        let mut roots = Vec::new();
+        roots_of(&mut ev, root, args, "", &mut roots).unwrap();
+        assert_eq!(roots.len(), 1);
+        let info = ev.drv.drvs.get(&roots[0].0).unwrap();
+        assert_eq!(info.attr.as_deref(), Some("a"));
+        let (file, offset) = ev.file_of(info.pos.unwrap()).unwrap();
+        assert_eq!(file.line_col(offset).0, 2);
+    }
+
+    #[test]
     fn the_name_a_program_takes_from_a_derivation_name() {
         assert_eq!(drv_pname("treefmt-2.0.0"), "treefmt");
         assert_eq!(drv_pname("nixfmt"), "nixfmt");

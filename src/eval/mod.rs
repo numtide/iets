@@ -2634,8 +2634,9 @@ impl Evaluator {
         pos: Pos,
     ) -> EvalResult<Word> {
         let mut v = self.eval_fast(env, subject)?;
-        for elem in path {
-            let name = self.attr_name(env, elem)?;
+        let mut elems = path.iter();
+        let mut next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
+        while let Some(name) = next {
             let attr = match default {
                 Some(d) => match v.as_attrs().and_then(|a| a.get(name)) {
                     Some(a) => a,
@@ -2659,6 +2660,9 @@ impl Evaluator {
                     }
                 }
             };
+            // Nix evaluates the next name before forcing the selected value,
+            // but only after this lookup succeeds (a default can stop here).
+            next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
             v = self.force_cell(&attr.cell).map_err(|mut e| {
                 e.add_trace(
                     attr.pos,
@@ -2680,8 +2684,9 @@ impl Evaluator {
     #[inline(never)]
     fn eval_select_count(&mut self, env: &'static EnvObj, s: &SelectIr) -> EvalResult<Word> {
         let mut v = self.eval(env, s.subject)?;
-        for elem in s.path {
-            let name = self.attr_name(env, elem)?;
+        let mut elems = s.path.iter();
+        let mut next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
+        while let Some(name) = next {
             let Some(a) = v.as_attrs().and_then(|a| a.get(name)) else {
                 let Some(d) = s.default else {
                     self.force_attrs(v, s.pos, "while selecting an attribute")?;
@@ -2693,6 +2698,8 @@ impl Evaluator {
                 }
                 return self.eval(env, d);
             };
+            // Keep the same name/force order as eval_select, including defaults.
+            next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
             let read = match name == self.s.rev_count {
                 true => purity::count_read(self, &a.cell, s.pos),
                 false => self.force_cell(&a.cell),

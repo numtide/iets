@@ -85,6 +85,12 @@ pub fn check_reservation(workers: usize, stack_size: usize) -> Result<(), StackE
     Ok(())
 }
 
+/// The most workers whose stacks of `stack_size` bytes fit in
+/// `MAX_RESERVE`, at least one.
+pub fn max_workers(stack_size: usize) -> usize {
+    (MAX_RESERVE - MAIN_STACK) / stack_size.max(1) + 1
+}
+
 /// Base addresses of the fiber stacks, for the SIGSEGV handler. A fixed
 /// table because the handler may not lock; more live fibers than this lose
 /// only the message, not the exit code. A freed stack frees its entry.
@@ -369,6 +375,16 @@ mod tests {
             .unwrap();
             assert_eq!(c.n.load(Ordering::Relaxed), i);
         }
+    }
+
+    #[test]
+    fn max_workers_is_the_most_the_cap_takes() {
+        for stack in [DEFAULT_STACK, 1 << 20, 16 << 30, MAX_RESERVE] {
+            let n = max_workers(stack);
+            check_reservation(n, stack).expect("max_workers fits");
+            check_reservation(n + 1, stack).expect_err("one more does not");
+        }
+        assert_eq!(max_workers(DEFAULT_STACK), 241);
     }
 
     #[test]

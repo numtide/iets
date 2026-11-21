@@ -165,6 +165,24 @@ pub enum Input {
     Flake(String),
 }
 
+/// Worker processes when `--max-memory-size` asks for them and `--workers`
+/// does not say: each holds up to the limit, so they stay few.
+const PROCESS_WORKERS_MAX: usize = 4;
+
+/// The default `--workers` of a job walk (`eval-jobs`): every visible CPU
+/// for fibers in one process, at most `PROCESS_WORKERS_MAX` for worker
+/// processes. `IETS_WORKERS` decides when set.
+pub fn jobs_workers(processes: bool) -> usize {
+    if processes {
+        Session::current()
+            .settings()
+            .workers
+            .unwrap_or_else(|| parallel::visible_cpus().min(PROCESS_WORKERS_MAX))
+    } else {
+        parallel::default_jobs_workers()
+    }
+}
+
 /// A `-I prefix=path` (or `-I path`) entry as a pair: the path absolute, a
 /// URL as given.
 pub fn parse_include(s: &str) -> (Vec<u8>, Vec<u8>) {

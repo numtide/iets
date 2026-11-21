@@ -77,7 +77,17 @@ impl Driver for SyncEv {
         // SAFETY: the fiber is switched out and this worker holds the slot,
         // so nothing else references its evaluator.
         let ev = unsafe { ev_of(slot) };
-        mem::swap(&mut ev.arena, &mut w.arena);
+        // a switch in starts the evaluator's clock over the worker's arena,
+        // a switch out pauses it over the same arena
+        if !ev.clock.on {
+            mem::swap(&mut ev.arena, &mut w.arena);
+        } else if ev.clock.is_running() {
+            ev.clock.pause(&ev.arena);
+            mem::swap(&mut ev.arena, &mut w.arena);
+        } else {
+            mem::swap(&mut ev.arena, &mut w.arena);
+            ev.clock.start(&ev.arena);
+        }
         ev.interner.swap_cache(&mut w.icache);
         // a fiber parked in the middle of a task keeps its counters until it
         // is resumed, which a stats line printed meanwhile would not see

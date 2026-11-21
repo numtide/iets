@@ -43,7 +43,7 @@ common:
   --arg N EXPR, --argstr N STR  call a top-level function with N = EXPR/\"STR\"
   -I, --include P=PATH  make <P> resolve to PATH
   --impure, --pure-eval  turn pure evaluation off or on
-  --workers N           evaluator threads (default: the cores, at most 4)
+  --workers N           evaluator threads (default: the CPUs, at most 8)
   --timings             report each phase and the cache on stderr
   --no-tracing-cache    do not use the tracing cache
   --no-ir-cache         do not use the compiled-file cache
@@ -109,7 +109,7 @@ REGEX ('iets help commands'). INSTALLABLE is a flake reference, a path or
   --arg N EXPR, --argstr N STR  call a top-level function with N = EXPR/\"STR\"
   -I, --include P=PATH  make <P> resolve to PATH
   --impure, --pure-eval  turn pure evaluation off or on
-  --workers N           evaluator threads (default: the cores, at most 4)
+  --workers N           evaluator threads (default: the CPUs, at most 8)
   --timings             report the index cache on stderr
   --no-tracing-cache    do not use the index, which the tracing cache holds
   --no-ir-cache         do not use the compiled-file cache
@@ -151,8 +151,10 @@ Walk a jobset and print one JSON line per derivation, like nix-eval-jobs
   --arg-from-file N F, --arg-from-stdin N  --argstr N from F or stdin
   -I, --include P=PATH  make <P> resolve to PATH
   --impure              turn off the pure evaluation --flake implies
-  --workers N           worker processes (default: the cores, at most 4)
-  --max-memory-size MB  restart a worker above MB (4096; 0: one process)
+  --workers N           evaluator threads (default: the CPUs), or with
+                        --max-memory-size worker processes (at most 4)
+  --max-memory-size MB  worker processes, each restarted above MB
+                        (default 0: one process with no limit)
   --force-recurse       walk every attribute set, not only marked ones
   --meta, --show-input-drvs  add each job's meta, inputDrvs
   --provenance          add each derivation's source position as pos

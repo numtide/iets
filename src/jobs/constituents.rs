@@ -113,8 +113,8 @@ pub fn fnmatch(pattern: &[u8], name: &[u8]) -> bool {
                     continue;
                 }
             }
-            Some(b'\\') if p + 1 < pattern.len() => {
-                if pattern[p + 1] == name[n] {
+            Some(b'\\') => {
+                if pattern.get(p + 1) == Some(&name[n]) {
                     p += 2;
                     n += 1;
                     continue;
@@ -390,6 +390,8 @@ mod tests {
     #[case(b"*.x86_64-linux", b"nixos.tests.login.x86_64-linux", true)]
     #[case(b"abc", b"abcd", false)]
     #[case(b"a*b*c", b"axxbyyc", true)]
+    #[case(br"a*\", br"abc\", false)]
+    #[case(br"a*\\", br"abc\", true)]
     fn fnmatch_basics(#[case] pattern: &[u8], #[case] name: &[u8], #[case] want: bool) {
         assert_eq!(fnmatch(pattern, name), want);
     }

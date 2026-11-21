@@ -724,7 +724,6 @@ pub fn copy_path_to_store(
     };
     let full = ev.arena.alloc_bytes(sp.to_full_string().as_bytes());
     ev.note_store_add(&sp, "tree", nar_size, &origin, pos);
-    ev.src_to_store.insert(path.to_vec(), full);
     let origin_on_disk = origin.local().is_some();
     let o = SourceOrigin::tree(origin, hash, nar_size);
     if origin_on_disk {
@@ -732,6 +731,8 @@ pub fn copy_path_to_store(
     } else {
         ev.known.add(sp, o);
     }
+    // A cache hit can immediately read through the virtual store path.
+    ev.src_to_store.insert(path.to_vec(), full);
     Ok(full)
 }
 
@@ -779,6 +780,51 @@ mod tests {
         assert_eq!(on_disk(other).unwrap(), other);
         assert_eq!(on_disk(b"/etc/passwd").unwrap(), b"/etc/passwd");
         assert!(locate(&ev, b"/nix/store/not-a-store-path").is_none());
+    }
+
+    #[test]
+    fn a_copy_cache_hit_requires_a_registered_origin() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("source");
+        fs::write(&file, b"copied bytes").unwrap();
+        let mut writer = Evaluator::new();
+        let path = writer.arena.alloc_bytes(&sys::path_to_internal(&file));
+        let mut reader = writer.clone();
+        let full = copy_path_to_store(&mut writer, path, Pos::NONE).unwrap();
+        assert_eq!(
+            copy_path_to_store(&mut reader, path, Pos::NONE).unwrap(),
+            full
+        );
+        assert_eq!(reader.nr_store_adds, 0);
+        assert_eq!(
+            resolve(&reader, full).read(&reader, true).unwrap(),
+            b"copied bytes"
+        );
+
+        // Make registration fail at its lock on a fresh pair of evaluators.
+        let mut writer = Evaluator::new();
+        let mut reader = writer.clone();
+        let known = writer.known.clone();
+        catch_unwind(AssertUnwindSafe(|| {
+            let _guard = known.lock();
+            panic!("poison the origin index");
+        }))
+        .unwrap_err();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| copy_path_to_store(
+                &mut writer,
+                path,
+                Pos::NONE
+            )))
+            .is_err()
+        );
+        assert_eq!(writer.nr_store_adds, 1, "the copy reached registration");
+        // A miss must now report the missing source. An early cache publication
+        // would let the cloned reader return the store path despite the failure.
+        fs::remove_file(file).unwrap();
+        assert!(copy_path_to_store(&mut reader, path, Pos::NONE).is_err());
     }
 
     #[test]

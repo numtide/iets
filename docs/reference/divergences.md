@@ -275,12 +275,14 @@ already evaluated variable (`Expr::maybeThunk`). iets keeps a value there
 instead of a thunk when it costs nothing to have it: a lambda, a folded
 `builtins.x`, a forced attribute of an attrset that is already forced
 (but not a function, see below), and `+` or `-` on ints that are
-already forced. The results are the same; only a
-printer that stops at thunks can see it. `nix-instantiate --eval` without
+already forced. A printer that stops at thunks can therefore show more
+of the value in iets. `nix-instantiate --eval` without
 `--strict` prints `[ builtins.nixPath (1 + 1) (x: x) ]` as
-`[ <CODE> <CODE> <CODE> ]`, and iets prints `[ [ ] 2 <LAMBDA> ]`. These are
-speed shortcuts, kept on purpose; `--strict`, `--json` and `nix eval`
-print the same.
+`[ <CODE> <CODE> <CODE> ]`, and iets prints `[ [ ] 2 <LAMBDA> ]`. These speed
+shortcuts are intentional. They can also change whether classic
+`nix-instantiate --eval --json` succeeds. For `[ (1 + 1) ]`, iets emits
+`[2]` and Nix reports that it cannot convert a thunk to JSON. Adding
+`--strict` gives `[2]` in both. Modern `nix eval --json` forces the value.
 
 `==` can see them too. In Nix, two elements that come from one slot are
 equal without a look inside, and a function equals only the function in

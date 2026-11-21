@@ -31,7 +31,7 @@ use crate::store::path::{
     HASH_PART_LEN, IngestionMethod, StorePath, StorePathError, make_fixed_output_path,
     make_text_path, split_store_path,
 };
-use crate::store::source::{SourceOrigin, Src, SrcPath};
+use crate::store::source::{SourceKind, SourceOrigin, Src, SrcPath};
 use crate::trace::{self, Kind};
 use crate::{config, log, treestore};
 
@@ -628,6 +628,9 @@ fn add_path_inner(
     };
     let on_disk = match at.at() {
         None => return Err(missing(path)),
+        // An in-memory regular file can be re-ingested from its bytes. A
+        // recursive origin cannot yet carry the original object's references.
+        Some(At::Mem(_)) if method == IngestionMethod::Flat || refs.is_empty() => false,
         Some(At::Mem(_)) => return Err(store_hooks::recopy_unsupported(path, pos)),
         Some(At::Spool(entry, base)) => {
             treestore::record(ev, &entry, base);
@@ -652,14 +655,16 @@ fn add_path_inner(
         }
     };
     let mut accepted: Option<HashSet<PathBuf>> = filter.map(|_| HashSet::new());
-    let nar_size: u64;
-    let hash = match method {
+    let (hash, size, flat) = match method {
         // only `outputHashMode` reaches it, never a path added to the store
         IngestionMethod::Text => unreachable!("a source tree is not text addressed"),
         IngestionMethod::Flat => {
             let bytes = at.read(ev, true).map_err(|e| read_error(e, path, pos))?;
-            nar_size = bytes.len() as u64;
-            hash_bytes(HashAlgo::Sha256, &bytes)
+            (
+                hash_bytes(HashAlgo::Sha256, &bytes),
+                bytes.len() as u64,
+                Some(bytes),
+            )
         }
         IngestionMethod::Recursive => {
             // The observation records `accepted`, which is the dump's own decisions unless
@@ -708,7 +713,7 @@ fn add_path_inner(
                 return Err(e);
             }
             r.map_err(|e| io_error(e, "copying", path, pos))?;
-            nar_size = h.bytes_written();
+            let nar_size = h.bytes_written();
             let h = h.finish();
             if on_disk {
                 ev.trace()
@@ -720,31 +725,10 @@ fn add_path_inner(
             if on_disk {
                 purity::large_source_copy(ev, path, nar_size, pos)?;
             }
-            h
+            (h, nar_size, None)
         }
     };
     let sp = make_fixed_output_path(method, &hash, name, &refs).map_err(store_err)?;
-    let kind = if method == IngestionMethod::Recursive {
-        "tree"
-    } else {
-        "flat"
-    };
-    ev.note_store_add(&sp, kind, nar_size, &at, pos);
-    if method == IngestionMethod::Recursive {
-        if on_disk {
-            let at = SrcPath::fs(resolved, accepted.map(Arc::new).or(parent));
-            ev.known
-                .add_copy(sp.clone(), SourceOrigin::tree(at, hash, nar_size));
-        } else {
-            // a spool origin's root is itself a member, which no filter was asked about
-            if let Some(a) = &mut accepted {
-                a.insert(resolved);
-            }
-            let at = at.filtered(accepted.map(Arc::new).or(parent));
-            ev.known
-                .add(sp.clone(), SourceOrigin::tree(at, hash, nar_size));
-        }
-    }
     if let Some(exp) = expected_sp
         && exp != sp
     {
@@ -754,6 +738,33 @@ fn add_path_inner(
             "store path mismatch in (possibly filtered) path added from '{}'",
             lossy(path)
         );
+    }
+    if let Some(bytes) = flat {
+        ev.note_store_add(&sp, "flat", size, &at, pos);
+        // Flat ingestion stores one non-executable regular file, even when
+        // the producer is executable. Keep the exact bytes used for its CA.
+        ev.known.add(
+            sp.clone(),
+            SourceOrigin {
+                at: SrcPath::mem(bytes),
+                kind: SourceKind::Flat { hash },
+                nar: None,
+            },
+        );
+    } else {
+        ev.note_store_add(&sp, "tree", size, &at, pos);
+        if on_disk {
+            let at = SrcPath::fs(resolved, accepted.map(Arc::new).or(parent));
+            ev.known
+                .add_copy(sp.clone(), SourceOrigin::tree(at, hash, size));
+        } else {
+            // a spool origin's root is itself a member, which no filter was asked about
+            if let Some(a) = &mut accepted {
+                a.insert(resolved);
+            }
+            let at = at.filtered(accepted.map(Arc::new).or(parent));
+            ev.known.add(sp.clone(), SourceOrigin::tree(at, hash, size));
+        }
     }
     Ok(sp)
 }

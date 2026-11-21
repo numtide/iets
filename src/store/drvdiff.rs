@@ -106,19 +106,57 @@ fn walk(
     let (pairs, added, removed) = pair_inputs(&a.input_drvs, &b.input_drvs);
     one_sided(v, "input drv", removed.iter(), true);
     one_sided(v, "input drv", added.iter(), false);
-    let want = |n: &InputNode| Some(n.outputs.iter().cloned().collect::<Vec<_>>().join(","));
     for (x, y) in pairs {
         let mut c = match depth {
             0 => node(&x, &y, Some("depth")),
             _ => walk(load, &x, &y, depth - 1, seen)?,
         };
-        let (wa, wb) = (want(&a.input_drvs[&x]), want(&b.input_drvs[&y]));
-        entry(&mut c.items, "wanted", "", wa, wb);
+        wanted(
+            &mut c.items,
+            "",
+            Some(&a.input_drvs[&x]),
+            Some(&b.input_drvs[&y]),
+        );
         if !c.is_empty() || c.cut.is_some() {
             d.changed.push(c);
         }
     }
     Ok(d)
+}
+
+/// A JSON Pointer to a dynamic derivation, relative to its input drv.
+fn wanted(items: &mut Vec<Item>, path: &str, a: Option<&InputNode>, b: Option<&InputNode>) {
+    let (left, right) = (a.map(|n| &n.outputs), b.map(|n| &n.outputs));
+    if left != right {
+        // Keep the usual comma-separated output names. If either side could
+        // be mistaken for a different list, quote both lists as JSON arrays.
+        let ambiguous = left
+            .into_iter()
+            .chain(right)
+            .flatten()
+            .any(|name| name.is_empty() || name.contains(','));
+        let show = |names: &BTreeSet<String>| {
+            if ambiguous {
+                serde_json::to_string(names).expect("serialize string set")
+            } else {
+                names.iter().cloned().collect::<Vec<_>>().join(",")
+            }
+        };
+        entry(items, "wanted", path, left.map(show), right.map(show));
+    }
+    let (a, b) = (a.map(|n| &n.children), b.map(|n| &n.children));
+    for key in union(
+        a.into_iter().flat_map(|m| m.keys()),
+        b.into_iter().flat_map(|m| m.keys()),
+    ) {
+        let segment = key.replace('~', "~0").replace('/', "~1");
+        wanted(
+            items,
+            &format!("{path}/{segment}"),
+            a.and_then(|m| m.get(key)),
+            b.and_then(|m| m.get(key)),
+        );
+    }
 }
 
 /// An empty node for the pair, with the reason the walk stopped, if any.

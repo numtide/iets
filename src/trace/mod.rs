@@ -399,6 +399,11 @@ impl Trace {
     /// A regular file whose bytes are in memory.
     pub fn file(&self, path: &[u8], meta: &fs::Metadata, bytes: &[u8]) {
         if self.is_on() {
+            // A stream such as procfs can change without updating its size or times.
+            if bytes.len() as u64 != meta.len() {
+                self.mark_uncacheable();
+                return;
+            }
             self.record(file_obs(&sys::from_native(path), meta, sha256(bytes)));
         }
     }

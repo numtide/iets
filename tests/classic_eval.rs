@@ -1345,7 +1345,10 @@ fn ignored_flags_and_settings() {
 
 #[test]
 fn nix_derivation_show() {
-    let s = store!();
+    let s = store!((
+        "extra-experimental-features",
+        "ca-derivations dynamic-derivations",
+    ));
     let f = Farm::new(&s);
     let mut c = Checks::default();
     let d = drvs(&s);
@@ -1393,12 +1396,14 @@ in {
         format!("{d}/multi.nix"),
         format!("{d}/floats.nix"),
     );
+    let dynamic = format!("{d}/dyndrv.nix");
     let pkg = format!("{r}#pkg");
     let mut cases: Vec<(&str, Vec<&str>)> = vec![
         ("a custom drv", vec!["-f", &def]),
         ("a multi-output drv", vec!["-f", &multi]),
         ("a fixed-output drv", vec!["-f", fod]),
         ("structured attrs and an input drv", vec!["-f", dep, "top"]),
+        ("nested dynamic inputs", vec!["-f", &dynamic]),
         ("two installables", vec!["-f", dep, "top", "dep"]),
         ("--pretty", vec!["--pretty", "-f", &multi]),
         ("--no-pretty", vec!["--no-pretty", "-f", &multi]),

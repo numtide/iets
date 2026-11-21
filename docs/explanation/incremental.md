@@ -21,7 +21,7 @@ and one merge in ten invalidated all of them.
 
 ## What the prototype records
 
-`IETS_FINE_TRACE` turns the trace on, at one worker and without the IR cache.
+To record a trace, set `IETS_FINE_TRACE` and pass `--workers 1`.
 
 | observation | made when | invalid when |
 |---|---|---|
@@ -68,6 +68,19 @@ files that changed, and the first changed byte of each file.
 of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
+
+For JSON output each element's trace covers its serialization, including
+attributes selected through `outPath`, calls to `__toString`, and path
+copies. These dependencies can arise after forcing the element itself.
+The text printer can display a reference to a previously printed container.
+For text output, a list or set element, or an element still unforced, is
+therefore checked again on each change. Scalar jobs continue to use their
+own traces. Regenerate graphs recorded before output demands were tracked.
+
+An `iets eval` with `IETS_FINE_TRACE` set evaluates the request even when
+its rendered result is already cached. Check the command's exit status
+before consuming any requested trace files. A write failure reports the
+destination and fails the command even if it already printed its result.
 
 ## Results
 
@@ -346,7 +359,18 @@ commit, and more while kept jobs hold older graphs.
 
 ## Limits
 
-- The trace runs at one worker, without the IR cache.
+- The trace runs at one worker, without the IR cache. Regenerate graphs and
+  per-job text captured before serial recording was enforced. Their worker
+  count was not recorded. Use a new or empty directory for each graph or
+  batch of per-job traces. The recorder publishes each complete directory
+  with a rename and reports an error if its destination is populated. A batch
+  with no jobs contains a hidden `.empty` marker; enumerate numeric job files,
+  not every directory entry. Open the directory after a successful capture;
+  no numeric files are a complete empty batch only when `.empty` is present.
+  An unused empty directory is not evidence. Standalone job text still requires
+  its framing. Output channels publish independently: use distinct, nonoverlapping
+  paths and check evaluation success before reading. Do not remove or replace a
+  published path while readers use it.
 - The job list of a commit comes from its full evaluation, not from an
   enumeration, and jobs that fail are left out.
 - The thresholds (8 bindings, one region per binding) were not tuned.

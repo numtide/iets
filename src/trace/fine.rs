@@ -1,6 +1,6 @@
 //! The fine trace: what an evaluation read, at the grain of a binding. A
 //! prototype for incremental evaluation, on only when `IETS_FINE_TRACE`
-//! names the file to write, and only at one worker.
+//! names the file to write. Capturing a trace runs the evaluator on one worker.
 //!
 //! A set or `let` of `FINE_MIN` bindings or more makes each binding a region
 //! of its own: the compiler wraps its value in `Ir::Region`, so an edit to
@@ -21,15 +21,18 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::io::ErrorKind;
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{env, fs, io, mem};
+use tempfile::Builder;
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
 };
-use crate::eval::Evaluator;
+use crate::eval::{EvalResult, Evaluator};
 use crate::runtime::Word;
 use crate::runtime::value::{Attr, AttrsObj, Value};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
@@ -50,6 +53,8 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+/// The reserved second node word identifies a graph recorded on the serial force path.
+const SERIAL_GRAPH: u32 = u32::from_le_bytes(*b"SER2");
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -80,6 +85,8 @@ struct State {
     rev: Option<FxHashMap<u64, Sym>>,
     obs: Vec<O>,
     obs_ids: FxHashMap<O, u32>,
+    /// What serializing each element of the last JSON result demanded.
+    json_elements: Vec<u32>,
     /// The frame that last recorded each observation and each trace.
     obs_stamp: Vec<u32>,
     /// Traces: a stamp, a length, then the entries; a trace id is the
@@ -188,7 +195,7 @@ pub fn init() {
 fn start(out: Option<PathBuf>) {
     let mut s = State {
         out,
-        nodes: vec![0, 0],
+        nodes: vec![0, SERIAL_GRAPH],
         serial: 1,
         ..State::default()
     };
@@ -239,8 +246,8 @@ impl State {
         self.frames.last().map_or(0, |f| f.1)
     }
 
-    fn record(&mut self, o: O) {
-        let id = match self.obs_ids.get(&o) {
+    fn obs_id(&mut self, o: O) -> u32 {
+        match self.obs_ids.get(&o) {
             Some(id) => *id,
             None => {
                 let id = self.obs.len() as u32;
@@ -249,7 +256,11 @@ impl State {
                 self.obs_stamp.push(0);
                 id
             }
-        };
+        }
+    }
+
+    fn record(&mut self, o: O) {
+        let id = self.obs_id(o);
         let st = self.stamp();
         if self.obs_stamp[id as usize] != st {
             self.obs_stamp[id as usize] = st;
@@ -1515,8 +1526,11 @@ impl State {
     /// `obs` as lines: `R` regions, `P` the provenances the `K` lookups and
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
-    fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
+    fn text(&self, ev: &Evaluator, obs: &[u32], job: bool) -> String {
         let mut out = String::new();
+        if job {
+            out.push_str("V\tserial-v2\n");
+        }
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1575,6 +1589,9 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
+        if job {
+            out.push_str("V\tend-serial-output-v1\n");
+        }
         out
     }
 
@@ -1594,6 +1611,9 @@ impl State {
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
+        // Unreachable as an observation. An older writer also overwrites
+        // this file when it records into a previously used directory.
+        o.push_str(OUTPUT_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
@@ -1624,12 +1644,38 @@ impl State {
         }
         std::fs::write(dir.join("queries"), q)?;
         let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        fs::write(dir.join("roots"), r)
     }
 }
 
-/// The trace of each element of `v` when it is a list, 0 for none.
-fn roots(v: Word) -> Vec<u32> {
+pub fn begin_json_output() {
+    with(|s| s.json_elements.clear());
+}
+
+/// JSON can force descendants, copy a path, or run a set's custom coercion
+/// after the element's own thunk has returned.
+pub fn json_element(w: Word, render: impl FnOnce() -> EvalResult<()>) -> EvalResult<()> {
+    push();
+    let result = render();
+    if result.is_ok() {
+        // Keep the direct dependency on the element's force even when its
+        // use inside the renderer went through a fingerprinted query.
+        if w.is_thunk() {
+            let st = w.thunk_state_cell().get();
+            if st.is_traced() {
+                edge(st.traced_id());
+            }
+        }
+        let t = pop();
+        with(|s| s.json_elements.push(t));
+    } else {
+        pop_failed();
+    }
+    result
+}
+
+/// The trace of each element of `v` when it is a list.
+fn roots(s: &mut State, v: Word) -> Vec<u32> {
     let mut v = v;
     if v.is_thunk() {
         let st = v.thunk_state_cell().get();
@@ -1641,10 +1687,25 @@ fn roots(v: Word) -> Vec<u32> {
     let Some(l) = v.as_list() else {
         return Vec::new();
     };
+    if s.json_elements.len() == l.len as usize {
+        return mem::take(&mut s.json_elements);
+    }
+    let mut fallback = None;
     l.cells()
         .iter()
         .map(|c| {
             let w = c.get();
+            // Text rendering can visit children after the element's force
+            // and can print a reference to an object seen in another job.
+            // Only scalar terminal values have a complete WHNF trace here.
+            if forced(w).is_none_or(|v| matches!(v.view(), Value::Attrs(_) | Value::List(_))) {
+                return *fallback.get_or_insert_with(|| {
+                    let id = s.obs_id(O::Out("R\t?\tjob-output\t".into()));
+                    let t = s.nodes.len() as u32;
+                    s.nodes.extend([0, 1, id]);
+                    t
+                });
+            }
             let st = if w.is_thunk() {
                 w.thunk_state_cell().get()
             } else {
@@ -1655,35 +1716,79 @@ fn roots(v: Word) -> Vec<u32> {
         .collect()
 }
 
+/// Publish a complete capture to a new or empty destination. Renaming a sibling
+/// directory also refuses a populated destination won by another recorder.
+fn publish_capture(dir: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut builder = Builder::new();
+    match fs::read_dir(dir) {
+        Ok(mut entries) => {
+            if entries.next().transpose()?.is_some() {
+                return Err(io::Error::new(
+                    ErrorKind::DirectoryNotEmpty,
+                    "use a new or empty directory for the fine capture",
+                ));
+            }
+            builder.permissions(fs::metadata(dir)?.permissions());
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let stage = builder.tempdir_in(parent)?;
+    write(stage.path())?;
+    fs::rename(stage.path(), dir)?;
+    let _ = stage.keep();
+    Ok(())
+}
+
 /// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named.
 /// When `v` is a list, writes the trace of each element to `DIR/INDEX` for
 /// `IETS_FINE_JOBS=DIR`, and the trace graph to `IETS_FINE_DAG=DIR`.
-pub fn dump(ev: &Evaluator, v: Option<Word>) {
+/// Returns whether all requested writes succeeded; each error names its path.
+#[must_use]
+pub fn dump(ev: &Evaluator, v: Option<Word>) -> bool {
     with(|s| {
+        let mut written = true;
+        let mut check = |path: &Path, result: io::Result<()>| {
+            if let Err(e) = result {
+                errln!("fine trace: writing {}: {e}", path.display());
+                written = false;
+            }
+        };
         if let Some(p) = &s.out {
             let all = s.flatten(&s.log[s.frames[0].0..]);
-            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
-                errln!("fine trace: writing {}: {e}", p.display());
-            }
+            check(p, fs::write(p, s.text(ev, &all, false)));
         }
-        let roots = v.map(roots).unwrap_or_default();
-        if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
-            for (i, t) in roots.iter().enumerate() {
-                let obs = if *t == 0 {
-                    Vec::new()
-                } else {
-                    s.flatten(&[EDGE | t])
-                };
-                let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
-                    errln!("fine trace: writing {}: {e}", p.display());
-                }
-            }
+        let roots = v.map(|v| roots(s, v)).unwrap_or_default();
+        if let Some(dir) = env::var_os("IETS_FINE_JOBS") {
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| {
+                    // An empty batch is still a published snapshot: keep it
+                    // distinguishable from an unused, precreated directory.
+                    if roots.is_empty() {
+                        fs::write(stage.join(".empty"), [])?;
+                    }
+                    for (i, t) in roots.iter().enumerate() {
+                        let obs = if *t == 0 {
+                            Vec::new()
+                        } else {
+                            s.flatten(&[EDGE | t])
+                        };
+                        fs::write(stage.join(i.to_string()), s.text(ev, &obs, true))?;
+                    }
+                    Ok(())
+                }),
+            );
         }
-        if let Some(dir) = std::env::var_os("IETS_FINE_DAG")
-            && let Err(e) = s.write_dag(ev, std::path::Path::new(&dir), &roots)
-        {
-            errln!("fine trace: writing {}: {e}", dir.display());
+        if let Some(dir) = env::var_os("IETS_FINE_DAG") {
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| s.write_dag(ev, stage, &roots)),
+            );
         }
         errln!(
             "fine trace: {} frames, {} words of traces, {} observations, {} provenances",
@@ -1692,7 +1797,8 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
             s.obs.len(),
             s.provs.len()
         );
-    });
+        written
+    })
 }
 
 fn kind_name(k: Kind) -> &'static str {
@@ -1850,12 +1956,36 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
 }
 
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+    let bytes = fs::read(path)?;
+    if bytes.get(4..8) != Some(SERIAL_GRAPH.to_le_bytes().as_slice()) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "regenerate the fine graph with serial recording",
+        ));
+    }
+    Ok(bytes
         .as_chunks::<4>()
         .0
         .iter()
         .map(|b| u32::from_le_bytes(*b))
         .collect())
+}
+
+const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
+
+fn read_observations(dir: &Path) -> io::Result<String> {
+    let mut obs = std::fs::read_to_string(dir.join("obs"))?;
+    if !obs.ends_with(OUTPUT_VERSION)
+        || obs.len() > OUTPUT_VERSION.len()
+            && obs.as_bytes()[obs.len() - OUTPUT_VERSION.len() - 1] != b'\n'
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "regenerate the fine graph to record job output demands",
+        ));
+    }
+    obs.truncate(obs.len() - OUTPUT_VERSION.len());
+    Ok(obs)
 }
 
 /// The steps each job of the trace graph in `dir` must be evaluated again
@@ -1871,7 +2001,7 @@ fn check_dag(
         u128::MAX >> (128 - c.steps.len())
     };
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let obs = ObsIndex::new(&read_observations(dir)?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -2257,7 +2387,7 @@ impl Graph {
         }
         let (provs, index, words, roots) = (
             std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            ObsIndex::new(&read_observations(d)?, None),
             read_words(&d.join("nodes"))?,
             std::fs::read_to_string(d.join("roots"))?
                 .lines()
@@ -2994,10 +3124,7 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
-        .lines()
-        .map(String::from)
-        .collect();
+    let obs: Vec<String> = read_observations(dir)?.lines().map(String::from).collect();
     let words = read_words(&dir.join("nodes"))?;
     let roots = std::fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots

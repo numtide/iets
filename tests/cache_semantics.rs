@@ -10,7 +10,7 @@ use rstest::{fixture, rstest};
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
@@ -73,6 +73,28 @@ impl Work {
             .args(["eval", "--impure", "--strict", "--timings"])
             .args(args);
         run(c)
+    }
+
+    fn trace_jobs(&self, mode: &str, expr: &str) -> Output {
+        let file = self.write("root.nix", expr);
+        let jobs = self.path("jobs");
+        fs::create_dir(&jobs).unwrap();
+        self.iets()
+            .env("IETS_FINE_TRACE", "")
+            .env("IETS_FINE_DAG", self.path("dag"))
+            .env("IETS_FINE_JOBS", jobs)
+            .args([
+                "eval",
+                "--no-tracing-cache",
+                "--no-ir-cache",
+                "--workers",
+                "1",
+                mode,
+                "-f",
+                &file,
+            ])
+            .output()
+            .unwrap()
     }
 }
 
@@ -581,4 +603,84 @@ fn search_uses_the_cache(work: Work) {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(stderr(&o).contains("--workers wants a number >= 1"));
+}
+
+#[rstest]
+#[case::text("--strict", "[ { result = import ./a.nix; } 42 ]", "[ { result = 1; } 42 ]\n", &[0], &[0])]
+#[case::json(
+    "--json",
+    r#"let shared = import ./a.nix; in [ { result = shared; } { outPath = import ./b.nix; unused = throw "unused"; }
+         { __toString = self: import ./b.nix; } [ { nested = shared; } ] 42 ]"#,
+    "[{\"result\":1},\"b\",\"b\",[{\"nested\":1}],42]\n",
+    &[0, 3],
+    &[1, 2]
+)]
+fn nested_job_output(
+    work: Work,
+    #[case] mode: &str,
+    #[case] expr: &str,
+    #[case] expected: &str,
+    #[case] a_jobs: &[usize],
+    #[case] b_jobs: &[usize],
+) {
+    let a = work.write("a.nix", "1");
+    let b = work.write("b.nix", r#""b""#);
+    let dag = work.s("dag");
+    let eval = work.trace_jobs(mode, expr);
+    assert!(eval.status.success(), "{}", stderr(&eval));
+    assert_eq!(eval.stdout, expected.as_bytes());
+
+    for (file, jobs) in [(&a, a_jobs), (&b, b_jobs)] {
+        let changes = work.write("changes", &format!("1\tV\t2\n1\tCR\t{file}\t\n"));
+        let check = work
+            .iets()
+            .args(["fine-check", &changes, &dag])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{}", stderr(&check));
+        let expected: String = jobs.iter().map(|i| format!("{dag}\t{i}\t1\n")).collect();
+        assert_eq!(check.stdout, expected.as_bytes());
+    }
+    let obs = work.path("dag/obs");
+    let records = fs::read_to_string(&obs).unwrap();
+    fs::write(obs, records.replace("V\tjob-output-v1\n", "")).unwrap();
+    let stale = work
+        .iets()
+        .args(["fine-check", &work.s("changes"), &dag])
+        .output()
+        .unwrap();
+    assert!(!stale.status.success());
+    assert!(stderr(&stale).contains("regenerate"), "{}", stderr(&stale));
+}
+
+#[rstest]
+fn json_jobs_share_a_path_copy_trace(work: Work) {
+    work.write("payload/file", "hello");
+    let run = work.trace_jobs("--json", "[ ./payload { nested = ./payload; } 42 ]");
+    assert!(run.status.success(), "{}", stderr(&run));
+    for i in 0..3 {
+        let trace = fs::read_to_string(work.path(&format!("jobs/{i}"))).unwrap();
+        assert!(trace.ends_with("V\tend-serial-output-v1\n"), "{trace}");
+    }
+    let output: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert!(output[0].as_str().unwrap().ends_with("-payload"));
+    assert_eq!(output[0], output[1]["nested"]);
+    work.write(
+        "changes",
+        &format!("1\tV\t2\n1\tCT\t{}\n", work.s("payload")),
+    );
+    let commands = work.write("server", "load dag 0\ncheck changes checked\n");
+    let server = work
+        .iets()
+        .current_dir(work.dir.path())
+        .args(["fine-check", "--serve"])
+        .stdin(fs::File::open(commands).unwrap())
+        .output()
+        .unwrap();
+    assert!(server.status.success(), "{}", stderr(&server));
+    assert_eq!(server.stdout, b"ok\nok\n");
+    assert_eq!(
+        fs::read_to_string(work.path("checked")).unwrap(),
+        "H\tdag\t0\nH\tdag\t1\n"
+    );
 }

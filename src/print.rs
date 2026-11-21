@@ -7,6 +7,7 @@ use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::{self, thunk};
 use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
 use crate::syntax::symbol::FxHashSet;
+use crate::trace::fine;
 
 /// C's `%g` with precision 6, as `std::ostream << double` prints.
 pub fn format_g(f: f64) -> String {
@@ -358,8 +359,22 @@ pub fn print_json(
     strict: bool,
     pos: Pos,
 ) -> EvalResult<()> {
+    print_json_output(ev, w, out, ctx, strict, pos, false)
+}
+
+/// Only the outer result list of the CLI has a trace per element. A nested
+/// list, including one produced by a builtin, belongs to the current job.
+pub(crate) fn print_json_output(
+    ev: &mut Evaluator,
+    w: Word,
+    out: &mut Vec<u8>,
+    ctx: &mut Vec<Ctx>,
+    strict: bool,
+    pos: Pos,
+    jobs: bool,
+) -> EvalResult<()> {
     ev.enter_call(pos)?;
-    let r = print_json_inner(ev, w, out, ctx, strict, pos);
+    let r = print_json_inner(ev, w, out, ctx, strict, pos, jobs);
     ev.call_depth -= 1;
     r
 }
@@ -371,6 +386,7 @@ fn print_json_inner(
     ctx: &mut Vec<Ctx>,
     strict: bool,
     pos: Pos,
+    jobs: bool,
 ) -> EvalResult<()> {
     let w = if strict { ev.force(w)? } else { w };
     if w.is_thunk() {
@@ -440,7 +456,14 @@ fn print_json_inner(
                 if i > 0 {
                     out.push(b',');
                 }
-                print_json(ev, c.get(), out, ctx, strict, pos).map_err(|mut e| {
+                let w = c.get();
+                let mut write = || print_json(ev, w, out, ctx, strict, pos);
+                let result = if jobs {
+                    fine::json_element(w, write)
+                } else {
+                    write()
+                };
+                result.map_err(|mut e| {
                     e.add_trace(pos, format!("while evaluating list element at index {i}"));
                     e
                 })?;

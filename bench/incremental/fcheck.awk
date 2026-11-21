@@ -2,8 +2,9 @@
 # fchg.all holds "step\tchange" lines; TRACES holds "J\tjob" and then the job's trace.
 # skip drops the whole reads (A) whose Nix call or stack matches it: what a fix at those sites would give.
 BEGIN { FS = OFS = "\t" }
-NR == FNR {
+FILENAME == ARGV[1] {
   s = $1
+  steps[s] = 1
   if ($2 == "CR") cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
   else if ($2 == "CF") cf[$3] = cf[$3] " " s
   else if ($2 == "CL") { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
@@ -22,8 +23,21 @@ function entries(e, name, why,    n, x, i, y) {
     if (name == "" || y[2] == "*" || index(" " y[2] " ", " " name " ")) mark(y[1], why)
   }
 }
-function flush(   s) { if (job != "") for (s in inv) print job, s, inv[s]; delete inv; delete pc }
-$1 == "J" { flush(); job = $2; next }
+function flush(   s) {
+  if (job != "" && !complete) {
+    print "regenerate the fine job trace for " job " with serial recording" > "/dev/stderr"
+    failed = 1
+  } else if (job != "") for (s in inv) print job, s, inv[s]
+  delete inv; delete pc; serial = complete = 0
+}
+$1 == "J" && NF == 2 && $2 != "" { flush(); job = $2; next }
+job != "" && !serial && $0 == "V\tserial-v2" { serial = 1; next }
+serial && !complete && $0 == "V\tend-serial-output-v1" { complete = 1; next }
+!serial || complete || $1 == "J" || $1 == "V" {
+  print "invalid fine job trace at " FILENAME ":" FNR > "/dev/stderr"
+  failed = 1; exit
+}
+$1 == "R" && $2 == "?" { for (s in steps) inv[s] = "untracked " $3; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
   if ($3 == "lit") pc[$2] = cl[$4 "\t" $5 "\t" $6]
@@ -40,4 +54,4 @@ $1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }
-END { flush() }
+END { if (!failed) flush(); if (failed) exit 1 }

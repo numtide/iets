@@ -53,8 +53,8 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
-/// The reserved second node word identifies a graph recorded on the serial force path.
 const EXTERNAL_READS: &str = "V\texternal-reads-v1\n";
+/// The reserved second node word identifies a graph recorded on the serial force path.
 const SERIAL_GRAPH: u32 = u32::from_le_bytes(*b"SER2");
 
 static ON: AtomicBool = AtomicBool::new(false);

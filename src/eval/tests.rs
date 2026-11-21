@@ -755,3 +755,40 @@ fn masks64_matches_the_scalar_masks() {
         assert_eq!(super::masks64(&b), super::masks64_scalar(&b), "{b:?}");
     }
 }
+
+// Exercise both Select and the separate SelectCount path.
+#[rstest]
+fn selection_evaluates_the_next_name_before_the_selected_value(
+    #[values("a", "revCount")] field: &str,
+    #[values("", " or 0")] default: &str,
+) {
+    let src = format!(
+        r#"builtins.tryEval (({{ {field} = throw "value"; }}).{field}.${{builtins.abort "name"}}{default})"#
+    );
+    let err = Evaluator::new().eval_string(&src, b"/").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Abort);
+    assert_eq!(
+        err.msg,
+        "evaluation aborted with the following error message: 'name'"
+    );
+
+    let src = format!(
+        r#"builtins.tryEval (({{ {field} = builtins.abort "value"; }}).{field}.${{throw "name"}}{default})"#
+    );
+    assert_eq!(eval_str(&src), "{ success = false; value = false; }");
+}
+
+#[rstest]
+fn selection_stops_before_later_names_and_forces_the_final_value(
+    #[values("a", "revCount")] field: &str,
+) {
+    for subject in ["{ }", "1", &format!("{{ {field} = {{ }}; }}")] {
+        let src = format!(r#"({subject}).{field}.missing.${{builtins.abort "unused"}} or 42"#);
+        assert_eq!(eval_str(&src), "42");
+    }
+    let src = format!(r#"builtins.tryEval (({{ {field}.b = throw "final"; }}).{field}.${{"b"}})"#);
+    assert_eq!(eval_str(&src), "{ success = false; value = false; }");
+    // The subject is still evaluated before the first name.
+    let src = r#"builtins.tryEval ((throw "subject").${builtins.abort "name"})"#;
+    assert_eq!(eval_str(src), "{ success = false; value = false; }");
+}

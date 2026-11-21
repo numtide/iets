@@ -1034,8 +1034,7 @@ fn drv_info(ev: &mut Evaluator, p: &StorePath, pos: Pos) -> EvalResult<DrvInfo> 
         pos: None,
         attr: None,
     };
-    ev.drv.drvs.insert(p.clone(), info.clone());
-    Ok(info)
+    Ok(ev.drv.drvs.get_or_insert(p.clone(), info))
 }
 
 /// Mirrors `computeFSClosure` on a `.drv` path as used for `DrvDeep` context:

@@ -207,8 +207,8 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
     git(&["init", "-q"]);
     git(&["add", "."]);
     // The generator's historical range includes 101 first-parent revisions.
-    for i in 0..101 {
-        if i == 100 {
+    for i in 0..102 {
+        if i == 101 {
             fs::remove_dir_all(repo.join("removed")).unwrap();
             fs::remove_dir_all(repo.join("replaced")).unwrap();
             fs::write(repo.join("replaced"), "now a file").unwrap();

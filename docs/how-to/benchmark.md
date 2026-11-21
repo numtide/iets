@@ -108,7 +108,10 @@ IETS_BENCH_FLAMEGRAPHS=1 nix run .#bench-callgrind -- '*::components::frontend::
 The runner exposes flamegraphs through its Rust API rather than a CLI option.
 SVGs are opt-in because expanding recursive graphs can use substantial memory.
 `TotalRW` includes instruction fetches. Raw profiles can also be opened with
-`callgrind_annotate` or KCachegrind without generating SVGs.
+`callgrind_annotate` or KCachegrind without generating SVGs. For guest instruction
+counts at individual addresses, pass `--callgrind-args=--dump-instr=yes`.
+Native `perf record` instruction samples can favor some addresses even with
+precise IPs, so sample shares alone cannot establish per-function instruction counts.
 
 Additional built-in tools and metrics are available:
 

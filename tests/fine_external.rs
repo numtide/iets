@@ -188,3 +188,63 @@ fn each_reader_of_an_open_stored_input_records_it(bin: Iets) {
     }
     assert_eq!(changed(&bin, dir), "dag\t0\tr\ndag\t1\tr");
 }
+
+#[cfg(unix)]
+#[rstest]
+fn a_torn_external_reader_cannot_borrow_the_next_jobs_evidence(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    // A legitimate path ending in J must not be mistaken for an embedded J header.
+    fs::write(root.join("endsJ"), "ordinary").unwrap();
+    assert_eq!(
+        capture(
+            eval(
+                &bin,
+                root,
+                "[ (builtins.getEnv \"PROBE\") (builtins.readFile ./endsJ) 7 ]"
+            )
+            .env("PROBE", "external"),
+            root
+        ),
+        "[ \"external\" \"ordinary\" 7 ]"
+    );
+    let reader = fs::read_to_string(root.join("jobs/0")).unwrap();
+    let clean = fs::read_to_string(root.join("jobs/1")).unwrap();
+    assert!(reader.lines().any(|line| line.starts_with("E\t")));
+    assert!(
+        clean
+            .lines()
+            .any(|line| line.starts_with("F\t") && line.contains("endsJ\t"))
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
+    let check = |text: &str| {
+        fs::write(root.join("delta"), "r\tV\t2\n").unwrap();
+        fs::write(root.join("flat"), text).unwrap();
+        Command::new("awk")
+            .arg("-f")
+            .arg(&script)
+            .arg(root.join("delta"))
+            .arg(root.join("flat"))
+            .output()
+            .unwrap()
+    };
+    let name = "reader with spaces/J";
+    let next = "clean Ω : J";
+    let intact = check(&format!("J\t{name}\n{reader}J\t{next}\n{clean}"));
+    assert!(intact.status.success());
+    assert_eq!(
+        stdout(&intact)
+            .lines()
+            .map(|s| s.split('\t').next().unwrap())
+            .collect::<Vec<_>>(),
+        [name]
+    );
+    // Keep the producer's exact prefix, but tear its real external record after E.
+    let at = reader.find("E\t").unwrap();
+    let torn = check(&format!("J\t{name}\n{}EJ\t{next}\n{clean}", &reader[..at]));
+    assert!(
+        !torn.status.success(),
+        "accepted incomplete external reader: {}",
+        stdout(&torn)
+    );
+}

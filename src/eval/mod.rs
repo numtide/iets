@@ -137,7 +137,6 @@ fn newline_starts(src: &[u8]) -> Option<Vec<u32>> {
         if r {
             return None;
         }
-        starts.reserve(nl.count_ones() as usize);
         while nl != 0 {
             starts.push(off + nl.trailing_zeros() + 1);
             nl &= nl - 1;

@@ -7,35 +7,19 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::eval::{EvalResult, Evaluator, Pos};
-use crate::flake;
-use crate::runtime::Word;
 use crate::source::{self, AttrVal, Attrs, Lock, SourceRef, lock};
 use crate::sys;
 
 pub use crate::flake::FlakeRef;
 pub use crate::source::Tree;
 
-/// A command-line input that names a flake rather than a `.nix` file.
-pub fn is_flake_ref(arg: &str) -> bool {
-    flake::is_flake_ref(arg)
-}
-
-/// attr-path.cc:parseAttrPath: `.` separates, `"..."` quotes.
-pub fn parse_attr_path(s: &str) -> Result<Vec<String>> {
-    flake::parse_attr_path(s)
-}
-
-/// eval-cache.cc:AttrCursor::findAlongAttrPath: walks `path` from `v`,
-/// forcing each step; `None` when a step is missing or is not an attrset.
-pub fn select(ev: &mut Evaluator, v: Word, path: &[String]) -> EvalResult<Option<Word>> {
-    flake::select(ev, v, path)
-}
+#[doc(inline)]
+pub use crate::flake::{is_flake_ref, parse_attr_path, select};
 
 /// The flake's outputs, with the reference's attribute path selected from
 /// them. The lock is read, the inputs are fetched and `call-flake.nix` runs.
-pub fn outputs(ev: &mut Evaluator, fr: &FlakeRef) -> EvalResult<Word> {
-    flake::eval_flake(ev, fr)
-}
+#[doc(inline)]
+pub use crate::flake::eval_flake as outputs;
 
 /// A local path as a URL carries it: `/C:/x` for a Windows drive.
 fn url_path(p: &Path) -> String {

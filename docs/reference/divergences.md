@@ -566,6 +566,13 @@ iets prints the `rev-count` warning. `--lint rev-count=off` removes it.
 `tests/e2e_flake.rs` compares the value with Nix on a clean tree, a dirty
 tree and a shallow clone.
 
+## A symlinked flake subdirectory
+
+Nix 2.34 rejects a local Git flake reference with `?dir=alias` when `alias`
+is a symlink. iets follows links within the source tree and uses the
+resolved directory in `self.outPath`. A link that leads outside the source
+tree fails evaluation.
+
 ## Pure evaluation of a project with no flake
 
 A native command evaluates purely by default, where `nix-instantiate`,

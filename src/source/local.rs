@@ -67,13 +67,7 @@ pub fn path_tree(
     if expect.is_some_and(|e| *e != hash) {
         return Ok(Err(hash));
     }
-    if names_its_content(dir, &hash) {
-        ev.trace()
-            .stat(dir.as_os_str().as_bytes(), false, trace::Kind::Directory);
-    } else {
-        ev.trace()
-            .tree_dated(dir, trace::hash_to_digest(&hash), mtime, fp);
-    }
+    record_path_tree(ev.trace(), dir, &hash, mtime, fp);
     let sp = treestore::store_path("source", &hash)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
     ev.known.add(
@@ -81,6 +75,20 @@ pub fn path_tree(
         SourceOrigin::tree(SrcPath::fs(dir, None), hash, nar_size),
     );
     Ok(Ok((hash, mtime)))
+}
+
+fn record_path_tree(trace: &Trace, dir: &Path, hash: &Hash, mtime: i64, fp: Option<TreeFp>) {
+    if !trace.is_on() {
+        return;
+    }
+    if fp.as_ref().is_none_or(|fp| !fp.is_complete()) {
+        // A later stat walk cannot validate the mtime this walk returned.
+        trace.mark_uncacheable();
+    } else if names_its_content(dir, hash) {
+        trace.stat(dir.as_os_str().as_bytes(), false, trace::Kind::Directory);
+    } else {
+        trace.tree_dated(dir, trace::hash_to_digest(hash), mtime, fp);
+    }
 }
 
 /// A store path that is the fixed-output path of the tree just hashed: a
@@ -99,13 +107,19 @@ fn names_its_content(dir: &Path, hash: &Hash) -> bool {
 /// entry in the tree, so the newest `lstat` mtime comes from its filter callback instead of a
 /// second recursive `read_dir`.
 fn dump_and_max_mtime(dir: &Path, fp: &mut Option<TreeFp>) -> io::Result<(Hash, u64, i64)> {
+    if let Some(fp) = fp {
+        let mut filter = |p: &Path, t| {
+            fp.entry(p, t, true);
+            true
+        };
+        let (hash, nar_size) = nar::nar_hash_filtered(dir, HashAlgo::Sha256, &mut filter)?;
+        return Ok((hash, nar_size, fp.newest()));
+    }
+
     let mut mtime = mtime_secs(&fs::symlink_metadata(dir)?);
-    let mut filter = |p: &Path, t: nar::FileType| {
+    let mut filter = |p: &Path, _| {
         if let Ok(st) = fs::symlink_metadata(p) {
             mtime = mtime.max(mtime_secs(&st));
-        }
-        if let Some(fp) = fp.as_mut() {
-            fp.entry(p, t, true);
         }
         true
     };
@@ -462,6 +476,37 @@ mod tests {
         let mut v: Vec<&str> = acc.iter().map(|p| p.to_str().unwrap()).collect();
         v.sort();
         assert_eq!(v, ["/r/a", "/r/a/b", "/r/a/b/c.nix", "/r/d.nix"]);
+    }
+
+    #[test]
+    fn an_incomplete_mtime_cannot_be_validated_by_a_later_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut fp = TreeFp::new(root).unwrap();
+        let child = root.join("appeared");
+        fp.entry(&child, nar::FileType::Regular, true);
+        let mtime = fp.newest();
+        fs::write(&child, b"x").unwrap();
+        sys::fs::set_times(&child, mtime + 1000, true).unwrap();
+        let hash = nar::nar_hash(root).unwrap();
+        for fp in [Some(fp), None] {
+            let trace = Trace::enabled();
+            record_path_tree(&trace, root, &hash, mtime, fp);
+            assert!(!trace.is_cacheable());
+        }
+    }
+
+    #[rstest]
+    fn traced_mtime_agrees_with_the_fingerprint_when_the_root_changes(#[from(tree)] d: Tree) {
+        let root = d.join("empty");
+        fs::create_dir(&root).unwrap();
+        sys::fs::set_times(&root, 100, true).unwrap();
+        let old = trace::tree_fingerprint(&root, None).unwrap();
+        let mut fp = Some(TreeFp::new(&root).unwrap());
+        sys::fs::set_times(&root, 200, true).unwrap();
+        let (_, _, mtime) = dump_and_max_mtime(&root, &mut fp).unwrap();
+        assert_eq!(fp.unwrap().finish(), Some(old));
+        assert_eq!(mtime, 100);
     }
 
     #[rstest]

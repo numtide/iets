@@ -29,7 +29,7 @@ pub enum Src {
     /// uploads needs no evaluation. `accepted` is as for `Fs`, with each
     /// member named by its path in the entry under `/`.
     Spool { name: String, accepted: Accepted },
-    /// One regular file: a `toFile` text or a `.drv` this evaluation holds.
+    /// One non-executable regular file whose contents the evaluator holds.
     Mem(Arc<Vec<u8>>),
 }
 
@@ -42,6 +42,13 @@ pub struct SrcPath {
 }
 
 impl SrcPath {
+    pub fn mem(contents: Vec<u8>) -> SrcPath {
+        SrcPath {
+            src: Src::Mem(Arc::new(contents)),
+            rel: Vec::new(),
+        }
+    }
+
     pub fn fs(root: impl Into<PathBuf>, accepted: Accepted) -> SrcPath {
         SrcPath {
             src: Src::Fs {
@@ -132,7 +139,7 @@ pub struct SourceOrigin {
     pub kind: SourceKind,
     /// The NAR hash and size the dump under the recorded filter produced, the exact pair
     /// `AddMultipleToStore` needs, so no upload path hashes the tree a second time. `None`
-    /// for a text, and for a store path the plan must hash itself.
+    /// for an in-memory file or a store path whose NAR the plan will hash itself.
     pub nar: Option<(Hash, u64)>,
 }
 
@@ -165,10 +172,7 @@ impl SourceOrigin {
 
     pub fn text(contents: Vec<u8>, references: BTreeSet<StorePath>) -> SourceOrigin {
         SourceOrigin {
-            at: SrcPath {
-                src: Src::Mem(Arc::new(contents)),
-                rel: Vec::new(),
-            },
+            at: SrcPath::mem(contents),
             kind: SourceKind::Text { references },
             nar: None,
         }

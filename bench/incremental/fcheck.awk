@@ -4,6 +4,7 @@
 BEGIN { FS = OFS = "\t" }
 FILENAME == ARGV[1] {
   s = $1
+  steps[s] = 1
   if ($2 == "CR") cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
   else if ($2 == "CF") cf[$3] = cf[$3] " " s
   else if ($2 == "CL") { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
@@ -49,7 +50,15 @@ $1 == "P" {
 $1 == "K" { if (pc[$2] != "" && ($3 in cn || index(pc[$2], ":*"))) entries(pc[$2], $3, "K " $3); next }
 $1 == "A" { if (pc[$2] != "" && !(skip != "" && ($4 " " $5) ~ skip)) entries(pc[$2], "", "A " $3 " " $4); next }
 $1 == "X" { if ($2 in cx) { n = split(cx[$2], x, ";"); for (i = 2; i <= n; i++) { split(x[i], y, ":"); if (y[2] + 0 <= $3 + 0) mark(y[1], "X " $2) } } next }
-$1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
+$1 == "F" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
+$1 == "C" {
+  path = $2
+  while (path != "") {
+    if (path in cm) mark(cm[path], "C " path)
+    if (!sub(/\/[^/]*$/, "", path)) break
+  }
+  next
+}
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }

@@ -330,7 +330,7 @@ impl<'a> Lexer<'a> {
     /// Start of the line holding `p`.
     fn line_start(&self, p: usize) -> usize {
         let mut i = p;
-        while i > 0 && self.src[i - 1] != b'\n' {
+        while i > 0 && !matches!(self.src[i - 1], b'\n' | b'\r') {
             i -= 1;
         }
         i

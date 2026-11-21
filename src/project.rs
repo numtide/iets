@@ -52,13 +52,13 @@ pub fn find_with(start: &Path, mut present: impl FnMut(&Path) -> bool) -> Option
             return Some(dir.to_path_buf());
         }
         if flake.is_none() && present(&dir.join(FLAKE)) {
-            flake = Some(dir.to_path_buf());
+            flake = Some(dir);
         }
         if present(&dir.join(CONFIG)) {
-            config = Some(dir.to_path_buf());
+            config = Some(dir);
         }
     }
-    flake.or(config)
+    flake.or(config).map(Path::to_path_buf)
 }
 
 /// [`find_with`] on the file system.

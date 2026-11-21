@@ -117,13 +117,13 @@ pub fn dir_copy_unfiltered(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalRes
     })
 }
 
-/// The nearest project root at or above `path` (`crate::project`). Every
+/// Whether there is a project root at or above `path` (`crate::project`). Every
 /// probe is a `Stat` observation, so a new marker is a cache miss. A
 /// marker is probed once per evaluation; its observation is recorded then.
-fn project_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
+fn in_project(ev: &Evaluator, path: &[u8]) -> bool {
     let dir = compile::canon_path(path);
     let at = sys::path_from_internal(&dir);
-    let root = project::find_with(&at, |m| {
+    project::find_with(&at, |m| {
         let m = m.as_os_str().as_bytes();
         if let Some(present) = ev.project_markers.get(m) {
             return present;
@@ -131,8 +131,8 @@ fn project_root_of(ev: &Evaluator, path: &[u8]) -> Option<Vec<u8>> {
         let present = ev.trace().stat_now(m, true) != trace::Kind::Missing;
         ev.project_markers.insert(m.to_vec(), present);
         present
-    })?;
-    Some(sys::path_to_internal(&root))
+    })
+    .is_some()
 }
 
 /// Derivation `drv_name` received attribute `key` whose value carries the
@@ -145,21 +145,22 @@ fn path_in_drv(
     path: &[u8],
     attr_pos: Pos,
 ) -> EvalResult<()> {
-    match project_root_of(ev, path) {
+    if in_project(ev, path) {
         // the root is not in the message: it is the working tree, which the
         // reader is in, and naming it makes the text differ per checkout
-        Some(_) => ev.lint(LintId::AbsolutePathInDrv, attr_pos, || {
+        ev.lint(LintId::AbsolutePathInDrv, attr_pos, || {
             format!(
                 "derivation '{drv_name}': attribute '{key}' holds the absolute path '{}' of this project; interpolate the path to copy it, or pass a relative name",
                 String::from_utf8_lossy(path)
             )
-        }),
-        None => ev.lint(LintId::ImpurePathInDrv, attr_pos, || {
+        })
+    } else {
+        ev.lint(LintId::ImpurePathInDrv, attr_pos, || {
             format!(
                 "derivation '{drv_name}': attribute '{key}' holds the checkout path '{}', so the .drv depends on where the repository lives; interpolate the path to copy it to the store",
                 String::from_utf8_lossy(path)
             )
-        }),
+        })
     }
 }
 

@@ -122,7 +122,7 @@ nix run .#bench-callgrind -- '*::evaluation::*::attrs' \
 # Native perf counters and DWARF call stacks (requires event access):
 nix run .#bench-callgrind -- '*::evaluation::*::attrs' \
   --default-tool=perf --perf-events=instructions:u --perf-record \
-  --perf-record-args=--call-graph=dwarf --save-summary=json
+  --perf-record-args='--call-graph=dwarf --user-callchains' --save-summary=json
 # Instrumented syscall diagnostics, not native syscall latency:
 nix run .#bench-callgrind -- '*::evaluation::*::attrs' \
   --callgrind-args=--collect-systime=nsec --callgrind-metrics='Ir,SysCount,SysTime,SysCpuTime'

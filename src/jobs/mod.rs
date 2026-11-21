@@ -16,8 +16,10 @@ use std::iter;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, OnceLock};
 
-use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
-use crate::parallel::force::{CellState, T_JOB, bail_requested, fanout_range, take_cell};
+use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, MAX_CALL_DEPTH, Pos};
+use crate::parallel::force::{
+    CellState, T_JOB, bail_requested, fanout_range, stack_exhausted, stack_low, take_cell,
+};
 use crate::print::{json_escape, lexicographic_order, print_json};
 use crate::runtime::{self, Attr, AttrsObj, Ctx, Value, Word};
 use crate::session::Session;
@@ -451,12 +453,26 @@ fn outputs(
 
 /// get-drvs.cc:PackageInfo::checkMeta: values JSON can carry, no
 /// derivations, no functions, no null, no paths.
-fn check_meta(ev: &mut Evaluator, w: Word) -> EvalResult<bool> {
+fn check_meta(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<bool> {
+    if stack_low(ev) {
+        return Err(stack_exhausted(ev, pos));
+    }
+    // PackageInfo::checkMeta checks the current depth before entering.
+    if ev.call_depth > MAX_CALL_DEPTH {
+        return Err(Error::stack_overflow(pos));
+    }
+    ev.call_depth += 1;
+    let result = check_meta_inner(ev, w, pos);
+    ev.call_depth -= 1;
+    result
+}
+
+fn check_meta_inner(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<bool> {
     let v = ev.force(w)?;
     Ok(match v.view() {
         Value::List(l) => {
             for c in l.cells() {
-                if !check_meta(ev, c.get())? {
+                if !check_meta(ev, c.get(), pos)? {
                     return Ok(false);
                 }
             }
@@ -467,7 +483,7 @@ fn check_meta(ev: &mut Evaluator, w: Word) -> EvalResult<bool> {
                 return Ok(false);
             }
             for attr in a.iter() {
-                if !check_meta(ev, attr.cell.get())? {
+                if !check_meta(ev, attr.cell.get(), attr.pos)? {
                     return Ok(false);
                 }
             }
@@ -491,7 +507,7 @@ fn meta_json(ev: &mut Evaluator, a: &'static AttrsObj, out: &mut Vec<u8>) -> Eva
     )?;
     let mut first = true;
     for attr in lexicographic_order(ev, meta) {
-        if !check_meta(ev, attr.cell.get())? {
+        if !check_meta(ev, attr.cell.get(), attr.pos)? {
             continue;
         }
         if first {
@@ -883,7 +899,7 @@ fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
     {
         let meta = ev.force_attrs(m.cell.get(), m.pos, "")?;
         for attr in meta.iter() {
-            if check_meta(ev, attr.cell.get())? {
+            if check_meta(ev, attr.cell.get(), attr.pos)? {
                 ev.force_deep(attr.cell.get())?;
             }
         }
@@ -894,6 +910,17 @@ fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_at_the_depth_limit_can_reject_a_leaf_without_descending() {
+        let mut ev = Evaluator::new();
+        let nested = ev.mk_list(&[Word::NULL]);
+        ev.call_depth = MAX_CALL_DEPTH;
+        assert!(!check_meta(&mut ev, Word::NULL, Pos::NONE).unwrap());
+        let err = check_meta(&mut ev, nested, Pos::NONE).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::StackOverflow);
+        assert_eq!(ev.call_depth, MAX_CALL_DEPTH);
+    }
 
     #[test]
     fn a_numeric_name_selects_an_attribute_under_a_set() {

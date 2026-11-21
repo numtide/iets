@@ -162,7 +162,7 @@ fn cancelled() -> Box<Error> {
 /// the sequential run — decides the result; the demand path reports what
 /// Nix reports.
 #[cold]
-fn stack_exhausted(ev: &mut Evaluator, pos: Pos) -> Box<Error> {
+pub(crate) fn stack_exhausted(ev: &mut Evaluator, pos: Pos) -> Box<Error> {
     if ev.par.is_main {
         Error::boxed(
             ErrorKind::StackOverflow,

@@ -780,16 +780,23 @@ pub fn tree_fingerprint(
     root: &Path,
     accepted: Option<&HashSet<PathBuf>>,
 ) -> io::Result<(Digest32, Digest32)> {
+    tree_fingerprint_with(root, &mut |p| accepts(accepted, p))
+}
+
+fn tree_fingerprint_with(
+    root: &Path,
+    accept: &mut dyn FnMut(&Path) -> bool,
+) -> io::Result<(Digest32, Digest32)> {
     let mut stat_h = Sha256::new();
     let mut seen_h = Sha256::new();
-    walk_fp(root, b"", accepted, &mut stat_h, &mut seen_h, 0)?;
+    walk_fp(root, b"", accept, &mut stat_h, &mut seen_h, 0)?;
     Ok((stat_h.finalize().into(), seen_h.finalize().into()))
 }
 
 fn walk_fp(
     path: &Path,
     rel: &[u8],
-    accepted: Option<&HashSet<PathBuf>>,
+    accept: &mut dyn FnMut(&Path) -> bool,
     stat_h: &mut Sha256,
     seen_h: &mut Sha256,
     depth: usize,
@@ -825,8 +832,8 @@ fn walk_fp(
                 seen_h.update((crel.len() as u64).to_le_bytes());
                 seen_h.update(&crel);
                 seen_h.update([ekind.to_u8()]);
-                if accepts(accepted, &child) {
-                    walk_fp(&child, &crel, accepted, stat_h, seen_h, depth + 1)?;
+                if accept(&child) {
+                    walk_fp(&child, &crel, accept, stat_h, seen_h, depth + 1)?;
                 }
             }
         }
@@ -842,9 +849,16 @@ pub fn tree_rehash(
     root: &Path,
     accepted: Option<&HashSet<PathBuf>>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
+    tree_rehash_with(root, &mut |p| accepts(accepted, p))
+}
+
+fn tree_rehash_with(
+    root: &Path,
+    accept: &mut dyn FnMut(&Path) -> bool,
+) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
     let mut fp = TreeFp::new(root).ok_or_else(|| io::Error::other("tree is gone"))?;
     let mut filter = |p: &Path, t: FileType| -> bool {
-        let keep = accepts(accepted, p);
+        let keep = accept(p);
         fp.entry(p, t, keep);
         keep
     };

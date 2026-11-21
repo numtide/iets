@@ -108,7 +108,8 @@ impl FailedThunks {
     }
 
     pub(crate) fn rethrow(&self, index: usize) -> Box<Error> {
-        Box::new(self.0.lock().unwrap()[index].lock().unwrap().detached())
+        let saved = Arc::clone(&self.0.lock().unwrap()[index]);
+        Box::new(saved.lock().unwrap().detached())
     }
 }
 

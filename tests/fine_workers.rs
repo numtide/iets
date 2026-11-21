@@ -3,7 +3,7 @@ mod hermetic;
 use hermetic::{Iets, bin, ok, stderr, stdout};
 use rstest::rstest;
 use std::fs;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tempfile::tempdir;
 
 #[rstest]
@@ -11,7 +11,8 @@ use tempfile::tempdir;
 #[case("4")]
 fn records_both_jobs_reading_a_shared_thunk(bin: Iets, #[case] workers: &str) {
     let dir = tempdir().unwrap();
-    let file = |name| dir.path().join(name);
+    let root = dir.path().canonicalize().unwrap();
+    let file = |name| root.join(name);
     fs::write(file("payload"), "old").unwrap();
     fs::write(
         file("expr.nix"),
@@ -33,11 +34,10 @@ fn records_both_jobs_reading_a_shared_thunk(bin: Iets, #[case] workers: &str) {
     assert_eq!(fs::read_dir(file("jobs")).unwrap().count(), 2);
     fs::write(file("payload"), "new").unwrap();
     assert_eq!(stdout(&ok(&mut eval())), r#"["new","new"]"#);
-    fs::write(
-        file("delta"),
-        format!("s\tV\t2\ns\tCM\t{}\n", file("payload").display()),
-    )
-    .unwrap();
+    let mut delta = b"s\tV\t2\ns\tCM\t".to_vec();
+    delta.extend(iets::sys::path_to_internal(&file("payload")));
+    delta.push(b'\n');
+    fs::write(file("delta"), delta).unwrap();
     let checked = stdout(&ok(bin
         .cmd()
         .arg("fine-check")
@@ -131,17 +131,7 @@ fn empty_job_batch_is_a_complete_snapshot(bin: Iets, #[case] precreate: bool) {
         assert!(!dest.join("0").exists());
         assert!(dest.join(".empty").is_file());
     }
-    // The documented numeric-file enumeration produces no phantom job.
-    let enumeration = Command::new("bash")
-        .env("JOBS", &dest)
-        .args([
-            "-c",
-            "shopt -s nullglob; for job in \"$JOBS\"/[0-9]*; do printf '%s\\n' \"$job\"; done",
-        ])
-        .output()
-        .unwrap();
-    assert!(enumeration.status.success());
-    assert!(enumeration.stdout.is_empty());
+    assert_eq!(fs::read_dir(&dest).unwrap().count(), 1);
 }
 
 #[rstest]

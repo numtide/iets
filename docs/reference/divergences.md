@@ -502,17 +502,6 @@ to Nix for each of these:
 `publicKeys`, which Nix renders only with the `verified-fetches`
 experimental feature on.
 
-## A root flake pinned by `rev`
-
-`git+file:///path?rev=SHA` is the tree of that commit, as it is in Nix
-(`docs/reference/flakes.md`). Its `flake.nix` and `flake.lock`, however,
-iets reads from the checkout at `/path`, not out of the commit: the lock
-decides what the evaluation fetches, so it is read before any tree is
-built. A checkout whose tracked `flake.nix` or `flake.lock` differs from
-the commit it is pinned to therefore evaluates against the files on disk,
-while Nix uses the commit's. CI pins a checkout to its own `HEAD`, where
-the two are the same file.
-
 ## `--reference-lock-file`
 
 Nix locks the flake again with the given file as the starting point, so it
@@ -576,6 +565,13 @@ flake with `iets eval` and with `nix eval`. stdout is the same, and only
 iets prints the `rev-count` warning. `--lint rev-count=off` removes it.
 `tests/e2e_flake.rs` compares the value with Nix on a clean tree, a dirty
 tree and a shallow clone.
+
+## A symlinked flake subdirectory
+
+Nix 2.34 rejects a local Git flake reference with `?dir=alias` when `alias`
+is a symlink. iets follows links within the source tree and uses the
+resolved directory in `self.outPath`. A link that leads outside the source
+tree fails evaluation.
 
 ## Pure evaluation of a project with no flake
 

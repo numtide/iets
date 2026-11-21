@@ -292,14 +292,25 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers() {
-        let me = process::id();
-        let kids = fs::read_to_string(format!("/proc/{me}/task/{me}/children")).unwrap_or_default();
-        for pid in kids
-            .split_whitespace()
-            .filter_map(|p| p.parse::<libc::pid_t>().ok())
-        {
-            // SAFETY: a signal to a process this one adopted.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+        // The per-task children file is optional on Linux.
+        let parent = process::id().to_string();
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
+                continue;
+            };
+            let Ok(status) = fs::read(entry.path().join("status")) else {
+                continue;
+            };
+            let ppid = status
+                .split(|&b| b == b'\n')
+                .find_map(|line| line.strip_prefix(b"PPid:\t"));
+            if ppid == Some(parent.as_bytes()) {
+                // SAFETY: a signal to a process this one adopted.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
         }
     }
 

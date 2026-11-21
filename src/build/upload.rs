@@ -26,7 +26,7 @@ use crate::remote::event::Event;
 use crate::remote::plan::{self, Locator, Node, Object, Plan};
 use crate::store::locate;
 use crate::store::path::StorePath;
-use crate::store::source::SourceOrigin;
+use crate::store::source::{SourceKind, SourceOrigin};
 
 use super::backend::{Backend, Drv, Phase};
 
@@ -134,7 +134,7 @@ impl Uploader for PlanUpload<'_> {
         })?;
         let mut bytes = b.add_fetched(&fetched, on_event)?;
 
-        let missing: Vec<&Object> = resolved.objects.iter().chain(missing_drvs).collect();
+        let missing = registration_order(resolved.objects.iter().chain(missing_drvs));
         bytes += b.add_objects(&missing, on_event)?;
         Ok(Stats {
             batches: 1,
@@ -166,6 +166,37 @@ impl Uploader for PlanUpload<'_> {
             })
             .collect())
     }
+}
+
+/// Text sources can reference derivations, so neither kind can always go first.
+fn registration_order<'a>(objects: impl Iterator<Item = &'a Object>) -> Vec<&'a Object> {
+    let mut pending: HashMap<&StorePath, &Object> = objects.map(|o| (o.store_path(), o)).collect();
+    let roots: Vec<_> = pending.keys().copied().collect();
+    let mut ordered = Vec::with_capacity(pending.len());
+    let mut stack = Vec::new();
+    for root in roots {
+        stack.push((root, None));
+        while let Some((path, done)) = stack.pop() {
+            if let Some(object) = done {
+                ordered.push(object);
+                continue;
+            }
+            let Some(object) = pending.remove(path) else {
+                continue;
+            };
+            stack.push((path, Some(object)));
+            let references = match object {
+                Object::Drv { references, .. }
+                | Object::Source {
+                    kind: SourceKind::Text { references },
+                    ..
+                } => references,
+                _ => continue,
+            };
+            stack.extend(references.iter().map(|p| (p, None)));
+        }
+    }
+    ordered
 }
 
 /// The incremental one: the evaluation's tables plus what the builder is
@@ -280,7 +311,7 @@ impl Uploader for StreamUpload {
             }
             objects.push(Object::drv(path.clone(), aterm.clone(), references.clone()));
         }
-        let refs: Vec<&Object> = objects.iter().collect();
+        let refs = registration_order(objects.iter());
         st.bytes += b.add_objects(&refs, on_event)?;
         st.added = fetched.len() + objects.len();
         self.valid.extend(srcs);

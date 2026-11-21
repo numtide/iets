@@ -21,7 +21,6 @@ use crate::ignored;
 use crate::runtime::{AttrsObj, Value, Word};
 use crate::source::lock::Declared;
 use crate::source::{self, AttrVal, SourceRef, lock};
-use crate::store::path::StorePath;
 use crate::trace::Kind;
 use crate::{sys, treestore};
 
@@ -350,15 +349,19 @@ fn load_flake_tree(
     top: bool,
 ) -> EvalResult<Word> {
     let pos = Pos::NONE;
-    if !root.subdir.is_empty() {
-        let store = root.path.to_string();
-        let base = sys::from_native(store.as_bytes());
+    let store = root.path.to_full_string();
+    let base = sys::from_native(store.as_bytes());
+    let resolved;
+    let (flake_dir, subdir) = if root.subdir.is_empty() {
+        (base.as_ref(), b"".as_slice())
+    } else {
         let dir = [base.as_ref(), b"/", root.subdir.as_bytes()].concat();
-        let resolved = store_hooks::resolve_links(ev, &dir, store_hooks::Follow::Full, pos)?;
-        if !resolved
+        // The tracked-file filter indexes the target directory's paths.
+        resolved = store_hooks::resolve_links(ev, &dir, store_hooks::Follow::Full, pos)?;
+        let Some(rest) = resolved
             .strip_prefix(base.as_ref())
-            .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
-        {
+            .filter(|rest| rest.is_empty() || rest[0] == b'/')
+        else {
             return Err(EvalError::boxed(
                 ErrorKind::Eval,
                 format!(
@@ -367,13 +370,10 @@ fn load_flake_tree(
                 ),
                 pos,
             ));
-        }
-    }
-    let lock_path = fr.lock.clone().unwrap_or_else(|| fr.dir.join("flake.lock"));
-    let tree_lock = PathBuf::from(root.path.to_string())
-        .join(&root.subdir)
-        .join("flake.lock");
-    let tree_lock = sys::path_to_internal(&tree_lock);
+        };
+        (resolved.as_slice(), rest.strip_prefix(b"/").unwrap_or(rest))
+    };
+    let tree_lock = [flake_dir, b"/flake.lock"].concat();
     if fr.lock.is_none() && store_hooks::stat(ev, &tree_lock, false) == Kind::Symlink {
         return Err(EvalError::boxed(
             ErrorKind::Unsupported,
@@ -385,7 +385,7 @@ fn load_flake_tree(
         ));
     }
     let read_lock = match &fr.lock {
-        Some(_) => read_traced(ev, &lock_path),
+        Some(path) => read_traced(ev, path),
         None => store_hooks::resolve(ev, &tree_lock)
             .read(ev, false)
             .map_err(|(_, e)| e),
@@ -416,39 +416,11 @@ fn load_flake_tree(
     }
 
     let source_info = fetch::emit_tree_attrs(ev, &root, Some("self"), pos)?;
-    let subdir = root.subdir;
-    let out_path = {
-        let ctx = format!(
-            "while evaluating the sourceInfo of flake '{}'",
-            fr.dir.display()
-        );
-        let a = ev.force_attrs(source_info, pos, &ctx)?;
-        let Some(attr) = a.get(ev.s.out_path) else {
-            return Err(EvalError::boxed(
-                ErrorKind::MissingAttr,
-                format!(
-                    "flake '{}': sourceInfo has no attribute 'outPath'",
-                    fr.dir.display()
-                ),
-                pos,
-            ));
-        };
-        ev.force_string(attr.cell.get(), pos, "while evaluating the flake's outPath")?
-            .bytes
-            .to_vec()
-    };
-    if let Ok(sp) = StorePath::parse(&String::from_utf8_lossy(&out_path)) {
-        ev.known.name_flake(&sp, lock.root.clone());
-        if top {
-            ev.known.mark_root(&sp);
-        }
+    ev.known.name_flake(&root.path, lock.root.clone());
+    if top {
+        ev.known.mark_root(&root.path);
     }
-    let mut flake_dir = out_path.clone();
-    if !subdir.is_empty() {
-        flake_dir.push(b'/');
-        flake_dir.extend_from_slice(subdir.as_bytes());
-    }
-    let has_nix_config = check_declared_inputs(ev, &flake_dir, &lock, pos)?;
+    let has_nix_config = check_declared_inputs(ev, flake_dir, &lock, pos)?;
     if top && has_nix_config {
         ignored::nix_config_seen();
     }
@@ -457,7 +429,7 @@ fn load_flake_tree(
     let root_env = ev.root_env;
     let call_flake = ev.eval(root_env, ir)?;
     let lock_str = ev.mk_string(&lock_bytes);
-    let dir_w = ev.mk_string(subdir.as_bytes());
+    let dir_w = ev.mk_string(subdir);
     let mut ov = vec![
         (ev.sym(b"sourceInfo"), pos, source_info),
         (ev.sym(b"dir"), pos, dir_w),

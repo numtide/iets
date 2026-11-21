@@ -303,17 +303,18 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
     match r {
         Ok(v) => {
             debug_assert!(!v.is_thunk());
+            // A packed map entry cannot hold both a speculative mark and
+            // its function result. Retry on demand so enclosing thunks never
+            // publish a comparison using a fresh function on each force.
+            if spec && w.thunk_kind() == Kind::ThunkMap && v.is_function() {
+                ev.par.cancelled = true;
+            }
             if ev.par.cancelled {
-                // Bailed (or hit an effect) somewhere below: transient.
                 ev.par.fx.0.truncate(mark);
                 thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
                 Err(cancelled())
-            } else if w.thunk_kind() == Kind::ThunkMap
-                && (ev.par.fx.0.len() > mark || (spec && v.is_function()))
-            {
+            } else if w.thunk_kind() == Kind::ThunkMap && ev.par.fx.0.len() > mark {
                 // Publishing into the map entry would expose pending effects.
-                // A function needs the state word for its demanded result,
-                // so it cannot also mark a speculative result here.
                 if ev.par.frames == 0 {
                     ev.par.fx.0.truncate(mark);
                 }

@@ -747,6 +747,7 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::store::hash::Hash;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
     fn virtual_tree_reads_go_to_the_local_files() {
@@ -784,8 +785,6 @@ mod tests {
 
     #[test]
     fn a_copy_cache_hit_requires_a_registered_origin() {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("source");
         fs::write(&file, b"copied bytes").unwrap();

@@ -159,3 +159,121 @@ fn nested_and_slash_containing_regions_are_distinct(bin: Iets) {
     fs::write(node_file, data).unwrap();
     assert!(!check().status.success(), "legacy DAG must be regenerated");
 }
+
+#[rstest]
+#[case::removed(false, false)]
+#[case::replaced_by_file(true, false)]
+#[case::surviving_directory(false, true)]
+fn git_directory_changes_reach_negative_lookups(
+    bin: Iets,
+    #[case] replace: bool,
+    #[case] keep: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let repo = home.join("incr/nixpkgs");
+    let base = home.join("incr/base");
+    let traces = home.join("traces");
+    let dag = home.join("dag");
+    for root in [&repo, &base] {
+        fs::create_dir_all(root.join("gone")).unwrap();
+        fs::write(root.join("gone/child"), "").unwrap();
+        fs::write(root.join("gone/keep"), "").unwrap();
+    }
+    fs::create_dir(&traces).unwrap();
+    fs::write(
+        base.join("jobs.nix"),
+        "let d=builtins.readDir ./gone; in [ (d ? child) (d ? absent) (builtins.attrNames d) ]",
+    )
+    .unwrap();
+    run(bin
+        .cmd()
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_JOBS", &traces)
+        .env("IETS_FINE_DAG", &dag)
+        .args(["eval", "--strict", "--no-cache", "--workers", "1"])
+        .arg(base.join("jobs.nix")));
+    let git = |args: &[&str]| {
+        run(Command::new("git")
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(args))
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    // The generator's historical range includes 101 first-parent revisions.
+    for i in 0..101 {
+        if i == 100 {
+            fs::remove_file(repo.join("gone/child")).unwrap();
+            if !keep {
+                fs::remove_dir_all(repo.join("gone")).unwrap();
+            }
+            if replace {
+                fs::write(repo.join("gone"), "now a file").unwrap();
+            }
+            git(&["add", "-A"]);
+        }
+        git(&["commit", "-qm", "fixture", "--allow-empty"]);
+        if i == 1 {
+            git(&["tag", "9dbd131e6c65"]);
+        }
+    }
+    git(&["tag", "4e63084a455b"]);
+    let incremental = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental");
+    let changes = home.join("incr/fchg");
+    fs::create_dir(&changes).unwrap();
+    // Existing V2 files predate the directory fix and must be regenerated.
+    fs::write(changes.join("100.txt"), "V\t2\n").unwrap();
+    run(Command::new("bash")
+        .env("HOME", home)
+        .arg(incremental.join("fchg.sh")));
+    let delta = fs::read_to_string(changes.join("100.txt")).unwrap();
+    assert!(delta.contains("# fchg 3"));
+    let changes = home.join("changes");
+    fs::write(
+        &changes,
+        delta
+            .lines()
+            .map(|s| format!("1\t{s}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let expected = if keep { vec![0, 2] } else { vec![0, 1, 2] };
+    let actual = run(bin.cmd().arg("fine-check").arg(&changes).arg(&dag));
+    let mut jobs: Vec<usize> = actual
+        .lines()
+        .map(|s| s.split('\t').nth(1).unwrap().parse().unwrap())
+        .collect();
+    jobs.sort_unstable();
+    assert_eq!(jobs, expected);
+    let flat = home.join("flat");
+    fs::write(
+        &flat,
+        (0..3)
+            .map(|i| {
+                format!(
+                    "J\t{i}\n{}",
+                    fs::read_to_string(traces.join(i.to_string())).unwrap()
+                )
+            })
+            .collect::<String>(),
+    )
+    .unwrap();
+    let actual = run(Command::new("awk")
+        .arg("-f")
+        .arg(incremental.join("fcheck.awk"))
+        .arg(&changes)
+        .arg(flat));
+    let mut jobs: Vec<usize> = actual
+        .lines()
+        .map(|s| s.split('\t').next().unwrap().parse().unwrap())
+        .collect();
+    jobs.sort_unstable();
+    assert_eq!(jobs, expected);
+}

@@ -29,9 +29,9 @@ cs=($(git log --first-parent --format=%h --reverse 9dbd131e6c65~1..4e63084a455b)
 pairs() { for ((i = 1; i < ${#cs[@]}; i++)); do echo "$i ${cs[i-1]} ${cs[i]}"; done; echo "w100 ${cs[0]} ${cs[100]}"; for ((i = 10; i <= 100; i += 10)); do echo "w10-$i ${cs[i-10]} ${cs[i]}"; done; }
 pairs | while read -r n a b; do
   out=../fchg/$n.txt
-  if [[ -s $out ]] && grep -Fqx $'V\t2' "$out"; then continue; fi
+  if [[ -s $out ]] && grep -Fqx '# fchg 3' "$out"; then continue; fi
   {
-    printf 'V\t2\n'
+    printf 'V\t2\n# fchg 3\n'
     git diff --no-renames --name-status -z "$a" "$b" | while IFS= read -r -d '' st && IFS= read -r -d '' p; do
       path_change CM "$P/$p"
       q=$p
@@ -44,11 +44,19 @@ pairs | while read -r n a b; do
         while [[ -n $rest ]]; do
           name=${rest%%/*} rest=${rest#*/}
           cand=${pre:+$pre/}$name
-          if ! $missing && ! git cat-file -e "$other:$cand" 2>/dev/null; then
-            dir_change "$P${pre:+/$pre}" "$name"
-            missing=true
+          if ! $missing; then
+            kind=$(git cat-file -t "$other:$cand" 2>/dev/null || :)
+            if [[ -z $kind || ( -n $rest && $kind != tree ) ]]; then missing=true; fi
           fi
-          if $missing; then path_change CS "$P/$cand"; fi
+          if $missing; then
+            dir_change "$P${pre:+/$pre}" "$name"
+            path_change CS "$P/$cand"
+            if [[ -n $rest ]]; then
+              # The directory itself vanished or replaced a non-directory:
+              # invalidate negative lookups too, not just its former entries.
+              field "$P/$cand"; printf 'CD\t%s\t*\n' "$encoded"
+            fi
+          fi
           pre=$cand
         done
         ;;

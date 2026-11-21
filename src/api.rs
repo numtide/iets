@@ -80,6 +80,10 @@ pub struct EvalArgs {
     pub reference_lock_file: Option<String>,
     /// What the lint configuration reads: `IETS_LINT` and the config home.
     pub env: Env,
+    /// `--option NAME VALUE` but `pure-eval`, and the settings a flag
+    /// aliases, in order. Only `iets build` reads them: it sends the store
+    /// settings to the daemon.
+    pub overrides: Vec<(String, String)>,
 }
 
 impl Default for EvalArgs {
@@ -108,6 +112,7 @@ impl Default for EvalArgs {
             pure: None,
             reference_lock_file: None,
             env: Session::current().env.clone(),
+            overrides: Vec::new(),
         }
     }
 }

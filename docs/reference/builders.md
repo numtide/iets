@@ -101,21 +101,21 @@ daemon's `nix_version` and its trust flag, then one `STDERR_LAST`.
 ### `SetOptions`
 
 Over `daemon` and `unix://`, iets sends the fields Nix's
-`RemoteStore::setOptions` sends, with these values:
+`RemoteStore::setOptions` sends. `iets build` and classic mode take them
+from nix.conf, `$NIX_CONFIG` and `--option`:
 
 | Option | Value |
 |:---|:---|
-| keep-going | 1 with `--keep-going` or more than one root, else 0 |
-| max-jobs | the CPU count (0 would forbid local builds) |
+| keep-going | the setting; `iets build` also sets it with `--keep-going` or more than one root |
+| max-jobs | the setting, or `-j`; unset or `auto` is the CPU count (0 would forbid local builds) |
+| cores | the setting, or `--cores`; unset is 0, all of them |
+| keep-failed, try-fallback, max-silent-time | the setting, else 0 |
+| substitutes | the `substitute` setting, else on |
 | build verbosity | `lvlVomit`, so builder output arrives as results attributed to their build activity |
-| substitutes | on |
-| keep-failed, try-fallback, max-silent-time, cores | 0 |
-| the override map | empty |
+| the override map | every other store setting you set outside the system nix.conf (`docs/reference/settings.md`) |
 
-In classic mode, these come from nix.conf instead: `keep-failed`,
-`keep-going`, `fallback`, `max-jobs`, `max-silent-time`, `cores` and
-`substitute`. The override map then holds every other store setting you
-set outside the system nix.conf (`docs/reference/settings.md`).
+iets's other commands (`eval-jobs`, `print-dev-env`) send the defaults of
+this table and an empty override map.
 
 Over `ssh-ng://`, iets sends no `SetOptions`, as Nix's `SSHStore` does
 (ssh-store.cc). The remote daemon's own settings apply. nixbuild.net
@@ -309,9 +309,7 @@ when its metadata changed (`docs/explanation/caching.md`).
 - `ssh-ng://` is tested through a local `ssh` shim, and against
   nixbuild.net with `bench/nixbuild.nu`. There is no `--ssh-option` passthrough: use
   `NIX_SSHOPTS` or `~/.ssh/config`.
-- Over `daemon` and `unix://`, `iets build` sends `max-jobs` equal to the
-  CPU count. It has no flag for that or for substituters. A `grpc://` builder always keeps going, so `-k`
-  changes nothing there.
+- A `grpc://` builder always keeps going, so `-k` changes nothing there.
 - iets asks for the output paths of the roots only. A dependency that built
   gets no line of its own beyond its result.
 - During a large upload, an error shows only after the whole stream is

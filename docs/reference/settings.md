@@ -352,17 +352,17 @@ as it does for a Nix client. `store` is not sent: it names the daemon. A
 list setting that only got `extra-` values goes as `extra-NAME`, which the
 daemon appends to its own value.
 
-Classic mode does this. iets's own commands (`iets eval`, `build`,
-`eval-jobs`, `print-dev-env`, `diff`) send Nix's defaults and no
+Classic mode and `iets build` do this. iets's other commands (`iets
+eval`, `eval-jobs`, `print-dev-env`, `diff`) send Nix's defaults and no
 overrides. There, a store setting given with `--option` gives one warning:
 
 ```
-warning: setting 'sandbox' is ignored: iets's own commands send a daemon no settings; classic mode does
+warning: setting 'sandbox' is ignored: this command sends a daemon no settings; 'iets build' and classic mode do
 ```
 
-A `grpc://` builder has no `SetOptions`. For it, classic mode gives
-the same warning, with the reason `a grpc:// builder takes no settings;
-its URL has 'max-builds'`. `store` and `system` still apply.
+A `grpc://` builder has no `SetOptions`. For it, classic mode and `iets
+build` give the same warning, with the reason `a grpc:// builder takes no
+settings; its URL has 'max-builds'`. `store` and `system` still apply.
 
 **3. It holds by construction.** iets says nothing.
 

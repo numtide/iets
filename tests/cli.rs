@@ -437,3 +437,49 @@ fn eval_prints_every_attr(bin: Iets) {
     assert!(!o.status.success());
     assert_eq!(o.stdout, "1\n".as_bytes());
 }
+
+#[rstest]
+fn fine_server_keeps_queued_loads_after_an_error(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    for graph in ["first", "broken", "last"] {
+        let out = bin
+            .cmd()
+            .current_dir(path)
+            .env("IETS_FINE_TRACE", "")
+            .env("IETS_FINE_DAG", graph)
+            .args([
+                "eval",
+                "--strict",
+                "--no-cache",
+                "--workers",
+                "1",
+                "-E",
+                "[ 0 ]",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    fs::remove_file(path.join("broken/nodes")).unwrap();
+    fs::write(path.join("dirs"), "first\nlast\n").unwrap();
+    fs::write(
+        path.join("commands"),
+        "load first 0\nload broken 0\nload last 0\ngc dirs failed\ngc dirs retry\n",
+    )
+    .unwrap();
+    let out = bin
+        .cmd()
+        .current_dir(path)
+        .args(["fine-check", "--serve"])
+        .stdin(fs::File::open(path.join("commands")).unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("error broken:"), "{}", stdout(&out));
+    assert!(!path.join("failed").exists());
+    assert_eq!(
+        fs::read_to_string(path.join("retry")).unwrap(),
+        "first\nlast\n"
+    );
+}

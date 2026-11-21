@@ -927,27 +927,25 @@ mod tests {
             drvPath = { __toString = _: (1).x or "/nix/store/00000000000000000000000000000000-job.drv"; };
             outPath = { __toString = _: (2).y or "/nix/store/00000000000000000000000000000000-out"; };
         }"#;
+        let named = r#"{ type = "derivation"; name = "job";
+            drvPath = "/nix/store/00000000000000000000000000000000-job.drv";
+            outputs = [ "out" ]; outPath = throw "unused";
+            out.outPath = { __toString = _: (3).z or "/nix/store/00000000000000000000000000000000-out"; };
+        }"#;
         for (src, warnings) in [
             ("{}: (1).x or null", 1),
             ("{ __functor = _: {}: (2).y or null; }", 1),
             (job, 2),
+            (named, 1),
         ] {
             let v = ev.eval_string(src, b"/").unwrap();
             let before = ev.lints.records().len();
             prefetch_value(&mut ev, v, FNV_BASIS, 1).unwrap();
             assert_eq!(ev.lints.records().len(), before, "{src}");
             let demanded = node(&mut ev, v, &[], FNV_BASIS).unwrap();
-            assert_eq!(matches!(demanded, Node::Job(_)), src == job);
+            assert_eq!(matches!(demanded, Node::Job(_)), src == job || src == named);
             assert_eq!(ev.lints.records().len(), before + warnings, "{src}");
         }
-
-        let explicit = ev
-            .eval_string(
-                r#"{ type = "derivation"; outputs = []; outPath = throw "unused"; }"#,
-                b"/",
-            )
-            .unwrap();
-        prefetch_value(&mut ev, explicit, FNV_BASIS, 1).unwrap();
     }
 
     #[test]

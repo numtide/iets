@@ -169,7 +169,7 @@ fn concurrent_empty_job_batch_has_one_publisher(bin: Iets, #[case] other: &str) 
         assert!(
             fs::read_to_string(dest.join("0"))
                 .unwrap()
-                .ends_with("V\tend-serial-v2\n")
+                .ends_with("V\tend-serial-volatile-v1\n")
         );
     }
     let loser = results.iter().find(|r| !r.status.success()).unwrap();

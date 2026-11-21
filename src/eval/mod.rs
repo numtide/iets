@@ -892,6 +892,11 @@ impl Evaluator {
         path: &[u8],
         pos: Pos,
     ) -> EvalResult<Word> {
+        // Standalone region fingerprints compile without the lexical bindings
+        // introduced by scopedImport, which may shadow global primitives.
+        if fine::on() {
+            fine::volatile();
+        }
         let resolved = self.resolve_import_path(path, pos)?;
         let src = self.read_source(&resolved, pos)?;
         let names: Vec<Sym> = scope.iter().map(|a| a.sym).collect();

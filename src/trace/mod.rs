@@ -368,6 +368,9 @@ impl Trace {
     }
 
     pub fn mark_uncacheable(&self) {
+        if fine::on() {
+            fine::volatile();
+        }
         if let Some(i) = &self.0 {
             i.uncacheable.store(true, Ordering::Relaxed);
         }

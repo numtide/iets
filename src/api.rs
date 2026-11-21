@@ -31,6 +31,7 @@ use crate::runtime::Word;
 use crate::session::Session;
 use crate::store::path::StorePath;
 use crate::sys::{self, OsStringExt};
+use crate::trace::fine;
 use crate::trace::key::{Key, has_relative_path};
 use crate::trace::run::Cache;
 use crate::{argv, compile, config, error, log, parallel, project};
@@ -285,15 +286,23 @@ pub fn evaluate_each(
     a: &EvalArgs,
     mut each: impl FnMut(&mut Evaluator, Word) -> Result<(), Box<Error>>,
 ) -> Result<(), Box<Error>> {
-    let (root, args) = input_and_args(ev, a, &mut Loaded::default())?;
+    let (input, input_trace) = fine::capture(|| input_and_args(ev, a, &mut Loaded::default()));
+    let (root, args) = input?;
     let has_args = !a.args.is_empty();
+    let mut one = |attr| {
+        let (v, trace) = fine::capture(|| {
+            fine::edge(input_trace);
+            select(ev, root, attr, args, has_args)
+        });
+        let v = v?;
+        fine::selected(trace);
+        each(ev, v)
+    };
     if a.attrs.is_empty() {
-        let v = select(ev, root, a.attr.as_deref(), args, has_args)?;
-        return each(ev, v);
+        return one(a.attr.as_deref());
     }
     for attr in &a.attrs {
-        let v = select(ev, root, Some(attr), args, has_args)?;
-        each(ev, v)?;
+        one(Some(attr))?;
     }
     Ok(())
 }

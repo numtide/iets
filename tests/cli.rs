@@ -3,16 +3,111 @@
 
 mod hermetic;
 
-use hermetic::{Iets, bin, stderr, stdout};
+use hermetic::{Iets, bin, ok, stderr, stdout};
+use iets::sys::{path_to_internal, temp_dir};
 
 use rstest::rstest;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::{env, fs};
-use tempfile::tempdir;
+use tempfile::{tempdir, tempdir_in};
 
 fn run(bin: &Iets, args: &[&str]) -> Output {
     bin.cmd().args(args).output().expect("run iets")
+}
+
+#[rstest]
+fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
+    let dir = tempdir_in(temp_dir()).unwrap();
+    let path = |name: &str| dir.path().join(name);
+    for (name, value) in [
+        ("guard", "true"),
+        ("left", "1"),
+        ("right", "2"),
+        ("other", "3"),
+    ] {
+        fs::write(path(name), value).unwrap();
+    }
+    fs::write(
+        path("jobs.nix"),
+        "if import ./guard then [ (import ./left) (import ./right) 0 ] else [ (import ./other) 4 5 ]",
+    )
+    .unwrap();
+    let eval = || {
+        let mut cmd = bin.cmd();
+        cmd.current_dir(dir.path()).args([
+            "eval",
+            "--strict",
+            "--no-cache",
+            "--workers",
+            "1",
+            "jobs.nix",
+        ]);
+        cmd
+    };
+    let traced = ok(eval()
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_DAG", path("dag")));
+    assert_eq!(stdout(&traced), "[ 1 2 0 ]");
+    fs::write(path("guard"), "false").unwrap();
+    assert_eq!(stdout(&ok(&mut eval())), "[ 3 4 5 ]");
+
+    // Model four revisions, each editing the root region of one imported file.
+    let changes: String = ["guard", "left", "right", "other"]
+        .iter()
+        .map(|name| {
+            let file = String::from_utf8(path_to_internal(&path(name))).unwrap();
+            format!("{name}\tV\t2\n{name}\tCR\t{file}\t\n")
+        })
+        .collect();
+    fs::write(path("changes"), changes).unwrap();
+    let checked = ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .args(["fine-check", "changes", "dag"]));
+    assert_eq!(
+        stdout(&checked),
+        "dag\t0\tguard\ndag\t0\tleft\ndag\t1\tguard\ndag\t1\tright\ndag\t2\tguard"
+    );
+}
+
+#[rstest]
+fn fine_check_rejects_graphs_without_list_control_traces(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_DAG", "dag")
+        .args([
+            "eval",
+            "--strict",
+            "--no-cache",
+            "--workers",
+            "1",
+            "-E",
+            "[ 0 ]",
+        ]));
+    // The old format for an immediate element with no cell trace.
+    fs::write(path("dag/roots"), "0\n").unwrap();
+    fs::write(path("changes"), "1\tV\t2\n").unwrap();
+    let checked = bin
+        .cmd()
+        .current_dir(dir.path())
+        .args(["fine-check", "changes", "dag"])
+        .output()
+        .unwrap();
+    assert!(!checked.status.success());
+    assert!(stderr(&checked).contains("record the graph again"));
+    fs::write(path("commands"), "load dag 0\ncheck changes checked\n").unwrap();
+    let served = ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .args(["fine-check", "--serve"])
+        .stdin(fs::File::open(path("commands")).unwrap()));
+    assert!(stdout(&served).contains("error dag: missing list-control traces"));
+    assert!(!path("checked").exists());
 }
 
 fn run_complete(mut c: Command, words: &[&str]) -> String {
@@ -20,6 +115,44 @@ fn run_complete(mut c: Command, words: &[&str]) -> String {
     assert_eq!(o.status.code(), Some(0), "{words:?}: {}", stderr(&o));
     assert!(o.stderr.is_empty(), "{words:?}: {}", stderr(&o));
     String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[cfg(unix)]
+#[rstest]
+fn fine_text_checker_rereads_only_jobs_missing_the_list_control_marker(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    fs::create_dir(path("jobs")).unwrap();
+    ok(bin
+        .cmd()
+        .current_dir(dir.path())
+        .env("IETS_FINE_TRACE", "")
+        .env("IETS_FINE_JOBS", "jobs")
+        .args([
+            "eval",
+            "--strict",
+            "--no-cache",
+            "--workers",
+            "1",
+            "-E",
+            "[ 0 ]",
+        ]));
+    let current = fs::read_to_string(path("jobs/0")).unwrap();
+    let legacy = current.replace("V\tlist-control-v1\n", "");
+    assert_ne!(current, legacy);
+    fs::write(path("changes"), "1\tV\t2\n1\tCR\tunrelated\t\n").unwrap();
+    fs::write(
+        path("traces"),
+        format!("J\tcurrent\n{current}J\tlegacy\n{legacy}"),
+    )
+    .unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
+    let checked = ok(Command::new("awk")
+        .arg("-f")
+        .arg(script)
+        .arg(path("changes"))
+        .arg(path("traces")));
+    assert_eq!(stdout(&checked), "legacy\t1\tmissing list control trace");
 }
 
 #[rstest]
@@ -436,4 +569,50 @@ fn eval_prints_every_attr(bin: Iets) {
     let o = run(&bin, &["eval", "-E", e, "-A", "a", "-A", "c", "-A", "b"]);
     assert!(!o.status.success());
     assert_eq!(o.stdout, "1\n".as_bytes());
+}
+
+#[rstest]
+fn fine_server_keeps_queued_loads_after_an_error(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    for graph in ["first", "broken", "last"] {
+        let out = bin
+            .cmd()
+            .current_dir(path)
+            .env("IETS_FINE_TRACE", "")
+            .env("IETS_FINE_DAG", graph)
+            .args([
+                "eval",
+                "--strict",
+                "--no-cache",
+                "--workers",
+                "1",
+                "-E",
+                "[ 0 ]",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    fs::remove_file(path.join("broken/nodes")).unwrap();
+    fs::write(path.join("dirs"), "first\nlast\n").unwrap();
+    fs::write(
+        path.join("commands"),
+        "load first 0\nload broken 0\nload last 0\ngc dirs failed\ngc dirs retry\n",
+    )
+    .unwrap();
+    let out = bin
+        .cmd()
+        .current_dir(path)
+        .args(["fine-check", "--serve"])
+        .stdin(fs::File::open(path.join("commands")).unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("error broken:"), "{}", stdout(&out));
+    assert!(!path.join("failed").exists());
+    assert_eq!(
+        fs::read_to_string(path.join("retry")).unwrap(),
+        "first\nlast\n"
+    );
 }

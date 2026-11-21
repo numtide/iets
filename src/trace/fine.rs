@@ -20,9 +20,12 @@
 //! jobs that share thunks still gives each job all that it depends on.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, Write as _};
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
@@ -50,6 +53,8 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+/// A complete roots file whose job traces include the choice of result list.
+const ROOTS_FOOTER: &str = "# list-control-v1\n";
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -89,6 +94,8 @@ struct State {
     log: Vec<u32>,
     /// Each open frame: where its entries start in `log`, and its stamp.
     frames: Vec<(usize, u32)>,
+    /// Evaluating the input and selecting the last result, before printing it.
+    selected: u32,
     /// The trace of each path copied to the store, for the cache hits.
     copies: FxHashMap<Vec<u8>, u32>,
     serial: u32,
@@ -278,6 +285,20 @@ pub fn push() -> bool {
         s.frames.push((s.log.len(), st));
     });
     true
+}
+
+/// Collect just the observations made by `f`. Pop also records the trace in
+/// its parent, so the whole-run trace still includes them.
+pub(crate) fn capture<T>(f: impl FnOnce() -> T) -> (T, u32) {
+    let tracing = push();
+    let value = f();
+    (value, if tracing { pop() } else { 0 })
+}
+
+pub(crate) fn selected(trace: u32) {
+    if on() {
+        with(|s| s.selected = trace);
+    }
 }
 
 impl State {
@@ -1588,6 +1609,8 @@ impl State {
         roots: &[u32],
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
+        // Invalidate a previous capture before replacing any graph components.
+        let mut roots_file = File::create(dir.join("roots"))?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
             // a name may hold a newline, and a line is an id
@@ -1623,18 +1646,36 @@ impl State {
             );
         }
         std::fs::write(dir.join("queries"), q)?;
-        let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        let mut r: String = roots.iter().map(|t| format!("{t}\n")).collect();
+        r.push_str(ROOTS_FOOTER);
+        roots_file.write_all(r.as_bytes())
     }
 }
 
-/// The trace of each element of `v` when it is a list, 0 for none.
-fn roots(v: Word) -> Vec<u32> {
+/// Both traces must remain valid. Keep a single shared edge to the work
+/// of choosing the list instead of copying its observations into every job.
+fn join(nodes: &mut Vec<u32>, a: u32, b: u32) -> u32 {
+    if a == 0 || a == b {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let t = nodes.len() as u32;
+    nodes.extend([0, 2, EDGE | a, EDGE | b]);
+    t
+}
+
+/// The trace that chose the result list, plus each element's own trace.
+fn roots(v: Word, mut parent: u32, nodes: &mut Vec<u32>) -> Vec<u32> {
     let mut v = v;
     if v.is_thunk() {
         let st = v.thunk_state_cell().get();
         if v.thunk_unforced(st) || st.is_blackhole() {
             return Vec::new();
+        }
+        if st.is_traced() {
+            parent = join(nodes, parent, st.traced_id());
         }
         v = v.thunk_value(st);
     }
@@ -1650,7 +1691,8 @@ fn roots(v: Word) -> Vec<u32> {
             } else {
                 Word::EMPTY
             };
-            if st.is_traced() { st.traced_id() } else { 0 }
+            let cell = if st.is_traced() { st.traced_id() } else { 0 };
+            join(nodes, parent, cell)
         })
         .collect()
 }
@@ -1666,7 +1708,9 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
-        let roots = v.map(roots).unwrap_or_default();
+        let roots = v
+            .map(|v| roots(v, s.selected, &mut s.nodes))
+            .unwrap_or_default();
         if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
                 let obs = if *t == 0 {
@@ -1675,7 +1719,9 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                     s.flatten(&[EDGE | t])
                 };
                 let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
+                let mut text = s.text(ev, &obs);
+                text.push_str("V\tlist-control-v1\n");
+                if let Err(e) = std::fs::write(&p, text) {
                     errln!("fine trace: writing {}: {e}", p.display());
                 }
             }
@@ -1858,6 +1904,22 @@ fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
+fn read_roots(dir: &Path) -> io::Result<Vec<u32>> {
+    let text = fs::read_to_string(dir.join("roots"))?;
+    let ids = text.strip_suffix(ROOTS_FOOTER).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing list-control traces; record the graph again",
+        )
+    })?;
+    ids.lines()
+        .map(|line| {
+            line.parse()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        })
+        .collect()
+}
+
 /// The steps each job of the trace graph in `dir` must be evaluated again
 /// for, with every query read as the trace of its force: `(job, mask)`.
 fn check_dag(
@@ -1870,6 +1932,7 @@ fn check_dag(
     } else {
         u128::MAX >> (128 - c.steps.len())
     };
+    let roots = read_roots(dir)?;
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
     let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
@@ -1899,11 +1962,8 @@ fn check_dag(
         at += 2 + n;
     }
     let mut out = Vec::new();
-    for (i, line) in std::fs::read_to_string(dir.join("roots"))?
-        .lines()
-        .enumerate()
-    {
-        let t: usize = line.parse().unwrap_or(0);
+    for (i, root) in roots.into_iter().enumerate() {
+        let t = root as usize;
         let m = match t {
             0 => 0,
             t if t >= words.len() => every,
@@ -2259,10 +2319,7 @@ impl Graph {
             std::fs::read_to_string(d.join("provs"))?,
             ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
             read_words(&d.join("nodes"))?,
-            std::fs::read_to_string(d.join("roots"))?
-                .lines()
-                .map(|l| l.parse().unwrap_or(0))
-                .collect(),
+            read_roots(d)?,
         );
         let mut g = Graph {
             dir,
@@ -2446,7 +2503,7 @@ struct Server {
     graphs: Vec<Graph>,
     keys: Keys,
     /// The graphs that `load` started to read.
-    loading: Vec<std::thread::JoinHandle<std::io::Result<Graph>>>,
+    loading: VecDeque<std::thread::JoinHandle<std::io::Result<Graph>>>,
     /// By key, made again after a load or a drop: the graph of the newest
     /// step that read it, plus one, where a check takes its trace; and how
     /// many graphs read it.
@@ -2558,7 +2615,7 @@ impl Server {
 
     /// Takes the graphs that `load` started.
     fn settle(&mut self) -> std::io::Result<()> {
-        for h in std::mem::take(&mut self.loading) {
+        while let Some(h) = self.loading.pop_front() {
             self.graphs.push(h.join().expect("a loader thread")?);
             self.fresh = false;
         }
@@ -2844,7 +2901,7 @@ fn serve() -> i32 {
                 let (dir, step) = (dir.to_string(), step.parse().unwrap_or(0));
                 let paths = Graph::paths(&dir, &mut s.keys);
                 let d = dir.clone();
-                s.loading.push(std::thread::spawn(move || {
+                s.loading.push_back(std::thread::spawn(move || {
                     Graph::load(dir, step, paths)
                         .map_err(|e| std::io::Error::other(format!("{d}: {e}")))
                 }));
@@ -2999,12 +3056,8 @@ fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
         .map(String::from)
         .collect();
     let words = read_words(&dir.join("nodes"))?;
-    let roots = std::fs::read_to_string(dir.join("roots"))?;
-    let t: u32 = roots
-        .lines()
-        .nth(job)
-        .and_then(|l| l.parse().ok())
-        .unwrap_or(0);
+    let roots = read_roots(dir)?;
+    let t = roots.get(job).copied().unwrap_or(0);
     let mut seen = FxHashSet::default();
     let mut ids = FxHashSet::default();
     let mut stack = vec![t];

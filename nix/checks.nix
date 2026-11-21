@@ -1,4 +1,4 @@
-{ lib, pkgs, stdenv, runCommand, git, jq, nix, openssh, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsRiscv64, fuzz }:
+{ lib, pkgs, stdenv, runCommand, git, jq, nix, openssh, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsRiscv64, fuzz, benchmarks }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # LTO, minutes for no extra coverage
@@ -9,6 +9,7 @@ let
   };
 in
 {
+  bench-smoke = benchmarks.smoke;
   test = craneLib.cargoNextest (withDev // {
     # nix runs the private daemon of tests/e2e
     # ssh-keygen checks the signed commits of the fetchGit tests

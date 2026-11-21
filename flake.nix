@@ -37,6 +37,7 @@
           { };
         # the differential fuzzer against Nix (docs/how-to/fuzz.md)
         fuzz = final.callPackage ./nix/fuzz.nix { };
+        benchmarks = final.callPackage ./nix/bench.nix { };
         # for files that return a set of packages
         callPackages = pkgs.lib.callPackagesWith (pkgs // final);
       });
@@ -52,7 +53,14 @@
       };
       notes = ./release-notes + "/v${version}.md";
     in {
-      devShells = forAll (scope: { default = scope.devShell; });
+      devShells = forAll (scope: { default = scope.devShell; }
+        // onLinux scope {
+          bench = scope.pkgs.mkShell {
+            inputsFrom = [ scope.devShell ];
+            packages = [ scope.benchmarks.runner scope.benchmarks.profilingValgrind ];
+            GUNGRAUN_RUNNER = lib.getExe scope.benchmarks.runner;
+          };
+        } { });
       nixosModules.default = import ./nix/module.nix self;
       lib.mkClassic = pkgs: iets: nix: pkgs.callPackage ./nix/classic.nix { inherit iets nix; };
       packages = lib.recursiveUpdate

@@ -10,6 +10,8 @@
 //! `NIXPKGS` names the nixpkgs tree, by default the flake's locked input.
 //! Exits 1 when a run fails, the outputs differ, or with `--threshold` when
 //! a slowdown or more memory has its whole interval past it.
+//! Hardware counters are omitted unless every event ran for its entire enabled
+//! time; multiplexed counts are not treated as totals or scaled estimates.
 
 use std::process::ExitCode;
 
@@ -61,6 +63,7 @@ mod ab {
         np: String,
         checkout: PathBuf,
         work: PathBuf,
+        workloads: PathBuf,
     }
 
     fn scenarios(c: &Ctx) -> Vec<Scenario> {
@@ -76,6 +79,18 @@ mod ab {
                 false,
                 Cache::Cold,
                 "eval --impure --strict --no-cache --workers 4 -I nixpkgs={np} {wl}/nixos-server.nix",
+            ),
+            (
+                "nixos/plasma-w1",
+                false,
+                Cache::Cold,
+                "eval --impure --strict --no-cache --workers 1 -I nixpkgs={np} {wl}/nixos-plasma.nix",
+            ),
+            (
+                "nixos/plasma-w4",
+                false,
+                Cache::Cold,
+                "eval --impure --strict --no-cache --workers 4 -I nixpkgs={np} {wl}/nixos-plasma.nix",
             ),
             (
                 "nixos/server-pure-w1",
@@ -130,10 +145,7 @@ mod ab {
         let fill = |a: &str| {
             a.replace("{np}", np)
                 .replace("{ck}", &c.checkout.display().to_string())
-                .replace(
-                    "{wl}",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/bench/workloads"),
-                )
+                .replace("{wl}", &c.workloads.display().to_string())
                 .replace("{work}", &c.work.display().to_string())
                 .replace(
                     "{rs}",
@@ -266,6 +278,8 @@ mod ab {
                     let mut attr = [0u64; 16];
                     attr[0] = 128 << 32; // type PERF_TYPE_HARDWARE, size
                     attr[1] = config;
+                    // PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING
+                    attr[4] = 3;
                     // disabled, inherit, exclude_kernel, exclude_hv, enable_on_exec
                     attr[5] = 1 | 1 << 1 | 1 << 5 | 1 << 6 | 1 << 12;
                     // SAFETY: attr is a perf_event_attr of the size it names.
@@ -279,14 +293,42 @@ mod ab {
         }
 
         pub fn read(files: &mut [File]) -> Option<Vec<f64>> {
-            files
-                .iter_mut()
-                .map(|f| {
-                    let mut b = [0u8; 8];
-                    f.read_exact(&mut b).ok()?;
-                    Some(u64::from_ne_bytes(b) as f64)
-                })
-                .collect()
+            files.iter_mut().map(read_counter).collect()
+        }
+
+        fn read_counter(mut f: impl Read) -> Option<f64> {
+            let mut b = [0u8; 24];
+            f.read_exact(&mut b).ok()?;
+            let value = u64::from_ne_bytes(b[..8].try_into().ok()?);
+            let enabled = u64::from_ne_bytes(b[8..16].try_into().ok()?);
+            let running = u64::from_ne_bytes(b[16..].try_into().ok()?);
+            // A partial count is not a total. Scaling assumes the measured
+            // phases represent the unmeasured ones, which a short run need not do.
+            (enabled != 0 && running == enabled).then_some(value as f64)
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            fn sample(value: u64, enabled: u64, running: u64) -> Vec<u8> {
+                [value, enabled, running]
+                    .into_iter()
+                    .flat_map(u64::to_ne_bytes)
+                    .collect()
+            }
+
+            #[test]
+            fn only_complete_counts_are_totals() {
+                assert_eq!(read_counter(&sample(42, 100, 100)[..]), Some(42.0));
+                // A fully observed event can legitimately have no occurrences.
+                assert_eq!(read_counter(&sample(0, 100, 100)[..]), Some(0.0));
+                assert_eq!(read_counter(&sample(42, 100, 99)[..]), None);
+                assert_eq!(read_counter(&sample(0, 100, 0)[..]), None);
+                assert_eq!(read_counter(&sample(0, 0, 0)[..]), None);
+                assert_eq!(read_counter(&sample(42, 99, 100)[..]), None);
+                assert_eq!(read_counter(&sample(42, 100, 100)[..23]), None);
+            }
         }
     }
 
@@ -377,7 +419,13 @@ mod ab {
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
-        let counts = counters.as_deref_mut().and_then(counters::read);
+        let counts = counters.as_deref_mut().and_then(|files| {
+            let counts = counters::read(files);
+            if counts.is_none() {
+                eprintln!("ab: hardware counters were incomplete; omitting this run's counters");
+            }
+            counts
+        });
         #[cfg(not(target_os = "linux"))]
         let counts = None;
         if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
@@ -526,18 +574,16 @@ mod ab {
         String::from_utf8(out.stdout).expect("utf-8 path")
     }
 
-    fn make_checkout(np: &str, at: &Path) -> Result<(), String> {
+    fn make_checkout(np: &str, at: &Path, workloads: &Path) -> Result<(), String> {
         let ok = |c: &mut Command| c.status().is_ok_and(|s| s.success());
         if !ok(Command::new("cp").arg("-r").arg(format!("{np}/.")).arg(at))
             || !ok(Command::new("chmod").arg("-R").arg("u+w").arg(at))
         {
             return Err(format!("cannot copy {np}"));
         }
-        let server = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/bench/workloads/nixos-server.nix"
-        );
-        let server = fs::read_to_string(server).map_err(|e| format!("{server}: {e}"))?;
+        let server = workloads.join("nixos-server.nix");
+        let server =
+            fs::read_to_string(&server).map_err(|e| format!("{}: {e}", server.display()))?;
         let w = |name: &str, text: &str| fs::write(at.join(name), text).map_err(|e| e.to_string());
         // a project marker, so a pure evaluation may read the whole tree
         w("iets.toml", "")?;
@@ -583,6 +629,7 @@ mod ab {
                 if round >= o.rounds
                     && intervals(&row.runs)
                         .iter()
+                        .take(2) // only the wall/RSS metrics used by the gate
                         .flatten()
                         .all(|i| i.hi - i.lo <= precision)
                 {
@@ -720,6 +767,11 @@ mod ab {
             np: nixpkgs(),
             checkout: work.path().join("nixpkgs"),
             work: work.path().to_path_buf(),
+            workloads: env::var_os("IETS_BENCH_WORKLOADS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/workloads"))
+                }),
         };
         let todo: Vec<Scenario> = scenarios(&c)
             .into_iter()
@@ -731,7 +783,7 @@ mod ab {
             return ExitCode::from(2);
         }
         if todo.iter().any(|s| s.checkout)
-            && let Err(e) = make_checkout(&c.np, &c.checkout)
+            && let Err(e) = make_checkout(&c.np, &c.checkout, &c.workloads)
         {
             eprintln!("ab: {e}");
             return ExitCode::from(2);
@@ -777,9 +829,6 @@ mod ab {
                 }
                 if mem.lo > t {
                     slow.push("MORE MEMORY");
-                }
-                if instr.as_ref().is_some_and(|i| i.lo > t) {
-                    slow.push("MORE INSTRUCTIONS");
                 }
                 if !slow.is_empty() {
                     row.status = [slow.join(", "), row.status.clone()]

@@ -840,10 +840,14 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
         return Ok(());
     }
     let cfg = config();
-    let v = ev.auto_call(v, cfg.auto_args)?;
     let Some(a) = v.as_attrs() else {
         return Ok(());
     };
+    // Auto-calls have no result cell. Running a function here repeats its
+    // effects outside the thunk that the demand walk will force.
+    if a.get(ev.s.functor).is_some() {
+        return Ok(());
+    }
     if ev.is_derivation(v)? {
         if admit(hash, depth, true) {
             prefetch_job(ev, a)?;
@@ -870,14 +874,16 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
 
 fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
     let cfg = config();
-    if let Some(n) = a.get(ev.s.name) {
-        ev.force(n.cell.get())?;
+    // Coercing a path can run a user-defined __toString. Only the shared
+    // field values can carry speculative work to the demand walk.
+    for sym in [ev.s.name, ev.s.drv_path] {
+        if let Some(attr) = a.get(sym) {
+            ev.force_cell(&attr.cell)?;
+        }
     }
-    if let Some(d) = a.get(ev.s.drv_path) {
-        let mut ctx = Vec::new();
-        ev.coerce_to_string(d.cell.get(), &mut ctx, d.pos, "", false, false, true)?;
+    if let Some(outputs) = a.get(cfg.syms.outputs).or_else(|| a.get(ev.s.out_path)) {
+        ev.force_cell(&outputs.cell)?;
     }
-    outputs(ev, a, true)?;
     if cfg.opts.meta
         && let Some(m) = a.get(cfg.syms.meta)
     {
@@ -894,6 +900,53 @@ fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::eval::EvalConfig;
+    use crate::lint::{Config, Level, Scope};
+
+    #[test]
+    fn job_prefetch_leaves_function_calls_and_path_coercions_to_demand() {
+        let _session = Session::new().enter();
+        let mut lints = Config {
+            scope: Scope::All,
+            ..Config::default()
+        };
+        lints.set("or-non-attrs", Level::Warn).unwrap();
+        let mut ev = EvalConfig::new().lints(lints).build();
+        let args = ev.empty_attrs();
+        configure(
+            &mut ev,
+            Opts {
+                no_instantiate: true,
+                ..Opts::default()
+            },
+            args,
+            None,
+        );
+        let job = r#"{ type = "derivation"; name = "job";
+            drvPath = { __toString = _: (1).x or "/nix/store/00000000000000000000000000000000-job.drv"; };
+            outPath = { __toString = _: (2).y or "/nix/store/00000000000000000000000000000000-out"; };
+        }"#;
+        let named = r#"{ type = "derivation"; name = "job";
+            drvPath = "/nix/store/00000000000000000000000000000000-job.drv";
+            outputs = [ "out" ]; outPath = throw "unused";
+            out.outPath = { __toString = _: (3).z or "/nix/store/00000000000000000000000000000000-out"; };
+        }"#;
+        for (src, warnings) in [
+            ("{}: (1).x or null", 1),
+            ("{ __functor = _: {}: (2).y or null; }", 1),
+            (job, 2),
+            (named, 1),
+        ] {
+            let v = ev.eval_string(src, b"/").unwrap();
+            let before = ev.lints.records().len();
+            prefetch_value(&mut ev, v, FNV_BASIS, 1).unwrap();
+            assert_eq!(ev.lints.records().len(), before, "{src}");
+            let demanded = node(&mut ev, v, &[], FNV_BASIS).unwrap();
+            assert_eq!(matches!(demanded, Node::Job(_)), src == job || src == named);
+            assert_eq!(ev.lints.records().len(), before + warnings, "{src}");
+        }
+    }
 
     #[test]
     fn a_numeric_name_selects_an_attribute_under_a_set() {

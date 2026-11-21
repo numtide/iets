@@ -654,11 +654,17 @@ impl Ser {
                 self.node(else_);
                 self.pos(*pos);
             }
-            Ir::Assert { cond, body, pos } => {
+            Ir::Assert {
+                cond,
+                body,
+                pos,
+                text,
+            } => {
                 self.tag(IrTag::Assert);
                 self.node(cond);
                 self.node(body);
                 self.pos(*pos);
+                put_bytes(&mut self.out, text);
             }
             Ir::Not(e, pos) => self.unary(IrTag::Not, e, *pos),
             Ir::Neg(e, pos) => self.unary(IrTag::Neg, e, *pos),
@@ -1465,7 +1471,15 @@ impl<'a> De<'a, '_> {
                 let cond = self.node();
                 let body = self.node();
                 let pos = self.pos();
-                Ir::Assert { cond, body, pos }
+                let text = self.bytes().to_vec();
+                let text: &'static [u8] = self.ev.arena.alloc_slice(&text);
+                let text = self.ev.arena.alloc(text);
+                Ir::Assert {
+                    cond,
+                    body,
+                    pos,
+                    text,
+                }
             }
             IrTag::Not => {
                 let e = self.node();

@@ -2398,9 +2398,32 @@ impl Evaluator {
 
     #[inline(never)]
     fn eval_k_assert(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
-        node!(Ir::Assert { cond, body, pos } = ir);
+        node!(
+            Ir::Assert {
+                cond,
+                body,
+                pos,
+                text
+            } = ir
+        );
         if !self.eval_bool(env, cond, *pos, "in the condition of the assert statement")? {
-            bail!(ErrorKind::Assert, *pos, "assertion failed");
+            let text = String::from_utf8_lossy(text);
+            // eval.cc: a failed `a == b` says how the two sides differ, and
+            // names the assertion in a trace
+            if let Ir::Eq(l, r, eq_pos) = cond {
+                let a = self.eval(env, l)?;
+                let b = self.eval(env, r)?;
+                if let Err(mut e) = self.assert_eq_values(a, b, *eq_pos) {
+                    if e.kind == ErrorKind::Assert {
+                        e.add_trace(
+                            *pos,
+                            format!("while evaluating the condition of the assertion '{text}'"),
+                        );
+                    }
+                    return Err(e);
+                }
+            }
+            bail!(ErrorKind::Assert, *pos, "assertion '{text}' failed");
         }
         self.eval(env, body)
     }

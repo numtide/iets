@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use super::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::builtins::store_hooks;
 use crate::lint::{LintId, coerce};
+use crate::print::show_value_short;
 use crate::runtime::{Cell, Ctx, Taint, Value, ValueType, Word};
 
 impl Evaluator {
@@ -160,7 +161,7 @@ impl Evaluator {
             format!(
                 "cannot coerce {} to a string: {}",
                 w.value_type().name(),
-                crate::print::show_value_short(self, w)
+                show_value_short(self, w)
             ),
             pos,
         );
@@ -272,6 +273,153 @@ impl Evaluator {
         }
     }
 
+    /// eval.cc `assertEqValues`: for an `assert a == b` that failed, the
+    /// error that says how `a` and `b` differ. It must take the steps of
+    /// `eq_forced`. Attributes go in symbol order, which is iets's own, so
+    /// of several differences the one named can be another than Nix names.
+    pub fn assert_eq_values(&mut self, a: Word, b: Word, pos: Pos) -> EvalResult<()> {
+        let a = self.force(a)?;
+        let b = self.force(b)?;
+        let fail = |msg: String| -> EvalResult<()> {
+            Err(Box::new(Error::new(ErrorKind::Assert, msg, pos)))
+        };
+        let show = |ev: &Self, w: Word| show_value_short(ev, w);
+        let (ta, tb) = (a.value_type(), b.value_type());
+        let number = |t| matches!(t, ValueType::Int | ValueType::Float);
+        if number(ta) && number(tb) {
+            if self.eq_forced(a, b, pos)? {
+                return Ok(());
+            }
+            return fail(format!(
+                "{} with value '{}' is not equal to {} with value '{}'",
+                ta.name(),
+                show(self, a),
+                tb.name(),
+                show(self, b)
+            ));
+        }
+        if ta != tb {
+            return fail(format!(
+                "{} of value '{}' is not equal to {} of value '{}'",
+                ta.name(),
+                show(self, a),
+                tb.name(),
+                show(self, b)
+            ));
+        }
+        match (a.view(), b.view()) {
+            (Value::Bool(x), Value::Bool(y)) if x != y => fail(format!(
+                "boolean '{}' is not equal to boolean '{}'",
+                show(self, a),
+                show(self, b)
+            )),
+            (Value::String(x), Value::String(y)) if x.bytes != y.bytes => fail(format!(
+                "string '{}' is not equal to string '{}'",
+                show(self, a),
+                show(self, b)
+            )),
+            (Value::Path(x), Value::Path(y)) if x.path != y.path => fail(format!(
+                "path '{}' is not equal to path '{}'",
+                show(self, a),
+                show(self, b)
+            )),
+            (Value::List(x), Value::List(y)) => {
+                if x.len != y.len {
+                    return fail(format!(
+                        "list of size '{}' is not equal to list of size '{}', left hand side is '{}', right hand side is '{}'",
+                        x.len,
+                        y.len,
+                        show(self, a),
+                        show(self, b)
+                    ));
+                }
+                for (n, (cx, cy)) in x.cells().iter().zip(y.cells()).enumerate() {
+                    if let Err(mut e) = self.assert_eq_cells(cx, cy, pos) {
+                        e.add_trace(pos, format!("while comparing list element {n}"));
+                        return Err(e);
+                    }
+                }
+                Ok(())
+            }
+            (Value::Attrs(x), Value::Attrs(y)) => {
+                if self.is_derivation(a)? && self.is_derivation(b)? {
+                    let i = x.get(self.s.out_path);
+                    let j = y.get(self.s.out_path);
+                    if let (Some(i), Some(j)) = (i, j) {
+                        if let Err(mut e) = self.assert_eq_cells(&i.cell, &j.cell, pos) {
+                            e.add_trace(
+                                pos,
+                                "while comparing a derivation by its 'outPath' attribute",
+                            );
+                            return Err(e);
+                        }
+                        return Ok(());
+                    }
+                }
+                if x.len() != y.len() {
+                    return fail(format!(
+                        "attribute names of attribute set '{}' differs from attribute set '{}'",
+                        show(self, a),
+                        show(self, b)
+                    ));
+                }
+                for (ax, ay) in x.iter().zip(y.iter()) {
+                    if ax.sym != ay.sym {
+                        if y.get(ax.sym).is_none() {
+                            return fail(format!(
+                                "attribute name '{}' is contained in '{}', but not in '{}'",
+                                self.interner.name_str(ax.sym),
+                                show(self, a),
+                                show(self, b)
+                            ));
+                        }
+                        return fail(format!(
+                            "attribute name '{}' is missing in '{}', but is contained in '{}'",
+                            self.interner.name_str(ay.sym),
+                            show(self, a),
+                            show(self, b)
+                        ));
+                    }
+                    if let Err(mut e) = self.assert_eq_cells(&ax.cell, &ay.cell, pos) {
+                        if ay.pos != Pos::NONE {
+                            e.add_trace(ay.pos, "where right hand side is");
+                        }
+                        if ax.pos != Pos::NONE {
+                            e.add_trace(ax.pos, "where left hand side is");
+                        }
+                        e.add_trace(
+                            pos,
+                            format!(
+                                "while comparing attribute '{}'",
+                                self.interner.name_str(ax.sym)
+                            ),
+                        );
+                        return Err(e);
+                    }
+                }
+                Ok(())
+            }
+            (Value::Lambda(_) | Value::PrimOp(_) | Value::PrimOpApp(_), _) => fail(
+                "distinct functions and immediate comparisons of identical functions compare as unequal"
+                    .into(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// `assert_eq_values` on two cells, with the shortcut `eq_cells` takes:
+    /// one word after forcing is equal, a function only when it was one word
+    /// before, so the error names the difference `==` saw.
+    fn assert_eq_cells(&mut self, x: &Cell, y: &Cell, pos: Pos) -> EvalResult<()> {
+        let (a, b) = (x.get(), y.get());
+        let fa = self.force_cell(x)?;
+        let fb = self.force_cell(y)?;
+        if fa == fb && (a == b || (!self.nix_eq && fa.value_type() != ValueType::Function)) {
+            return Ok(());
+        }
+        self.assert_eq_values(fa, fb, pos)
+    }
+
     /// Nix `<` (also used by `lessThan` and `sort`).
     pub fn less_than(&mut self, a: Word, b: Word, pos: Pos) -> EvalResult<bool> {
         let a = self.force(a)?;
@@ -305,8 +453,8 @@ impl Evaluator {
                 "cannot compare {} with {}; values are {} and {}",
                 a.value_type().name(),
                 b.value_type().name(),
-                crate::print::show_value_short(self, a),
-                crate::print::show_value_short(self, b)
+                show_value_short(self, a),
+                show_value_short(self, b)
             ),
         }
     }

@@ -3,6 +3,11 @@
 //! `cargo run --release --example ab -- BEFORE AFTER [--full] [--only SUBSTR]
 //! [--rounds N] [--max-rounds N] [--threshold PCT] [--json FILE]`
 //!
+//! Paired changes treat equal counts, including two zeros, as unchanged. A
+//! positive count after zero is an unbounded increase. In the JSON interval
+//! unbounded endpoints or medians are written as null. An unbounded interval
+//! for a stopping metric keeps sampling until the maximum round count.
+//!
 //! Each scenario runs at least `--rounds` rounds (6), and more, up to
 //! `--max-rounds` (20), until each interval is narrower than the threshold
 //! (2 % without one).
@@ -639,11 +644,15 @@ mod ab {
         String::new()
     }
 
+    fn paired_ratio(before: f64, after: f64) -> f64 {
+        if before == after { 1.0 } else { after / before }
+    }
+
     fn ratios(runs: &[Vec<Run>; 2], f: impl Fn(&Run) -> f64) -> Interval {
         let r: Vec<f64> = runs[0]
             .iter()
             .zip(&runs[1])
-            .map(|(a, b)| f(b) / f(a))
+            .map(|(a, b)| paired_ratio(f(a), f(b)))
             .collect();
         interval(&r)
     }
@@ -659,6 +668,9 @@ mod ab {
     }
 
     fn pct(x: f64) -> String {
+        if x.is_infinite() {
+            return "unbounded".to_owned();
+        }
         format!("{:+.1}", (x - 1.0) * 100.0)
     }
 
@@ -790,8 +802,14 @@ mod ab {
             }
             failed |= !row.status.is_empty();
             let after = |f: fn(&Run) -> f64| median(&row.runs[1].iter().map(f).collect::<Vec<_>>());
-            let change =
-                |i: &Interval| format!("{} % [{}, {}]", pct(i.median), pct(i.lo), pct(i.hi));
+            let change = |i: &Interval| {
+                let median = if i.median.is_infinite() {
+                    "unbounded increase".to_owned()
+                } else {
+                    format!("{} %", pct(i.median))
+                };
+                format!("{median} [{}, {}]", pct(i.lo), pct(i.hi))
+            };
             let width = |i: &Interval| json!({"median": i.median, "lo": i.lo, "hi": i.hi});
             json_rows.push(json!({
                 "id": row.id,
@@ -853,6 +871,16 @@ mod ab {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn zero_baselines_keep_ties_and_increases_distinct() {
+            assert_eq!(paired_ratio(0.0, 0.0), 1.0);
+            assert_eq!(paired_ratio(0.0, 7.0), f64::INFINITY);
+            assert_eq!(paired_ratio(7.0, 0.0), 0.0);
+            let mut pairs = [2.0; 6];
+            pairs[0] = paired_ratio(0.0, 0.0);
+            assert_eq!(interval(&pairs).lo, 1.0);
+        }
 
         #[test]
         fn stats_numbers_are_masked() {

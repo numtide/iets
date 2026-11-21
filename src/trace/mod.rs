@@ -436,7 +436,7 @@ impl Trace {
 
     /// Stats `path` and records what it saw; returns the kind.
     pub fn stat_now(&self, path: &[u8], follow: bool) -> Kind {
-        let kind = stat_kind(&sys::path_from_internal(&sys::from_native(path)), follow);
+        let kind = stat_kind(&sys::native_path(&sys::from_native(path)), follow);
         self.stat(path, follow, kind);
         kind
     }
@@ -594,7 +594,7 @@ const RACY_NS: i64 = 2_000_000_000;
 const UNTRUSTED_MTIME: i64 = i64::MIN;
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
-    let at = sys::path_from_internal(path);
+    let at = sys::native_path(path);
     let (dev, ino) = file_id(&at, meta);
     let mtime = mtime_ns(meta);
     let now = SystemTime::now()

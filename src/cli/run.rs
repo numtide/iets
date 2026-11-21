@@ -17,8 +17,12 @@ pub fn classic_name(argv0: &OsStr) -> Option<String> {
     cli::classic::NAMES.contains(&base.as_str()).then_some(base)
 }
 
-/// An `exit` on the evaluator thread has to end the command here too.
+/// An `exit` on the evaluator thread has to end the command here too. WASI
+/// has one thread, and the host sets the size of its stack.
 fn on_big_stack(f: impl FnOnce() -> i32 + Send + 'static) -> i32 {
+    if cfg!(target_os = "wasi") {
+        return f();
+    }
     let joined = Builder::new()
         .stack_size(MAIN_STACK)
         .spawn(session::bind(f))

@@ -77,6 +77,11 @@ For text output, a list or set element, or an element still unforced, is
 therefore checked again on each change. Scalar jobs continue to use their
 own traces. Regenerate graphs recorded before output demands were tracked.
 
+An `iets eval` with `IETS_FINE_TRACE` set evaluates the request even when
+its rendered result is already cached. Check the command's exit status
+before consuming any requested trace files. A write failure reports the
+destination and fails the command even if it already printed its result.
+
 ## Results
 
 All measurements are on bld1 (32 cores, 125 GB), at one worker per process,
@@ -354,10 +359,18 @@ commit, and more while kept jobs hold older graphs.
 
 ## Limits
 
-- Recording uses one worker and disables the IR cache. The recorder accepts
-  larger worker counts, but a second job that reads the same thunk can lose
-  its dependency and reuse a stale result. Regenerate captures made with
-  more workers or an unknown worker count.
+- The trace runs at one worker, without the IR cache. Regenerate graphs and
+  per-job text captured before serial recording was enforced. Their worker
+  count was not recorded. Use a new or empty directory for each graph or
+  batch of per-job traces. The recorder publishes each complete directory
+  with a rename and reports an error if its destination is populated. A batch
+  with no jobs contains a hidden `.empty` marker; enumerate numeric job files,
+  not every directory entry. Open the directory after a successful capture;
+  no numeric files are a complete empty batch only when `.empty` is present.
+  An unused empty directory is not evidence. Standalone job text still requires
+  its framing. Output channels publish independently: use distinct, nonoverlapping
+  paths and check evaluation success before reading. Do not remove or replace a
+  published path while readers use it.
 - The job list of a commit comes from its full evaluation, not from an
   enumeration, and jobs that fail are left out.
 - The thresholds (8 bindings, one region per binding) were not tuned.

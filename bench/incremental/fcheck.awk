@@ -24,19 +24,18 @@ function entries(e, name, why,    n, x, i, y) {
   }
 }
 function flush(   s) {
-  if (job != "") {
-    if (!output_version) {
-      print "regenerate the fine job trace for " job " to record job output demands" > "/dev/stderr"
-      failed = 1
-    } else for (s in inv) print job, s, inv[s]
-  }
-  delete inv; delete pc; output_version = 0
+  if (job != "" && !complete) {
+    print "regenerate the fine job trace for " job " with serial recording" > "/dev/stderr"
+    failed = 1
+  } else if (job != "") for (s in inv) print job, s, inv[s]
+  delete inv; delete pc; serial = complete = 0
 }
 $1 == "J" && NF == 2 && $2 != "" { flush(); job = $2; next }
-$0 == "V\tjob-output-v1" && job != "" && !output_version { output_version = 1; next }
-job == "" || output_version || $1 == "J" || $1 == "V" {
+job != "" && !serial && $0 == "V\tserial-v2" { serial = 1; next }
+serial && !complete && $0 == "V\tend-serial-output-v1" { complete = 1; next }
+!serial || complete || $1 == "J" || $1 == "V" {
   print "invalid fine job trace at " FILENAME ":" FNR > "/dev/stderr"
-  exit 1
+  failed = 1; exit
 }
 $1 == "R" && $2 == "?" { for (s in steps) inv[s] = "untracked " $3; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
@@ -55,4 +54,4 @@ $1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }
-END { flush(); if (failed) exit 1 }
+END { if (!failed) flush(); if (failed) exit 1 }

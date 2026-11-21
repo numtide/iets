@@ -315,18 +315,21 @@ impl<'a> TreeWriter<'a> {
     }
 }
 
+/// The byte prefix before the "/name" appended for each root entry.
+pub(crate) fn walk_root(path: &Path) -> &[u8] {
+    let mut root = path.as_os_str().as_bytes();
+    while root.len() > 1 && root.last() == Some(&b'/') {
+        root = &root[..root.len() - 1];
+    }
+    root
+}
+
 /// Mirrors archive.cc:SourceAccessor::dumpPath; writes the NAR of `path` into `sink`.
 pub fn dump_path(path: &Path, sink: &mut dyn Write, filter: &mut PathFilter<'_>) -> io::Result<()> {
     let ft = FileType::of(fs::symlink_metadata(path)?.file_type());
-    let mut root = path.as_os_str().as_bytes().to_vec();
-    // The walk appends "/name", so a trailing slash on the root would double it
-    // and change the paths the filter sees.
-    while root.len() > 1 && root.last() == Some(&b'/') {
-        root.pop();
-    }
     let mut w = Walk {
         w: TreeWriter::new(sink),
-        path: root,
+        path: walk_root(path).to_vec(),
         names: Vec::with_capacity(4096),
         index: Vec::with_capacity(256),
     };

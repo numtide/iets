@@ -12,6 +12,7 @@ mod hermetic;
 use hermetic::{Iets, bin};
 use rstest::rstest;
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -193,6 +194,7 @@ fn flags_match_nix_eval_jobs() {
     let impure = r#"{ x = derivation { name = "x-${builtins.currentSystem}"; system = builtins.currentSystem; builder = ":"; }; }"#;
     let checks: &[(&str, &[&str], Option<&str>)] = &[
         ("basic", &["ci.nix"], None),
+        ("logs", &["logs.nix"], None),
         ("meta", &["--meta", "ci.nix"], None),
         (
             "force-recurse",
@@ -473,6 +475,59 @@ fn ci(bin: &Iets) -> Command {
     c.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs"))
         .args(["eval-jobs", "--workers", "2", "--no-instantiate"]);
     c
+}
+
+/// `builtins.warn` and `builtins.trace` messages go on the line of the
+/// attribute that printed them, in one process as from worker processes,
+/// without escape sequences; what a set printed goes on no line. The
+/// worker-process side is compared with nix-eval-jobs above.
+#[rstest]
+fn warnings_and_traces_go_on_their_line(bin: Iets) {
+    let logs = |max_memory: &str| -> BTreeMap<String, (Value, Value)> {
+        let o = ci(&bin)
+            .args(["--max-memory-size", max_memory, "logs.nix"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                let attr = v["attr"].as_str().unwrap().to_string();
+                (attr, (v["warnings"].clone(), v["traces"].clone()))
+            })
+            .collect()
+    };
+    let one = logs("0");
+    assert_eq!(one, logs("4096"));
+    let want = |w: Value, t: Value| (w, t);
+    assert_eq!(
+        one["traced"],
+        want(Value::Null, serde_json::json!(["a trace"]))
+    );
+    assert_eq!(
+        one["warned"],
+        want(serde_json::json!(["a warning"]), Value::Null)
+    );
+    assert_eq!(
+        one["both"],
+        want(
+            serde_json::json!(["w1", "w2"]),
+            serde_json::json!(["{ a = 1; }"])
+        )
+    );
+    assert_eq!(
+        one["colored"],
+        want(Value::Null, serde_json::json!(["red"]))
+    );
+    assert_eq!(
+        one["failing"],
+        want(Value::Null, serde_json::json!(["before the throw"]))
+    );
+    assert_eq!(one["plain"], want(Value::Null, Value::Null));
+    assert_eq!(
+        one["set.inner"],
+        want(serde_json::json!(["inner"]), Value::Null)
+    );
 }
 
 /// Every line from a worker carries the `stats` nixbot reads.

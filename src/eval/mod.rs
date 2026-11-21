@@ -29,6 +29,7 @@ use crate::events::{self, Field, Group};
 use crate::lint::allow::Allows;
 use crate::lint::coerce::{or_non_attrs, read_through_copy};
 use crate::lint::{self, Diag, Lints, purity};
+use crate::log::filter_ansi;
 use crate::parallel::shared::{ArenaUse, Counts, Files, SharedMap, SymWords, Totals};
 use crate::profile::{self, Stack};
 use crate::runtime::arena::{self, STAT_NAMES, Stat};
@@ -366,6 +367,9 @@ pub struct Evaluator {
     lint_config: lint::Config,
     /// The warnings emitted so far.
     pub lints: Lints,
+    /// What `builtins.warn` and `builtins.trace` printed for the eval-jobs
+    /// attribute being evaluated (`EvalLogs`); `None` records nothing.
+    eval_logs: Option<EvalLogs>,
     pub drv: DrvState,
     pub par: parallel::Ctx,
     /// This fiber's shadow stack for the sampled profile.
@@ -792,6 +796,7 @@ impl EvalConfig {
             project_markers: Default::default(),
             lint_config: self.lints,
             lints: Default::default(),
+            eval_logs: None,
             drv: DrvState::new(self.keep_aterm, self.keep_site, self.dump_dir),
             par: Default::default(),
             prof: Default::default(),
@@ -3543,6 +3548,45 @@ impl Evaluator {
             }
             #[cfg(not(feature = "stats2"))]
             errln!("census: build with --features stats2");
+        }
+    }
+}
+
+/// The `builtins.warn` and `builtins.trace` messages printed while one
+/// eval-jobs attribute was evaluated, for its line's `warnings` and
+/// `traces` (nix-eval-jobs 2.35.4, eval-log.cc). They are printed on the
+/// demand path only, where a helper hands them back
+/// (docs/explanation/evaluation.md), so the evaluator that prints them is
+/// the one that walks the jobs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EvalLogs {
+    pub warnings: Vec<String>,
+    pub traces: Vec<String>,
+}
+
+impl Evaluator {
+    /// Records the messages printed from now on, and drops any recorded
+    /// before: what came between two attributes belongs to neither.
+    pub fn record_logs(&mut self) {
+        self.eval_logs = Some(EvalLogs::default());
+    }
+
+    /// The messages recorded since `record_logs`; recording goes on.
+    pub fn take_logs(&mut self) -> EvalLogs {
+        self.eval_logs.as_mut().map(mem::take).unwrap_or_default()
+    }
+
+    /// Notes a printed `builtins.trace` (`trace`) or `builtins.warn`
+    /// message, without its prefix and its escape sequences, as
+    /// nix-eval-jobs keeps it.
+    pub(crate) fn note_log(&mut self, trace: bool, msg: &str) {
+        if let Some(l) = &mut self.eval_logs {
+            let msg = filter_ansi(msg, true);
+            if trace {
+                l.traces.push(msg);
+            } else {
+                l.warnings.push(msg);
+            }
         }
     }
 }

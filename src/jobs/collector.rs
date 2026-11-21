@@ -104,8 +104,10 @@ pub fn run_worker(
         let response: Vec<u8> = if depth == chunk_depth && !admit(hash, depth, false) {
             MSG_OK.into()
         } else {
+            ev.record_logs();
             let (t, alloc) = (Instant::now(), ev.arena.bytes_allocated);
             let r = find_along_attr_path(ev, root, &path).and_then(|v| node(ev, v, &path, hash));
+            let logs = ev.take_logs();
             let stats = stats_json(
                 t.elapsed().as_millis() as u64,
                 ev.arena.bytes_allocated.saturating_sub(alloc) as u64,
@@ -113,7 +115,7 @@ pub fn run_worker(
             match r {
                 Ok(Node::Job(mut job)) => {
                     job.extra.insert("stats".into(), stats);
-                    let line = Line::Job(job);
+                    let line = Line::Job(job).with_logs(&logs);
                     match &inst {
                         Some(i) => i.push(line),
                         None => write_out(out, &line.render()),
@@ -136,7 +138,7 @@ pub fn run_worker(
                 Err(e) => {
                     let mut line = error_line(ev, &path, &e);
                     line.stats = Some(stats);
-                    line.render()
+                    Line::Error(line).with_logs(&logs).render()
                 }
             }
         };

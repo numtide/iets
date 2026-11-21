@@ -676,6 +676,28 @@ impl Derivation {
         self.env_get(key).and_then(|v| str::from_utf8(v).ok())
     }
 
+    /// The features requested by the derivation itself, before output-type inference.
+    pub(crate) fn declared_system_features(&self) -> BTreeSet<String> {
+        let Some(json) = &self.structured_attrs else {
+            return self
+                .env_str("requiredSystemFeatures")
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+        };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
+            && let Some(features) = v.get("requiredSystemFeatures").and_then(|v| v.as_array())
+        {
+            features
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        } else {
+            BTreeSet::new()
+        }
+    }
+
     /// Inserts or replaces `key` in the sorted env.
     pub fn env_set(&mut self, key: &str, value: Vec<u8>) {
         match self.env.binary_search_by(|(k, _)| k.as_str().cmp(key)) {

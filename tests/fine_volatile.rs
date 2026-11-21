@@ -83,10 +83,65 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
             .collect::<Vec<_>>(),
         ["0", "1"]
     );
-    fs::write(&flat_file, flat.replace("V\tvolatile-v1\n", "")).unwrap();
-    assert!(!text_check(&flat_file).status.success());
+    // Use a real following job: a torn observation must not consume its J
+    // boundary and borrow its footer, even when either job has no observations.
+    let following = fs::read_to_string(jobs.join("1")).unwrap();
+    let begin = "V\tserial-v2\n";
+    let end = "V\tend-serial-volatile-v1\n";
+    assert!(following.starts_with(begin) && following.ends_with(end));
+    for torn in [
+        "R\t?\tvolatile\t",
+        "R\t/source\tregion",
+        "F\t/payload",
+        "P\t0\tdir\t/directory",
+        "", // Even an empty preceding job needs its own footer.
+    ] {
+        fs::write(&flat_file, format!("J\t0\n{begin}{torn}J\t1\n{following}")).unwrap();
+        assert!(
+            !text_check(&flat_file).status.success(),
+            "accepted {torn:?}"
+        );
+    }
+    for invalid in [
+        flat.replace(begin, ""),
+        flat.replace(end, ""),
+        flat.replace(begin, "").replace(end, "V\tvolatile-v1\n"),
+        format!("J\t0\n{begin}{begin}{end}"),
+        format!("J\t0\n{begin}{end}F\t/late\n"),
+    ] {
+        fs::write(&flat_file, invalid).unwrap();
+        assert!(!text_check(&flat_file).status.success());
+    }
+    fs::write(&flat_file, format!("J\t0\n{begin}{end}J\t1\n{following}")).unwrap();
+    assert!(text_check(&flat_file).status.success());
+    let changes = fs::read(&delta).unwrap();
+    fs::write(&delta, "").unwrap();
+    assert!(text_check(&flat_file).status.success());
+    for malformed in ["J\t0\nR\t?\tvolatile\t\n", "J\t0\nV\tserial-v2\n"] {
+        fs::write(&flat_file, malformed).unwrap();
+        assert!(!text_check(&flat_file).status.success());
+    }
+    fs::write(&delta, changes).unwrap();
     let obs = graph.join("obs");
     let recorded = fs::read_to_string(&obs).unwrap();
+    // The graph version must be its own final line, not a suffix of a torn
+    // observation. Test both the transition checker and inspection reader.
+    let body = recorded.strip_suffix("V\tvolatile-v1\n").unwrap();
+    fs::write(
+        &obs,
+        format!("{}V\tvolatile-v1\n", body.trim_end_matches('\n')),
+    )
+    .unwrap();
+    for inspection in [false, true] {
+        let mut cmd = runner.cmd();
+        cmd.arg("fine-check");
+        if inspection {
+            cmd.args(["--job", "0"]);
+        } else {
+            cmd.arg(&delta);
+        }
+        assert!(!cmd.arg(&graph).output().unwrap().status.success());
+    }
     fs::write(&obs, recorded.replace("V\tvolatile-v1\n", "")).unwrap();
     assert!(
         !runner

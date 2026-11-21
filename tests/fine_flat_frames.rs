@@ -31,7 +31,7 @@ fn serial_flat_frames_reject_torn_and_repeated_prologues() {
         .map(|i| fs::read_to_string(jobs.join(i.to_string())).unwrap())
         .collect();
     let start = "V\tserial-v2\n";
-    let end = "V\tend-serial-v2\n";
+    let end = "V\tend-serial-volatile-v1\n";
     assert!(
         records
             .iter()

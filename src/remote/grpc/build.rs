@@ -891,7 +891,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let sent = Arc::new(AtomicU64::new(0));
         let mut ship = ChunkShip::new(tx, Arc::clone(&sent)).unwrap();
-        let first = rx.blocking_recv().unwrap();
+        let first = rx.try_recv().unwrap();
         assert!(first.check_sigs);
         assert!(!first.repair);
         assert!(first.data.is_empty());

@@ -13,7 +13,7 @@ use std::{fs, thread};
 
 use super::{
     Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_kind, tree_fingerprint, tree_rehash,
+    mtime_ns, run_query, stat_kind, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -80,6 +80,31 @@ fn file_sha256(p: &Path) -> io::Result<Digest32> {
     let mut h = Hasher::new(HashAlgo::Sha256);
     io::copy(&mut fs::File::open(p)?, &mut h)?;
     Ok(hash_to_digest(&h.finish()))
+}
+
+/// On Unix an exact wire spelling proves membership. A wire-order miss
+/// still needs native Path equality (and stored records may be unsorted).
+fn membership(paths: Option<&[Vec<u8>]>) -> impl FnMut(&Path) -> bool + '_ {
+    let mut next = 0;
+    let mut fallback = None;
+    move |p| {
+        let Some(paths) = paths else { return true };
+        if cfg!(unix) {
+            let bytes = p.as_os_str().as_bytes();
+            if paths.get(next).is_some_and(|v| v.as_slice() == bytes) {
+                next += 1;
+                return true;
+            }
+            let i = paths.partition_point(|v| v.as_slice() < bytes);
+            if paths.get(i).is_some_and(|v| v.as_slice() == bytes) {
+                next = i + 1;
+                return true;
+            }
+        }
+        fallback
+            .get_or_insert_with(|| paths.iter().map(|v| os(v)).collect::<HashSet<_>>())
+            .contains(p)
+    }
 }
 
 fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
@@ -152,17 +177,15 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             filtered,
             newest,
         } => {
-            let accepted: Option<HashSet<PathBuf>> = filtered
-                .as_ref()
-                .map(|f| f.accepted.iter().map(|p| os(p)).collect());
+            let mut accept = membership(filtered.as_ref().map(|f| f.accepted.as_slice()));
             let root_p = os(root);
-            match tree_fingerprint(&root_p, accepted.as_ref()) {
+            match tree_fingerprint_with(&root_p, &mut accept) {
                 Ok((sh, _)) if sh == *stat_hash => return Outcome::Same,
                 Ok(_) => {}
                 Err(e) => return unreadable(root, &e),
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let (nar, seen, sh, now) = match tree_rehash(&root_p, accepted.as_ref()) {
+            let (nar, seen, sh, now) = match tree_rehash_with(&root_p, &mut accept) {
                 Ok(t) => t,
                 Err(e) => return unreadable(root, &e),
             };
@@ -295,6 +318,24 @@ mod tests {
     use tempfile::tempdir;
 
     use std::time::{self, Duration, SystemTime};
+
+    #[test]
+    fn membership_preserves_native_path_equality_after_misses() {
+        let paths = ["z", "a/./b", "a/b", "z/", "q", "a/c"].map(|p| p.as_bytes().to_vec());
+        let reference: HashSet<_> = paths.iter().map(|p| os(p)).collect();
+        let mut accept = membership(Some(&paths));
+        for q in [
+            "z", "a//b", "missing", "z/", "a/c", "a/b/", "q", "a", "./z", "z",
+        ] {
+            assert_eq!(
+                accept(Path::new(q)),
+                reference.contains(Path::new(q)),
+                "{q}"
+            );
+        }
+        assert!(membership(None)(Path::new("q")));
+        assert!(!membership(Some(&[]))(Path::new("q")));
+    }
 
     /// Windows lets only a handle opened for writing change the times.
     fn open_rw(p: &Path) -> fs::File {

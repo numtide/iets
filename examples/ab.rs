@@ -435,6 +435,9 @@ mod ab {
         // Even readable task lists may omit live children. The outer reaper
         // calls this bounded sweep only at cleanup or after reaping an exit.
         let mut next_poll = Instant::now();
+        if next_poll >= deadline {
+            return Ok(());
+        }
         for entry in fs::read_dir(procfs)? {
             let now = Instant::now();
             if now >= deadline {
@@ -483,6 +486,7 @@ mod ab {
         let mut sweep_error = None;
         let mut final_polls = 32;
         loop {
+            let poll_started = Instant::now();
             // SAFETY: this runner is the sole reaper; a null status pointer is allowed.
             match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
                 p if p > 0 && Instant::now() < deadline => {
@@ -514,7 +518,12 @@ mod ab {
                     }
                     return Err(sweep_error.unwrap_or_else(|| io::ErrorKind::TimedOut.into()));
                 }
-                0 if Instant::now() < until => {}
+                0 if poll_started < until => {
+                    thread::sleep(
+                        REAP_INTERVAL.min(until.saturating_duration_since(Instant::now())),
+                    );
+                    continue;
+                }
                 0 => {
                     clean = false;
                     if discover {
@@ -536,6 +545,9 @@ mod ab {
                 }
             }
             if Instant::now() >= deadline {
+                if poll_started < deadline {
+                    continue;
+                }
                 return Err(sweep_error.unwrap_or_else(|| io::ErrorKind::TimedOut.into()));
             }
             thread::sleep(REAP_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
@@ -1116,16 +1128,11 @@ mod ab {
             // and spawn failures; keep child-spawning assertions in this test.
             {
                 let root = tempfile::tempdir().unwrap();
-                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
-                    .map(|dir| dir.join("false"))
-                    .find(|path| path.is_file())
-                    .expect("the false utility")
-                    .canonicalize()
-                    .unwrap();
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {
-                        symlink(&false_bin, &bin).unwrap();
+                        fs::write(&bin, b"#!/bin/sh\nexit 1\n").unwrap();
+                        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
                     }
                     let result = run_once(
                         &bin,

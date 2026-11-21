@@ -312,6 +312,87 @@ pub struct WellKnown {
     pub prefix: Sym,
 }
 
+/// The body of `Evaluator::eval`: one small handler per node kind,
+/// tail-called. A macro so that the census build can wrap it while the
+/// normal build compiles the same match as before.
+macro_rules! dispatch {
+    ($s:ident, $env:ident, $ir:ident) => {
+        match $ir {
+            Ir::Const(w) => Ok(*w),
+            Ir::Local { .. } => $s.eval_k_local($env, $ir),
+            Ir::WithVar { .. } => $s.eval_k_with_var($env, $ir),
+            Ir::CurPos(..) => $s.eval_k_cur_pos($env, $ir),
+            Ir::Concat { .. } => $s.eval_k_concat($env, $ir),
+            Ir::SearchPath { .. } => $s.eval_k_search_path($env, $ir),
+            Ir::Select(..) => $s.eval_k_select($env, $ir),
+            Ir::SelectCount(..) => $s.eval_k_select_count($env, $ir),
+            Ir::Select1 { .. } => $s.eval_k_select1($env, $ir),
+            Ir::HasAttr { .. } => $s.eval_k_has_attr($env, $ir),
+            Ir::Attrs(..) => $s.eval_k_attrs($env, $ir),
+            Ir::List(..) => $s.eval_k_list($env, $ir),
+            Ir::Lambda(..) => $s.eval_k_lambda($env, $ir),
+            Ir::Apply { .. } => $s.eval_k_apply($env, $ir),
+            Ir::Let(..) => $s.eval_k_let($env, $ir),
+            Ir::With { .. } => $s.eval_k_with($env, $ir),
+            Ir::If { .. } => $s.eval_k_if($env, $ir),
+            Ir::Assert { .. } => $s.eval_k_assert($env, $ir),
+            Ir::Not(..) => $s.eval_k_not($env, $ir),
+            Ir::Neg(..) => $s.eval_k_neg($env, $ir),
+            Ir::Eq(..) => $s.eval_k_eq($env, $ir),
+            Ir::Ne(..) => $s.eval_k_ne($env, $ir),
+            Ir::Lt(..) => $s.eval_k_lt($env, $ir),
+            Ir::Ge(..) => $s.eval_k_ge($env, $ir),
+            Ir::And(..) => $s.eval_k_and($env, $ir),
+            Ir::Or(..) => $s.eval_k_or($env, $ir),
+            Ir::Impl(..) => $s.eval_k_impl($env, $ir),
+            Ir::Update(..) => $s.eval_k_update($env, $ir),
+            Ir::ConcatLists(..) => $s.eval_k_concat_lists($env, $ir),
+            Ir::Sub(..) => $s.eval_k_sub($env, $ir),
+            Ir::Mul(..) => $s.eval_k_mul($env, $ir),
+            Ir::Div(..) => $s.eval_k_div($env, $ir),
+        }
+    };
+}
+
+/// The census index of a node's kind (`census::IR_KINDS`).
+#[cfg(feature = "stats2")]
+fn census_kind(ir: IrRef) -> u8 {
+    match ir {
+        Ir::Const(_) => 0,
+        Ir::Local { .. } => 1,
+        Ir::WithVar { .. } => 2,
+        Ir::CurPos(..) => 3,
+        Ir::Concat { .. } => 4,
+        Ir::SearchPath { .. } => 5,
+        Ir::Select(..) => 6,
+        Ir::SelectCount(..) => 7,
+        Ir::Select1 { .. } => 8,
+        Ir::HasAttr { .. } => 9,
+        Ir::Attrs(..) => 10,
+        Ir::List(..) => 11,
+        Ir::Lambda(..) => 12,
+        Ir::Apply { .. } => 13,
+        Ir::Let(..) => 14,
+        Ir::With { .. } => 15,
+        Ir::If { .. } => 16,
+        Ir::Assert { .. } => 17,
+        Ir::Not(..) => 18,
+        Ir::Neg(..) => 19,
+        Ir::Eq(..) => 20,
+        Ir::Ne(..) => 21,
+        Ir::Lt(..) => 22,
+        Ir::Ge(..) => 23,
+        Ir::And(..) => 24,
+        Ir::Or(..) => 25,
+        Ir::Impl(..) => 26,
+        Ir::Update(..) => 27,
+        Ir::ConcatLists(..) => 28,
+        Ir::Sub(..) => 29,
+        Ir::Mul(..) => 30,
+        Ir::Div(..) => 31,
+    }
+}
+
 /// Clone gives a fiber its own evaluator: shared tables by handle, a
 /// fresh arena, private counters (see docs/explanation/evaluation.md).
 #[derive(Clone)]
@@ -349,6 +430,10 @@ pub struct Evaluator {
     /// `IETS_STATS`: a stats line will read the arena totals, so a switch
     /// folds into them. Nothing else does, so a normal run skips the fold.
     fold_arenas: bool,
+    /// Census: the kind of the node whose handler is running, the parent
+    /// of the next `eval` dispatch (`census::IR_KINDS`, `PARENT_*`).
+    #[cfg(feature = "stats2")]
+    census_parent: u8,
     /// One shared context-free string per symbol, made on first use.
     sym_strings: SymWords,
     /// Source path -> virtual store path, like Nix's `srcToStore`.
@@ -785,6 +870,8 @@ impl EvalConfig {
             t_compile: Duration::ZERO,
             totals: Default::default(),
             fold_arenas: Session::current().settings().stats >= 1,
+            #[cfg(feature = "stats2")]
+            census_parent: census::PARENT_OTHER,
             sym_strings: SymWords::new(),
             src_to_store: Default::default(),
             known: Default::default(),
@@ -1361,6 +1448,14 @@ impl Evaluator {
         match w.thunk_kind() {
             Kind::Thunk => {
                 let t = w.as_thunk();
+                #[cfg(feature = "stats2")]
+                {
+                    let prev = mem::replace(&mut self.census_parent, census::PARENT_THUNK);
+                    let r = self.eval(ThunkObj::env_of(st), t.ir());
+                    self.census_parent = prev;
+                    r
+                }
+                #[cfg(not(feature = "stats2"))]
                 self.eval(ThunkObj::env_of(st), t.ir())
             }
             Kind::ThunkApp => {
@@ -1889,6 +1984,14 @@ impl Evaluator {
                                 self.frame_env(fenv, lam, last.frame)
                             }
                         };
+                        #[cfg(feature = "stats2")]
+                        if !lam.no_env {
+                            let unc = self.frame_uncaptured(lam, last);
+                            self.arena
+                                .stats
+                                .census
+                                .note_call_env(env2, last.frame as usize, unc);
+                        }
                         let mut cur_lam = lam;
                         let mut d = 0;
                         for (i, a) in args[..n].iter().enumerate() {
@@ -1925,7 +2028,17 @@ impl Evaluator {
                             (fenv, lam) = (env2, inner);
                             continue;
                         }
-                        cur = self.eval(env2, last.body).map_err(|mut e| {
+                        #[cfg(feature = "stats2")]
+                        let census_prev =
+                            mem::replace(&mut self.census_parent, census::PARENT_LAMBDA);
+                        let r = self.eval(env2, last.body);
+                        // before the `?`: an error a tryEval catches goes on
+                        // under the caller's parent
+                        #[cfg(feature = "stats2")]
+                        {
+                            self.census_parent = census_prev;
+                        }
+                        cur = r.map_err(|mut e| {
                             e.add_trace(
                                 last.pos,
                                 format!("while calling {}", self.lambda_desc(last)),
@@ -2016,6 +2129,40 @@ impl Evaluator {
             }
         }
         Ok(cur)
+    }
+
+    /// Census: whether the frame of a call of `lam` through `last` (one
+    /// env for a chain `a: b: e`) is provably never captured, from the
+    /// compiled code alone: no formal default and nothing in `last`'s body
+    /// can make a thunk, closure or child env over it.
+    #[cfg(feature = "stats2")]
+    fn frame_uncaptured(&mut self, lam: &'static LambdaIr, last: &'static LambdaIr) -> bool {
+        let key = last as *const LambdaIr as usize;
+        let body = *self
+            .arena
+            .stats
+            .census
+            .escape_memo
+            .entry(key)
+            .or_insert_with(|| !ir_captures(last.body));
+        if !body {
+            return false;
+        }
+        let mut cur = lam;
+        loop {
+            if let ParamIr::Formals { formals, .. } = &cur.param
+                && formals.iter().any(|f| f.default.is_some_and(lazy_captures))
+            {
+                return false;
+            }
+            if ptr::eq(cur, last) {
+                return true;
+            }
+            let Ir::Lambda(inner) = cur.body else {
+                return false;
+            };
+            cur = inner;
+        }
     }
 
     /// An env of `size` slots for a call of `lam` in the closure env
@@ -2198,41 +2345,21 @@ impl Evaluator {
     /// Evaluate `ir` in `env` to weak head normal form.
     /// One small handler per node kind, tail-called: each recursion pays
     /// for its own kind's frame, not for the largest arm's.
+    #[cfg(not(feature = "stats2"))]
     pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
-        match ir {
-            Ir::Const(w) => Ok(*w),
-            Ir::Local { .. } => self.eval_k_local(env, ir),
-            Ir::WithVar { .. } => self.eval_k_with_var(env, ir),
-            Ir::CurPos(..) => self.eval_k_cur_pos(env, ir),
-            Ir::Concat { .. } => self.eval_k_concat(env, ir),
-            Ir::SearchPath { .. } => self.eval_k_search_path(env, ir),
-            Ir::Select(..) => self.eval_k_select(env, ir),
-            Ir::SelectCount(..) => self.eval_k_select_count(env, ir),
-            Ir::Select1 { .. } => self.eval_k_select1(env, ir),
-            Ir::HasAttr { .. } => self.eval_k_has_attr(env, ir),
-            Ir::Attrs(..) => self.eval_k_attrs(env, ir),
-            Ir::List(..) => self.eval_k_list(env, ir),
-            Ir::Lambda(..) => self.eval_k_lambda(env, ir),
-            Ir::Apply { .. } => self.eval_k_apply(env, ir),
-            Ir::Let(..) => self.eval_k_let(env, ir),
-            Ir::With { .. } => self.eval_k_with(env, ir),
-            Ir::If { .. } => self.eval_k_if(env, ir),
-            Ir::Assert { .. } => self.eval_k_assert(env, ir),
-            Ir::Not(..) => self.eval_k_not(env, ir),
-            Ir::Neg(..) => self.eval_k_neg(env, ir),
-            Ir::Eq(..) => self.eval_k_eq(env, ir),
-            Ir::Ne(..) => self.eval_k_ne(env, ir),
-            Ir::Lt(..) => self.eval_k_lt(env, ir),
-            Ir::Ge(..) => self.eval_k_ge(env, ir),
-            Ir::And(..) => self.eval_k_and(env, ir),
-            Ir::Or(..) => self.eval_k_or(env, ir),
-            Ir::Impl(..) => self.eval_k_impl(env, ir),
-            Ir::Update(..) => self.eval_k_update(env, ir),
-            Ir::ConcatLists(..) => self.eval_k_concat_lists(env, ir),
-            Ir::Sub(..) => self.eval_k_sub(env, ir),
-            Ir::Mul(..) => self.eval_k_mul(env, ir),
-            Ir::Div(..) => self.eval_k_div(env, ir),
-        }
+        dispatch!(self, env, ir)
+    }
+
+    /// `eval` in a census build: the dispatch counted under the running
+    /// handler's kind, which this node's handler then is.
+    #[cfg(feature = "stats2")]
+    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        let kind = census_kind(ir);
+        self.arena.stats.census.note_pair(self.census_parent, kind);
+        let prev = mem::replace(&mut self.census_parent, kind);
+        let r = dispatch!(self, env, ir);
+        self.census_parent = prev;
+        r
     }
 
     #[inline(never)]
@@ -3544,5 +3671,79 @@ impl Evaluator {
             #[cfg(not(feature = "stats2"))]
             errln!("census: build with --features stats2");
         }
+    }
+}
+
+/// Census: whether a value placed in a lazy position (an argument, an
+/// attribute or list element, a binding, a formal's default) holds the
+/// env it is built in. A constant or a variable's word is copied; anything
+/// else is a thunk or a closure over it (a closed lambda's closure keeps
+/// the env too).
+#[cfg(feature = "stats2")]
+fn lazy_captures(ir: IrRef) -> bool {
+    !matches!(ir, Ir::Const(_) | Ir::Local { .. })
+}
+
+/// Census: whether evaluating `ir` can store its env where it outlives the
+/// evaluation: in a thunk, a closure or a child env. A nested lambda is a
+/// closure; its body is not walked.
+#[cfg(feature = "stats2")]
+fn ir_captures(ir: IrRef) -> bool {
+    let dyn_path = |p: &[AttrElemIr]| {
+        p.iter()
+            .any(|e| matches!(e, AttrElemIr::Dynamic(d) if ir_captures(d)))
+    };
+    match ir {
+        Ir::Const(_) | Ir::Local { .. } | Ir::WithVar { .. } | Ir::CurPos(_) => false,
+        Ir::Lambda(_) => true,
+        Ir::Concat { parts, .. } => parts.iter().any(|p| ir_captures(p)),
+        Ir::SearchPath { name, .. } => ir_captures(name),
+        Ir::Select(s) | Ir::SelectCount(s) => {
+            ir_captures(s.subject) || s.default.is_some_and(ir_captures) || dyn_path(s.path)
+        }
+        Ir::Select1 {
+            subject, default, ..
+        } => ir_captures(subject) || default.is_some_and(ir_captures),
+        Ir::HasAttr { subject, path } => ir_captures(subject) || dyn_path(path),
+        // a rec set and `inherit (e)` make a child env; plain values are
+        // thunks over this one
+        Ir::Attrs(a) => {
+            a.rec
+                || !a.from.is_empty()
+                || a.binds.iter().any(|b| lazy_captures(b.value))
+                || a.dynamic
+                    .iter()
+                    .any(|d| ir_captures(d.name) || lazy_captures(d.value))
+        }
+        Ir::List(xs) => xs.iter().any(|x| lazy_captures(x)),
+        Ir::Apply { func, args, .. } => ir_captures(func) || args.iter().any(|a| lazy_captures(a)),
+        // a `let` with an env of its own is a child env; one in the frame
+        // thunks its bindings over the frame, and a variable too when it
+        // reads a binding not filled yet (`maybe_thunk`: `let a = b; b = x;`)
+        Ir::Let(l) => l.base == LetIr::OWN_ENV
+            || !l.from.is_empty()
+            || l.binds.iter().enumerate().any(|(i, b)| {
+                lazy_captures(b.value)
+                    || matches!(b.value, Ir::Local { depth: 0, idx } if *idx >= l.base + i as u32)
+            })
+            || ir_captures(l.body),
+        Ir::With { .. } => true,
+        Ir::If {
+            cond, then, else_, ..
+        } => ir_captures(cond) || ir_captures(then) || ir_captures(else_),
+        Ir::Assert { cond, body, .. } => ir_captures(cond) || ir_captures(body),
+        Ir::Not(x, _) | Ir::Neg(x, _) => ir_captures(x),
+        Ir::Eq(a, b, _)
+        | Ir::Ne(a, b, _)
+        | Ir::Lt(a, b, _)
+        | Ir::Ge(a, b, _)
+        | Ir::And(a, b, _)
+        | Ir::Or(a, b, _)
+        | Ir::Impl(a, b, _)
+        | Ir::Update(a, b, _)
+        | Ir::ConcatLists(a, b, _)
+        | Ir::Sub(a, b, _)
+        | Ir::Mul(a, b, _)
+        | Ir::Div(a, b, _) => ir_captures(a) || ir_captures(b),
     }
 }

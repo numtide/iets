@@ -1,6 +1,6 @@
 //! The fine trace: what an evaluation read, at the grain of a binding. A
 //! prototype for incremental evaluation, on only when `IETS_FINE_TRACE`
-//! names the file to write, and only at one worker.
+//! names the file to write. Capturing a trace runs the evaluator on one worker.
 //!
 //! A set or `let` of `FINE_MIN` bindings or more makes each binding a region
 //! of its own: the compiler wraps its value in `Ir::Region`, so an edit to
@@ -21,13 +21,13 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::panic::Location;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{env, fs, io};
+use tempfile::Builder;
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -53,6 +53,8 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+/// The reserved second node word identifies a graph recorded on the serial force path.
+const SERIAL_GRAPH: u32 = u32::from_le_bytes(*b"SER2");
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -191,7 +193,7 @@ pub fn init() {
 fn start(out: Option<PathBuf>) {
     let mut s = State {
         out,
-        nodes: vec![0, 0],
+        nodes: vec![0, SERIAL_GRAPH],
         serial: 1,
         ..State::default()
     };
@@ -1523,8 +1525,11 @@ impl State {
     /// `obs` as lines: `R` regions, `P` the provenances the `K` lookups and
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
-    fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
+    fn text(&self, ev: &Evaluator, obs: &[u32], job: bool) -> String {
         let mut out = String::new();
+        if job {
+            out.push_str("V\tserial-v2\n");
+        }
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1583,7 +1588,9 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
-        out.push_str(VOLATILE_VERSION);
+        if job {
+            out.push_str("V\tend-serial-volatile-v1\n");
+        }
         out
     }
 
@@ -1634,7 +1641,7 @@ impl State {
         }
         std::fs::write(dir.join("queries"), q)?;
         let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        fs::write(dir.join("roots"), r)
     }
 }
 
@@ -1665,35 +1672,79 @@ fn roots(v: Word) -> Vec<u32> {
         .collect()
 }
 
+/// Publish a complete capture to a new or empty destination. Renaming a sibling
+/// directory also refuses a populated destination won by another recorder.
+fn publish_capture(dir: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut builder = Builder::new();
+    match fs::read_dir(dir) {
+        Ok(mut entries) => {
+            if entries.next().transpose()?.is_some() {
+                return Err(io::Error::new(
+                    ErrorKind::DirectoryNotEmpty,
+                    "use a new or empty directory for the fine capture",
+                ));
+            }
+            builder.permissions(fs::metadata(dir)?.permissions());
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let stage = builder.tempdir_in(parent)?;
+    write(stage.path())?;
+    fs::rename(stage.path(), dir)?;
+    let _ = stage.keep();
+    Ok(())
+}
+
 /// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named.
 /// When `v` is a list, writes the trace of each element to `DIR/INDEX` for
 /// `IETS_FINE_JOBS=DIR`, and the trace graph to `IETS_FINE_DAG=DIR`.
-pub fn dump(ev: &Evaluator, v: Option<Word>) {
+/// Returns whether all requested writes succeeded; each error names its path.
+#[must_use]
+pub fn dump(ev: &Evaluator, v: Option<Word>) -> bool {
     with(|s| {
+        let mut written = true;
+        let mut check = |path: &Path, result: io::Result<()>| {
+            if let Err(e) = result {
+                errln!("fine trace: writing {}: {e}", path.display());
+                written = false;
+            }
+        };
         if let Some(p) = &s.out {
             let all = s.flatten(&s.log[s.frames[0].0..]);
-            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
-                errln!("fine trace: writing {}: {e}", p.display());
-            }
+            check(p, fs::write(p, s.text(ev, &all, false)));
         }
         let roots = v.map(roots).unwrap_or_default();
-        if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
-            for (i, t) in roots.iter().enumerate() {
-                let obs = if *t == 0 {
-                    Vec::new()
-                } else {
-                    s.flatten(&[EDGE | t])
-                };
-                let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
-                    errln!("fine trace: writing {}: {e}", p.display());
-                }
-            }
+        if let Some(dir) = env::var_os("IETS_FINE_JOBS") {
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| {
+                    // An empty batch is still a published snapshot: keep it
+                    // distinguishable from an unused, precreated directory.
+                    if roots.is_empty() {
+                        fs::write(stage.join(".empty"), [])?;
+                    }
+                    for (i, t) in roots.iter().enumerate() {
+                        let obs = if *t == 0 {
+                            Vec::new()
+                        } else {
+                            s.flatten(&[EDGE | t])
+                        };
+                        fs::write(stage.join(i.to_string()), s.text(ev, &obs, true))?;
+                    }
+                    Ok(())
+                }),
+            );
         }
-        if let Some(dir) = std::env::var_os("IETS_FINE_DAG")
-            && let Err(e) = s.write_dag(ev, std::path::Path::new(&dir), &roots)
-        {
-            errln!("fine trace: writing {}: {e}", dir.display());
+        if let Some(dir) = env::var_os("IETS_FINE_DAG") {
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| s.write_dag(ev, stage, &roots)),
+            );
         }
         errln!(
             "fine trace: {} frames, {} words of traces, {} observations, {} provenances",
@@ -1702,7 +1753,8 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
             s.obs.len(),
             s.provs.len()
         );
-    });
+        written
+    })
 }
 
 fn kind_name(k: Kind) -> &'static str {
@@ -1863,7 +1915,10 @@ const VOLATILE_VERSION: &str = "V\tvolatile-v1\n";
 
 fn read_observations(dir: &Path) -> io::Result<String> {
     let mut observations = fs::read_to_string(dir.join("obs"))?;
-    if !observations.ends_with(VOLATILE_VERSION) {
+    if !observations.ends_with(VOLATILE_VERSION)
+        || observations.len() > VOLATILE_VERSION.len()
+            && observations.as_bytes()[observations.len() - VOLATILE_VERSION.len() - 1] != b'\n'
+    {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "regenerate the fine graph to record uncacheable forces",
@@ -1874,7 +1929,14 @@ fn read_observations(dir: &Path) -> io::Result<String> {
 }
 
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+    let bytes = fs::read(path)?;
+    if bytes.get(4..8) != Some(SERIAL_GRAPH.to_le_bytes().as_slice()) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "regenerate the fine graph with serial recording",
+        ));
+    }
+    Ok(bytes
         .as_chunks::<4>()
         .0
         .iter()

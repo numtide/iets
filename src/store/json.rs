@@ -207,18 +207,15 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, DrvError> {
-        let Some(h) = self.s.get(self.i..self.i + 4) else {
-            return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-        };
-        let Some(v) = str::from_utf8(h)
-            .ok()
-            .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
-            .and_then(|h| u32::from_str_radix(h, 16).ok())
-        else {
-            return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-        };
-        self.i += 4;
-        Ok(v)
+        let mut value = 0;
+        for _ in 0..4 {
+            let Some(digit) = self.peek().and_then(|b| char::from(b).to_digit(16)) else {
+                return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
+            };
+            value = value * 16 + digit;
+            self.i += 1;
+        }
+        Ok(value)
     }
 
     fn string(&mut self) -> Result<String, DrvError> {
@@ -442,12 +439,13 @@ mod tests {
 
     #[test]
     fn what_nix_refuses() {
-        let cases: [(&[u8], &str); 10] = [
+        let cases: [(&[u8], &str); 11] = [
             (b"[1]", "type must be object, but is array"),
             (b"null", "type must be object, but is null"),
             (br#"{"a":1e400}"#, "number overflow parsing '1e400'"),
             (b"{\"a\":\"x\0y\"}", "control character must be escaped"),
             (br#"{"a":"\ud800"}"#, "invalid string"),
+            (br#"{"n":"\u1z00"}"#, "line 1, column 10"),
             (b"{\"a\":\"\xff\"}", "ill-formed UTF-8"),
             (br#"{"a":1} x"#, "expected end of input"),
             (b"", "unexpected end of input"),

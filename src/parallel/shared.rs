@@ -7,7 +7,8 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Index;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::ptr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::vec::IntoIter;
@@ -85,11 +86,11 @@ struct FilesInner {
     /// `list[i]` points at file `i`, stored before `len` publishes it, so
     /// a lookup takes no lock: compiles on every worker read the table, and
     /// a mutex around it was contended at eight workers.
-    list: *mut AtomicPtr<FileInfo>,
+    list: *mut Box<FileInfo>,
     len: AtomicUsize,
     adder: Mutex<Adder>,
-    /// Owns the entries, so references to them outlive the table.
-    heap: Arc<Heap>,
+    /// A table constructed in a session keeps its heap alive.
+    _heap: Arc<Heap>,
 }
 
 /// What only an add touches.
@@ -99,13 +100,17 @@ struct Adder {
     next_base: u32,
 }
 
-// SAFETY: the list holds atomics only, each written once before `len`
-// publishes it; the mapping lives as long as this.
-unsafe impl Sync for FilesInner {}
-unsafe impl Send for FilesInner {}
+// SAFETY: writers hold the adder lock and only initialize unpublished
+// slots. Readers acquire `len` before borrowing an immutable box.
+unsafe impl Sync for FilesInner where FileInfo: Send + Sync {}
+unsafe impl Send for FilesInner where FileInfo: Send + Sync {}
 
 impl Drop for FilesInner {
     fn drop(&mut self) {
+        // SAFETY: the last owner has exclusive access. Only this prefix
+        // has been initialized, and each slot owns its box.
+        let entries = ptr::slice_from_raw_parts_mut(self.list, *self.len.get_mut());
+        unsafe { ptr::drop_in_place(entries) };
         interner::unmap_per_sym(self.list);
     }
 }
@@ -120,27 +125,25 @@ impl FilesInner {
             .checked_add(src_len as u32 + 1)
             .expect("sources exceed 4 GiB");
         info.base = base;
-        let p: *const FileInfo = self.heap.keep(info);
-        // SAFETY: `n` is below the mapping's length, and only the holder of
-        // the adder lock writes past `len`.
-        unsafe { (*self.list.add(n)).store(p as *mut FileInfo, Ordering::Release) };
+        // SAFETY: the adder lock owns the next uninitialized slot, and
+        // readers cannot reach it until the release store below.
+        unsafe { self.list.add(n).write(Box::new(info)) };
         self.len.store(n + 1, Ordering::Release);
         FileId(n as u32)
     }
 
-    fn get(&self, i: usize) -> Option<&'static FileInfo> {
+    fn get(&self, i: usize) -> Option<&FileInfo> {
         if i >= self.len.load(Ordering::Acquire) {
             return None;
         }
-        // SAFETY: entries below `len` were stored before it, point into the
-        // session heap and are never written again.
-        Some(unsafe { &*(*self.list.add(i)).load(Ordering::Acquire) })
+        // SAFETY: entries below `len` were published before it. Their boxes
+        // remain at stable addresses for the lifetime of this table.
+        Some(unsafe { &**self.list.add(i) })
     }
 }
 
-/// Append-only table of loaded files: path, global base offset and line
-/// table only, never the source text. The entries live as long as the
-/// session.
+/// Append-only table owning each file's path, global base offset and line
+/// table. Lint reporting can also cache the source and its parsed tree.
 #[derive(Clone)]
 pub struct Files(Arc<FilesInner>);
 
@@ -151,7 +154,7 @@ impl Default for Files {
 }
 
 impl Files {
-    /// A table whose entries live in the session this thread entered.
+    /// A file table for the session this thread entered.
     pub fn new() -> Files {
         Files::in_heap(Session::current().heap.clone())
     }
@@ -164,7 +167,7 @@ impl Files {
                 ids: HashMap::new(),
                 next_base: 0,
             }),
-            heap,
+            _heap: heap,
         }))
     }
 
@@ -193,12 +196,19 @@ impl Files {
             .push(&mut self.0.adder.lock().unwrap(), info, src.len())
     }
 
-    pub fn get(&self, i: usize) -> Option<&'static FileInfo> {
+    /// Borrows a file from this table.
+    ///
+    /// ```compile_fail,E0515
+    /// fn retain(files: iets::parallel::shared::Files) -> &'static iets::eval::FileInfo {
+    ///     files.get(0).unwrap()
+    /// }
+    /// ```
+    pub fn get(&self, i: usize) -> Option<&FileInfo> {
         self.0.get(i)
     }
 
     /// The file whose base range holds `pos`, and the offset inside it.
-    pub fn file_of(&self, pos: Pos) -> Option<(&'static FileInfo, u32)> {
+    pub fn file_of(&self, pos: Pos) -> Option<(&FileInfo, u32)> {
         if pos.is_none() {
             return None;
         }
@@ -383,5 +393,37 @@ impl Totals {
             counts: array::from_fn(|i| self.kind_counts.0[i].load(Ordering::Relaxed)),
             kind_bytes: array::from_fn(|i| self.kind_bytes.0[i].load(Ordering::Relaxed)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn published_files_survive_concurrent_appends_and_cloning() {
+        let files = Files::in_heap(Arc::new(Heap::default()));
+        let first = files.add(b"first", b"a\nb");
+        let retained = files.clone();
+        let first_file = &retained[first.0 as usize];
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..64 {
+                        assert_eq!(files.add(b"first", b"a\nb"), first);
+                        files.add_text(b"text", b"x\ny");
+                        let last = files.get(files.len() - 1).unwrap();
+                        assert_eq!(last.path, b"text");
+                        assert_eq!(last.line_col(2), (2, 1));
+                    }
+                });
+            }
+        });
+        drop(files);
+        assert_eq!(retained.len(), 257);
+        assert!(ptr::eq(first_file, &retained[first.0 as usize]));
+        assert_eq!(first_file.line_col(2), (2, 1));
     }
 }

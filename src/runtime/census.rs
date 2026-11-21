@@ -13,7 +13,14 @@ use super::value::{
 use super::word::Word;
 use crate::syntax::symbol::fx_bytes;
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// A census can outlive a replaced file table, including all its addresses.
+pub(crate) fn next_file_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .expect("file census IDs exhausted")
+}
 
 pub const SIZE_BUCKETS: [&str; 11] = [
     "0", "1", "2", "3-4", "5-8", "9-16", "17-32", "33-64", "65-128", "129-256", "257+",
@@ -97,7 +104,7 @@ pub struct Upd {
     /// Each new result: chain length, uses as left and as right operand.
     pub results: HashMap<*const AttrsObj, (u32, u32, u32)>,
     /// By the file of the `//`: path, count, bytes.
-    pub by_file: HashMap<usize, (&'static [u8], u64, u64)>,
+    pub by_file: HashMap<usize, (Box<[u8]>, u64, u64)>,
 }
 
 /// The branch `update_attrs` takes; read before the update, which may
@@ -289,7 +296,7 @@ impl Census {
         b: &'static AttrsObj,
         out: Word,
         bytes: u64,
-        file: Option<(usize, &'static [u8])>,
+        file: Option<(usize, &[u8])>,
     ) {
         let u = &mut self.upd;
         let (la, lb) = (a.len_unmarked(), b.len_unmarked());
@@ -328,7 +335,7 @@ impl Census {
             u.results.insert(o, (chain, 0, 0));
         }
         if let Some((key, name)) = file {
-            let f = u.by_file.entry(key).or_insert((name, 0, 0));
+            let f = u.by_file.entry(key).or_insert_with(|| (name.into(), 0, 0));
             f.1 += 1;
             f.2 += bytes;
         }

@@ -104,6 +104,7 @@ fn append_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 String::from_utf8_lossy(name)
             );
         };
+        let name = ev.arena.alloc_bytes(name);
         let v = ev.force_attrs(
             a.cell.get(),
             a.pos,

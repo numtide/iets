@@ -351,7 +351,18 @@ commit, and more while kept jobs hold older graphs.
 
 ## Limits
 
-- The trace runs at one worker, without the IR cache.
+- The trace runs at one worker, without the IR cache. Regenerate graphs and
+  per-job text captured before serial recording was enforced. Their worker
+  count was not recorded. Use a new or empty directory for each graph or
+  batch of per-job traces. The recorder publishes each complete directory
+  with a rename and reports an error if its destination is populated. A batch
+  with no jobs contains a hidden `.empty` marker; enumerate numeric job files,
+  not every directory entry. Open the directory after a successful capture;
+  no numeric files are a complete empty batch only when `.empty` is present.
+  An unused empty directory is not evidence. Standalone job text still requires
+  its framing. Output channels publish independently: use distinct, nonoverlapping
+  paths and check evaluation success before reading. Do not remove or replace a
+  published path while readers use it.
 - The job list of a commit comes from its full evaluation, not from an
   enumeration, and jobs that fail are left out.
 - The thresholds (8 bindings, one region per binding) were not tuned.

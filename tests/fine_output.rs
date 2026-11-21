@@ -40,7 +40,6 @@ fn warm_eval_still_writes_a_requested_graph(bin: Iets) {
     let dir = tempdir().unwrap();
     let dag = dir.path().join("graph");
     fs::create_dir(&dag).unwrap();
-    fs::write(dag.join("roots"), "previous capture").unwrap();
     let eval = || {
         let mut c = bin.cmd();
         c.args([
@@ -58,10 +57,7 @@ fn warm_eval_still_writes_a_requested_graph(bin: Iets) {
     assert!(stderr(&ok(&mut eval())).contains("cache: hit"));
     let traced = ok(eval().env("IETS_FINE_TRACE", "").env("IETS_FINE_DAG", &dag));
     assert_eq!(stdout(&traced), "[ true ]");
-    assert_ne!(
-        fs::read_to_string(dag.join("roots")).unwrap(),
-        "previous capture"
-    );
+    assert!(dag.join("roots").is_file());
     assert!(dag.join("nodes").is_file());
     assert_eq!(stdout(&ok(&mut eval())), "[ false ]");
 }

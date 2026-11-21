@@ -609,8 +609,8 @@ fn search_uses_the_cache(work: Work) {
 #[case::text("--strict", "[ { result = import ./a.nix; } 42 ]", "[ { result = 1; } 42 ]\n", &[0], &[0])]
 #[case::json(
     "--json",
-    r#"[ { result = import ./a.nix; } { outPath = import ./b.nix; unused = throw "unused"; }
-         { __toString = self: import ./b.nix; } [ { nested = import ./a.nix; } ] 42 ]"#,
+    r#"let shared = import ./a.nix; in [ { result = shared; } { outPath = import ./b.nix; unused = throw "unused"; }
+         { __toString = self: import ./b.nix; } [ { nested = shared; } ] 42 ]"#,
     "[{\"result\":1},\"b\",\"b\",[{\"nested\":1}],42]\n",
     &[0, 3],
     &[1, 2]

@@ -32,16 +32,20 @@ thunk shares that thunk pointer instead of allocating a second one.
 Forcing overwrites the thunk object in place. A thunk is two words. `code`
 holds the IR or the function, and becomes the value. `state` holds the
 environment or the argument, and becomes empty. Cells that still point at
-the thunk get the value written over them as they are read. That is graph
-reduction, and it is why a shared subexpression is evaluated only once.
+the thunk get the value written over them as they are read, except when
+the result is a function. In that case the thunk still memoizes the result,
+and nested equality can distinguish two slots that produced the same function.
 
 `mapAttrs` is the case where even two words were too many. On the outpaths
 workload there were 22 million `mapAttrs` thunks and 93 % of them were
 never forced. A `mapAttrs` entry has no thunk object at all: a
 `THUNK_MAP` word carries a descriptor pointer and an entry index, and one
-`MapDesc` per call holds an 8-byte state cell per entry. Large sets fall
-back to an ordinary two-argument thunk. That change alone took
-the arena from 8,936 MB to 7,981 MB, with the run time inside the noise.
+`MapDesc` per call holds an 8-byte state cell per entry. A demanded
+function lives in that state cell, leaving the entry word available for
+equality. A helper that encounters a function leaves the entry for the
+demand path. Large sets fall back to an ordinary two-argument thunk.
+Packing map entries took the arena from 8,936 MB to 7,981 MB, with the
+run time inside the noise.
 
 ## Values
 
@@ -245,15 +249,12 @@ These properties give the same answer:
 A helper computes ahead of the demand path, so what it computes must leave
 no trace the program can read. The places that could show it are closed:
 
-- **The cell.** Only the demand path unboxes a forced cell. A helper
-  forces the thunk and leaves the cell alone (`Evaluator::force_cell`,
-  `parallel::force::take`). A cell that holds a value is therefore a
-  cell the program asked for, which is what `==` reads for the identity of
-  a function and what the printers read for `<CODE>`.
-- **The thunk state.** A helper publishes `SPECULATED` where the demand
-  path publishes `EMPTY` (`Word::thunk_finish`). Both say "forced"; only
-  the demand path's mark makes the value printable. The first demand of a
-  speculated thunk upgrades the mark.
+- **The cell.** Only the demand path unboxes a forced cell. Both paths
+  retain a thunk that produced a function so `==` can read its original
+  identity (`Evaluator::force_cell`, `parallel::force::take_cell`).
+- **The thunk state.** A helper can publish `SPECULATED` where the demand
+  path publishes `EMPTY` (`Word::thunk_finish`). The first demand of a
+  speculated thunk upgrades the mark and makes the value printable.
 
 The demand path pays for this guarantee. A helper leaves its value inside
 the thunk, so the demand path reads the cell, the thunk state and the value,

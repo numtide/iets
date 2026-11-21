@@ -152,7 +152,7 @@ pub fn print_ambiguous(
         } else if w.thunk_unforced(st) || w.thunk_speculated(st) {
             out.extend_from_slice(b"<CODE>");
         } else {
-            return print_ambiguous(ev, w.thunk_value(), cell, out, seen, depth);
+            return print_ambiguous(ev, w.thunk_value(st), cell, out, seen, depth);
         }
         return Ok(());
     }
@@ -211,6 +211,7 @@ pub fn show_value_short(ev: &Evaluator, w: Word) -> String {
 }
 
 fn show_short(ev: &Evaluator, w: Word, out: &mut String, depth: usize) {
+    let w = w.peek_demanded();
     if w.is_thunk() {
         out.push_str("«thunk»");
         return;
@@ -380,7 +381,11 @@ fn print_json_inner(
     strict: bool,
     pos: Pos,
 ) -> EvalResult<()> {
-    let w = if strict { ev.force(w)? } else { w };
+    let w = if strict {
+        ev.force(w)?
+    } else {
+        w.peek_demanded()
+    };
     if w.is_thunk() {
         return Err(Error::boxed(
             ErrorKind::Type,

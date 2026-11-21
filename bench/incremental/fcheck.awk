@@ -32,8 +32,12 @@ function flush(   s) {
   }
   delete inv; delete pc; output_version = 0
 }
-$1 == "J" { flush(); job = $2; next }
-$0 == "V\tjob-output-v1" { output_version = 1; next }
+$1 == "J" && NF == 2 && $2 != "" { flush(); job = $2; next }
+$0 == "V\tjob-output-v1" && job != "" && !output_version { output_version = 1; next }
+job == "" || output_version || $1 == "J" || $1 == "V" {
+  print "invalid fine job trace at " FILENAME ":" FNR > "/dev/stderr"
+  exit 1
+}
 $1 == "R" && $2 == "?" { for (s in steps) inv[s] = "untracked " $3; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {

@@ -1,6 +1,6 @@
 //! The fine trace: what an evaluation read, at the grain of a binding. A
 //! prototype for incremental evaluation, on only when `IETS_FINE_TRACE`
-//! names the file to write, and only at one worker.
+//! names the file to write. Capturing a trace runs the evaluator on one worker.
 //!
 //! A set or `let` of `FINE_MIN` bindings or more makes each binding a region
 //! of its own: the compiler wraps its value in `Ir::Region`, so an edit to
@@ -20,11 +20,15 @@
 //! jobs that share thunks still gives each job all that it depends on.
 
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
+use std::io::ErrorKind;
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{env, fs, io};
+use tempfile::Builder;
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -34,6 +38,7 @@ use crate::runtime::Word;
 use crate::runtime::value::{Attr, AttrsObj, Value};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
+use crate::sys::{OsStrExt, path_from_internal, path_to_internal};
 use crate::trace::{Kind, Obs};
 
 pub const FINE_MIN: usize = 8;
@@ -50,6 +55,9 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+const SYMLINK_PATHS: &str = "V\tsymlink-paths-v1\n";
+/// The reserved second node word identifies a graph recorded on the serial force path.
+const SERIAL_GRAPH: u32 = u32::from_le_bytes(*b"SER2");
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -188,7 +196,7 @@ pub fn init() {
 fn start(out: Option<PathBuf>) {
     let mut s = State {
         out,
-        nodes: vec![0, 0],
+        nodes: vec![0, SERIAL_GRAPH],
         serial: 1,
         ..State::default()
     };
@@ -932,6 +940,15 @@ pub fn position(path: &[u8], off: u32) {
 
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
+    match o {
+        Obs::File { path, .. } | Obs::Dir { path, .. } | Obs::Canon { path, .. } => {
+            path_resolution(&path_from_internal(path), true);
+        }
+        Obs::Stat { path, follow, .. } => path_resolution(&path_from_internal(path), *follow),
+        // NAR serialization records a final symlink itself.
+        Obs::Tree { root, .. } => path_resolution(Path::new(OsStr::from_bytes(root)), false),
+        _ => {}
+    }
     let line = match o {
         Obs::File { path, hash, .. } => format!("F\t{}\t{}", lossy(path), hex(hash)),
         Obs::Dir { path, hash } => format!("D\t{}\t{}", lossy(path), hex(hash)),
@@ -943,6 +960,49 @@ pub fn outside(o: &Obs) {
         Obs::Input { entry, .. } => format!("I\t{}", lossy(entry)),
     };
     with(|s| s.record(O::Out(line)));
+}
+
+/// Git reports changes under their repository paths. If an input was read
+/// through a symlink, changing its target or an intermediate link can leave
+/// the observed spelling untouched. Mark only the force that read the path.
+fn path_resolution(path: &Path, follow_leaf: bool) {
+    let uncertain = !path.is_absolute()
+        || path.to_str().is_none_or(|p| p.contains(['\t', '\n', '\r']))
+        || path.ancestors().skip(usize::from(!follow_leaf)).any(|p| {
+            match fs::symlink_metadata(p) {
+                Ok(m) => m.is_symlink(),
+                Err(e) => !matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ),
+            }
+        });
+    if uncertain {
+        followed_link();
+    } else if let Some(parent) = path.parent() {
+        // A directory which is ordinary now can itself be replaced by a
+        // link. CM(directory) covers the replacement, including a formerly
+        // missing child which suddenly exists through the new link.
+        with(|s| s.record(O::Out(format!("C\t{}", lossy(&path_to_internal(parent))))));
+    }
+}
+
+pub(crate) fn followed_link() {
+    with(|s| s.record(O::Out("R\t?\tvolatile\t".into())));
+}
+
+pub(crate) fn import_file(path: &[u8]) {
+    path_resolution(&path_from_internal(path), true);
+    // Keep the region as the identity for byte edits. Replacing its file
+    // by a link changes the source identity even if the region hash matches.
+    with(|s| s.record(O::Out(format!("S\t{}\tregular", lossy(path)))));
+}
+
+pub(crate) fn disk_listing(path: &[u8]) {
+    path_resolution(&path_from_internal(path), true);
+    // A directory replaced by a link can make a previously absent key appear
+    // without a Git addition under the spelling readDir was given.
+    with(|s| s.record(O::Out(format!("C\t{}", lossy(path)))));
 }
 
 /// After the compile of `path` with `root` as its IR: the regions and the
@@ -1515,8 +1575,11 @@ impl State {
     /// `obs` as lines: `R` regions, `P` the provenances the `K` lookups and
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
-    fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
+    fn text(&self, ev: &Evaluator, obs: &[u32], job: bool) -> String {
         let mut out = String::new();
+        if job {
+            out.push_str("V\tserial-v2\n");
+        }
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1575,6 +1638,9 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
+        if job {
+            out.push_str("V\tend-serial-symlink-v1\n");
+        }
         out
     }
 
@@ -1594,7 +1660,8 @@ impl State {
             o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
             o.push('\n');
         }
-        std::fs::write(dir.join("obs"), o)?;
+        o.push_str(SYMLINK_PATHS);
+        fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
             p.push_str(&self.prov_line(ev, i).replace('\n', "\\n"));
@@ -1624,7 +1691,7 @@ impl State {
         }
         std::fs::write(dir.join("queries"), q)?;
         let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        fs::write(dir.join("roots"), r)
     }
 }
 
@@ -1655,35 +1722,79 @@ fn roots(v: Word) -> Vec<u32> {
         .collect()
 }
 
+/// Publish a complete capture to a new or empty destination. Renaming a sibling
+/// directory also refuses a populated destination won by another recorder.
+fn publish_capture(dir: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut builder = Builder::new();
+    match fs::read_dir(dir) {
+        Ok(mut entries) => {
+            if entries.next().transpose()?.is_some() {
+                return Err(io::Error::new(
+                    ErrorKind::DirectoryNotEmpty,
+                    "use a new or empty directory for the fine capture",
+                ));
+            }
+            builder.permissions(fs::metadata(dir)?.permissions());
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let stage = builder.tempdir_in(parent)?;
+    write(stage.path())?;
+    fs::rename(stage.path(), dir)?;
+    let _ = stage.keep();
+    Ok(())
+}
+
 /// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named.
 /// When `v` is a list, writes the trace of each element to `DIR/INDEX` for
 /// `IETS_FINE_JOBS=DIR`, and the trace graph to `IETS_FINE_DAG=DIR`.
-pub fn dump(ev: &Evaluator, v: Option<Word>) {
+/// Returns whether all requested writes succeeded; each error names its path.
+#[must_use]
+pub fn dump(ev: &Evaluator, v: Option<Word>) -> bool {
     with(|s| {
+        let mut written = true;
+        let mut check = |path: &Path, result: io::Result<()>| {
+            if let Err(e) = result {
+                errln!("fine trace: writing {}: {e}", path.display());
+                written = false;
+            }
+        };
         if let Some(p) = &s.out {
             let all = s.flatten(&s.log[s.frames[0].0..]);
-            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
-                errln!("fine trace: writing {}: {e}", p.display());
-            }
+            check(p, fs::write(p, s.text(ev, &all, false)));
         }
         let roots = v.map(roots).unwrap_or_default();
-        if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
-            for (i, t) in roots.iter().enumerate() {
-                let obs = if *t == 0 {
-                    Vec::new()
-                } else {
-                    s.flatten(&[EDGE | t])
-                };
-                let p = std::path::Path::new(&dir).join(i.to_string());
-                if let Err(e) = std::fs::write(&p, s.text(ev, &obs)) {
-                    errln!("fine trace: writing {}: {e}", p.display());
-                }
-            }
+        if let Some(dir) = env::var_os("IETS_FINE_JOBS") {
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| {
+                    // An empty batch is still a published snapshot: keep it
+                    // distinguishable from an unused, precreated directory.
+                    if roots.is_empty() {
+                        fs::write(stage.join(".empty"), [])?;
+                    }
+                    for (i, t) in roots.iter().enumerate() {
+                        let obs = if *t == 0 {
+                            Vec::new()
+                        } else {
+                            s.flatten(&[EDGE | t])
+                        };
+                        fs::write(stage.join(i.to_string()), s.text(ev, &obs, true))?;
+                    }
+                    Ok(())
+                }),
+            );
         }
-        if let Some(dir) = std::env::var_os("IETS_FINE_DAG")
-            && let Err(e) = s.write_dag(ev, std::path::Path::new(&dir), &roots)
-        {
-            errln!("fine trace: writing {}: {e}", dir.display());
+        if let Some(dir) = env::var_os("IETS_FINE_DAG") {
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| s.write_dag(ev, stage, &roots)),
+            );
         }
         errln!(
             "fine trace: {} frames, {} words of traces, {} observations, {} provenances",
@@ -1692,7 +1803,8 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
             s.obs.len(),
             s.provs.len()
         );
-    });
+        written
+    })
 }
 
 fn kind_name(k: Kind) -> &'static str {
@@ -1849,8 +1961,31 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
+fn read_observations(dir: &Path) -> io::Result<String> {
+    let text = fs::read_to_string(dir.join("obs"))?;
+    if !text
+        .lines()
+        .rev()
+        .take_while(|line| line.starts_with("V\t"))
+        .any(|line| line == SYMLINK_PATHS.trim_end())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing symlink resolution evidence, record the graph again",
+        ));
+    }
+    Ok(text)
+}
+
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+    let bytes = fs::read(path)?;
+    if bytes.get(4..8) != Some(SERIAL_GRAPH.to_le_bytes().as_slice()) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "regenerate the fine graph with serial recording",
+        ));
+    }
+    Ok(bytes
         .as_chunks::<4>()
         .0
         .iter()
@@ -1871,7 +2006,7 @@ fn check_dag(
         u128::MAX >> (128 - c.steps.len())
     };
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let obs = ObsIndex::new(&read_observations(dir)?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -2072,7 +2207,12 @@ impl ObsIndex {
                     .entry(a.to_string())
                     .or_default()
                     .push((i, b.parse().unwrap_or(0))),
-                "F" | "C" => push(&mut x.files, a, i),
+                "F" => push(&mut x.files, a, i),
+                "C" => {
+                    for prefix in Path::new(a).ancestors() {
+                        push(&mut x.files, prefix.to_str().unwrap(), i);
+                    }
+                }
                 "T" => push(&mut x.trees, a, i),
                 "S" => push(&mut x.stats, a, i),
                 "D" => push(&mut x.dirs, a, i),
@@ -2257,7 +2397,7 @@ impl Graph {
         }
         let (provs, index, words, roots) = (
             std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            ObsIndex::new(&read_observations(d)?, None),
             read_words(&d.join("nodes"))?,
             std::fs::read_to_string(d.join("roots"))?
                 .lines()
@@ -2994,10 +3134,7 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
-        .lines()
-        .map(String::from)
-        .collect();
+    let obs: Vec<String> = read_observations(dir)?.lines().map(String::from).collect();
     let words = read_words(&dir.join("nodes"))?;
     let roots = std::fs::read_to_string(dir.join("roots"))?;
     let t: u32 = roots

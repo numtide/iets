@@ -64,10 +64,25 @@ of a file as if it were at `AS`. A change between two revisions is then a list
 of changed regions, names that came or went per set and per directory, the
 files that changed, and the first changed byte of each file.
 
+A Git revision reports paths by their repository names. A job that reads
+`builtins.readFile ./link` can observe new bytes even when only the target
+appears in the diff. The fine recorder marks the reading force as volatile
+when it follows a physical symlink. Any revision step then invalidates jobs
+that consumed that force. Reading the type of the link itself uses its
+ordinary type dependency. For paths through ordinary directories the checker
+also tracks replacement of an ancestor, which can make a previously absent
+name appear through a new link. Graphs and flat job traces from before this
+evidence was recorded need a fresh recording.
+
 `IETS_FINE_DAG=DIR` writes the traces of a run as one graph, with the trace
 of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
+
+An `iets eval` with `IETS_FINE_TRACE` set evaluates the request even when
+its rendered result is already cached. Check the command's exit status
+before consuming any requested trace files. A write failure reports the
+destination and fails the command even if it already printed its result.
 
 ## Results
 
@@ -346,7 +361,18 @@ commit, and more while kept jobs hold older graphs.
 
 ## Limits
 
-- The trace runs at one worker, without the IR cache.
+- The trace runs at one worker, without the IR cache. Regenerate graphs and
+  per-job text captured before serial recording was enforced. Their worker
+  count was not recorded. Use a new or empty directory for each graph or
+  batch of per-job traces. The recorder publishes each complete directory
+  with a rename and reports an error if its destination is populated. A batch
+  with no jobs contains a hidden `.empty` marker; enumerate numeric job files,
+  not every directory entry. Open the directory after a successful capture;
+  no numeric files are a complete empty batch only when `.empty` is present.
+  An unused empty directory is not evidence. Standalone job text still requires
+  its framing. Output channels publish independently: use distinct, nonoverlapping
+  paths and check evaluation success before reading. Do not remove or replace a
+  published path while readers use it.
 - The job list of a commit comes from its full evaluation, not from an
   enumeration, and jobs that fail are left out.
 - The thresholds (8 bindings, one region per binding) were not tuned.

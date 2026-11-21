@@ -406,7 +406,10 @@ impl Trace {
 
     /// A regular file whose bytes are in memory.
     pub fn file(&self, path: &[u8], meta: &fs::Metadata, bytes: &[u8]) {
-        if self.is_on() && !fine::importing() {
+        if fine::importing() {
+            // A region stands for the imported bytes but keeps their spelling.
+            fine::import_file(&sys::from_native(path));
+        } else if self.is_on() {
             self.record(file_obs(&sys::from_native(path), meta, sha256(bytes)));
         }
     }

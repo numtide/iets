@@ -25,6 +25,12 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
             .collect()
     }
     let capture = |src: &str, setting: &str| {
+        // Each capture owns a new immutable snapshot destination.
+        for dir in [&graph, &jobs] {
+            if dir.exists() {
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
         fs::write(&entry, src).unwrap();
         stdout(&ok(runner
             .cmd()

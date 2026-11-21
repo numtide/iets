@@ -602,16 +602,6 @@ impl<'a> Reader<'a> {
         Ok(&self.buf[self.start - take..self.start])
     }
 
-    /// Throws away `n` bytes: what a parse that wants only the framing does with
-    /// a file's body.
-    fn skip(&mut self, n: u64) -> io::Result<()> {
-        let mut left = n;
-        while left > 0 {
-            left -= self.some(left.min(BUF as u64) as usize)?.len() as u64;
-        }
-        Ok(())
-    }
-
     fn padding(&mut self, len: u64) -> io::Result<()> {
         let rem = (len % 8) as usize;
         if rem != 0 {
@@ -657,7 +647,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Copies `len` bytes of contents into `out`, then the padding.
-    fn contents_to(&mut self, out: &mut fs::File, len: u64) -> io::Result<()> {
+    fn contents_to(&mut self, out: &mut impl Write, len: u64) -> io::Result<()> {
         let mut left = len;
         while left > 0 {
             let chunk = self.some(left.min(BUF as u64) as usize)?;
@@ -721,8 +711,7 @@ impl<'a> Parser<'a> {
                 if RESTORE {
                     self.regular(len, tag == TAG_EXE)?;
                 } else {
-                    self.r.skip(len)?;
-                    self.r.padding(len)?;
+                    self.r.contents_to(&mut io::sink(), len)?;
                 }
             }
             TAG_SYM => {

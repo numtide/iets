@@ -50,7 +50,7 @@ use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::nar::{FileType, PathFilter};
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path};
 use crate::sys::errno;
-use crate::trace::Obs;
+use crate::trace::{Obs, fine};
 use std::sync::atomic::Ordering::{self, Relaxed};
 
 /// The store path a tree with this NAR hash has. The one naming site for a
@@ -550,11 +550,16 @@ pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
 /// version that says the entry can still be read, is the whole check: there is
 /// nothing per file to stat and nothing to rehash (docs/explanation/caching.md).
 pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
+    let input = || Obs::Input {
+        entry: name.as_bytes().to_vec(),
+        version: spool::INDEX_VERSION,
+    };
     if ev.trace().is_on() && !tree.recorded.swap(true, Ordering::Relaxed) {
-        ev.trace().record(Obs::Input {
-            entry: name.as_bytes().to_vec(),
-            version: spool::INDEX_VERSION,
-        });
+        ev.trace().record(input());
+    } else if fine::on() {
+        // The command read set has this entry, but this job may be reading
+        // it for the first time. Let the current fine frame deduplicate it.
+        fine::outside(&input());
     }
 }
 

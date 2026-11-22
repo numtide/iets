@@ -13,6 +13,7 @@ pub mod line;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::iter;
+use std::ops::ControlFlow;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, OnceLock};
 
@@ -81,6 +82,9 @@ pub struct Run {
     /// Path hash and depth of every set the walk fanned out, by address, so
     /// a helper handed a range of its cells can apply the chunk rule.
     sets: Mutex<Option<HashMap<u64, (u64, u32)>>>,
+    /// What helpers spent on a job before the walk reached it, by path
+    /// hash: nanoseconds run and bytes allocated (`job_stats`).
+    cost: Mutex<Option<HashMap<u64, (u64, u64)>>>,
     /// Worker processes spawned so far: `--workers` plus one per restart.
     pub spawned: AtomicUsize,
 }
@@ -103,6 +107,36 @@ fn recall_set(a: &'static AttrsObj) -> Option<(u64, u32)> {
         .unwrap()
         .as_ref()
         .and_then(|m| m.get(&(a as *const AttrsObj as u64)).copied())
+}
+
+/// Adds what a helper spent on the job at `hash`.
+fn add_cost(hash: u64, ns: u64, bytes: u64) {
+    let session = Session::current();
+    let mut m = session.jobs.cost.lock().unwrap();
+    let e = m.get_or_insert_with(HashMap::new).entry(hash).or_default();
+    e.0 += ns;
+    e.1 += bytes;
+}
+
+/// The `stats` of the job at `hash`, as a worker process gives them: what
+/// helpers spent on it ahead of the walk, plus what the walk spent since
+/// `since` (`Evaluator::cost_so_far`). Time is what the fibers ran, not
+/// what they waited for another fiber, so nothing counts twice. As in
+/// nix-eval-jobs, a value jobs share is billed to the one that forced it
+/// first.
+fn job_stats(ev: &Evaluator, hash: u64, since: (u64, u64)) -> Vec<u8> {
+    let now = ev.cost_so_far();
+    let (ns, bytes) = Session::current()
+        .jobs
+        .cost
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|m| m.remove(&hash))
+        .unwrap_or_default();
+    let ns = ns + now.0.saturating_sub(since.0);
+    let bytes = bytes + now.1.saturating_sub(since.1);
+    line::stats_json(ns / 1_000_000, bytes)
 }
 
 /// A copy, not a reference: the callers hold it across a `&mut Evaluator`.
@@ -149,10 +183,11 @@ pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<
 }
 
 /// Walk `root` and hand every job or error line to `sink`, in
-/// lexicographic depth-first order.
+/// lexicographic depth-first order. A fatal error line is the last: the
+/// walk stops there, as nix-eval-jobs' does.
 pub fn run(ev: &mut Evaluator, root: Word, sink: &mut dyn FnMut(Line)) {
     let mut path = Vec::new();
-    walk(ev, root, &mut path, FNV_BASIS, sink);
+    let _ = walk(ev, root, &mut path, FNV_BASIS, sink);
 }
 
 pub enum Node {
@@ -167,13 +202,17 @@ fn walk(
     path: &mut Vec<String>,
     hash: u64,
     sink: &mut dyn FnMut(Line),
-) {
+) -> ControlFlow<()> {
     let depth = path.len() as u32;
     if depth == config().opts.chunk_depth && !admit(hash, depth, false) {
-        return;
+        return ControlFlow::Continue(());
     }
+    let since = ev.cost_so_far();
     match node(ev, w, path, hash) {
-        Ok(Node::Job(job)) => sink(Line::Job(job)),
+        Ok(Node::Job(mut job)) => {
+            job.extra.insert("stats".into(), job_stats(ev, hash, since));
+            sink(Line::Job(job))
+        }
         Ok(Node::Recurse(attrs)) => {
             remember_set(attrs, hash, depth);
             let ordered: Vec<&Attr> = lexicographic_order(ev, attrs).collect();
@@ -201,16 +240,26 @@ fn walk(
                 let name = ev.interner.name_str(attr.sym).to_string();
                 let h = fnv_step(hash, name.as_bytes());
                 path.push(name);
-                walk(ev, attr.cell.get(), path, h, sink);
+                let flow = walk(ev, attr.cell.get(), path, h, sink);
                 path.pop();
+                flow?;
             }
         }
         Ok(Node::Skip) => {}
         // An attr that fails above the chunk depth is a unit of its own,
         // like a derivation there, so one chunk reports it.
         Err(_) if !admit(hash, depth, true) => {}
-        Err(e) => sink(Line::Error(error_line(ev, path, &e))),
+        Err(e) => {
+            let mut line = error_line(ev, path, &e);
+            line.stats = Some(job_stats(ev, hash, since));
+            let fatal = line.fatal;
+            sink(Line::Error(line));
+            if fatal {
+                return ControlFlow::Break(());
+            }
+        }
     }
+    ControlFlow::Continue(())
 }
 
 /// The error line for `path`, also printed to stderr as nix-eval-jobs does.
@@ -817,6 +866,7 @@ fn prefetch_child(
     if d == cfg.opts.chunk_depth && !admit(h, d, false) {
         return Ok(());
     }
+    let since = ev.cost_so_far();
     // only the demand path may unbox a cell and take the effects a helper
     // held on its thunk (docs/explanation/evaluation.md); a prefetch task
     // runs on a helper, so it reads through the same call as a walk
@@ -831,31 +881,42 @@ fn prefetch_child(
     };
     match prefetch_value(ev, v, h, d) {
         Err(e) if e.kind == ErrorKind::Cancelled => Err(()),
+        Ok(true) => {
+            let now = ev.cost_so_far();
+            add_cost(
+                h,
+                now.0.saturating_sub(since.0),
+                now.1.saturating_sub(since.1),
+            );
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
 
-fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalResult<()> {
+/// `Ok(true)` when the value was a job and what it needs is forced.
+fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalResult<bool> {
     if depth > 64 {
-        return Ok(());
+        return Ok(false);
     }
     let cfg = config();
     let v = ev.auto_call(v, cfg.auto_args)?;
     let Some(a) = v.as_attrs() else {
-        return Ok(());
+        return Ok(false);
     };
     if ev.is_derivation(v)? {
         if admit(hash, depth, true) {
             prefetch_job(ev, a)?;
+            return Ok(true);
         }
-        return Ok(());
+        return Ok(false);
     }
     let mut recurse = cfg.opts.force_recurse;
     if !recurse && let Some(r) = a.get(cfg.syms.recurse) {
         recurse = ev.force_bool(r.cell.get(), r.pos, "")?;
     }
     if !recurse {
-        return Ok(());
+        return Ok(false);
     }
     let a = ev.arena.flat(a);
     remember_set(a, hash, depth);
@@ -865,7 +926,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
             return Err(Error::boxed(ErrorKind::Cancelled, "cancelled", Pos::NONE));
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {

@@ -334,8 +334,8 @@ impl Census {
         }
     }
 
-    /// A snapshot of this arena: helpers may still mark shared objects.
-    /// Each mark is read atomically, but the report is not a global snapshot.
+    /// Covers this arena only, and other workers may still be marking its
+    /// objects.
     pub(crate) fn report(&self, out: &mut String) {
         let _ = writeln!(out, "--- census (IETS_STATS=2) ---");
         let _ = writeln!(out, "envs by slot count (count, bytes):");
@@ -345,7 +345,7 @@ impl Census {
             }
         }
         // SAFETY: every pointer was allocated in the arena, which lives
-        // until exit; marks() atomically reads the low bits of `up`.
+        // until exit.
         let (mut env_unread, mut env_unread_bytes) = (0u64, 0u64);
         let mut env_unread_by: [u64; 11] = [0; 11];
         let mut env_uncaptured_by: [u64; 11] = [0; 11];

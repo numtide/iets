@@ -103,10 +103,9 @@ pub fn try_run<R: Send + 'static>(
         ev.lints.flush();
         return Ok(r);
     }
-    let mut template = ev.clone();
-    // every fiber's evaluator borrows its worker's interner cache
-    template.interner.drop_cache();
-    let template = force::SyncEv(template);
+    // Every fiber, including the main one, borrows its worker's interner cache.
+    ev.interner.drop_cache();
+    let template = force::SyncEv(ev.clone());
     let rt = sched::Runtime::start(workers, Box::new(template), stack_size())?;
     let user = Box::into_raw(Box::new(ev)) as *mut ();
     let out = Arc::new(Mutex::new(None));

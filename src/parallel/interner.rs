@@ -190,7 +190,7 @@ impl Interner {
         }
     }
 
-    /// Gives up this handle's cache, for a template whose clones borrow
+    /// Gives up this handle's cache before this fiber and its clones borrow
     /// their worker's.
     pub(crate) fn drop_cache(&mut self) {
         self.cache = Box::new([]);

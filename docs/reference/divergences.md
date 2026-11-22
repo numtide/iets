@@ -343,7 +343,8 @@ is the thread's, so `ulimit -s` sets the depth; iets gives the demand
 path 4 GiB and takes a much deeper recursion. A file of 400,000 `1 + 1`
 terms is an error in Nix and an answer in iets. A recursion that passes
 the call depth limit of 10000 gets `stack overflow; max-call-depth
-exceeded` instead.
+exceeded` instead. The [WebAssembly](../explanation/webassembly.md) build has
+much lower limits.
 
 `error: out of memory`, exit 1. Nix prints one or more
 `GC Warning: Out of Memory!` lines first, and iets adds its usual

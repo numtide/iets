@@ -152,6 +152,7 @@ impl Taint {
     }
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<Ctx>() == 40);
 
 impl Ctx {
@@ -162,7 +163,7 @@ impl Ctx {
     }
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct StringObj {
     pub kind: Kind,
     /// Census only (`stats2`): set once the string was viewed.
@@ -174,6 +175,7 @@ pub struct StringObj {
     pub ctx: &'static [Ctx],
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<StringObj>() == 40);
 
 impl StringObj {
@@ -190,7 +192,7 @@ impl StringObj {
     }
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PathObj {
     pub kind: Kind,
     pub path: &'static [u8],
@@ -233,7 +235,7 @@ pub struct AttrsObj {
 /// priority first. Lookups probe the leaves from the last; an iteration
 /// merges them; `flat` caches the copy once someone needs the entries as
 /// one slice.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct UnionTail {
     pub flat: Cell,
     // followed by `leaves` pointers to flat sets
@@ -273,7 +275,7 @@ pub(crate) fn leaf_count(a: &'static AttrsObj) -> usize {
 /// Envs are reached only through `up`, lambdas and thunks, never through a
 /// `Word`, so they carry no `Kind`; slot indices come from the compiler, so
 /// they carry no length either. Header is one word.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct EnvObj {
     pub up: *const EnvObj,
     // followed by the slots
@@ -281,7 +283,7 @@ pub struct EnvObj {
 
 /// Closures are the third most common object; `TAG_LAMBDA` on the word
 /// replaces the Kind byte so the object is two words.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct LambdaObj {
     pub env: &'static EnvObj,
     pub lam: &'static LambdaIr,
@@ -289,7 +291,7 @@ pub struct LambdaObj {
 
 pub type PrimFn = fn(&mut Evaluator, &[Word], Pos) -> Result<Word, Box<eval::Error>>;
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PrimOpObj {
     pub kind: Kind,
     pub arity: u8,
@@ -300,7 +302,7 @@ pub struct PrimOpObj {
     pub f: PrimFn,
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PrimOpAppObj {
     pub kind: Kind,
     pub op: &'static PrimOpObj,
@@ -385,7 +387,9 @@ const _: () = assert!(size_of::<Attr>() == 16);
 const _: () = assert!(size_of::<ThunkObj>() == 16);
 const _: () = assert!(size_of::<ThunkAppObj>() == 16);
 const _: () = assert!(size_of::<ThunkApp2Obj>() == 24);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<MapDesc>() == 24);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<LambdaObj>() == 16);
 
 impl ThunkObj {
@@ -1273,12 +1277,26 @@ impl Arena {
     /// `a // b` as a union over the flat leaves of both sides; the caller
     /// checked the leaf budget (`leaf_count`).
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
+        self.alloc_union_with_hook(a, b, || {})
+    }
+
+    /// The no-op hook is eliminated in production; tests use it to publish a
+    /// flat copy between sizing and copying, as another worker can do.
+    #[inline]
+    fn alloc_union_with_hook(
+        &mut self,
+        a: &'static AttrsObj,
+        b: &'static AttrsObj,
+        hook: impl FnOnce(),
+    ) -> Word {
         let n = leaf_count(a) + leaf_count(b);
         debug_assert!(n <= MAX_LEAVES as usize);
+        hook();
         let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header, tail and n pointers.
+        // Publishing a flat copy can only reduce the number of leaves.
         unsafe {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
@@ -1298,6 +1316,9 @@ impl Arena {
                     leaves = leaves.add(1);
                 });
             }
+            // A worker may have flattened an operand since capacity was
+            // measured. Only the initialized leaf pointers belong in the view.
+            (*p).leaves = leaves.offset_from(tail.add(1).cast()) as u8;
             #[cfg(feature = "stats2")]
             self.stats.census.note_attrs(
                 p,
@@ -1637,6 +1658,26 @@ mod tests {
         a.iter()
             .map(|e| (e.sym.0, e.cell.get().imm_int_value()))
             .collect()
+    }
+
+    #[test]
+    fn union_header_uses_written_leaves_when_flattening_changes_capacity() {
+        let mut arena = Arena::new();
+        let sets = vec![vec![(1, 10)], vec![(2, 20)], vec![(3, 30)]];
+        let a = build(&mut arena, &sets);
+        let b = build(&mut arena, &[vec![(2, 99)]]);
+        let capacity = leaf_count(a) + leaf_count(b);
+        assert_eq!(capacity, 4);
+        // A second arena in this session models the publishing worker.
+        let mut worker = Arena::new();
+        let w = arena.alloc_union_with_hook(a, b, || {
+            worker.flat(a);
+        });
+        let out = unsafe { &*w.ptr::<AttrsObj>() };
+        // Check the header before traversing: the old value would expose
+        // uninitialized pointer slots and must not be dereferenced.
+        assert_eq!(out.leaves, 2);
+        assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

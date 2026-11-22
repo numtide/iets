@@ -1,4 +1,4 @@
-{ lib, pkgs, stdenv, runCommand, git, jq, nix, openssh, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsRiscv64, fuzz }:
+{ lib, pkgs, stdenv, runCommand, git, jq, nix, openssh, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsRiscv64, ietsWasi, nodejs, fuzz }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # LTO, minutes for no extra coverage
@@ -15,6 +15,8 @@ in
     nativeCheckInputs = [ git nix openssh ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
     # no e2e test may skip for want of nix-daemon
     IETS_TEST_E2E = "1";
+    # nextest runs no example's tests by default, and examples/ab.rs has some
+    cargoNextestExtraArgs = "--lib --bins --tests --examples";
     # cargo would create /homeless-shelter, and then that daemon refuses to
     # build without a sandbox
     postUnpack = "export HOME=$(mktemp -d)";
@@ -68,6 +70,72 @@ in
 # catches a missing per-arch cfg
 // lib.optionalAttrs (stdenv.hostPlatform.system == "x86_64-linux") {
   cross-riscv64 = ietsRiscv64;
+  # no directories, no environment and the stack of a browser: this size holds
+  # as many Nix calls as a web worker of Chromium 156
+  cross-wasi = runCommand "iets-wasi" { nativeBuildInputs = [ nodejs ]; } ''
+    run() { node --no-warnings --stack-size=500 ${./wasi-run.mjs} ${ietsWasi}/bin/iets.wasm "$@"; }
+    # the output is $1, and the exit status is 0 (a trap is 99)
+    is() { got="$(run "''${@:2}")" && test "$got" = "$1"; }
+    is "iets ${commonArgs.version}" --version
+    is 3 eval --expr '1 + 2'
+    is '[2,4,6]' eval --json --expr 'builtins.map (x: x * 2) [ 1 2 3 ]'
+    # flags that ask for threads or processes do not stop the instance
+    is 3 eval --workers 4 --expr '1 + 2'
+    jobs="$(run eval-jobs --no-instantiate --expr '{ a = derivation { name = "a"; system = "x"; builder = "/b"; }; }')"
+    grep -q '"attr":"a"' <<< "$jobs"
+    # recursion ends in an error, and a stack the engine runs out of does not
+    deep() {
+      rc=0
+      run eval --expr "$1" 2> err || rc=$?
+      test "$rc" = 1 && grep -q 'stack overflow' err
+    }
+    deep 'let f = n: 1 + f (n + 1); in f 0'
+    deep 'let f = n: { a = (f (n + 1)).a; }; in (f 0).a'
+    nest="n: builtins.foldl' (a: x: [ a ]) [ ] (builtins.genList (x: x) n)"
+    deep "let nest = $nest; in nest 50000 == nest 50000"
+    deep "let nest = $nest; in builtins.deepSeq (nest 50000) 1"
+    many() { printf "$1%.0s" $(seq "$2"); }
+    deep "$(many '(' 5000)1$(many ')' 5000)"
+    # expressions nested in one function body, with few calls between them
+    deep "let f = n: $(many '1 + (' 50)f (n + 1)$(many ')' 50); in f 0"
+    deep 'let f = n: if { a = [ (f (n + 1)) ]; } == { a = [ 0 ]; } then 1 else 2; in f 0'
+    # chains that parse in a loop and are deep trees after that
+    deep "1$(many ' + 1' 5000)"
+    deep "0$(many ' |> (x: x)' 5000)"
+    deep "{ a$(many '.a' 5000) = 1; }"
+    deep "$(many '{ }.a or ' 5000)0"
+    # a chain is a tree above the operands that come before it
+    chains=1; for _ in $(seq 100); do chains="($chains)$(many ' - 1' 190)"; done
+    deep "$chains"
+    attrs=1; for _ in $(seq 100); do attrs="{ } ? \''${$attrs}$(many '||true' 150)"; done
+    deep "$attrs"
+    # builtins that recurse stop at their own limits
+    fails() {
+      rc=0
+      run eval --expr "$1" 2> /dev/null || rc=$?
+      test "$rc" = 1
+    }
+    # what needs a thread or a temporary directory ends in an error too
+    clean() {
+      rc=0
+      run "''${@:2}" 2> err || rc=$?
+      test "$rc" != 0 && test "$rc" != 99 && grep -q "$1" err
+    }
+    clean 'has no network' eval --expr 'builtins.fetchClosure { fromStore = "https://cache.invalid"; fromPath = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x"; inputAddressed = true; }'
+    clean 'scratch file' prefetch --unpack https://example.invalid/a.tar.gz
+    fails "builtins.fromJSON \"$(many '[' 5000)\""
+    fails "builtins.match \"$(many '(' 5000)a$(many ')' 5000)\" \"a\""
+    fails "builtins.match \"a$(many '*' 5000)\" \"a\""
+    # the regex limit is on nesting, not on length, and the deepest pattern
+    # below it does not overflow the stack
+    is true eval --expr "builtins.match \"$(many 'a**' 5000)\" \"a\" != null"
+    is true eval --expr "builtins.match \"$(many '(' 499)a$(many ')*' 499)\" \"a\" != null"
+    # the call depth leaves room to parse at the bottom of it
+    file="$(many '{ a = ' 249)1$(many '; }' 249)"
+    leaf="builtins.seq (import (builtins.toFile \"x.nix\" \"$file\")) 0"
+    is 240 eval --expr "let f = n: if n == 0 then $leaf else 1 + f (n - 1); in f 240"
+    touch $out
+  '';
 }
 # the differential fuzzers against Nix (nix/fuzz.nix)
 // fuzz.checks

@@ -33,7 +33,7 @@ use crate::remote::worker::{Connection, failed_event};
 use crate::store::drv::Derivation;
 use crate::store::path::StorePath;
 
-use super::build::{self, Objects, Timings};
+use super::build::{self, Limits, Objects, Timings};
 use super::drvwire::{BuildResult, basic_input_srcs};
 use super::sched::Sched;
 use super::{Client, GrpcConfig};
@@ -46,10 +46,11 @@ pub struct Grpc {
     objects: Objects,
     /// The derivations the submitted batches named, for their output paths.
     drvs: BTreeMap<StorePath, Derivation>,
+    limits: Limits,
 }
 
 impl Grpc {
-    pub fn open(cfg: &GrpcConfig) -> Result<Grpc> {
+    pub fn open(cfg: &GrpcConfig, limits: Limits) -> Result<Grpc> {
         let c = Client::open(cfg)?;
         Ok(Grpc {
             t: Timings {
@@ -63,6 +64,7 @@ impl Grpc {
             c,
             objects: Objects::default(),
             drvs: BTreeMap::new(),
+            limits,
         })
     }
 }
@@ -79,6 +81,7 @@ fn build_batch(
     objects: &Objects,
     drvs: &BTreeMap<StorePath, Derivation>,
     batch: &Batch<'_>,
+    limits: Limits,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<HashMap<String, Status>> {
     let mut out: HashMap<String, Status> = batch
@@ -109,7 +112,7 @@ fn build_batch(
             build::output_path(drvs, dep, output)
         })?;
         index.insert(drv_path, jobs.len());
-        jobs.push(build::Job::new(drv_path.clone(), drv.clone(), srcs));
+        jobs.push(build::Job::new(drv_path.clone(), drv.clone(), srcs, limits));
     }
     t.drvs += jobs.len();
     t.drvs_cached += drvs.len() - jobs.len();
@@ -335,6 +338,7 @@ impl Backend for Grpc {
             &self.objects,
             &self.drvs,
             batch,
+            self.limits,
             on_event,
         );
         self.t.common.build += t0.elapsed();

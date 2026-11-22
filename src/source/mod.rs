@@ -134,11 +134,13 @@ pub enum SourceRef {
     /// One revision of a local repository, which the SCM reads out of it
     /// (git.cc:getAccessorFromCommit). `git+file:///path?rev=…` names this,
     /// and it is the tree of the commit, not of the working tree beside it.
+    /// With `shallow`, the tree has no `revCount`, as in Nix.
     Commit {
         scm: &'static dyn scm::Scm,
         root: PathBuf,
         rev: String,
         subdir: String,
+        shallow: bool,
     },
     /// A locked input: a `narHash` is known before anything is fetched, so
     /// the tree names itself and verifies itself.
@@ -191,7 +193,8 @@ pub fn tree(ev: &mut Evaluator, r: &SourceRef, pos: Pos) -> EvalResult<Tree> {
             root,
             rev,
             subdir,
-        } => local::commit_source(ev, *scm, root, rev, subdir, pos),
+            shallow,
+        } => local::commit_source(ev, *scm, root, rev, subdir, *shallow, pos),
         SourceRef::Locked(attrs) => remote::locked(ev, attrs, pos),
     }
 }

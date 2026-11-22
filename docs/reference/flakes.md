@@ -23,7 +23,7 @@ prints.
   parsed as `builtins.parseFlakeRef` parses it, with the current directory
   as the base. The fragment is percent-decoded, as in Nix.
 - **A local checkout an SCM names is also taken**:
-  `git+file:///path[?ref=NAME&rev=SHA][&dir=SUB]`, which is how CI pins the
+  `git+file:///path[?ref=NAME&rev=SHA][&shallow=1][&dir=SUB]`, which is how CI pins the
   tree it evaluates. With a `rev` — the 40 hex digits of a commit, and
   nothing else — the source is that revision, read out of the repository
   beside the checkout, so `self.rev`, `self.revCount` and
@@ -31,8 +31,10 @@ prints.
   tree changes nothing. Without a `rev` the working tree is the source, as
   the plain path would be. A `ref` beside a `rev` is advisory. A `ref`
   without a `rev` is an error: iets resolves no reference of a root flake.
-  Other query parameters, including `submodules` on a `git+file:` root,
-  are errors.
+  With `shallow=1` beside a `rev`, `self.revCount` is missing, as in Nix,
+  so a depth-1 clone works. `shallow` without a `rev` is an error, like
+  `ref`. Other query parameters, including `submodules` on a `git+file:`
+  root, are errors.
 - **Submodules of a local Git working tree**: `.?submodules=1#attr`
   includes the checked-out submodules, nested ones too.
 - iets does not take these, so classic mode falls back to Nix on them:

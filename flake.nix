@@ -29,6 +29,8 @@
         # the Nix that iets is compared with (docs/reference/divergences.md);
         # `nix` of nixpkgs is a later release
         referenceNix = pkgs.nixVersions.nix_2_34;
+        # runs in a browser (docs/explanation/webassembly.md)
+        ietsWasi = (scopeFor pkgs.pkgsCross.wasi32).iets;
         classic = final.callPackage ./nix/classic.nix { };
         devShell = final.callPackage
           ({ lib, stdenv, mkShell, cargo, rustc, rustPlatform, clippy, rustfmt, hyperfine, nix, perf, jq, nushell, direnv, ast-grep }:

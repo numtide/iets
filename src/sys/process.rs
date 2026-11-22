@@ -3,7 +3,7 @@
 
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, ExitStatus};
+use std::process::{self, Command, ExitStatus};
 use std::time::Duration;
 
 /// Runs `cmd` in place of this process, named `arg0`. Returns only on failure.
@@ -14,6 +14,11 @@ pub fn exec(cmd: &mut Command, arg0: &str) -> io::Error {
 /// The signal that ended the child, if one did.
 pub fn signal(st: &ExitStatus) -> Option<i32> {
     st.signal()
+}
+
+/// This process's id.
+pub fn id() -> u32 {
+    process::id()
 }
 
 /// CPU time this thread has used, user and system.

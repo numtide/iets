@@ -5,10 +5,12 @@ use iets::cli::run::{classic_name, dispatch};
 use iets::sys;
 
 // musl's malloc costs up to 30% (docs/explanation/static-build.md)
+#[cfg(not(target_os = "wasi"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// `mi_option_allow_thp` in mimalloc v3, which libmimalloc-sys has no name for.
+#[cfg(not(target_os = "wasi"))]
 const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
 
 fn main() {
@@ -16,7 +18,10 @@ fn main() {
     // sys::advise_huge. Cleared after its start, the option stops that for
     // later arenas only: cleared before, it disables THP for the process.
     // SAFETY: an option store.
-    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ALLOW_THP, 0) };
+    #[cfg(not(target_os = "wasi"))]
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_ALLOW_THP, 0)
+    };
     let probe = Box::new(0u8);
     sys::note_allocator_arena(&raw const *probe);
     drop(probe);

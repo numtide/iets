@@ -285,19 +285,12 @@ impl Evaluator {
             (Value::Path(x), Value::Path(y)) => Ok(x.path < y.path),
             (Value::List(x), Value::List(y)) => {
                 let (cx, cy) = (x.cells(), y.cells());
-                let mut i = 0;
-                loop {
-                    if i == cy.len() {
-                        return Ok(false);
+                for (left, right) in cx.iter().zip(cy) {
+                    if !self.eq_cells(left, right, pos)? {
+                        return self.less_than(left.get(), right.get(), pos);
                     }
-                    if i == cx.len() {
-                        return Ok(true);
-                    }
-                    if !self.eq_cells(&cx[i], &cy[i], pos)? {
-                        return self.less_than(cx[i].get(), cy[i].get(), pos);
-                    }
-                    i += 1;
                 }
+                Ok(cx.len() < cy.len())
             }
             _ => bail!(
                 ErrorKind::Eval,

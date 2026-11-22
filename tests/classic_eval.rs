@@ -418,7 +418,15 @@ fn nix_eval_of_a_flake() {
     let s = store!();
     let f = Farm::new(&s);
     let mut c = Checks::default();
-    let r = flake(&s, "flake");
+    let r = flake(&s, "storehouse");
+    let sibling = format!("{}#x", s.dir().join("storehouse").display());
+    let b = f.both("nix", &["eval", "--raw", &sibling]);
+    c.same("absolute flake beside the store", &b);
+    c.check(
+        "sibling of the store is resolved by iets",
+        !stderr(&b.ours).contains("falling back") && stdout(&b.ours) == "hello",
+        show(&b),
+    );
     for (label, a) in [
         ("--json .#x", vec!["--json", "#x"]),
         ("--raw .#x", vec!["--raw", "#x"]),

@@ -494,7 +494,7 @@ pub(super) fn resolve(ev: &mut Evaluator, n: &Nix, what: &str, cwd: &[u8]) -> Ev
         let root = ev.eval_file(&p, Pos::NONE)?;
         return installable::find_along_attr_path(ev, root, attr, args);
     }
-    if what.contains('^') || what.as_bytes().starts_with(&ev.store_dir) {
+    if what.contains('^') || ev.is_store_path_text(what.as_bytes()) {
         return Err(Error::boxed(
             ErrorKind::Unsupported,
             format!("the installable '{what}' is a store path"),

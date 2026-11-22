@@ -355,19 +355,16 @@ fn process_attr(
         }
         return Ok(());
     }
-    if let Some(mut json) = b.json.take() {
+    if let Some(json) = &mut b.json {
         if sym == s.structured_attrs {
-            b.json = Some(json);
             return Ok(());
         }
         if json.len() > 1 {
             json.push(b',');
         }
-        json_escape_str(&mut json, key);
+        json_escape_str(json, key);
         json.push(b':');
-        let r = print_json(ev, w, &mut json, &mut b.context, true, pos);
-        b.json = Some(json);
-        r?;
+        print_json(ev, w, json, &mut b.context, true, pos)?;
         if sym == s.builder {
             let st = ev.force_string(w, pos, "")?;
             b.context.extend_from_slice(st.ctx);

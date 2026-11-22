@@ -1,6 +1,9 @@
 use std::io::{self, Write};
 use std::{error, fmt};
 
+#[cfg(feature = "stats2")]
+use std::panic::Location;
+
 use md5::Digest as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -236,6 +239,7 @@ impl Hash {
 }
 
 /// Mirrors hash.cc:hashString.
+#[cfg_attr(feature = "stats2", track_caller)]
 pub fn hash_bytes(algo: HashAlgo, data: &[u8]) -> Hash {
     let mut h = Hasher::new(algo);
     h.update(data);
@@ -263,9 +267,13 @@ enum State {
 pub struct Hasher {
     state: State,
     bytes: u64,
+    /// Census: where the hash was started.
+    #[cfg(feature = "stats2")]
+    site: &'static Location<'static>,
 }
 
 impl Hasher {
+    #[cfg_attr(feature = "stats2", track_caller)]
     pub fn new(algo: HashAlgo) -> Hasher {
         let state = match algo {
             HashAlgo::Md5 => State::Md5(md5::Md5::new()),
@@ -274,7 +282,12 @@ impl Hasher {
             HashAlgo::Sha512 => State::Sha512(sha2::Sha512::new()),
             HashAlgo::Blake3 => State::Blake3(Box::new(blake3::Hasher::new())),
         };
-        Hasher { state, bytes: 0 }
+        Hasher {
+            state,
+            bytes: 0,
+            #[cfg(feature = "stats2")]
+            site: Location::caller(),
+        }
     }
 
     pub fn update(&mut self, data: &[u8]) {
@@ -295,13 +308,16 @@ impl Hasher {
     }
 
     pub fn finish(self) -> Hash {
-        match self.state {
+        let h = match self.state {
             State::Md5(h) => Hash::raw(HashAlgo::Md5, &h.finalize()),
             State::Sha1(h) => Hash::raw(HashAlgo::Sha1, &h.finalize()),
             State::Sha256(h) => Hash::raw(HashAlgo::Sha256, &h.finalize()),
             State::Sha512(h) => Hash::raw(HashAlgo::Sha512, &h.finalize()),
             State::Blake3(h) => Hash::raw(HashAlgo::Blake3, h.finalize().as_bytes()),
-        }
+        };
+        #[cfg(feature = "stats2")]
+        census::note(self.site, h.algo, self.bytes, h.bytes());
+        h
     }
 }
 
@@ -313,6 +329,108 @@ impl Write for Hasher {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Census (`stats2`): every hash finished through `Hasher` or `hash_bytes`
+/// by the line that started it (one caller up), its input size, the
+/// compression blocks it cost, and whether the same site already hashed
+/// the same input (by digest). One table for the process, so it covers
+/// every worker, where the rest of the census is the reporting worker's.
+#[cfg(feature = "stats2")]
+pub mod census {
+    use std::cmp::Reverse;
+    use std::collections::{HashMap, HashSet};
+    use std::fmt::Write;
+    use std::panic::Location;
+    use std::sync::Mutex;
+
+    use super::HashAlgo;
+    use crate::runtime::census::{SIZE_BUCKETS, size_bucket};
+
+    #[derive(Default)]
+    struct Site {
+        n: u64,
+        bytes: u64,
+        blocks: u64,
+        repeats: u64,
+        repeat_blocks: u64,
+        sizes: [u64; 11],
+    }
+
+    #[derive(Default)]
+    struct Hashes {
+        sites: HashMap<(&'static str, u32), Site>,
+        seen: HashSet<(&'static str, u32, u128)>,
+    }
+
+    static HASHES: Mutex<Option<Hashes>> = Mutex::new(None);
+
+    pub(super) fn note(
+        site: &'static Location<'static>,
+        algo: HashAlgo,
+        bytes: u64,
+        digest: &[u8],
+    ) {
+        // Merkle-Damgard padding: a 1 bit and the 64-bit (SHA-512: 128-bit)
+        // length after the message, in 64-byte (128-byte) blocks
+        let blocks = match algo {
+            HashAlgo::Sha512 => (bytes + 17).div_ceil(128),
+            HashAlgo::Blake3 => bytes.div_ceil(64).max(1),
+            _ => (bytes + 9).div_ceil(64),
+        };
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&digest[..16]);
+        let k = (site.file(), site.line());
+        let mut g = HASHES.lock().unwrap();
+        let h = g.get_or_insert_with(Hashes::default);
+        let repeat = !h.seen.insert((k.0, k.1, u128::from_le_bytes(key)));
+        let s = h.sites.entry(k).or_default();
+        s.n += 1;
+        s.bytes += bytes;
+        s.blocks += blocks;
+        s.sizes[size_bucket(bytes as usize)] += 1;
+        if repeat {
+            s.repeats += 1;
+            s.repeat_blocks += blocks;
+        }
+    }
+
+    pub fn report(out: &mut String) {
+        let g = HASHES.lock().unwrap();
+        let Some(h) = g.as_ref() else {
+            return;
+        };
+        let mut sites: Vec<_> = h.sites.iter().collect();
+        sites.sort_unstable_by_key(|(_, s)| Reverse(s.blocks));
+        let (n, b, bl): (u64, u64, u64) = sites.iter().fold((0, 0, 0), |a, (_, s)| {
+            (a.0 + s.n, a.1 + s.bytes, a.2 + s.blocks)
+        });
+        let _ = writeln!(
+            out,
+            "hashes through Hasher, all workers: {n}, {b} bytes, {bl} blocks; by site (blocks first):"
+        );
+        for ((file, line), s) in sites.iter().take(25) {
+            let sizes = s
+                .sizes
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c > 0)
+                .map(|(i, c)| format!("{}={}", SIZE_BUCKETS[i], c))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(
+                out,
+                "  {file}:{line}: {} hashes, {} bytes, {} blocks ({:.1}%), same input again {} ({} blocks); sizes {}",
+                s.n,
+                s.bytes,
+                s.blocks,
+                100.0 * s.blocks as f64 / bl.max(1) as f64,
+                s.repeats,
+                s.repeat_blocks,
+                sizes
+            );
+        }
     }
 }
 

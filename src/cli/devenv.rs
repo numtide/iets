@@ -567,8 +567,8 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
             devenv::env_derivation(&shell, &mut ev.drv.hash_cache.lock().unwrap(), &mut loader)?;
         let text = env_drv.unparse()?;
         let env_path = env_drv.drv_path_for(&text)?;
-        let mut references = env_drv.input_srcs.clone();
-        references.extend(env_drv.input_drvs.keys().cloned());
+        let mut references = env_drv.input_srcs;
+        references.extend(env_drv.input_drvs.into_keys());
         ev.drv.drvs.insert(
             env_path.clone(),
             DrvInfo {

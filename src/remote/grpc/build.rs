@@ -28,6 +28,7 @@ use crate::session;
 use crate::store::drv::Derivation;
 use crate::store::nar::restore_path;
 use crate::store::path::StorePath;
+use crate::store::source::SourceKind;
 
 use super::super::copy::topo_sort;
 use super::super::event::{Event, Log, Phase};
@@ -609,9 +610,9 @@ impl Objects {
     fn closure(&self, drv_path: &StorePath) -> Vec<&Object> {
         let mut out = Vec::new();
         let mut seen: HashSet<&str> = HashSet::new();
-        let mut stack = vec![(drv_path.base_name().to_string(), false)];
+        let mut stack = vec![(drv_path.base_name(), false)];
         while let Some((name, expanded)) = stack.pop() {
-            let Some(o) = self.by_name.get(name.as_str()) else {
+            let Some(o) = self.by_name.get(name) else {
                 continue;
             };
             if expanded {
@@ -622,10 +623,17 @@ impl Objects {
                 continue;
             }
             stack.push((name, true));
-            if let Object::Drv { references, .. } = o {
-                for r in references {
-                    stack.push((r.base_name().to_string(), false));
-                }
+            let references = match o {
+                Object::Drv { references, .. }
+                | Object::Source {
+                    kind: SourceKind::Text { references },
+                    ..
+                } => references,
+                Object::Closure { fetched, .. } => &fetched.info.references,
+                _ => continue,
+            };
+            for r in references {
+                stack.push((r.base_name(), false));
             }
         }
         out
@@ -877,6 +885,8 @@ fn remote_closure(
 
 #[cfg(test)]
 mod tests {
+    use crate::store::source::SourceOrigin;
+
     use super::*;
 
     use crate::build::backend::tests::every_timing;
@@ -947,6 +957,42 @@ mod tests {
             sigs: vec![],
             ca: String::new(),
         }
+    }
+
+    #[test]
+    fn a_worker_retry_includes_the_retained_references_of_text_sources() {
+        let path = |name| {
+            StorePath::from_base_name(&format!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-{name}")).unwrap()
+        };
+        let leaf = path("leaf");
+        let text = path("text");
+        let drv = path("root.drv");
+        let other = path("not-uploaded");
+        let leaf_object = Object::source(
+            leaf.clone(),
+            SourceOrigin::text(b"leaf".to_vec(), BTreeSet::new()),
+        )
+        .unwrap();
+        let text_object = Object::source(
+            text.clone(),
+            SourceOrigin::text(b"text".to_vec(), BTreeSet::from([leaf.clone(), other])),
+        )
+        .unwrap();
+        let root = Object::drv(
+            drv.clone(),
+            Arc::new(Vec::new()),
+            BTreeSet::from([text.clone()]),
+        );
+        let mut objects = Objects::default();
+        objects.extend(&[&leaf_object, &text_object, &root]);
+        assert_eq!(
+            objects
+                .closure(&drv)
+                .iter()
+                .map(|o| o.store_path())
+                .collect::<Vec<_>>(),
+            [&leaf, &text, &drv]
+        );
     }
 
     #[test]

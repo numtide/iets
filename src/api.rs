@@ -572,7 +572,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
         "require-sigs",
         conf.str("require-sigs").unwrap_or("").as_bytes(),
     );
-    if !config::reads_built_outputs(&Session::current()) {
+    if !config::reads_built_outputs(cfg.configured_session()) {
         k.field("built-outputs", b"0");
     }
     if needs_cwd {
@@ -584,6 +584,21 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_key_uses_the_configured_ifd_policy() {
+        let mut a = EvalArgs::new();
+        a.input = Some(Input::Expr("1".into()));
+        let key = |allow| {
+            let session = Session::new();
+            let mut conf = config::Config::empty();
+            conf.set("allow-import-from-derivation", allow);
+            session.nix_conf.set(conf).unwrap();
+            let cfg = EvalConfig::new().session(session);
+            cache_key(&a, "eval", &cfg, &[]).unwrap().finish()
+        };
+        assert_ne!(key("true"), key("false"));
+    }
 
     #[test]
     fn the_cache_key_holds_the_enforced_project_root() {

@@ -256,8 +256,9 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     };
     let t0 = Instant::now();
     // the process model is this command's own: the collector evaluates
-    // nothing itself, and a worker is one evaluator thread with no cache
-    if !j.worker && j.max_memory > 0 {
+    // nothing itself, and a worker is one evaluator thread with no cache. WASI
+    // cannot start a worker, so it is always one process.
+    if !j.worker && j.max_memory > 0 && !cfg!(target_os = "wasi") {
         return jobs_collector(&worker_argv(argv, &j), a.workers, &j, &transport, t0);
     }
     let mut run = run_for(&a);
@@ -362,7 +363,12 @@ fn jobs_finish(
     {
         return e.report();
     }
-    let em = emitter.lock().unwrap();
+    let mut em = emitter.lock().unwrap();
+    // a full disk: the output is incomplete, which a reader must not take
+    // for the whole job set
+    if let Some(e) = em.failed.take() {
+        return CrateError::io("cannot write to stdout", e).report();
+    }
     // `| head`: the reader is gone, so the summary has nowhere to go either
     if em.closed {
         return 0;

@@ -13,7 +13,7 @@ use crate::compile::ir::{Ir, LambdaIr};
 use crate::eval::{self, Evaluator, Pos};
 use crate::syntax::symbol::{self, Sym};
 #[cfg(feature = "stats2")]
-use std::sync::atomic::{AtomicU8, AtomicUsize};
+use std::sync::atomic::{AtomicPtr, AtomicU8};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::{ptr, slice};
 
@@ -152,6 +152,7 @@ impl Taint {
     }
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<Ctx>() == 40);
 
 impl Ctx {
@@ -162,10 +163,13 @@ impl Ctx {
     }
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct StringObj {
     pub kind: Kind,
     /// Census only (`stats2`): set once the string was viewed.
+    #[cfg(feature = "stats2")]
+    pub flags: AtomicU8,
+    #[cfg(not(feature = "stats2"))]
     pub flags: u8,
     /// The symbol of `bytes` plus one, 0 until first asked for
     /// (`Evaluator::force_sym`); it fills padding, the object stays 5 words.
@@ -174,6 +178,7 @@ pub struct StringObj {
     pub ctx: &'static [Ctx],
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<StringObj>() == 40);
 
 impl StringObj {
@@ -190,7 +195,7 @@ impl StringObj {
     }
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PathObj {
     pub kind: Kind,
     pub path: &'static [u8],
@@ -200,6 +205,9 @@ pub struct PathObj {
 pub struct ListObj {
     pub kind: Kind,
     /// Census only (`stats2`): set once the cells were read.
+    #[cfg(feature = "stats2")]
+    pub flags: AtomicU8,
+    #[cfg(not(feature = "stats2"))]
     pub flags: u8,
     pub len: u32,
     // followed by `len` Cells
@@ -221,6 +229,9 @@ pub struct AttrsObj {
     pub origin: u8,
     /// Census only (`stats2`): selections (low 7 bits, saturating) and
     /// bit 7 once the entries were iterated.
+    #[cfg(feature = "stats2")]
+    pub flags: AtomicU8,
+    #[cfg(not(feature = "stats2"))]
     pub flags: u8,
     /// Flat slices an iteration merges: 1 for a flat set.
     pub leaves: u8,
@@ -233,7 +244,7 @@ pub struct AttrsObj {
 /// priority first. Lookups probe the leaves from the last; an iteration
 /// merges them; `flat` caches the copy once someone needs the entries as
 /// one slice.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct UnionTail {
     pub flat: Cell,
     // followed by `leaves` pointers to flat sets
@@ -273,15 +284,18 @@ pub(crate) fn leaf_count(a: &'static AttrsObj) -> usize {
 /// Envs are reached only through `up`, lambdas and thunks, never through a
 /// `Word`, so they carry no `Kind`; slot indices come from the compiler, so
 /// they carry no length either. Header is one word.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct EnvObj {
+    #[cfg(not(feature = "stats2"))]
     pub up: *const EnvObj,
+    #[cfg(feature = "stats2")]
+    pub up: AtomicPtr<EnvObj>,
     // followed by the slots
 }
 
 /// Closures are the third most common object; `TAG_LAMBDA` on the word
 /// replaces the Kind byte so the object is two words.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct LambdaObj {
     pub env: &'static EnvObj,
     pub lam: &'static LambdaIr,
@@ -289,7 +303,7 @@ pub struct LambdaObj {
 
 pub type PrimFn = fn(&mut Evaluator, &[Word], Pos) -> Result<Word, Box<eval::Error>>;
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PrimOpObj {
     pub kind: Kind,
     pub arity: u8,
@@ -300,7 +314,7 @@ pub struct PrimOpObj {
     pub f: PrimFn,
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PrimOpAppObj {
     pub kind: Kind,
     pub op: &'static PrimOpObj,
@@ -385,7 +399,9 @@ const _: () = assert!(size_of::<Attr>() == 16);
 const _: () = assert!(size_of::<ThunkObj>() == 16);
 const _: () = assert!(size_of::<ThunkAppObj>() == 16);
 const _: () = assert!(size_of::<ThunkApp2Obj>() == 24);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<MapDesc>() == 24);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<LambdaObj>() == 16);
 
 impl ThunkObj {
@@ -405,22 +421,11 @@ impl ThunkObj {
     }
 }
 
-/// Census marks (`stats2`): a byte in header padding is written through a
-/// raw pointer. Single-worker measurement runs only.
-#[cfg(feature = "stats2")]
-#[inline]
-fn mark_byte(p: *const u8, f: impl Fn(u8) -> u8) {
-    // SAFETY: `p` is a flags byte inside a live arena object, viewed as an
-    // atomic byte.
-    let a = unsafe { &*(p as *const AtomicU8) };
-    let _ = a.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(f(v)));
-}
-
 impl ListObj {
     #[inline]
     pub(crate) fn cells(&self) -> &'static [Cell] {
         #[cfg(feature = "stats2")]
-        mark_byte(&self.flags, |_| 1);
+        self.flags.store(1, Ordering::Relaxed);
         // SAFETY: the allocator placed `len` cells directly after the header.
         unsafe {
             let p = (self as *const ListObj).add(1) as *const Cell;
@@ -435,7 +440,7 @@ impl AttrsObj {
     #[inline]
     pub(crate) fn attrs(&self) -> &'static [Attr] {
         #[cfg(feature = "stats2")]
-        mark_byte(&self.flags, |f| f | 0x80);
+        self.flags.fetch_or(0x80, Ordering::Relaxed);
         self.attrs_raw()
     }
 
@@ -524,15 +529,13 @@ impl AttrsObj {
     /// `len` for the census, which must not count as a use.
     #[cfg(feature = "stats2")]
     pub(crate) fn len_unmarked(&self) -> usize {
-        let f = self.flags;
-        let n = self.len();
-        self.set_flags(f);
+        let n = self.len_raw();
+        if n != u32::MAX {
+            return n as usize;
+        }
+        let n = self.iter_raw().count();
+        self.len.store(n as u32, Ordering::Relaxed);
         n
-    }
-
-    #[cfg(feature = "stats2")]
-    pub(crate) fn set_flags(&self, f: u8) {
-        mark_byte(&self.flags, |_| f);
     }
 
     #[inline]
@@ -547,7 +550,11 @@ impl AttrsObj {
     #[inline]
     pub(crate) fn get(&self, sym: Sym) -> Option<&'static Attr> {
         #[cfg(feature = "stats2")]
-        mark_byte(&self.flags, |f| if f & 0x7f < 0x7f { f + 1 } else { f });
+        let _ = self
+            .flags
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |f| {
+                Some(if f & 0x7f < 0x7f { f + 1 } else { f })
+            });
         if self.kind == Kind::Attrs {
             #[cfg(feature = "stats2")]
             census::note_get(0, 0);
@@ -598,7 +605,13 @@ impl AttrsObj {
     #[inline]
     pub(crate) fn iter(&self) -> AttrIter {
         #[cfg(feature = "stats2")]
-        mark_byte(&self.flags, |f| f | 0x80);
+        self.flags.fetch_or(0x80, Ordering::Relaxed);
+        self.iter_raw()
+    }
+
+    /// `iter` without the census mark, for the merge of a `//` and the census itself.
+    #[inline]
+    pub(crate) fn iter_raw(&self) -> AttrIter {
         let mut it = AttrIter {
             leaves: [&[]; SENTINEL + 1],
             keys: [u64::MAX; SENTINEL + 1],
@@ -732,7 +745,7 @@ impl EnvObj {
     #[inline]
     pub(crate) fn up(&self) -> Option<&'static EnvObj> {
         #[cfg(feature = "stats2")]
-        let up = ((self.up as usize) & !7) as *const EnvObj;
+        let up = self.up.load(Ordering::Relaxed).map_addr(|a| a & !7);
         #[cfg(not(feature = "stats2"))]
         let up = self.up;
         // SAFETY: `up` is either null or an arena env that lives forever.
@@ -754,14 +767,18 @@ impl EnvObj {
     }
 
     #[cfg(feature = "stats2")]
+    pub(crate) fn marks(&self) -> usize {
+        self.up.load(Ordering::Relaxed).addr() & 7
+    }
+
+    #[cfg(feature = "stats2")]
     #[inline]
     fn mark_bit(&self, bit: usize) {
-        // SAFETY: `up` is a pointer-sized, pointer-aligned word viewed as an
-        // atomic; the low bits are free (8-byte aligned) and masked by `up()`.
-        unsafe {
-            let a = &*(&self.up as *const *const EnvObj as *const AtomicUsize);
-            a.fetch_or(bit, Ordering::Relaxed);
-        }
+        let _ = self
+            .up
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
+                Some(p.map_addr(|addr| addr | bit))
+            });
     }
 }
 
@@ -808,7 +825,7 @@ impl Word {
                         Kind::Float => Value::Float((*(p as *const FloatObj)).val),
                         Kind::String => {
                             #[cfg(feature = "stats2")]
-                            mark_byte(&(*(p as *const StringObj)).flags, |_| 1);
+                            (*(p as *const StringObj)).flags.store(1, Ordering::Relaxed);
                             Value::String(&*(p as *const StringObj))
                         }
                         Kind::Path => Value::Path(&*(p as *const PathObj)),
@@ -1013,7 +1030,7 @@ impl Arena {
         self.stats.note(Stat::StrObj, size_of::<StringObj>());
         let s = self.alloc(StringObj {
             kind: Kind::String,
-            flags: 0,
+            flags: Default::default(),
             sym: AtomicU32::new(0),
             bytes,
             ctx,
@@ -1209,7 +1226,7 @@ impl Arena {
         unsafe {
             p.write(ListObj {
                 kind: Kind::List,
-                flags: 0,
+                flags: Default::default(),
                 len: n as u32,
             });
             let cells = p.add(1) as *mut u64;
@@ -1260,7 +1277,7 @@ impl Arena {
             p.write(AttrsObj {
                 kind: Kind::Attrs,
                 origin: bucket.attrs_origin(),
-                flags: 0,
+                flags: Default::default(),
                 leaves: 1,
                 len: AtomicU32::new(n as u32),
             });
@@ -1273,17 +1290,31 @@ impl Arena {
     /// `a // b` as a union over the flat leaves of both sides; the caller
     /// checked the leaf budget (`leaf_count`).
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
+        self.alloc_union_with_hook(a, b, || {})
+    }
+
+    /// `hook` runs between counting the leaves and copying them, where
+    /// another worker can flatten an operand. Only the test passes one.
+    #[inline]
+    fn alloc_union_with_hook(
+        &mut self,
+        a: &'static AttrsObj,
+        b: &'static AttrsObj,
+        hook: impl FnOnce(),
+    ) -> Word {
         let n = leaf_count(a) + leaf_count(b);
         debug_assert!(n <= MAX_LEAVES as usize);
+        hook();
         let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
-        // SAFETY: fresh allocation sized for header, tail and n pointers.
+        // SAFETY: fresh allocation sized for header, tail and n pointers. An
+        // operand flattened since then has fewer leaves, never more.
         unsafe {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
                 origin: Stat::AttrsUpd.attrs_origin(),
-                flags: 0,
+                flags: Default::default(),
                 leaves: n as u8,
                 len: AtomicU32::new(u32::MAX),
             });
@@ -1298,6 +1329,8 @@ impl Arena {
                     leaves = leaves.add(1);
                 });
             }
+            // fewer than `n` when a worker flattened an operand since the count
+            (*p).leaves = leaves.offset_from(tail.add(1).cast()) as u8;
             #[cfg(feature = "stats2")]
             self.stats.census.note_attrs(
                 p,
@@ -1349,7 +1382,7 @@ impl Arena {
                 n += 1;
             }
         } else {
-            for e in a.iter() {
+            for e in a.iter_raw() {
                 out.init_from(n, e);
                 n += 1;
             }
@@ -1424,7 +1457,10 @@ impl Arena {
         // SAFETY: fresh allocation sized for header plus n cells.
         unsafe {
             p.write(EnvObj {
+                #[cfg(not(feature = "stats2"))]
                 up: up.map_or(ptr::null(), |e| e as *const EnvObj),
+                #[cfg(feature = "stats2")]
+                up: AtomicPtr::new(up.map_or(ptr::null_mut(), |e| (e as *const EnvObj).cast_mut())),
             });
             // A relaxed store per slot: LLVM folds plain stores of a
             // run-time count, however unrolled, into a memset call, a sixth
@@ -1601,6 +1637,8 @@ mod tests {
     use super::*;
 
     use std::collections::BTreeMap;
+    #[cfg(feature = "stats2")]
+    use std::{sync::Barrier, thread};
 
     /// The leaves of `sets`, folded left to right: the last set holding a sym
     /// wins, as `//` does.
@@ -1637,6 +1675,136 @@ mod tests {
         a.iter()
             .map(|e| (e.sym.0, e.cell.get().imm_int_value()))
             .collect()
+    }
+
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn census_queries_preserve_intervening_marks() {
+        let mut arena = Arena::new();
+        let a = build(&mut arena, &[vec![(1, 1), (3, 3)], vec![(2, 2), (3, 4)]]);
+        assert_eq!(a.len_raw(), u32::MAX);
+        assert_eq!(a.flags.load(Ordering::Relaxed), 0);
+        let begin = Barrier::new(2);
+        let marked = Barrier::new(2);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                begin.wait();
+                assert!(a.get(Sym(1)).is_some());
+                a.iter();
+                marked.wait();
+            });
+            // an unmarked view, held while another worker uses the set
+            let entries = a.iter_raw();
+            begin.wait();
+            marked.wait();
+            assert_eq!(entries.count(), 3);
+            assert_eq!(a.len_unmarked(), 3);
+            arena.flat(a);
+        });
+        assert_eq!(a.flags.load(Ordering::Relaxed), 0x81);
+    }
+
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn reporting_unknown_union_does_not_mark_it_used() {
+        let mut arena = Arena::new();
+        let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)]]);
+        assert_eq!(a.len_raw(), u32::MAX);
+        let mut first = String::new();
+        arena.stats.census.report(&mut first);
+        assert_eq!(a.flags.load(Ordering::Relaxed), 0);
+        let mut second = String::new();
+        arena.stats.census.report(&mut second);
+        assert_eq!(a.flags.load(Ordering::Relaxed), 0);
+        // the lookup counters after it are global, and other tests move them
+        assert_eq!(
+            first.split("attrset lookups:").next(),
+            second.split("attrset lookups:").next()
+        );
+    }
+
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn selection_saturation_preserves_iteration_mark() {
+        let mut arena = Arena::new();
+        for mark_first in [false, true] {
+            let a = build(&mut arena, &[vec![(1, 1)]]);
+            if mark_first {
+                a.iter();
+            }
+            for _ in 0..130 {
+                assert!(a.get(Sym(1)).is_some());
+            }
+            assert_eq!(a.flags.load(Ordering::Relaxed) & 0x7f, 0x7f);
+            a.iter();
+            assert!(a.get(Sym(1)).is_some());
+            assert_eq!(a.flags.load(Ordering::Relaxed), 0xff);
+        }
+    }
+
+    /// Three leaves or more take a branch of `flat` that two do not.
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn flattening_many_leaves_sets_no_mark() {
+        let mut arena = Arena::new();
+        let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)], vec![(3, 3)]]);
+        let flat = arena.flat(a);
+        assert_eq!(a.flags.load(Ordering::Relaxed), 0);
+        assert_eq!(flat.flags.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn marked_root_env_keeps_null_parent() {
+        let mut arena = Arena::new();
+        let root = arena.alloc_env(None, 0);
+        root.mark_read();
+        root.mark_captured();
+        assert_eq!(root.marks(), 3);
+        assert!(root.up().is_none());
+    }
+
+    #[cfg(feature = "stats2")]
+    #[test]
+    fn concurrent_env_marks_preserve_parent_pointer() {
+        let mut arena = Arena::new();
+        let parent = arena.alloc_env(None, 0);
+        let child = arena.alloc_env(Some(parent), 0);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..1000 {
+                    child.mark_read();
+                    assert!(ptr::eq(child.up().unwrap(), parent));
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..1000 {
+                    child.mark_captured();
+                    assert!(ptr::eq(child.up().unwrap(), parent));
+                }
+            });
+        });
+        assert_eq!(child.marks(), 3);
+        assert!(ptr::eq(child.up().unwrap(), parent));
+    }
+
+    #[test]
+    fn union_header_uses_written_leaves_when_flattening_changes_capacity() {
+        let mut arena = Arena::new();
+        let sets = vec![vec![(1, 10)], vec![(2, 20)], vec![(3, 30)]];
+        let a = build(&mut arena, &sets);
+        let b = build(&mut arena, &[vec![(2, 99)]]);
+        let capacity = leaf_count(a) + leaf_count(b);
+        assert_eq!(capacity, 4);
+        // a second arena stands for the other worker
+        let mut worker = Arena::new();
+        let w = arena.alloc_union_with_hook(a, b, || {
+            worker.flat(a);
+        });
+        let out = unsafe { &*w.ptr::<AttrsObj>() };
+        // before any traversal, which would read uninitialized slots
+        assert_eq!(out.leaves, 2);
+        assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

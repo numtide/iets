@@ -28,7 +28,7 @@ fn main() -> ExitCode {
 mod ab {
     use std::env;
     use std::fs::{self, File};
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::{self, BufRead, BufReader, Read};
     use std::mem::MaybeUninit;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
@@ -185,6 +185,20 @@ mod ab {
         ]
     }
 
+    #[derive(Debug)]
+    enum RunError {
+        /// This scenario failed, and the next one can run.
+        Scenario(String),
+        /// Processes are left that later runs would be measured with.
+        Cleanup(String),
+    }
+
+    impl From<String> for RunError {
+        fn from(message: String) -> Self {
+            Self::Scenario(message)
+        }
+    }
+
     /// The numbers in an eval-jobs `"stats":{...}` are time and allocation,
     /// which a change may move on purpose.
     fn mask_stats(line: &[u8]) -> Vec<u8> {
@@ -237,6 +251,8 @@ mod ab {
 
     /// How long processes a run left behind may go on before they are killed.
     const LEFTOVER_LIMIT: Duration = Duration::from_secs(60);
+    /// How long killed processes may take to go away.
+    const KILL_LIMIT: Duration = Duration::from_secs(2);
 
     const COUNTERS: [&str; 5] = [
         "instructions",
@@ -290,58 +306,99 @@ mod ab {
         }
     }
 
+    /// Processes a run leaves behind become children of this one.
+    #[cfg(target_os = "linux")]
+    fn enable_subreaper() -> io::Result<()> {
+        // With an inherited SIG_IGN the kernel reaps children itself, and no
+        // wait gets their exit status.
+        // SAFETY: SIG_DFL is a valid disposition.
+        if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a prctl that takes an integer.
+        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Kills every child of this process. `/proc` only supplies candidates:
+    /// `waitid` says which are ours, and a child stays ours until
+    /// `reap_leftovers` reaps it, so the signal cannot reach another process.
     #[cfg(target_os = "linux")]
     fn kill_leftovers() {
-        let me = process::id();
-        let kids = fs::read_to_string(format!("/proc/{me}/task/{me}/children")).unwrap_or_default();
-        for pid in kids
-            .split_whitespace()
-            .filter_map(|p| p.parse::<libc::pid_t>().ok())
+        let Ok(procs) = fs::read_dir("/proc") else {
+            return;
+        };
+        for pid in procs
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<libc::pid_t>().ok())
+            .filter(|&pid| pid > 0)
         {
-            // SAFETY: a signal to a process this one adopted.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+            let ask = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+            // SAFETY: waitid fills the struct it is given, and WNOWAIT reaps nothing.
+            if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, info.as_mut_ptr(), ask) } == 0
+            {
+                // SAFETY: a signal to our own child.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
         }
     }
 
     #[cfg(not(target_os = "linux"))]
     fn kill_leftovers() {}
 
-    /// Processes the run left behind, which are ours as the subreaper. False
-    /// when they had to be killed.
-    fn reap_leftovers(limit: Duration) -> bool {
-        let until = Instant::now() + limit;
+    /// Waits for the processes a run left behind, and kills them after
+    /// `limit`. False when they had to be killed. An error when some are
+    /// still there [`KILL_LIMIT`] later.
+    fn reap_leftovers(limit: Duration) -> io::Result<bool> {
+        let start = Instant::now();
+        let mut clean = true;
         loop {
+            // before the poll, so a child that exits after it is not a timeout
+            let waited = start.elapsed();
             // SAFETY: waitpid with a null status pointer is allowed.
             match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
-                0 if Instant::now() < until => thread::sleep(Duration::from_millis(10)),
-                0 => {
-                    // a killed process's own children come to us in turn
-                    loop {
-                        kill_leftovers();
-                        // SAFETY: as above.
-                        match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
-                            0 => thread::sleep(Duration::from_millis(10)),
-                            p if p > 0 => {}
-                            _ => return false,
-                        }
-                    }
+                0 => {}
+                p if p > 0 => continue,
+                _ => {
+                    let e = io::Error::last_os_error();
+                    return if e.raw_os_error() == Some(libc::ECHILD) {
+                        Ok(clean)
+                    } else {
+                        Err(e)
+                    };
                 }
-                p if p > 0 => {}
-                _ => return true,
             }
+            if waited >= limit + KILL_LIMIT {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            if waited >= limit {
+                clean = false;
+                // again each time: a killed process's own children come to us in turn
+                kill_leftovers();
+            }
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
-    fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, String> {
+    fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
         // a thread of its own, so the counters it opens cover only the run
         thread::scope(|s| {
             s.spawn(|| run(bin, args, cache, stderr))
                 .join()
                 .expect("the run thread")
         })
+        .map_err(|e| {
+            let at = |m| format!("{}: {m}", bin.display());
+            match e {
+                RunError::Scenario(m) => RunError::Scenario(at(m)),
+                RunError::Cleanup(m) => RunError::Cleanup(at(m)),
+            }
+        })
     }
 
-    fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, String> {
+    fn run(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
         let mut cmd = Command::new(bin);
         cmd.arg(&args[0])
             .arg("--cache-dir")
@@ -361,19 +418,26 @@ mod ab {
         #[cfg(target_os = "linux")]
         let mut counters = counters::open();
         let t0 = Instant::now();
-        let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
         let hasher = thread::spawn(move || hash_output(out));
         let mut status = 0;
         let mut ru = MaybeUninit::<libc::rusage>::zeroed();
-        // SAFETY: the pid is our child, and wait4 fills the struct it is given.
-        let ru = unsafe {
-            libc::wait4(pid, &mut status, 0, ru.as_mut_ptr());
-            ru.assume_init()
-        };
+        // SAFETY: the pid is our child, and wait4 fills the structs it is given.
+        while unsafe { libc::wait4(pid, &mut status, 0, ru.as_mut_ptr()) } != pid {
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::Interrupted {
+                // without the wait, `status` says nothing about the run
+                return Err(RunError::Cleanup(format!("wait4: {e}")));
+            }
+        }
+        // SAFETY: wait4 succeeded, so it filled the struct.
+        let ru = unsafe { ru.assume_init() };
         let wall = t0.elapsed().as_secs_f64();
-        let clean = reap_leftovers(LEFTOVER_LIMIT);
+        // the hash thread may never end while a leftover holds stdout open
+        let clean = reap_leftovers(LEFTOVER_LIMIT)
+            .map_err(|e| RunError::Cleanup(format!("cannot stop the processes it left: {e}")))?;
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -384,13 +448,13 @@ mod ab {
             let err = fs::read_to_string(stderr).unwrap_or_default();
             let tail: Vec<&str> = err.lines().rev().take(5).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            return Err(format!("exit status {status}:\n{}", tail.join("\n")));
+            return Err(format!("exit status {status}:\n{}", tail.join("\n")).into());
         }
         if !clean {
-            return Err(format!(
+            return Err(RunError::Scenario(format!(
                 "processes still ran {}s after it exited, and were killed",
                 LEFTOVER_LIMIT.as_secs()
-            ));
+            )));
         }
         let kb = if cfg!(target_os = "macos") {
             1.0
@@ -550,7 +614,7 @@ mod ab {
         status: String,
     }
 
-    fn measure(c: &Ctx, sc: &Scenario, o: &Opts) -> Row {
+    fn measure(c: &Ctx, sc: &Scenario, o: &Opts) -> Result<Row, String> {
         let bins = [&o.before, &o.after];
         let mut row = Row {
             id: sc.id,
@@ -562,7 +626,7 @@ mod ab {
         let original = fs::read(Path::new(&c.np).join(EDIT_FILE)).unwrap_or_default();
         let fresh = || tempfile::tempdir_in(&c.work).expect("a cache directory");
         let kept = [fresh(), fresh()];
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<(), RunError> {
             if sc.cache == Cache::Edit {
                 fs::write(&edit_at, &original).map_err(|e| e.to_string())?;
             }
@@ -601,8 +665,7 @@ mod ab {
                     } else {
                         kept[i].path()
                     };
-                    let r = run_once(bins[i], &sc.args, cache, &err)
-                        .map_err(|e| format!("{}: {e}", bins[i].display()))?;
+                    let r = run_once(bins[i], &sc.args, cache, &err)?;
                     row.runs[i].push(r);
                 }
             }
@@ -612,10 +675,11 @@ mod ab {
             let _ = fs::write(&edit_at, &original);
         }
         row.status = match result {
-            Err(e) => format!("FAILED: {e}"),
+            Err(RunError::Cleanup(e)) => return Err(e),
+            Err(RunError::Scenario(e)) => format!("FAILED: {e}"),
             Ok(()) => check_output(sc, &row.runs),
         };
-        row
+        Ok(row)
     }
 
     fn check_output(sc: &Scenario, runs: &[Vec<Run>; 2]) -> String {
@@ -690,9 +754,9 @@ mod ab {
             }
         }
         #[cfg(target_os = "linux")]
-        // SAFETY: a prctl that takes an integer.
-        unsafe {
-            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
+        if let Err(e) = enable_subreaper() {
+            eprintln!("ab: cannot adopt the processes a run leaves behind: {e}");
+            return ExitCode::from(2);
         }
         #[cfg(target_os = "linux")]
         if counters::open().is_none() {
@@ -745,7 +809,13 @@ mod ab {
         let mut rows = Vec::new();
         for sc in &todo {
             eprintln!("ab: {}", sc.id);
-            rows.push(measure(&c, sc, &o));
+            match measure(&c, sc, &o) {
+                Ok(row) => rows.push(row),
+                Err(e) => {
+                    eprintln!("ab: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
         }
 
         let mut failed = false;
@@ -852,6 +922,9 @@ mod ab {
 
     #[cfg(test)]
     mod tests {
+        #[cfg(target_os = "linux")]
+        use std::sync::Mutex;
+
         use super::*;
 
         #[test]
@@ -865,19 +938,40 @@ mod ab {
             );
         }
 
+        /// Both wait for any child, and `cargo test` runs them in one process.
+        #[cfg(target_os = "linux")]
+        static CHILDREN: Mutex<()> = Mutex::new(());
+
         #[cfg(target_os = "linux")]
         #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
-            // SAFETY: a prctl that takes an integer.
-            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+            let _alone = CHILDREN.lock().unwrap();
+            enable_subreaper().unwrap();
             let t = Instant::now();
             Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
                 .args(["-c", "(sleep 30 & wait) &"])
                 .status()
                 .unwrap();
-            assert!(!reap_leftovers(Duration::from_secs(1)));
+            assert!(!reap_leftovers(Duration::from_secs(1)).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_failed_run_fails_even_when_sigchld_was_ignored() {
+            let _alone = CHILDREN.lock().unwrap();
+            // SAFETY: SIG_IGN is a valid disposition.
+            unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            enable_subreaper().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let run = run_once(
+                Path::new("false"),
+                &["eval".into()],
+                dir.path(),
+                &dir.path().join("stderr"),
+            );
+            assert!(matches!(run, Err(RunError::Scenario(m)) if m.contains("exit status")));
         }
 
         #[test]

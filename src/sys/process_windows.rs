@@ -20,6 +20,11 @@ pub fn signal(_st: &ExitStatus) -> Option<i32> {
     None
 }
 
+/// This process's id.
+pub fn id() -> u32 {
+    process::id()
+}
+
 /// CPU time this thread has used, user and system.
 pub fn thread_cpu_time() -> Duration {
     let zero = FILETIME {

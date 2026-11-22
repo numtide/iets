@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::line::{Job, Line, json_str, json_str_list};
 use crate::error::{Error, Result};
 use crate::remote::worker::{Connection, Transport};
-use crate::store::drv::{Derivation, DerivationOutput, load_derivation_from_store};
+use crate::store::drv::{Derivation, load_derivation_from_store};
 use crate::store::path::StorePath;
 
 pub struct Resolver {
@@ -184,13 +184,9 @@ impl Resolver {
             if !wanted.is_empty() && !wanted.contains(name) {
                 continue;
             }
-            let path = match out {
-                DerivationOutput::InputAddressed(p) => p.clone(),
-                DerivationOutput::Fixed { .. } => drv.fixed_output_path(name)?,
-                _ => {
-                    r.known = false;
-                    return Ok(r);
-                }
+            let Some(path) = out.path(&drv.name, name)? else {
+                r.known = false;
+                return Ok(r);
             };
             match self.probe_validity(&path) {
                 None => r.complete = false,

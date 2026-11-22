@@ -253,6 +253,7 @@ pub fn realisation(raw: &[u8]) -> io::Result<()> {
 pub struct FramedSink<'a> {
     to: &'a mut dyn Write,
     buf: Vec<u8>,
+    broken: bool,
 }
 
 impl<'a> FramedSink<'a> {
@@ -262,16 +263,30 @@ impl<'a> FramedSink<'a> {
         FramedSink {
             to,
             buf: Vec::with_capacity(Self::FRAME),
+            broken: false,
         }
     }
 
+    fn frame(w: &mut dyn Write, data: &[u8]) -> io::Result<()> {
+        write_u64(w, data.len() as u64)?;
+        w.write_all(data)
+    }
+
     fn send(&mut self) -> io::Result<()> {
+        if self.broken {
+            return Err(io::Error::other(
+                "incomplete frame on the daemon connection",
+            ));
+        }
         if !self.buf.is_empty() {
-            write_u64(self.to, self.buf.len() as u64)?;
-            self.to.write_all(&self.buf)?;
+            Self::frame(self.to, &self.buf).inspect_err(|_| self.broken = true)?;
             self.buf.clear();
         }
         Ok(())
+    }
+
+    pub(super) fn discard_buffer(&mut self) {
+        self.buf.clear();
     }
 
     /// Sends the last frame and the terminator.
@@ -284,12 +299,11 @@ impl<'a> FramedSink<'a> {
 
 impl Write for FramedSink<'_> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        if self.buf.len() + data.len() > Self::FRAME {
+        if data.len() >= Self::FRAME || self.buf.len() + data.len() > Self::FRAME {
             self.send()?;
         }
         if data.len() >= Self::FRAME {
-            write_u64(self.to, data.len() as u64)?;
-            self.to.write_all(data)?;
+            Self::frame(self.to, data).inspect_err(|_| self.broken = true)?;
         } else {
             self.buf.extend_from_slice(data);
         }
@@ -298,7 +312,7 @@ impl Write for FramedSink<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.send()?;
-        self.to.flush()
+        self.to.flush().inspect_err(|_| self.broken = true)
     }
 }
 

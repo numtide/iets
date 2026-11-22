@@ -515,6 +515,39 @@ fn rooting_child() {
     stdin.read_to_end(&mut Vec::new()).unwrap();
 }
 
+/// A local source vanishing after a flushed frame must not leave the next
+/// request inside the unfinished upload.
+#[test]
+fn a_failed_upload_can_be_retried_on_the_worker() {
+    let s = store!();
+    let socket = s.socket();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut conn = Connection::open(&Transport::Unix(socket), &mut |_| {}).unwrap();
+        let err = conn
+            .add_multiple_to_store(
+                false,
+                &mut |w| {
+                    w.write_all(&1u64.to_le_bytes())?;
+                    w.flush()?;
+                    Err(io::Error::new(io::ErrorKind::NotFound, "vanished source"))
+                },
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("vanished source"));
+        conn.add_multiple_to_store(
+            false,
+            &mut |w| w.write_all(&0u64.to_le_bytes()),
+            &mut |_| {},
+        )
+        .unwrap();
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("stalled upload retry");
+}
+
 /// Unread temp-root replies fill the daemon's send buffer while the query
 /// fills ours.
 #[test]

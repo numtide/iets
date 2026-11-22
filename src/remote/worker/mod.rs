@@ -503,6 +503,8 @@ pub struct Connection {
     to: BufWriter<Counting<Box<dyn Write + Send>>>,
     from: BufReader<Box<dyn Read + Send>>,
     child: Option<Child>,
+    /// An upload permits another op only after its complete daemon reply.
+    upload_pending: bool,
     pub minor: u64,
     pub daemon_nix_version: String,
     /// `Some(true)` when the daemon trusts us (protocol >= 1.35).
@@ -669,6 +671,7 @@ impl Connection {
             ),
             from: BufReader::with_capacity(1 << 20, from),
             child,
+            upload_pending: false,
             minor: 0,
             daemon_nix_version: String::new(),
             trusted: None,
@@ -695,7 +698,8 @@ impl Connection {
         self.to.flush().map_err(conn)
     }
 
-    fn sync_stats(&mut self) {
+    fn end_stderr(&mut self) {
+        self.upload_pending = false;
         self.stats.bytes_sent = self.bytes_sent();
     }
 
@@ -754,7 +758,18 @@ impl Connection {
         Ok(())
     }
 
+    fn check_upload(&self) -> Result<()> {
+        if self.upload_pending {
+            return Err(Error::Protocol(
+                "incomplete store upload; reopen the connection".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn op(&mut self, op: Op) -> Result<()> {
+        self.check_upload()?;
+        self.upload_pending = matches!(op, Op::AddMultipleToStore);
         self.stats.ops += 1;
         self.stats.round_trips += 1;
         write_u64(self.w(), op as u64)
@@ -794,7 +809,7 @@ impl Connection {
         loop {
             match read_u64(self.r())? {
                 STDERR_LAST => {
-                    self.sync_stats();
+                    self.end_stderr();
                     return Ok(());
                 }
                 STDERR_NEXT => {
@@ -889,7 +904,7 @@ impl Connection {
                 }
                 STDERR_ERROR => {
                     let e = self.read_error()?;
-                    self.sync_stats();
+                    self.end_stderr();
                     return Err(e);
                 }
                 STDERR_READ | STDERR_WRITE => {
@@ -1002,6 +1017,7 @@ impl Connection {
         paths: &[impl AsRef<str>],
         on_event: &mut dyn FnMut(Event),
     ) -> Result<usize> {
+        self.check_upload()?;
         let mut chunks = paths.chunks(TEMP_ROOT_CHUNK).peekable();
         while let Some(chunk) = chunks.next() {
             for path in chunk {
@@ -1065,9 +1081,17 @@ impl Connection {
         write_u64(self.w(), u64::from(dont_check_sigs))?;
         self.flush()?;
         let mut sink = FramedSink::new(&mut self.to);
-        body(&mut sink).map_err(conn)?;
-        sink.finish().map_err(conn)?;
-        self.process_stderr(on_event)
+        let result = body(&mut sink);
+        if result.is_err() {
+            // Do not send the tail of an object the producer failed to complete.
+            sink.discard_buffer();
+        }
+        let reply = sink
+            .finish()
+            .map_err(conn)
+            .and_then(|()| self.process_stderr(on_event));
+        result.map_err(conn)?;
+        reply
     }
 
     /// `BuildPathsWithResults` in normal mode; `paths` are legacy derived paths

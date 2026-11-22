@@ -26,6 +26,9 @@
         ietsRiscv64 = (scopeFor pkgs.pkgsCross.riscv64).iets.override (o: {
           commonArgs = o.commonArgs // { CARGO_PROFILE = "dev"; };
         });
+        # the Nix that iets is compared with (docs/reference/divergences.md);
+        # `nix` of nixpkgs is a later release
+        referenceNix = pkgs.nixVersions.nix_2_34;
         classic = final.callPackage ./nix/classic.nix { };
         devShell = final.callPackage
           ({ lib, stdenv, mkShell, cargo, rustc, rustPlatform, clippy, rustfmt, hyperfine, nix, perf, jq, nushell, direnv, ast-grep }:
@@ -34,7 +37,7 @@
                 ++ lib.optional stdenv.hostPlatform.isLinux perf;
               RUST_SRC_PATH = "${rustPlatform.rustLibSrc}";
             })
-          { };
+          { nix = final.referenceNix; };
         # the differential fuzzer against Nix (docs/how-to/fuzz.md)
         fuzz = final.callPackage ./nix/fuzz.nix { };
         # for files that return a set of packages
@@ -66,7 +69,7 @@
         lib.mapAttrs' (n: lib.nameValuePair "package-${n}")
           (lib.filterAttrs (n: _: !lib.hasSuffix "-campaign" n) self.packages.${system})
         // lib.mapAttrs' (n: lib.nameValuePair "devShell-${n}") self.devShells.${system}
-        // onLinux scope (scope.callPackages ./nix/checks.nix { }) { })
+        // onLinux scope (scope.callPackages ./nix/checks.nix { nix = scope.referenceNix; }) { })
         (forAll lib.id);
       herculesCI = { primaryRepo, ... }: {
         onPush.default.outputs = {

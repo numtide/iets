@@ -7,7 +7,6 @@ pub(crate) mod regex;
 mod xml;
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{self, SystemTime};
@@ -551,21 +550,28 @@ fn generic_closure(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
 /// like Nix's std::map<Value*, CompareValues>. Integers, strings and paths,
 /// what keys nearly always are, go in a hash set. Any other key moves every
 /// key to a list ordered by `<`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum ClosureKey {
+    Int(i64),
+    String(&'static [u8]),
+    Path(&'static [u8]),
+}
+
 #[derive(Default)]
 struct ClosureKeys {
-    hashed: FxHashMap<(u8, Vec<u8>), Word>,
+    hashed: FxHashMap<ClosureKey, Word>,
     /// A key of the kind the hashed ones are, for the error `<` gives a key
     /// of another kind.
-    first: Option<(u8, Word)>,
+    first: Option<Word>,
     ordered: Option<Vec<Word>>,
 }
 
 impl ClosureKeys {
-    fn hash_key(w: Word) -> Option<(u8, Vec<u8>)> {
+    fn hash_key(w: Word) -> Option<ClosureKey> {
         Some(match w.view() {
-            Value::Int(n) => (0, n.to_le_bytes().to_vec()),
-            Value::String(s) => (1, s.bytes.to_vec()),
-            Value::Path(p) => (2, p.path.to_vec()),
+            Value::Int(n) => ClosureKey::Int(n),
+            Value::String(s) => ClosureKey::String(s.bytes),
+            Value::Path(p) => ClosureKey::Path(p.path),
             _ => return None,
         })
     }
@@ -574,17 +580,17 @@ impl ClosureKeys {
         if self.ordered.is_none() {
             match Self::hash_key(kv) {
                 Some(k) => match self.first {
-                    Some((kind, w)) if kind != k.0 => {
+                    Some(w) if w.value_type() != kv.value_type() => {
                         // raises the error Nix's comparison raises
                         ev.less_than(w, kv, Pos::NONE)?;
-                        self.order(ev)?;
+                        self.order();
                     }
                     _ => {
-                        self.first.get_or_insert((k.0, kv));
+                        self.first.get_or_insert(kv);
                         return Ok(self.hashed.insert(k, kv).is_none());
                     }
                 },
-                None => self.order(ev)?,
+                None => self.order(),
             }
         }
         let keys = self.ordered.as_mut().expect("ordered");
@@ -603,22 +609,11 @@ impl ClosureKeys {
         Ok(true)
     }
 
-    fn order(&mut self, ev: &mut Evaluator) -> EvalResult<()> {
+    fn order(&mut self) {
         let mut words: Vec<Word> = self.hashed.drain().map(|(_, w)| w).collect();
-        let mut err = None;
-        words.sort_by(|a, b| match ev.less_than(*a, *b, Pos::NONE) {
-            Ok(true) => Ordering::Less,
-            Ok(false) => Ordering::Greater,
-            Err(e) => {
-                err.get_or_insert(e);
-                Ordering::Equal
-            }
-        });
-        if let Some(e) = err {
-            return Err(e);
-        }
+        // The hash table contains only one of the three totally ordered kinds.
+        words.sort_unstable_by_key(|&w| Self::hash_key(w).expect("hashed key"));
         self.ordered = Some(words);
-        Ok(())
     }
 }
 

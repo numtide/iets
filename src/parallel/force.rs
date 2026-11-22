@@ -570,7 +570,7 @@ pub fn fanout_attrs_coerce(ev: &mut Evaluator, a: &'static AttrsObj) {
 /// cells; returns false when the task should stop.
 fn coerce_walk(ev: &mut Evaluator, v: Word, depth: u32) -> bool {
     if depth > 64 || bail_requested(ev) {
-        return depth <= 64;
+        return false;
     }
     match v.view() {
         Value::List(l) => {
@@ -863,4 +863,26 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
     }
     let root = ev.root_env;
     ev.eval(root, ir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coercion_walk_stops_cancelled_helper() {
+        let mut ev = Evaluator::new();
+        ev.par.is_main = false;
+        // Cancellation short-circuits before accessing a runtime slot.
+        ev.par.cancelled = true;
+        assert!(!coerce_walk(&mut ev, Word::TRUE, 0));
+        assert!(!coerce_step(&mut ev, &Cell::new(Word::TRUE), 0));
+    }
+
+    #[test]
+    fn coercion_walk_depth_limit_is_unchanged() {
+        let mut ev = Evaluator::new();
+        assert!(coerce_walk(&mut ev, Word::TRUE, 64));
+        assert!(!coerce_walk(&mut ev, Word::TRUE, 65));
+    }
 }

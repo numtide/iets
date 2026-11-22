@@ -202,6 +202,23 @@ fn fetch_all(
     limits: Limits,
     session: &Arc<Session>,
 ) -> Result<Vec<NarInfo>, String> {
+    // WASI has no threads, and a thread that fails to start is a panic
+    if cfg!(target_os = "wasi") {
+        let mut kept = http::Kept::new().map_err(|e| e.to_string())?;
+        let mut todo = vec![root.clone()];
+        let mut seen = BTreeSet::from([root.clone()]);
+        let mut done = Vec::new();
+        while let Some(p) = todo.pop() {
+            let ni = narinfo(&mut kept, store, &p, limits)?;
+            for r in &ni.references {
+                if seen.insert(r.clone()) {
+                    todo.push(r.clone());
+                }
+            }
+            done.push(ni);
+        }
+        return Ok(done);
+    }
     let walk = Mutex::new(Walk {
         todo: vec![root.clone()],
         seen: BTreeSet::from([root.clone()]),

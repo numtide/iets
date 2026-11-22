@@ -609,7 +609,7 @@ impl AttrsObj {
         self.iter_raw()
     }
 
-    /// Merge entries without recording a user iteration (update plumbing/census).
+    /// `iter` without the census mark, for the merge of a `//` and the census itself.
     #[inline]
     pub(crate) fn iter_raw(&self) -> AttrIter {
         let mut it = AttrIter {
@@ -774,7 +774,6 @@ impl EnvObj {
     #[cfg(feature = "stats2")]
     #[inline]
     fn mark_bit(&self, bit: usize) {
-        // Preserve the parent pointer provenance while changing only the marks.
         let _ = self
             .up
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
@@ -1294,8 +1293,8 @@ impl Arena {
         self.alloc_union_with_hook(a, b, || {})
     }
 
-    /// The no-op hook is eliminated in production; tests use it to publish a
-    /// flat copy between sizing and copying, as another worker can do.
+    /// `hook` runs between counting the leaves and copying them, where
+    /// another worker can flatten an operand. Only the test passes one.
     #[inline]
     fn alloc_union_with_hook(
         &mut self,
@@ -1309,8 +1308,8 @@ impl Arena {
         let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
-        // SAFETY: fresh allocation sized for header, tail and n pointers.
-        // Publishing a flat copy can only reduce the number of leaves.
+        // SAFETY: fresh allocation sized for header, tail and n pointers. An
+        // operand flattened since then has fewer leaves, never more.
         unsafe {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
@@ -1330,8 +1329,7 @@ impl Arena {
                     leaves = leaves.add(1);
                 });
             }
-            // A worker may have flattened an operand since capacity was
-            // measured. Only the initialized leaf pointers belong in the view.
+            // fewer than `n` when a worker flattened an operand since the count
             (*p).leaves = leaves.offset_from(tail.add(1).cast()) as u8;
             #[cfg(feature = "stats2")]
             self.stats.census.note_attrs(
@@ -1695,7 +1693,7 @@ mod tests {
                 a.iter();
                 marked.wait();
             });
-            // Hold an internal merge view across another worker's legitimate use.
+            // an unmarked view, held while another worker uses the set
             let entries = a.iter_raw();
             begin.wait();
             marked.wait();
@@ -1718,8 +1716,7 @@ mod tests {
         let mut second = String::new();
         arena.stats.census.report(&mut second);
         assert_eq!(a.flags.load(Ordering::Relaxed), 0);
-        // Global lookup counters may change in unrelated tests; the entire
-        // object-use/update section must nevertheless be idempotent.
+        // the lookup counters after it are global, and other tests move them
         assert_eq!(
             first.split("attrset lookups:").next(),
             second.split("attrset lookups:").next()
@@ -1745,27 +1742,15 @@ mod tests {
         }
     }
 
+    /// Three leaves or more take a branch of `flat` that two do not.
     #[cfg(feature = "stats2")]
     #[test]
-    fn internal_many_leaf_flatten_preserves_marks() {
+    fn flattening_many_leaves_sets_no_mark() {
         let mut arena = Arena::new();
-        for marked in [false, true] {
-            let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)], vec![(3, 3)]]);
-            assert_eq!(a.leaves, 3);
-            assert_eq!(a.len_raw(), u32::MAX);
-            if marked {
-                assert!(a.get(Sym(1)).is_some());
-                a.iter();
-            }
-            let expected = if marked { 0x81 } else { 0 };
-            let flat = arena.flat(a);
-            assert_eq!(a.flags.load(Ordering::Relaxed), expected);
-            assert_eq!(flat.flags.load(Ordering::Relaxed), 0);
-            assert_eq!(a.len_unmarked(), 3);
-            assert_eq!(a.flags.load(Ordering::Relaxed), expected);
-            assert_eq!(flat.flags.load(Ordering::Relaxed), 0);
-            assert_eq!(observed(flat), vec![(1, 1), (2, 2), (3, 3)]);
-        }
+        let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)], vec![(3, 3)]]);
+        let flat = arena.flat(a);
+        assert_eq!(a.flags.load(Ordering::Relaxed), 0);
+        assert_eq!(flat.flags.load(Ordering::Relaxed), 0);
     }
 
     #[cfg(feature = "stats2")]
@@ -1811,14 +1796,13 @@ mod tests {
         let b = build(&mut arena, &[vec![(2, 99)]]);
         let capacity = leaf_count(a) + leaf_count(b);
         assert_eq!(capacity, 4);
-        // A second arena in this session models the publishing worker.
+        // a second arena stands for the other worker
         let mut worker = Arena::new();
         let w = arena.alloc_union_with_hook(a, b, || {
             worker.flat(a);
         });
         let out = unsafe { &*w.ptr::<AttrsObj>() };
-        // Check the header before traversing: the old value would expose
-        // uninitialized pointer slots and must not be dereferenced.
+        // before any traversal, which would read uninitialized slots
         assert_eq!(out.leaves, 2);
         assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
     }

@@ -3205,8 +3205,8 @@ impl Evaluator {
         Word::from_ref(out)
     }
 
-    /// Census of one `//`. Internal flattening/length queries do not record
-    /// user iteration, so each operand is counted once as an operand.
+    /// Census of one `//`. Merging the operands marks neither of them as
+    /// iterated, so each use counts once, as an operand.
     #[cfg(feature = "stats2")]
     fn note_upd(
         &mut self,

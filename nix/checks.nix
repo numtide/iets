@@ -25,6 +25,9 @@ in
   } // lib.optionalAttrs stdenv.hostPlatform.isLinux {
     IETS_TEST_NIX_GRPC_DAEMON = "${import ./nix-grpc-store.nix { inherit pkgs; }}/bin/nix-grpc-daemon";
   });
+  stats2 = craneLib.cargoNextest (withDev // {
+    cargoNextestExtraArgs = "--features stats2 --lib runtime::value::tests";
+  });
   # every nixpkgs drv against nix-eval-jobs (tests/nixpkgs_eval.rs), with
   # optimized code to keep it short. Nix's side depends on nixpkgs alone, so
   # it is a derivation of its own that a change to iets does not rebuild.

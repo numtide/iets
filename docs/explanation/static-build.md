@@ -1,9 +1,8 @@
 # The static build
 
 `nix build .#static` gives you a musl binary with no runtime dependencies,
-for x86_64-linux or aarch64-linux. Like every build of iets, it's Linux
-only: the evaluator uses futexes, `/proc/self` and Linux `madvise` flags.
-It needs no `/nix/store`, no daemon, no shared libraries and no CA bundle.
+for x86_64-linux or aarch64-linux. It needs no `/nix/store`, no daemon, no
+shared libraries and no CA bundle.
 It evaluates, fetches `github:`, `gitlab:`, `sourcehut:` and `tarball`
 inputs, and builds on a `grpc://` builder. Stripped and compressed with
 `xz -9`, it was 3.1 MB when last measured.
@@ -11,6 +10,8 @@ inputs, and builds on a `grpc://` builder. Stripped and compressed with
 It runs `git` for a project that is a git checkout and for a `git` input. If the machine has no CA bundle, the binary trusts the
 Mozilla roots built into it, and `NIX_SSL_CERT_FILE` overrides them
 ([Settings](../reference/settings.md)).
+
+For a build that runs in a browser, see [WebAssembly](webassembly.md).
 
 ## The allocator
 

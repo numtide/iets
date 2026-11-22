@@ -16,7 +16,7 @@ use super::lexer::{IndPart, Lexer, PathPart, StrEnd, Tok, Token};
 use super::symbol::{FxHashMap, Interner, Sym};
 use super::{ParseError, line_col};
 
-use std::{ops, str};
+use std::{mem, ops, str};
 
 use crate::lint::allow;
 
@@ -110,6 +110,9 @@ pub struct Parser<'a> {
     /// as the parser adds nodes.
     ind_strs: Vec<(ExprId, bool)>,
     depth: u32,
+    /// The highest `depth` since the start of the subtree that `measure`
+    /// started. It gives the height of a finished subtree.
+    peak: u32,
 }
 
 /// Nix has no limit and reports a stack overflow from its SIGSEGV handler.
@@ -117,7 +120,13 @@ pub struct Parser<'a> {
 /// is a third of the deepest nesting the 4 GiB evaluator stack survived
 /// (150,000 nested attribute sets), so the parse ends before any stage of
 /// the pipeline runs out of stack.
+#[cfg(not(target_os = "wasi"))]
 const MAX_PARSE_DEPTH: u32 = 50_000;
+/// A browser's stack is small, and an `import` can start the parser at the
+/// bottom of a deep evaluation. With `MAX_CALL_DEPTH`, this value holds in the
+/// web workers of Firefox 158 and Chromium 156.
+#[cfg(target_os = "wasi")]
+const MAX_PARSE_DEPTH: u32 = 500;
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], interner: &'a mut Interner) -> Self {
@@ -145,6 +154,7 @@ impl<'a> Parser<'a> {
             sym_body,
             ind_strs: Vec::new(),
             depth: 0,
+            peak: 0,
         }
     }
 
@@ -152,15 +162,74 @@ impl<'a> Parser<'a> {
     #[inline]
     fn deeper(&mut self) -> R<()> {
         self.depth += 1;
+        self.peak = self.peak.max(self.depth);
         if self.depth > MAX_PARSE_DEPTH {
-            let t = self.peek();
-            return Err(self.error_at(
-                t.start,
-                t.end,
-                "stack overflow (possible infinite recursion)".into(),
-            ));
+            return Err(self.overflow());
         }
         Ok(())
+    }
+
+    fn overflow(&mut self) -> Box<ParseError> {
+        let t = self.peek();
+        self.error_at(
+            t.start,
+            t.end,
+            "stack overflow (possible infinite recursion)".into(),
+        )
+    }
+
+    /// One more level of nesting that a loop parses with no recursion, such
+    /// as `a.b.c = x;`. Each stage after the parser recurses through it. Most
+    /// targets have the stack for that, and do not count it.
+    #[inline]
+    fn chained(&mut self, links: &mut u32) -> R<()> {
+        if cfg!(target_os = "wasi") {
+            self.deeper()?;
+            *links += 1;
+        }
+        Ok(())
+    }
+
+    /// Start to measure the height of the next subtree. Returns the peak of
+    /// the enclosing subtree, which the caller sets again when it is done.
+    #[inline]
+    fn measure(&mut self) -> u32 {
+        mem::replace(&mut self.peak, self.depth)
+    }
+
+    /// The height of the subtree since `measure`, at the same `depth`.
+    #[inline]
+    fn height(&self) -> u32 {
+        self.peak - self.depth
+    }
+
+    /// A chain, such as `a + b + c`, parses in a loop. But its tree is as
+    /// high as the chain is long, above the operands that are parsed before
+    /// the links that hold them. `h` is the height of the chain at `depth`.
+    /// On WASI, the tree must be in the limit. Most targets have the stack
+    /// for that, and do not count it.
+    #[inline]
+    fn tall(&mut self, h: u32) -> R<()> {
+        if cfg!(target_os = "wasi") && self.depth + h > MAX_PARSE_DEPTH {
+            return Err(self.overflow());
+        }
+        Ok(())
+    }
+
+    /// An operand of a chain, one level below the chain, and its height
+    /// from the level of the chain.
+    #[inline]
+    fn operand(&mut self, parse: impl FnOnce(&mut Self) -> R<ExprId>) -> R<(ExprId, u32)> {
+        let base = self.depth;
+        let outer = self.measure();
+        if cfg!(target_os = "wasi") {
+            self.deeper()?;
+        }
+        let e = parse(self)?;
+        self.depth = base;
+        let h = self.height();
+        self.peak = outer;
+        Ok((e, h))
     }
 
     pub fn parse_file(mut self, file: FileId) -> R<Ast> {
@@ -533,31 +602,45 @@ impl<'a> Parser<'a> {
     /// duplicate formals of a lambda) and fails where the enclosing rule
     /// meets the operator, which is where iets's caller does too.
     fn parse_pipe(&mut self) -> R<ExprId> {
+        let base = self.depth;
+        let outer = self.measure();
         let lhs = self.parse_op(0)?;
-        match self.peek().kind {
+        let mut h = self.height();
+        let r = match self.peek().kind {
             Tok::PipeInto => {
                 let mut acc = lhs;
                 while self.peek().kind == Tok::PipeInto {
                     self.bump();
-                    let f = self.parse_op(0)?;
+                    let (f, hf) = self.operand(|p| p.parse_op(0))?;
+                    h = (h + 1).max(hf);
+                    self.tall(h)?;
                     acc = self.make_call(f, acc);
                 }
-                Ok(acc)
+                acc
             }
             Tok::PipeFrom => {
+                // the last operand is the deepest: the height of the tallest
+                // operand plus the length of the chain is a bound
+                let (mut top, mut links) = (h, 0);
                 let mut chain = vec![lhs];
                 while self.peek().kind == Tok::PipeFrom {
                     self.bump();
-                    chain.push(self.parse_op(0)?);
+                    let (f, hf) = self.operand(|p| p.parse_op(0))?;
+                    (top, links) = (top.max(hf), links + 1);
+                    h = top + links;
+                    self.tall(h)?;
+                    chain.push(f);
                 }
                 let mut acc = chain.pop().unwrap();
                 while let Some(f) = chain.pop() {
                     acc = self.make_call(f, acc);
                 }
-                Ok(acc)
+                acc
             }
-            _ => Ok(lhs),
-        }
+            _ => lhs,
+        };
+        self.peak = outer.max(base + h);
+        Ok(r)
     }
 
     /// `f a` becomes one `Apply`; applying an `Apply` again extends it,
@@ -591,6 +674,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_op(&mut self, min_bp: u8) -> R<ExprId> {
+        let base = self.depth;
+        let outer = self.measure();
         let t = self.peek();
         let mut lhs = match t.kind {
             Tok::Bang => {
@@ -623,6 +708,7 @@ impl<'a> Parser<'a> {
             }
             _ => self.parse_app()?,
         };
+        let mut h = self.height();
         loop {
             let op = self.peek();
             let Some((bp, assoc, bin)) = binop(op.kind) else {
@@ -635,14 +721,21 @@ impl<'a> Parser<'a> {
             let start = self.ast.spans[lhs.0 as usize].start;
             lhs = match bin {
                 None => {
+                    // the `${...}` elements of the path are subtrees too
+                    let subject = self.measure();
                     let path = self.parse_attrpath()?;
+                    h = h.max(self.height()) + 1;
+                    self.peak = subject;
                     self.add(Expr::HasAttr { subject: lhs, path }, start, self.last_end)
                 }
                 Some(op) => {
-                    let rhs = self.parse_op(if assoc == Assoc::Right { bp } else { bp + 1 })?;
+                    let rbp = if assoc == Assoc::Right { bp } else { bp + 1 };
+                    let (rhs, hr) = self.operand(|p| p.parse_op(rbp))?;
+                    h = (h + 1).max(hr);
                     self.add(Expr::Binary { op, lhs, rhs }, start, self.last_end)
                 }
             };
+            self.tall(h)?;
             if assoc == Assoc::None {
                 let n = self.peek();
                 if let Some((bp2, _, _)) = binop(n.kind)
@@ -652,6 +745,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.peak = outer.max(base + h);
         Ok(lhs)
     }
 
@@ -703,7 +797,13 @@ impl<'a> Parser<'a> {
                 let mut default = None;
                 if self.peek().kind == Tok::Or {
                     self.bump();
+                    // `a.b or c.d or e` recurses with no level of its own
+                    let base = self.depth;
+                    if cfg!(target_os = "wasi") {
+                        self.deeper()?;
+                    }
                     default = Some(self.parse_select()?);
+                    self.depth = base;
                 }
                 Ok(self.add(
                     Expr::Select {
@@ -1176,7 +1276,13 @@ impl<'a> Parser<'a> {
             }
             let path = self.parse_attrpath()?;
             self.expect(Tok::Assign, "expecting '.' or '='")?;
+            // `a.b.c = x;` is `a = { b = { c = x; }; };`
+            let mut links = 0;
+            for _ in 1..path.len {
+                self.chained(&mut links)?;
+            }
             let value = self.parse_expr()?;
+            self.depth -= links;
             self.expect(Tok::Semi, "expecting ';'")?;
             self.sc_binds.push(Bind {
                 span: Span {

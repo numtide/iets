@@ -690,6 +690,8 @@ pub const DEFAULT_SYSTEM: &str = "aarch64-darwin";
 pub const DEFAULT_SYSTEM: &str = "x86_64-windows";
 #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
 pub const DEFAULT_SYSTEM: &str = "aarch64-windows";
+#[cfg(target_os = "wasi")]
+pub const DEFAULT_SYSTEM: &str = "wasm32-wasi";
 
 fn cpus() -> u64 {
     thread::available_parallelism().map_or(1, |n| n.get() as u64)

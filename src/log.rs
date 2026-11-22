@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{self, SystemTime};
-use std::{env, mem, process};
+use std::{env, mem};
 
 use serde_json::{Value, json};
 
@@ -458,7 +458,7 @@ pub fn show_progress() {
 
 /// logging.cc:Activity: the pid in the high half, a counter below.
 pub fn activity_id() -> u64 {
-    cur().log.next_activity.fetch_add(1, Ordering::Relaxed) + (u64::from(process::id()) << 32)
+    cur().log.next_activity.fetch_add(1, Ordering::Relaxed) + (u64::from(sys::process::id()) << 32)
 }
 
 fn fields(mut v: Value, f: Vec<Value>) -> Value {
@@ -1405,7 +1405,7 @@ mod tests {
         let p = vec![1.into(), 2.into(), 1.into(), 0.into()];
         let want = r#"{"action":"result","fields":[1,2,1,0],"id":8,"type":105}"#;
         assert_eq!(result_record(8, RES_PROGRESS, p).to_string(), want);
-        assert_eq!(activity_id() >> 32, u64::from(std::process::id()));
+        assert_eq!(activity_id() >> 32, u64::from(sys::process::id()));
         assert_ne!(activity_id(), activity_id());
     }
 

@@ -28,6 +28,10 @@ type Res<T> = Result<T, Error>;
 type ByteSet = [bool; 256];
 
 const STATE_LIMIT: u64 = 99_995;
+/// Nested groups and stacked quantifiers a browser's stack holds after what
+/// evaluation may already use of it. Each stage that follows the parser
+/// recurses over them too.
+const MAX_GROUP_DEPTH: u32 = 500;
 const NONE: usize = usize::MAX;
 
 /// Portable character set names in code order; letters name themselves.
@@ -66,6 +70,13 @@ struct Parser<'a> {
     i: usize,
     groups: u32,
     depth: u32,
+    /// The height of the atom last parsed. A group is one level more than
+    /// the tallest piece in it.
+    height: u32,
+    /// The height of the tallest piece in the innermost open group. A piece
+    /// counts its atom and each quantifier applied to an already quantified
+    /// piece.
+    tallest: u32,
     states: u64,
     /// `std::regex::icase`: a letter matches in either case (the C locale's).
     icase: bool,
@@ -130,10 +141,19 @@ impl Parser<'_> {
     /// `{n,}` adds s*(n+1)+1 and `{m,n}` adds s*n+(n-m)+1.
     fn piece(&mut self) -> Res<Node> {
         let before = self.states;
+        self.height = 0;
         let (mut node, quantifiable) = self.atom()?;
+        let mut height = self.height;
         while let Some(q) = self.quant()? {
             if !quantifiable {
                 return Err(Error::Invalid);
+            }
+            // `a**` nests as deep as a group does, but no parenthesis closes it
+            if matches!(node, Node::Rep(..)) {
+                height += 1;
+                if cfg!(target_os = "wasi") && self.depth + height > MAX_GROUP_DEPTH {
+                    return Err(Error::TooBig);
+                }
             }
             let s = self.states - before;
             self.states = self.states.saturating_add(match q {
@@ -156,6 +176,7 @@ impl Parser<'_> {
         if self.states > STATE_LIMIT + 1 {
             return Err(Error::TooBig);
         }
+        self.tallest = self.tallest.max(height);
         Ok(node)
     }
 
@@ -167,12 +188,17 @@ impl Parser<'_> {
                 let g = self.groups;
                 self.groups += 1;
                 self.depth += 1;
+                if cfg!(target_os = "wasi") && self.depth > MAX_GROUP_DEPTH {
+                    return Err(Error::TooBig);
+                }
                 self.states += 2;
+                let outer = mem::replace(&mut self.tallest, 0);
                 let inner = self.alt()?;
                 if self.next()? != b')' {
                     return Err(Error::Invalid);
                 }
                 self.depth -= 1;
+                self.height = mem::replace(&mut self.tallest, outer) + 1;
                 Node::Group(g, Box::new(inner))
             }
             b')' | b'*' | b'+' | b'?' | b'{' => return Err(Error::Invalid),
@@ -561,6 +587,8 @@ pub fn compile_opt(re: &[u8], icase: bool) -> Result<Prog, Error> {
         i: 0,
         groups: 0,
         depth: 0,
+        height: 0,
+        tallest: 0,
         states: 0,
         icase,
     };

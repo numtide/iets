@@ -11,10 +11,12 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(not(target_os = "wasi"))]
+use std::ptr;
 use std::str::from_utf8;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use std::{fs, mem, ptr};
+use std::{fs, mem};
 
 pub use error::{Error, ErrorKind, EvalResult, Pos};
 
@@ -49,7 +51,16 @@ use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
 use crate::trace::{self, Trace, store};
 use crate::{argv, config, parallel, syntax};
 
+#[cfg(not(target_os = "wasi"))]
 pub const MAX_CALL_DEPTH: u32 = 10000;
+/// A page cannot set the stack of WebAssembly, and what runs out of it ends
+/// the instance: stop while that can still be an error. This value holds in
+/// the web workers of Firefox 158 and Chromium 156 with the most stack that
+/// parsing, `fromJSON` or a regex can add at the limit. Chromium trapped at
+/// 1250. On this target `deeper` counts more than calls, so plain recursion
+/// stops at about 250 Nix calls.
+#[cfg(target_os = "wasi")]
+pub const MAX_CALL_DEPTH: u32 = 1000;
 
 /// Virtual path prefix for the embedded corepkgs (`<nix/fetchurl.nix>`).
 pub struct CorePkgs;
@@ -343,11 +354,12 @@ pub struct Evaluator {
     pub nr_function_calls: u64,
     pub nr_store_adds: u64,
     pub t_compile: Duration,
-    /// Where those counters and `drv.nr_derivations` go when this fiber
-    /// finishes a task. Shared, so a stats line covers every fiber.
+    /// Where `drv.nr_derivations`, and with `IETS_STATS` those counters, go
+    /// when this fiber finishes a task. Shared, so a count covers every fiber.
     totals: Arc<Totals>,
-    /// `IETS_STATS`: a stats line will read the arena totals, so a switch
-    /// folds into them. Nothing else does, so a normal run skips the fold.
+    /// `IETS_STATS`: a stats line will read the arena totals and the
+    /// counters, so a switch folds them. Nothing else does, so a normal run
+    /// skips the fold (`fold_counters` keeps the derivations).
     fold_arenas: bool,
     /// One shared context-free string per symbol, made on first use.
     sym_strings: SymWords,
@@ -727,6 +739,8 @@ impl EvalConfig {
         if !self.pure {
             prefetch_store_entries(&self.search_path, &self.session);
         }
+        // the evaluator's session, which a stats line reads too
+        let fold_arenas = self.session.settings().stats >= 1;
         let mut arena = Arena::in_heap(self.session.heap.clone());
         let mut interner = Interner::in_heap(self.session.heap.clone());
         for name in NIX_STATIC_SYMBOLS {
@@ -784,7 +798,7 @@ impl EvalConfig {
             nr_store_adds: 0,
             t_compile: Duration::ZERO,
             totals: Default::default(),
-            fold_arenas: Session::current().settings().stats >= 1,
+            fold_arenas,
             sym_strings: SymWords::new(),
             src_to_store: Default::default(),
             known: Default::default(),
@@ -1307,7 +1321,7 @@ impl Evaluator {
             }] += 1;
             self.arena.stats.census.note_thunk_forced(w.bits());
         }
-        let v = self.run_thunk(w, st);
+        let v = self.deeper(Pos::NONE, |ev| ev.run_thunk(w, st));
         match v {
             Ok(v) => {
                 debug_assert!(!v.is_thunk());
@@ -1549,7 +1563,7 @@ impl Evaluator {
                         );
                         e
                     })?;
-                    self.force_deep_inner(v, seen)?;
+                    self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen))?;
                 }
             }
             Value::List(l) => {
@@ -1558,7 +1572,7 @@ impl Evaluator {
                 }
                 for c in l.cells() {
                     let v = self.force_cell(c)?;
-                    self.force_deep_inner(v, seen)?;
+                    self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen))?;
                 }
             }
             _ => {}
@@ -1790,6 +1804,26 @@ impl Evaluator {
             return Err(Error::stack_overflow(pos));
         }
         Ok(())
+    }
+
+    /// Run `f` one level deeper. Most targets leave this recursion out of the
+    /// call depth, as Nix does, and have a stack that can hold it. A browser's
+    /// cannot: there, it counts as calls do. So does each `eval`, because
+    /// expressions nested in one function body use stack with no call
+    /// between them.
+    #[inline(always)]
+    pub(crate) fn deeper<T>(
+        &mut self,
+        pos: Pos,
+        f: impl FnOnce(&mut Self) -> EvalResult<T>,
+    ) -> EvalResult<T> {
+        if !cfg!(target_os = "wasi") {
+            return f(self);
+        }
+        self.enter_call(pos)?;
+        let r = f(self);
+        self.call_depth -= 1;
+        r
     }
 
     /// Apply `func` to `args` left to right. Returns a forced value.
@@ -2196,9 +2230,17 @@ impl Evaluator {
     }
 
     /// Evaluate `ir` in `env` to weak head normal form.
+    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        if cfg!(target_os = "wasi") {
+            return self.deeper(Pos::NONE, |ev| ev.dispatch(env, ir));
+        }
+        self.dispatch(env, ir)
+    }
+
     /// One small handler per node kind, tail-called: each recursion pays
     /// for its own kind's frame, not for the largest arm's.
-    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+    #[inline(always)]
+    fn dispatch(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
             Ir::Const(w) => Ok(*w),
             Ir::Local { .. } => self.eval_k_local(env, ir),
@@ -2509,8 +2551,6 @@ impl Evaluator {
         #[cfg(feature = "stats2")]
         let before = (
             census::upd_path(a, b),
-            a.flags,
-            b.flags,
             self.arena.bytes_allocated,
             matches!(r, Ir::Update(..)),
         );
@@ -2634,8 +2674,9 @@ impl Evaluator {
         pos: Pos,
     ) -> EvalResult<Word> {
         let mut v = self.eval_fast(env, subject)?;
-        for elem in path {
-            let name = self.attr_name(env, elem)?;
+        let mut elems = path.iter();
+        let mut next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
+        while let Some(name) = next {
             let attr = match default {
                 Some(d) => match v.as_attrs().and_then(|a| a.get(name)) {
                     Some(a) => a,
@@ -2659,6 +2700,9 @@ impl Evaluator {
                     }
                 }
             };
+            // Nix evaluates the next name before forcing the selected value,
+            // but only after this lookup succeeds (a default can stop here).
+            next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
             v = self.force_cell(&attr.cell).map_err(|mut e| {
                 e.add_trace(
                     attr.pos,
@@ -2680,8 +2724,9 @@ impl Evaluator {
     #[inline(never)]
     fn eval_select_count(&mut self, env: &'static EnvObj, s: &SelectIr) -> EvalResult<Word> {
         let mut v = self.eval(env, s.subject)?;
-        for elem in s.path {
-            let name = self.attr_name(env, elem)?;
+        let mut elems = s.path.iter();
+        let mut next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
+        while let Some(name) = next {
             let Some(a) = v.as_attrs().and_then(|a| a.get(name)) else {
                 let Some(d) = s.default else {
                     self.force_attrs(v, s.pos, "while selecting an attribute")?;
@@ -2693,6 +2738,8 @@ impl Evaluator {
                 }
                 return self.eval(env, d);
             };
+            // Keep the same name/force order as eval_select, including defaults.
+            next = elems.next().map(|e| self.attr_name(env, e)).transpose()?;
             let read = match name == self.s.rev_count {
                 true => purity::count_read(self, &a.cell, s.pos),
                 false => self.force_cell(&a.cell),
@@ -3158,9 +3205,8 @@ impl Evaluator {
         Word::from_ref(out)
     }
 
-    /// Census of one `//`. The update flattens union operands, which marks
-    /// them iterated; their marks are put back so a use counts once, as
-    /// an operand.
+    /// Census of one `//`. Internal flattening/length queries do not record
+    /// user iteration, so each operand is counted once as an operand.
     #[cfg(feature = "stats2")]
     fn note_upd(
         &mut self,
@@ -3168,10 +3214,8 @@ impl Evaluator {
         b: &'static AttrsObj,
         out: Word,
         pos: Pos,
-        (path, fa, fb, bytes, nested): (usize, u8, u8, usize, bool),
+        (path, bytes, nested): (usize, usize, bool),
     ) {
-        a.set_flags(fa);
-        b.set_flags(fb);
         let file = self
             .file_of(pos)
             .map(|(f, _)| (f as *const FileInfo as usize, &f.path[..]));
@@ -3385,7 +3429,8 @@ impl Evaluator {
 impl Evaluator {
     /// Thunks, calls, derivations and compile time of the whole run: this
     /// fiber's own counters plus every fiber that folded into the totals.
-    /// Read it, not the fields, to report a number.
+    /// Read it, not the fields, to report a number. Without `IETS_STATS`
+    /// only the derivations are folded, so only they cover the whole run.
     pub fn counts(&self) -> Counts {
         let t = self.totals.get();
         Counts {
@@ -3460,9 +3505,19 @@ impl Evaluator {
     }
 
     /// Move this fiber's counters into the run's totals. The scheduler
-    /// calls it when a fiber finishes a task, which is why the counters
-    /// themselves need no atomics.
+    /// calls it when a fiber finishes a task or parks, which is why the
+    /// counters themselves need no atomics. Only a stats line reads the
+    /// thunks, calls, store adds and compile time, so a run without stats
+    /// folds the derivations alone, and only when there are any: the totals
+    /// are one line every worker writes, on every fiber switch.
     pub fn fold_counters(&mut self) {
+        if !self.fold_arenas {
+            if self.drv.nr_derivations != 0 {
+                self.totals.add_derivations(self.drv.nr_derivations);
+                self.drv.nr_derivations = 0;
+            }
+            return;
+        }
         self.totals.add(Counts {
             thunks: self.nr_thunks,
             calls: self.nr_function_calls,
@@ -3531,7 +3586,10 @@ impl Evaluator {
             crate::builtins::text::regex_cache_len()
         );
         // SAFETY: a null argument prints to stderr.
-        unsafe { libmimalloc_sys::mi_stats_print(ptr::null_mut()) };
+        #[cfg(not(target_os = "wasi"))]
+        unsafe {
+            libmimalloc_sys::mi_stats_print(ptr::null_mut())
+        };
         if self.session.settings().stats >= 2 {
             #[cfg(feature = "stats2")]
             {

@@ -279,22 +279,28 @@ pub fn evaluate_with(
     select(ev, root, a.attr.as_deref(), args, !a.args.is_empty())
 }
 
-/// [`evaluate`] for each `-A` in order. The input and the `--arg`s are
-/// evaluated once, as in `nix-instantiate --eval`.
+/// Visit each selected value in order, applying explicit auto arguments to
+/// that value as in `nix-instantiate --eval`. The input and arguments are shared.
 pub fn evaluate_each(
     ev: &mut Evaluator,
     a: &EvalArgs,
     mut each: impl FnMut(&mut Evaluator, Word) -> Result<(), Box<Error>>,
 ) -> Result<(), Box<Error>> {
     let (root, args) = input_and_args(ev, a, &mut Loaded::default())?;
-    let has_args = !a.args.is_empty();
+    let mut emit = |path: &str| {
+        let v = installable::find_along_attr_path(ev, root, path, args)?;
+        let v = if a.args.is_empty() {
+            v
+        } else {
+            ev.auto_call(v, args)?
+        };
+        each(ev, v)
+    };
     if a.attrs.is_empty() {
-        let v = select(ev, root, a.attr.as_deref(), args, has_args)?;
-        return each(ev, v);
+        return emit(a.attr.as_deref().unwrap_or(""));
     }
     for attr in &a.attrs {
-        let v = select(ev, root, Some(attr), args, has_args)?;
-        each(ev, v)?;
+        emit(attr)?;
     }
     Ok(())
 }
@@ -542,7 +548,9 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
         k.field("include-path", &path);
     }
     if a.attrs.is_empty() {
-        k.field("attr", a.attr.as_deref().unwrap_or("").as_bytes());
+        if let Some(attr) = &a.attr {
+            k.field("attr", attr.as_bytes());
+        }
     } else {
         for attr in &a.attrs {
             k.field("attr", attr.as_bytes());

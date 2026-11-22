@@ -797,7 +797,13 @@ impl<'a> Parser<'a> {
                 let mut default = None;
                 if self.peek().kind == Tok::Or {
                     self.bump();
+                    // `a.b or c.d or e` recurses with no level of its own
+                    let base = self.depth;
+                    if cfg!(target_os = "wasi") {
+                        self.deeper()?;
+                    }
                     default = Some(self.parse_select()?);
+                    self.depth = base;
                 }
                 Ok(self.add(
                     Expr::Select {

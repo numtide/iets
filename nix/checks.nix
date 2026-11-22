@@ -103,6 +103,7 @@ in
     deep "1$(many ' + 1' 5000)"
     deep "0$(many ' |> (x: x)' 5000)"
     deep "{ a$(many '.a' 5000) = 1; }"
+    deep "$(many '{ }.a or ' 5000)0"
     # a chain is a tree above the operands that come before it
     chains=1; for _ in $(seq 100); do chains="($chains)$(many ' - 1' 190)"; done
     deep "$chains"
@@ -114,6 +115,14 @@ in
       run eval --expr "$1" 2> /dev/null || rc=$?
       test "$rc" = 1
     }
+    # what needs a thread or a temporary directory ends in an error too
+    clean() {
+      rc=0
+      run "''${@:2}" 2> err || rc=$?
+      test "$rc" != 0 && test "$rc" != 99 && grep -q "$1" err
+    }
+    clean 'has no network' eval --expr 'builtins.fetchClosure { fromStore = "https://cache.invalid"; fromPath = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x"; inputAddressed = true; }'
+    clean 'scratch file' prefetch --unpack https://example.invalid/a.tar.gz
     fails "builtins.fromJSON \"$(many '[' 5000)\""
     fails "builtins.match \"$(many '(' 5000)a$(many ')' 5000)\" \"a\""
     fails "builtins.match \"a$(many '*' 5000)\" \"a\""

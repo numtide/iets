@@ -147,8 +147,8 @@ fn drv_err(e: DrvError, pos: Pos) -> Box<Error> {
     Error::boxed(ErrorKind::Eval, e.0, pos)
 }
 
-fn utf8(bytes: &[u8], pos: Pos) -> EvalResult<String> {
-    String::from_utf8(bytes.to_vec())
+fn utf8(bytes: &[u8], pos: Pos) -> EvalResult<&str> {
+    str::from_utf8(bytes)
         .map_err(|_| Error::boxed(ErrorKind::Eval, "string is not valid UTF-8", pos))
 }
 
@@ -219,7 +219,7 @@ fn derivation_strict(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<
         })?;
     let drv_name = utf8(drv_name, pos)?;
     let s = syms(ev);
-    derivation_strict_internal(ev, &drv_name, attrs, pos, name_attr.pos, &s).map_err(|mut e| {
+    derivation_strict_internal(ev, drv_name, attrs, pos, name_attr.pos, &s).map_err(|mut e| {
         e.add_trace(
             Pos::NONE,
             format!(
@@ -371,20 +371,20 @@ fn process_attr(
         if sym == s.builder {
             let st = ev.force_string(w, pos, "")?;
             b.context.extend_from_slice(st.ctx);
-            b.drv.builder = utf8(st.bytes, pos)?;
+            b.drv.builder = utf8(st.bytes, pos)?.to_owned();
         } else if sym == s.system {
             let st = ev.force_string_no_ctx(w, pos, "")?;
-            b.drv.platform = utf8(st, pos)?;
+            b.drv.platform = utf8(st, pos)?.to_owned();
         } else if sym == s.output_hash {
             let st = ev.force_string_no_ctx(w, pos, "")?;
-            b.output_hash = Some(utf8(st, pos)?);
+            b.output_hash = Some(utf8(st, pos)?.to_owned());
         } else if sym == s.output_hash_algo {
             let st = ev.force_string_no_ctx(w, pos, "")?;
-            b.output_hash_algo = HashAlgo::parse(&utf8(st, pos)?);
+            b.output_hash_algo = HashAlgo::parse(utf8(st, pos)?);
         } else if sym == s.output_hash_mode {
             let st = ev.force_string_no_ctx(w, pos, "")?;
             let st = utf8(st, pos)?;
-            b.handle_hash_mode(&st, pos)?;
+            b.handle_hash_mode(st, pos)?;
         } else if sym == s.outputs {
             let l = ev.force_list(w, pos, "")?;
             let mut names = Vec::with_capacity(l.len as usize);
@@ -392,7 +392,7 @@ fn process_attr(
                 let st = ev.force_string_no_ctx(c.get(), pos, "")?;
                 names.push(utf8(st, pos)?);
             }
-            b.handle_outputs(names.iter().map(String::as_str), pos)?;
+            b.handle_outputs(names.into_iter(), pos)?;
         } else if sym == s.required_system_features {
             let l = ev.force_list(w, pos, "")?;
             for c in l.cells() {
@@ -442,22 +442,22 @@ fn process_attr(
         return Ok(());
     }
     if sym == s.builder {
-        b.drv.builder = st.clone();
+        b.drv.builder = st.to_owned();
     } else if sym == s.system {
-        b.drv.platform = st.clone();
+        b.drv.platform = st.to_owned();
     } else if sym == s.output_hash {
-        b.output_hash = Some(st.clone());
+        b.output_hash = Some(st.to_owned());
     } else if sym == s.output_hash_algo {
-        b.output_hash_algo = HashAlgo::parse(&st);
+        b.output_hash_algo = HashAlgo::parse(st);
     } else if sym == s.output_hash_mode {
-        b.handle_hash_mode(&st, pos)?;
+        b.handle_hash_mode(st, pos)?;
     } else if sym == s.outputs {
         b.handle_outputs(
             st.split([' ', '\t', '\n', '\r']).filter(|t| !t.is_empty()),
             pos,
         )?;
     }
-    b.drv.env.push((key.to_string(), st.into_bytes()));
+    b.drv.env.push((key.to_string(), raw.into_owned()));
     Ok(())
 }
 
@@ -587,9 +587,12 @@ fn derivation_strict_internal(
                     .entry(parse_store_path(root, pos)?)
                     .or_default();
                 for name in layers.iter().rev() {
-                    node = node.children.entry(utf8(name, pos)?).or_default();
+                    node = node
+                        .children
+                        .entry(utf8(name, pos)?.to_owned())
+                        .or_default();
                 }
-                node.outputs.insert(utf8(output, pos)?);
+                node.outputs.insert(utf8(output, pos)?.to_owned());
             }
             Ctx::DrvDeep(d) => {
                 let d = parse_store_path(d, pos)?;
@@ -912,9 +915,9 @@ fn render_built(
         );
     };
     // downstream-placeholder.cc:fromSingleDerivedPathBuilt, from the bottom up
-    let mut h = unknown_ca_output(root, drv_name, &utf8(innermost, pos)?);
+    let mut h = unknown_ca_output(root, drv_name, utf8(innermost, pos)?);
     for name in above.iter().rev() {
-        h = unknown_derivation(&h, &utf8(name, pos)?);
+        h = unknown_derivation(&h, utf8(name, pos)?);
     }
     Ok(render_placeholder(&unknown_derivation(&h, output)))
 }
@@ -964,7 +967,7 @@ fn output_of(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             let (layers, root) = split_built(drv);
             let root = parse_store_path(root, pos)?;
             let out = utf8(output, pos)?;
-            let expected = render_built(ev, &root, &layers, &out, pos)?;
+            let expected = render_built(ev, &root, &layers, out, pos)?;
             let mut tail = Vec::with_capacity(output.len() + 1 + drv.len());
             tail.extend_from_slice(output);
             tail.push(b'!');
@@ -984,7 +987,7 @@ fn output_of(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     }
     let (layers, root) = split_built(drv);
     let root = parse_store_path(root, pos)?;
-    let rendered = render_built(ev, &root, &layers, &name, pos)?;
+    let rendered = render_built(ev, &root, &layers, name, pos)?;
     let bytes = ev.arena.alloc_bytes(rendered.as_bytes());
     let output = ev.arena.alloc_bytes(name.as_bytes());
     Ok(ev.arena.mk_string_ctx(bytes, &[Ctx::Built { drv, output }]))
@@ -1078,7 +1081,7 @@ fn placeholder(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> 
         "while evaluating the first argument passed to builtins.placeholder",
     )?;
     let s = utf8(s, pos)?;
-    Ok(ev.mk_string(hash_placeholder(&s).as_bytes()))
+    Ok(ev.mk_string(hash_placeholder(s).as_bytes()))
 }
 
 /// Mirrors primops.cc:derivationToValue for `import /nix/store/...drv`:

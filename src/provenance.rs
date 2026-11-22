@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::eval::{Evaluator, Pos};
 use crate::session::Session;
-use crate::store::path::{StorePath, drv_name, store_dir};
+use crate::store::path::{StorePath, drv_name, is_name_byte, store_dir};
 use crate::store::source::SourceOrigin;
 
 pub fn enabled() -> bool {
@@ -18,11 +18,6 @@ pub fn enabled() -> bool {
 
 /// How many times a mapping may point at another mapped tree.
 const MAX_HOPS: usize = 8;
-
-/// A byte a store path's base name may hold (path.cc:checkName).
-fn is_name_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'_' | b'?' | b'=')
-}
 
 /// A pseudo-file (`«derivation-internal»`, `«arg»`) rather than a real path.
 fn is_pseudo(path: &[u8]) -> bool {

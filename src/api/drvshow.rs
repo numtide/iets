@@ -88,7 +88,7 @@ fn write_json(out: &mut Vec<u8>, v: &Value, indent: Option<usize>) {
                 if let Some(d) = inner {
                     newline(out, d);
                 }
-                out.extend_from_slice(&serde_json::to_vec(k).unwrap_or_default());
+                serde_json::to_writer(&mut *out, k).expect("writing JSON to a Vec");
                 out.push(b':');
                 if indent.is_some() {
                     out.push(b' ');
@@ -100,7 +100,7 @@ fn write_json(out: &mut Vec<u8>, v: &Value, indent: Option<usize>) {
             }
             out.push(b'}');
         }
-        _ => out.extend_from_slice(&serde_json::to_vec(v).unwrap_or_default()),
+        _ => serde_json::to_writer(out, v).expect("writing JSON to a Vec"),
     }
 }
 

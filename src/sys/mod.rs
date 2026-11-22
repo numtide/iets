@@ -81,6 +81,14 @@ pub fn program(name: &OsStr) -> PathBuf {
     }
 }
 
+/// Hands the memory freed since the last purge back to the OS now, instead
+/// of after mimalloc's purge delay. Freed blocks of a huge-page arena stay
+/// resident as whole 2 MB pages until then.
+pub fn release_freed() {
+    // SAFETY: a call into the allocator with no arguments to uphold.
+    unsafe { libmimalloc_sys::mi_collect(true) };
+}
+
 /// Fills `buf` from the system's random source. A failure leaves zeros: the
 /// bytes are a cache key or a name suffix, and nothing here can act on it.
 pub fn random(buf: &mut [u8]) {

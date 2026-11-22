@@ -116,6 +116,7 @@ pub enum BindScope {
     From,
 }
 
+#[derive(Clone, Copy)]
 pub struct BindIr {
     pub sym: Sym,
     pub value: IrRef,

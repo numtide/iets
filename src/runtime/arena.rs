@@ -11,6 +11,7 @@ use super::census::Census;
 use super::heap::Heap;
 use super::value::{Ctx, ListObj};
 use super::word::Word;
+use crate::compile::ir::{Ir, IrRef};
 use crate::parallel::shared::ArenaUse;
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, FxHashSet};
@@ -55,6 +56,22 @@ pub struct Arena {
     /// to an object without entries, so every empty one can be this one.
     pub(crate) empty_list: Option<&'static ListObj>,
     pub(crate) empty_attrs: Option<Word>,
+    /// Bytes mapped at a time: `CHUNK`, or less for an arena that only
+    /// holds a slice of one file's IR (`compile::slices`).
+    chunk: usize,
+    /// The local and constant IR nodes this arena made, to share; made on
+    /// the first compile.
+    shared_ir: Option<Box<SharedIr>>,
+}
+
+/// One IR node per local (depth, slot) and per recent constant, kept for
+/// the run: IR never changes once built, and a third of the compiled nodes
+/// are a local or a constant an earlier node already is. Locals index a
+/// table directly; constants a direct-mapped one that keeps their word
+/// beside the node.
+struct SharedIr {
+    locals: [[Option<IrRef>; 64]; 16],
+    consts: [(u64, Option<IrRef>); 4096],
 }
 
 /// Position of the bump pointer, to give back the last allocation.
@@ -84,6 +101,22 @@ impl Arena {
         a
     }
 
+    /// The session memory this arena's chunks belong to, once it has one.
+    pub(crate) fn heap(&self) -> Option<&Arc<Heap>> {
+        self.heap.as_ref()
+    }
+
+    /// `in_heap`, mapping `chunk` bytes at a time (a power of two): for an
+    /// arena that holds little, which a full chunk, prefaulted, would
+    /// waste.
+    pub(crate) fn in_heap_small(heap: Arc<Heap>, chunk: usize) -> Self {
+        debug_assert!(chunk.is_power_of_two());
+        let mut a = Arena::placeholder();
+        a.heap = Some(heap);
+        a.chunk = chunk;
+        a
+    }
+
     /// An arena that reserves nothing, for a slot that a real arena is
     /// swapped into before anything allocates from it.
     pub(crate) fn placeholder() -> Self {
@@ -99,6 +132,8 @@ impl Arena {
             heap: None,
             empty_list: None,
             empty_attrs: None,
+            chunk: CHUNK,
+            shared_ir: None,
         }
     }
 
@@ -192,7 +227,8 @@ impl Arena {
 
     #[cold]
     fn alloc_slow(&mut self, size: usize, align: usize) -> *mut u8 {
-        let chunk = CHUNK.max((size + align + CHUNK - 1) & !(CHUNK - 1));
+        let unit = self.chunk;
+        let chunk = unit.max((size + align + unit - 1) & !(unit - 1));
         // Anonymous mmap, its pages faulted in as they are touched. The
         // chunk goes with the session's heap.
         let base = map_chunk(chunk) as *mut u8;
@@ -206,6 +242,43 @@ impl Arena {
         self.ptr = (start + size) as *mut u8;
         self.bytes_allocated += size;
         start as *mut u8
+    }
+
+    /// `ir` in this arena, or the node it already made for the same local
+    /// or constant.
+    #[inline]
+    pub(crate) fn ir_node(&mut self, ir: Ir) -> IrRef {
+        let t = self.shared_ir.get_or_insert_with(|| {
+            Box::new(SharedIr {
+                locals: [[None; 64]; 16],
+                consts: [(0, None); 4096],
+            })
+        });
+        let slot = match ir {
+            Ir::Local { depth, idx } if depth < 16 && idx < 64 => {
+                let slot = &mut t.locals[depth as usize][idx as usize];
+                if let Some(p) = *slot {
+                    return p;
+                }
+                slot as *mut Option<IrRef>
+            }
+            Ir::Const(w) => {
+                let e = &mut t.consts[(w.bits().wrapping_mul(0x9E3779B97F4A7C15) >> 52) as usize];
+                if e.0 == w.bits()
+                    && let Some(p) = e.1
+                {
+                    return p;
+                }
+                e.0 = w.bits();
+                &mut e.1 as *mut Option<IrRef>
+            }
+            _ => return self.alloc(ir),
+        };
+        let p: IrRef = self.alloc(ir);
+        // SAFETY: `slot` is in the boxed table, which the allocation above
+        // neither moves nor frees.
+        unsafe { *slot = Some(p) };
+        p
     }
 
     #[inline]

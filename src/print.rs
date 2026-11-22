@@ -117,7 +117,8 @@ pub fn lexicographic_order(
     // the dense prefix decides 97% of the compares on nixos-plasma without
     // reading the scattered names
     let names = &ev.interner;
-    let mut v: Vec<(u64, &'static Attr)> = a.iter().map(|x| (names.prefix(x.sym), x)).collect();
+    let mut v: Vec<(u64, &'static Attr)> = Vec::with_capacity(a.len_bounds().1);
+    v.extend(a.iter().map(|x| (names.prefix(x.sym), x)));
     v.sort_unstable_by(|x, y| {
         (x.0.cmp(&y.0)).then_with(|| names.name(x.1.sym).cmp(names.name(y.1.sym)))
     });

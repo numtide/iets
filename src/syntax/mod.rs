@@ -33,6 +33,19 @@ pub fn parse(src: &[u8], file: FileId, interner: &mut Interner) -> Result<Ast, P
         .map_err(|e| *e)
 }
 
+/// `parse`, with the bindings of a huge set parsed in chunks on up to
+/// `threads` threads; the tree and the errors are `parse`'s.
+pub fn parse_threads(
+    src: &[u8],
+    file: FileId,
+    interner: &mut Interner,
+    threads: usize,
+) -> Result<Ast, ParseError> {
+    parser::Parser::with_threads(src, interner, threads)
+        .parse_file(file)
+        .map_err(|e| *e)
+}
+
 /// 1-based line and column of a byte offset. The column counts bytes, like
 /// Nix does.
 pub fn line_col(src: &[u8], offset: u32) -> (u32, u32) {

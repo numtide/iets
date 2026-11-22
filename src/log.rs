@@ -127,9 +127,11 @@ impl Out {
     /// Brings the display in line with what is to be shown: starts it, ends it
     /// or redraws it. A new size redraws it too.
     fn sync(&mut self) {
-        let wanted = !self.live().is_empty() && self.w.is_some();
-        let size = self.term().size().filter(|_| wanted);
         let landed = self.landed.take();
+        if self.w.is_none() || (self.region.is_empty() && self.status.is_empty()) {
+            return self.close();
+        }
+        let size = self.term().size();
         match (size, self.display.is_some()) {
             (Some(_), true) => self.paint(&[]),
             (Some((_, rows)), false) => {
@@ -208,7 +210,9 @@ impl Log {
         let mut went = o.partial.clone();
         o.close();
         let r = write();
-        if let (Some(top), Some(size)) = (top, o.term().size()) {
+        if let Some(top) = top
+            && let Some(size) = o.term().size()
+        {
             went.extend_from_slice(bytes);
             o.landed = Some(landing(&went, top, size));
         }

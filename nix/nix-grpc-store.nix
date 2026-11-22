@@ -7,16 +7,17 @@ let
   # fetched at evaluation, not by a derivation: the package files are
   # imported from it, and a check may not import from a derivation
   src = builtins.fetchTarball {
-    url = "https://github.com/Mic92/nix-grpc-store/archive/4f6d239e834f96bd1544a8b243d46c41a892016e.tar.gz";
-    sha256 = "sha256-JNwiqh3oaU0uToxtK+rf3FxqpoGnH/hCh7Q+QFSfcwk=";
+    url = "https://github.com/Mic92/nix-grpc-store/archive/40839a1c07f1960607230e705792b307f180838f.tar.gz";
+    sha256 = "sha256-ymWc83kJ7KZ3OtHIkMy0dFP4xqFAkukySj/2Oas/OzU=";
   };
   jwt-cpp = pkgs.callPackage "${src}/nix/packages/jwt-cpp.nix" { };
-  plugin = pkgs.callPackage "${src}/nix/packages/plugin.nix" {
+  server = pkgs.callPackage "${src}/nix/packages/nix-grpc-store.nix" {
     inherit jwt-cpp;
     inherit (pkgs.nix.libs) nix-store nix-util;
+    stdenv = pkgs.clangStdenv;
   };
 in
-plugin.overrideAttrs {
+server.overrideAttrs {
   pname = "nix-grpc-daemon";
   ninjaFlags = [ "nix-grpc-daemon" ];
   doCheck = false;

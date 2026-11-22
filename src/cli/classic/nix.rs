@@ -251,7 +251,6 @@ impl Nix {
             a.attr = Some(first);
         }
         a.args = self.c.flags.args.clone();
-        a.includes = self.c.flags.includes.clone();
         a.pure = self.c.flags.pure;
         a.strict = strict;
         a.json = json;

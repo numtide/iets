@@ -96,7 +96,6 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
     let mut a = EvalArgs::new();
     a.input = Some(Input::Flake(".".into()));
     a.attr = Some(attr.clone());
-    a.includes = f.c.flags.includes.clone();
     a.pure = f.c.flags.pure;
     let ec = eval_config(&f.c, &cfg);
     let run = Run::on(ec).cached(&a, "fmt");

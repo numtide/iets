@@ -663,6 +663,14 @@ impl EvalConfig {
         self
     }
 
+    pub(crate) fn configured_search_path(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.search_path
+    }
+
+    pub(crate) fn configured_lints(&self) -> &lint::Config {
+        &self.lints
+    }
+
     pub fn lint_root(mut self, dir: &[u8]) -> EvalConfig {
         self.lints.add_root(dir);
         self

@@ -479,3 +479,21 @@ fn eval_prints_every_attr(bin: Iets) {
     assert!(!o.status.success());
     assert_eq!(o.stdout, "1\n".as_bytes());
 }
+
+#[rstest]
+fn dynamic_selection_preserves_name_and_value_effect_order(
+    bin: Iets,
+    #[values("a", "revCount")] field: &str,
+    #[values("1", "4", "8")] workers: &str,
+) {
+    let src = format!(
+        r#"({{ {field} = builtins.trace "VALUE" {{ b = 42; }}; }}).{field}.${{builtins.trace "NAME" "b"}}"#
+    );
+    let o = run(
+        &bin,
+        &["eval", "--no-cache", "--workers", workers, "-E", &src],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "42");
+    assert_eq!(stderr(&o), "trace: NAME\ntrace: VALUE\n");
+}

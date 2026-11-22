@@ -179,6 +179,13 @@ fn show(parts: &[Vec<u8>]) -> String {
 /// An unnamed file in TMPDIR: the bytes live exactly as long as the handle,
 /// and no name exists for another user to plant.
 pub fn scratch() -> Result<File> {
+    // WASI has no temporary directory, and std panics when asked for one
+    if cfg!(target_os = "wasi") {
+        return Err(Error::io(
+            "cannot create a scratch file",
+            io::ErrorKind::Unsupported.into(),
+        ));
+    }
     tempfile::tempfile().map_err(|e| Error::io("cannot create a scratch file", e))
 }
 

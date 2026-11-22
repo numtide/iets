@@ -395,7 +395,9 @@ fn jobs_single(
     let mut conn = None;
     if j.opts.no_instantiate {
         let em = emitter.clone();
-        jobs::run(ev, root, &mut |line| em.lock().unwrap().emit(line));
+        if let Err(e) = jobs::run(ev, root, &mut |line| em.lock().unwrap().emit(line)) {
+            return report(ev, &e);
+        }
         if ev.session().settings().stats >= 1 {
             ev.print_stats();
         }
@@ -432,8 +434,12 @@ fn jobs_single(
                 Ok(())
             }),
         );
-        jobs::run(ev, root, &mut |line| inst.push(line));
-        let store = match inst.finish() {
+        let walked = jobs::run(ev, root, &mut |line| inst.push(line));
+        let store = inst.finish();
+        if let Err(e) = walked {
+            return report(ev, &e);
+        }
+        let store = match store {
             Ok(r) => r,
             Err(e) => return e.report(),
         };

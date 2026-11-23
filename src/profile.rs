@@ -519,6 +519,7 @@ pub fn open(session: &Arc<Session>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
     use super::*;
 
     /// A call the way the evaluator enters one: sample, then push.
@@ -701,7 +702,7 @@ mod tests {
     #[test]
     fn a_wait_is_not_cpu_time() {
         cpu_us_since_sample();
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         thread::sleep(Duration::from_millis(100));
         let wall = start.elapsed();
         let cpu = Duration::from_micros(cpu_us_since_sample());

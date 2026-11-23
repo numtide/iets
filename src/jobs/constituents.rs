@@ -33,17 +33,9 @@ pub struct Entry {
 
 pub type Jobs = BTreeMap<String, Entry>;
 
-#[derive(Clone)]
 struct Aggregate {
-    name: String,
     dependencies: BTreeSet<String>,
     broken: BTreeMap<String, String>,
-}
-
-struct Cycle {
-    a: String,
-    b: String,
-    remaining: BTreeSet<String>,
 }
 
 /// fnmatch(3) with no flags: `*`, `?`, `[...]` (with `!`/`^` and ranges),
@@ -207,7 +199,6 @@ fn resolve_named(jobs: &Jobs) -> BTreeMap<String, Aggregate> {
         aggregates.insert(
             name.clone(),
             Aggregate {
-                name: name.clone(),
                 dependencies: results,
                 broken,
             },
@@ -216,47 +207,48 @@ fn resolve_named(jobs: &Jobs) -> BTreeMap<String, Aggregate> {
     aggregates
 }
 
-/// constituents.cc:topoSort: dependencies first; a cycle names the two
-/// jobs and every aggregate not yet erased.
-fn topo_sort(mut dict: BTreeMap<String, Aggregate>) -> result::Result<Vec<Aggregate>, Cycle> {
-    fn visit(
-        dict: &mut BTreeMap<String, Aggregate>,
-        visited: &mut BTreeSet<String>,
-        parents: &mut BTreeSet<String>,
-        sorted: &mut Vec<Aggregate>,
-        path: &str,
-        parent: Option<&str>,
-    ) -> result::Result<(), Cycle> {
-        if parents.contains(path) {
-            dict.remove(path);
-            let parent = parent.unwrap_or_default();
-            dict.remove(parent);
-            return Err(Cycle {
-                a: path.to_string(),
-                b: parent.to_string(),
-                remaining: dict.keys().cloned().collect(),
-            });
-        }
-        if !visited.insert(path.to_string()) {
+type NamedAggregate<'a> = (&'a str, &'a Aggregate);
+
+/// constituents.cc:topoSort: dependencies first; report the first back edge.
+fn topo_sort(
+    dict: &BTreeMap<String, Aggregate>,
+) -> result::Result<Vec<NamedAggregate<'_>>, (&str, &str)> {
+    fn visit<'a>(
+        dict: &'a BTreeMap<String, Aggregate>,
+        visited: &mut BTreeSet<&'a str>,
+        parents: &mut BTreeSet<&'a str>,
+        sorted: &mut Vec<NamedAggregate<'a>>,
+        (name, aggregate): NamedAggregate<'a>,
+    ) -> result::Result<(), (&'a str, &'a str)> {
+        if !visited.insert(name) {
             return Ok(());
         }
-        parents.insert(path.to_string());
-        let refs = dict[path].dependencies.clone();
-        for r in &refs {
-            if r != path && dict.contains_key(r) {
-                visit(dict, visited, parents, sorted, r, Some(path))?;
+        parents.insert(name);
+        for dep in &aggregate.dependencies {
+            if dep != name
+                && let Some(child) = dict.get(dep)
+            {
+                if parents.contains(dep.as_str()) {
+                    return Err((dep, name));
+                }
+                visit(dict, visited, parents, sorted, (dep, child))?;
             }
         }
-        sorted.push(dict[path].clone());
-        parents.remove(path);
+        sorted.push((name, aggregate));
+        parents.remove(name);
         Ok(())
     }
     let mut sorted = Vec::new();
     let mut visited = BTreeSet::new();
     let mut parents = BTreeSet::new();
-    let keys: Vec<String> = dict.keys().cloned().collect();
-    for k in keys {
-        visit(&mut dict, &mut visited, &mut parents, &mut sorted, &k, None)?;
+    for (name, aggregate) in dict {
+        visit(
+            dict,
+            &mut visited,
+            &mut parents,
+            &mut sorted,
+            (name, aggregate),
+        )?;
     }
     Ok(sorted)
 }
@@ -273,21 +265,21 @@ pub fn rewrite(
     out: &mut dyn FnMut(Line),
 ) -> Result<()> {
     let aggregates = resolve_named(jobs);
-    let sorted = match topo_sort(aggregates) {
+    let sorted = match topo_sort(&aggregates) {
         Ok(s) => s,
-        Err(cycle) => {
-            let msg = format!("Dependency cycle: {} <-> {}", cycle.a, cycle.b);
+        Err((a, b)) => {
+            let msg = format!("Dependency cycle: {a} <-> {b}");
             log::line(&format!(
-                "error: Found dependency cycle between jobs '{}' and '{}'",
-                cycle.a, cycle.b
+                "error: Found dependency cycle between jobs '{a}' and '{b}'"
             ));
-            for name in [&cycle.a, &cycle.b] {
+            for name in [a, b] {
                 if let Some(mut job) = jobs.get_mut(name).and_then(|e| e.held.take()) {
                     set_error(&mut job, &msg);
                     out(Line::Job(job));
                 }
             }
-            for name in &cycle.remaining {
+            // The cycle endpoints have already been taken from the held jobs.
+            for name in aggregates.keys() {
                 if let Some(mut job) = jobs.get_mut(name).and_then(|e| e.held.take()) {
                     set_error(&mut job, "Skipping aggregate because of a dependency cycle");
                     out(Line::Job(job));
@@ -297,8 +289,8 @@ pub fn rewrite(
         }
     };
     let mut hash_cache = DrvHashCache::new();
-    for agg in sorted {
-        let Some(mut job) = jobs.get_mut(&agg.name).and_then(|e| e.held.take()) else {
+    for (name, agg) in sorted {
+        let Some(mut job) = jobs.get_mut(name).and_then(|e| e.held.take()) else {
             continue;
         };
         if agg.broken.is_empty() {
@@ -354,7 +346,7 @@ pub fn rewrite(
                     let p = drv.env_str(name).and_then(|s| StorePath::parse(s).ok());
                     job.outputs.insert(name.clone(), p);
                 }
-                if let Some(e) = jobs.get_mut(&agg.name) {
+                if let Some(e) = jobs.get_mut(name) {
                     e.drv_path = Some(new_path);
                 }
             }
@@ -398,33 +390,30 @@ mod tests {
 
     #[test]
     fn topo_sort_orders_and_detects_cycles() {
-        let agg = |name: &str, deps: &[&str]| Aggregate {
-            name: name.into(),
-            dependencies: deps.iter().map(|s| s.to_string()).collect(),
-            broken: BTreeMap::new(),
+        let agg = |name: &str, deps: &[&str]| {
+            (
+                name.to_owned(),
+                Aggregate {
+                    dependencies: deps.iter().map(|s| s.to_string()).collect(),
+                    broken: BTreeMap::new(),
+                },
+            )
         };
-        let dict: BTreeMap<String, Aggregate> =
-            [agg("indirect", &["direct"]), agg("direct", &["leaf"])]
-                .into_iter()
-                .map(|a| (a.name.clone(), a))
-                .collect();
-        let names: Vec<String> = topo_sort(dict)
-            .ok()
+        let dict = BTreeMap::from([
+            agg("indirect", &["direct"]),
+            agg("direct", &["direct", "leaf"]),
+        ]);
+        let names: Vec<_> = topo_sort(&dict)
             .unwrap()
             .into_iter()
-            .map(|a| a.name)
+            .map(|(name, _)| name)
             .collect();
         assert_eq!(names, ["direct", "indirect"]);
-        let dict: BTreeMap<String, Aggregate> = [
+        let dict = BTreeMap::from([
             agg("aggregate0", &["aggregate1"]),
             agg("aggregate1", &["aggregate0"]),
             agg("other", &[]),
-        ]
-        .into_iter()
-        .map(|a| (a.name.clone(), a))
-        .collect();
-        let Err(c) = topo_sort(dict) else { panic!() };
-        assert_eq!((c.a.as_str(), c.b.as_str()), ("aggregate0", "aggregate1"));
-        assert_eq!(c.remaining, BTreeSet::from(["other".to_string()]));
+        ]);
+        assert_eq!(topo_sort(&dict).err(), Some(("aggregate0", "aggregate1")));
     }
 }

@@ -519,8 +519,8 @@ pub fn open(session: &Arc<Session>) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
     use super::*;
+    use std::time::Instant;
 
     /// A call the way the evaluator enters one: sample, then push.
     fn call(s: &mut Stack, p: &Profile, frame: u64, bytes: u64) {

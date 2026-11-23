@@ -414,6 +414,36 @@ pub fn note_unsent(overrides: &[(String, String)], applied: &[&str], why: &str) 
     }
 }
 
+/// The settings `worker::Options` sends as fields of `SetOptions`, and
+/// `store`, which names the daemon this goes to and is not a setting for it.
+const SET_OPTIONS_FIELDS: &[&str] = &[
+    "store",
+    "keep-failed",
+    "keep-going",
+    "fallback",
+    "max-jobs",
+    "max-silent-time",
+    "cores",
+    "substitute",
+];
+
+/// `note_unsent` for `iets build` over `ssh-ng://`, which sends no
+/// `SetOptions` at all, as Nix's `SSHStore` does (ssh-store.cc).
+pub fn note_ssh(overrides: &[(String, String)]) {
+    let why = "an ssh-ng:// builder gets no SetOptions, as in Nix; its daemon's own settings apply";
+    note_unsent(overrides, &["store", "system"], why);
+    ignored::flush();
+}
+
+/// `note_unsent` for `iets build` over the worker protocol: it sends the
+/// fields of `SetOptions` and no override map.
+pub fn note_unsent_overrides(overrides: &[(String, String)]) {
+    let why =
+        "'iets build' sends the daemon only the fields of SetOptions; classic mode sends the rest";
+    note_unsent(overrides, SET_OPTIONS_FIELDS, why);
+    ignored::flush();
+}
+
 /// The settings a `grpc://` builder applies: `store` and `system` name and
 /// route it, and each `BuildDerivationRequest` carries the build limits
 /// (`remote::grpc::build::Limits`).
@@ -496,9 +526,10 @@ impl Config {
         }
     }
 
-    /// `load` for iets's own commands, which send a daemon no settings.
+    /// `load` for iets's own commands but `iets build`, which send a daemon no
+    /// settings.
     pub fn load_native(overrides: &[(String, String)]) -> Result<Config> {
-        let why = "iets's own commands send a daemon no settings; classic mode does";
+        let why = "this command sends a daemon no settings; classic mode does";
         note_unsent(overrides, &[], why);
         Config::load(overrides)
     }
@@ -570,18 +601,7 @@ impl Config {
     /// `worker::Options` sends as fields. A list that only got `extra-`
     /// values goes as `extra-<name>`, which the daemon appends to its own.
     pub fn forwarded(&self) -> Vec<(String, String)> {
-        // `store` names the daemon this goes to; it is not a setting for it
-        const FIELDS: &[&str] = &[
-            "store",
-            "keep-failed",
-            "keep-going",
-            "fallback",
-            "max-jobs",
-            "max-silent-time",
-            "cores",
-            "substitute",
-        ];
-        let sent = |n: &&String| acts_in_store(n) && !FIELDS.contains(&n.as_str());
+        let sent = |n: &&String| acts_in_store(n) && !SET_OPTIONS_FIELDS.contains(&n.as_str());
         let pair = |n: &String| {
             let name = match self.extra_only.contains(n) {
                 true => format!("extra-{n}"),
@@ -922,6 +942,18 @@ mod tests {
         for applied in ["timeout", "max-silent-time"] {
             assert!(!ignored.iter().any(|n| n == applied), "{applied}");
         }
+    }
+
+    /// An `ssh-ng://` builder gets no `SetOptions`, so even its fields are
+    /// noted.
+    #[test]
+    fn an_ssh_builder_takes_no_settings() {
+        note_ssh(&[("cores".to_string(), "3".to_string())]);
+        assert!(
+            ignored::noted("ignored-setting")
+                .iter()
+                .any(|n| n == "cores")
+        );
     }
 
     #[test]

@@ -77,7 +77,7 @@ section lists.
 | `-I P=PATH`, `--include P=PATH`, `-IP=PATH` | make `<P>` resolve to `PATH` |
 | `--impure`, `--no-pure-eval` | turn pure evaluation off; it is on by default, and the `pure` key in the user `iets.toml` changes that (`docs/reference/settings.md`) |
 | `--pure-eval` | turn pure evaluation on |
-| `--option NAME VALUE` | set a nix.conf setting. The evaluation and fetch settings apply (`docs/reference/settings.md`). A store setting gives one `ignored-setting` warning: these commands send a daemon no settings |
+| `--option NAME VALUE` | set a nix.conf setting. Store settings apply according to the command and builder (see `docs/reference/settings.md`). |
 | `--json-log-path PATH` | also write every log record to `PATH` |
 | `--log-format F` | `internal-json`, `raw`, `raw-with-logs`, `bar`, `bar-with-logs` |
 | `--show-trace` | put the trace into the JSON error records too |
@@ -175,12 +175,19 @@ to evaluate stops the run before anything builds.
 | `--dry-run` | upload the closure, print the plan, build nothing |
 | `--json` | print the outcomes as one JSON object instead of the paths |
 | `-k`, `--keep-going` | with one root: build everything a failure does not block |
+| `-j N`, `--max-jobs N` | allow up to `N` simultaneous local builds; `auto` is the CPU count. The same as `--option max-jobs N` |
+| `--cores N` | tell builders how many cores to use via `NIX_BUILD_CORES`; 0 is all of them. The same as `--option cores N` |
 | `--out NAME` | build the output `NAME` only; repeatable |
 | `--fetch-to DIR` | copy the outputs from the builder into `DIR` |
 | `-o`, `--out-link PATH` | bring the outputs into the local store and link them at `PATH`, `PATH-1`, ... |
 | `--source SP=LOCAL` | with a `DRV` argument: the local tree of the input source `SP` |
 
 It also takes the shared evaluation flags.
+
+The two parallelism flags apply over `daemon` and `unix://`. An `ssh-ng://`
+builder uses its own settings. A `grpc://` builder takes `timeout` and
+`max-silent-time`; its URL’s `max-builds` limits builds in flight.
+An unsupported store setting given with `--option` produces a warning.
 
 - stdout: one output path per line, in root order. With `--json`, the
   outcomes as one JSON object instead. With `--dry-run --json`, the plan.

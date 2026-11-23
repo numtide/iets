@@ -71,6 +71,17 @@ impl TryFrom<&Config> for Options {
 
     fn try_from(c: &Config) -> Result<Options> {
         Ok(Options {
+            overrides: c.forwarded(),
+            ..Options::fields(c)?
+        })
+    }
+}
+
+impl Options {
+    /// Native builds send the fixed fields only. Classic mode also forwards
+    /// store overrides, which can change the keys and substituters a daemon trusts.
+    pub(crate) fn fields(c: &Config) -> Result<Options> {
+        Ok(Options {
             max_jobs: c.max_jobs()?,
             cores: c.cores()?,
             keep_going: c.keep_going()?,
@@ -79,7 +90,7 @@ impl TryFrom<&Config> for Options {
             try_fallback: c.bool("fallback")?.unwrap_or(false),
             max_silent_time: c.int("max-silent-time")?.unwrap_or(0),
             build_timeout: c.int("timeout")?.unwrap_or(0),
-            overrides: c.forwarded(),
+            overrides: Vec::new(),
         })
     }
 }

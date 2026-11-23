@@ -451,6 +451,66 @@ fn a_path_on_stdout_or_a_failure() {
     assert!(!wrong.status.success() && stdout(&wrong).is_empty());
 }
 
+/// `--cores`, `-j` and `--option` reach the daemon in `SetOptions`, as Nix's
+/// client sends them: the build sees the cores as `NIX_BUILD_CORES`.
+#[test]
+fn the_daemon_gets_the_build_settings() {
+    let s = store!();
+    let file = s.write(
+        "cores.nix",
+        r#"{ name }: derivation { inherit name; system = "@SYSTEM@"; builder = "@SHELL@"; args = [ "-c" "echo $NIX_BUILD_CORES > $out" ]; }"#,
+    );
+    let build = |args: &[&str]| {
+        s.iets()
+            .args(["build", "--builder", "daemon", "--no-tracing-cache"])
+            .args(args)
+            .arg(&file)
+            .output()
+            .unwrap()
+    };
+
+    // Use the same unbuilt derivation for both job limits.
+    let none = build(&["-j", "0", "--argstr", "name", "cores"]);
+    assert!(!none.status.success(), "{}", stderr(&none));
+    for (args, expected) in [
+        (
+            &["-j", "1", "--cores", "3", "--argstr", "name", "cores"][..],
+            "3",
+        ),
+        (
+            &["--option", "cores", "5", "--argstr", "name", "--cores"][..],
+            "5",
+        ),
+    ] {
+        let o = build(args);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert!(!stderr(&o).contains("is ignored"), "{}", stderr(&o));
+        let path = stdout(&o);
+        let out = s.store_dir().join(Path::new(&path).file_name().unwrap());
+        assert_eq!(fs::read_to_string(out).unwrap().trim(), expected);
+    }
+
+    let o = build(&[
+        "--dry-run",
+        "--option",
+        "sandbox",
+        "false",
+        "--argstr",
+        "name",
+        "cores",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("setting 'sandbox' is ignored"),
+        "{}",
+        stderr(&o)
+    );
+
+    let bad = build(&["-j", "many"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("'max-jobs'"), "{}", stderr(&bad));
+}
+
 /// What a connection was told is valid stays valid until it closes.
 #[test]
 fn a_queried_path_is_rooted_until_the_connection_closes() {

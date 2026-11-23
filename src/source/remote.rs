@@ -561,9 +561,11 @@ fn adopt_file(ev: &mut Evaluator, sp: &StorePath, entry: &StoredTree, flat: Hash
 
 /// nix.conf, read once: `store` for the eval store and `access-tokens` for the
 /// forge headers. The file cannot change under a running evaluation.
-pub fn nix_conf(s: &Session) -> &config::Config {
-    s.nix_conf
-        .get_or_init(|| config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty()))
+pub fn nix_conf(s: &Arc<Session>) -> &config::Config {
+    s.nix_conf.get_or_init(|| {
+        let _entered = s.enter();
+        config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty())
+    })
 }
 
 /// The types whose fetch is "download one archive and unpack it"
@@ -780,11 +782,21 @@ fn fetch_git_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::Env;
     use rstest::rstest;
     use tempfile::tempdir;
 
     use IngestionMethod::{Flat, Recursive};
     use trace::Kind::{Directory, Regular};
+
+    #[test]
+    fn nix_conf_reads_its_own_sessions_environment() {
+        let ambient = Session::with_env(Env::isolated());
+        let _entered = ambient.enter();
+        let owner = Session::with_env(Env::isolated().with([("NIX_CONFIG", "cores = 3")]));
+        assert_eq!(nix_conf(&owner).str("cores"), Some("3"));
+        assert!(Arc::ptr_eq(&Session::current(), &ambient));
+    }
 
     fn attrs(pairs: &[(&str, &str)]) -> Attrs {
         pairs

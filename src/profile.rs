@@ -520,6 +520,7 @@ pub fn open(session: &Arc<Session>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     /// A call the way the evaluator enters one: sample, then push.
     fn call(s: &mut Stack, p: &Profile, frame: u64, bytes: u64) {
@@ -701,8 +702,12 @@ mod tests {
     #[test]
     fn a_wait_is_not_cpu_time() {
         cpu_us_since_sample();
-        thread::sleep(Duration::from_millis(50));
-        assert!(cpu_us_since_sample() < 10_000);
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(100));
+        let wall = start.elapsed();
+        let cpu = Duration::from_micros(cpu_us_since_sample());
+        // Allow for coarse CPU accounting on Windows while excluding the wait.
+        assert!(cpu < wall / 2, "sleep used {cpu:?} of CPU in {wall:?}");
         let start = thread_cpu_time();
         while thread_cpu_time() - start < Duration::from_millis(20) {}
         assert!(cpu_us_since_sample() >= 20_000);

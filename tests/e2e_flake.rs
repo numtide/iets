@@ -443,6 +443,80 @@ fn a_git_root_with_submodules() {
     f.check("submodules: dirty file", &value, &[]);
 }
 
+#[test]
+fn get_flake_of_a_local_git_subdirectory() {
+    let Some(f) = F::new() else { return };
+    let repo = f.work().join("repo");
+    let real = repo.join("real");
+    write(
+        &real.join("flake.nix"),
+        r#"{
+  inputs.dep.url = "path:./dep";
+  outputs = { self, dep }: { result = dep.value + " " + self.outPath; };
+}"#,
+    );
+    write(
+        &real.join("dep/flake.nix"),
+        r#"{ outputs = { self }: { value = "locked"; }; }"#,
+    );
+    symlink("real", repo.join("alias")).unwrap();
+    symlink("../outside", repo.join("escape")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    let lock = f.lock(real.to_str().unwrap());
+    assert!(lock.status.success(), "{}", stderr(&lock));
+    git(&repo, &["add", "real/flake.lock"]);
+    git(&repo, &["commit", "-qm", "locked flake"]);
+    let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+
+    let expr = |query: &str| {
+        format!(
+            r#"(builtins.getFlake "git+file://{}?{query}").result"#,
+            repo.display()
+        )
+    };
+    let direct = f.nix(&["eval", "--raw", "--impure", "--expr", &expr("dir=real")]);
+    assert!(direct.status.success(), "{}", stderr(&direct));
+    let expected = stdout(&direct);
+    assert!(
+        expected.starts_with("locked ") && expected.ends_with("/real"),
+        "{expected}"
+    );
+
+    let alias = f.nix(&["eval", "--raw", "--impure", "--expr", &expr("dir=alias")]);
+    assert!(
+        !alias.status.success() && stderr(&alias).contains("is a symlink"),
+        "{}",
+        stderr(&alias)
+    );
+
+    let eval = |mode: &str, query: &str| {
+        f.iets_eval(
+            &[("IETS_NIX_FALLBACK", "never")],
+            &["--raw", "--no-cache", mode, "--expr", &expr(query)],
+        )
+    };
+    let check = |mode: &str, query: &str| {
+        let out = eval(mode, query);
+        assert!(out.status.success(), "{query}: {}", stderr(&out));
+        assert_eq!(stdout(&out), expected, "{query}");
+    };
+    check("--impure", "dir=real");
+    check("--impure", "dir=alias");
+
+    let escape = eval("--impure", "dir=escape");
+    assert!(
+        !escape.status.success() && stderr(&escape).contains("escapes its source tree"),
+        "{}",
+        stderr(&escape)
+    );
+
+    // The worktree lock no longer includes the input declared by the flake.
+    write(&real.join("flake.lock"), LOCK);
+    check("--pure-eval", &format!("rev={rev}&dir=real"));
+    check("--pure-eval", &format!("rev={rev}&dir=alias"));
+}
+
 /// A git flake with a `path:` input, a relative `path:` input (no narHash in
 /// the lock) and a `follows`, in every state a working tree can be in.
 #[test]

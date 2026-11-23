@@ -903,31 +903,17 @@ impl<'a> Compiler<'a> {
         if let Some(&i) = m.index.get(&sym) {
             // Both sides attrs literals: merge (Nix discards the inner `rec`).
             let ast: &'a Ast = self.ast;
-            let new_binds: Option<&'a [Bind]> = match &def {
-                Def::Expr(e) => match ast.expr(*e) {
-                    Expr::Attrs { binds, .. } => Some(ast.binds(*binds)),
-                    _ => None,
-                },
-                Def::Nested(_) => Some(&[]),
-                _ => None,
-            };
-            let Some(new_binds) = new_binds else {
-                return self.dup_attr(sym, pos, m.statics[i].2);
-            };
-            self.open_nested(m, i, pos)?;
-            let target = m.nested_at(i);
-            if let Def::Nested(src) = def {
-                let src = *src;
-                for (s, d, p) in src.statics {
-                    self.add_static(target, s, d, p)?;
-                }
-                target.dynamics.extend(src.dynamics);
-            } else {
-                for b in new_binds {
+            if let Def::Expr(e) = def
+                && let Expr::Attrs { binds, .. } = ast.expr(e)
+            {
+                self.open_nested(m, i, pos)?;
+                let target = m.nested_at(i);
+                for b in ast.binds(*binds) {
                     self.add_bind(target, b)?;
                 }
+                return Ok(());
             }
-            return Ok(());
+            return self.dup_attr(sym, pos, m.statics[i].2);
         }
         let i = m.statics.len();
         m.statics.push((sym, def, pos));

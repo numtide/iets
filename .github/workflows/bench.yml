@@ -39,6 +39,7 @@ jobs:
       # milliseconds by more
       - name: Compare
         run: |
+          set -o pipefail
           ./target/release/examples/ab "$RUNNER_TEMP/iets-base" \
             target/release/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
       - if: ${{ !cancelled() }}

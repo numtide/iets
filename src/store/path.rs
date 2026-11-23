@@ -141,6 +141,11 @@ impl fmt::Display for StorePath {
     }
 }
 
+/// A byte a store path's base name may hold (path.cc:checkName).
+pub(crate) fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'_' | b'?' | b'=')
+}
+
 /// Mirrors path.cc:checkName.
 pub fn check_name(name: &str) -> Result<(), StorePathError> {
     if name.is_empty() {
@@ -173,7 +178,7 @@ pub fn check_name(name: &str) -> Result<(), StorePathError> {
         }
     }
     for &c in b {
-        if !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.' | b'_' | b'?' | b'=')) {
+        if !is_name_byte(c) {
             return Err(StorePathError(format!(
                 "name '{name}' contains illegal character '{}'",
                 c as char

@@ -1,10 +1,7 @@
 //! The safe value handle an embedder works with.
 //!
-//! [`Eval`] borrows an [`Evaluator`]; [`Value`] is a value that evaluator
-//! holds. The shared lifetime is the whole safety story: a `Value<'e>` can
-//! only exist while the evaluator is borrowed, so it can never outlive the
-//! arena it points into. Nothing here exposes `runtime::Word`, an arena
-//! pointer or a tag.
+//! [`Eval`] borrows an [`Evaluator`]. Its [`Value`] handles carry that
+//! borrow's lifetime. Pass each handle back to the evaluator that made it.
 //!
 //! The layer is thin: every getter is the load the evaluator itself does.
 //! Only the constructors allocate (docs/reference/library.md).
@@ -71,7 +68,7 @@ pub enum ContextElem<'e> {
 }
 
 /// A value of the evaluator `Eval` borrows. Copy, one machine word, and
-/// invariant in `'e` so it stays with the evaluator that made it.
+/// invariant in the evaluator borrow's lifetime.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Value<'e> {
     w: Word,
@@ -217,8 +214,13 @@ impl<'e> Eval<'e> {
         Eval { ev }
     }
 
-    /// The evaluator itself, for the parts of the library that take one.
-    pub fn evaluator(&mut self) -> &mut Evaluator {
+    /// Shared access keeps the evaluator in place while its values are live.
+    /// ```compile_fail,E0594
+    /// fn replace(e: &mut iets::api::value::Eval<'_>, other: iets::eval::Evaluator) {
+    ///     *e.evaluator() = other;
+    /// }
+    /// ```
+    pub fn evaluator(&self) -> &Evaluator {
         self.ev
     }
 

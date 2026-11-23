@@ -48,7 +48,11 @@ fn parse(out: &str) -> Jobs {
             Some(_) => None,
             None => Some(j["drvPath"].as_str().expect("drvPath").to_string()),
         };
-        jobs.insert(attr, drv);
+        assert!(
+            jobs.insert(attr, drv).is_none(),
+            "duplicate job: {}",
+            j["attr"]
+        );
     }
     jobs
 }

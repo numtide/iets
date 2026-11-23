@@ -172,8 +172,11 @@ fn walk(
     if depth == config().opts.chunk_depth && !admit(hash, depth, false) {
         return;
     }
+    // worker.cc:processJobRequest: what printed between two attributes, or
+    // while a set was evaluated, goes on no line
+    ev.record_logs();
     match node(ev, w, path, hash) {
-        Ok(Node::Job(job)) => sink(Line::Job(job)),
+        Ok(Node::Job(job)) => sink(Line::Job(job).with_logs(&ev.take_logs())),
         Ok(Node::Recurse(attrs)) => {
             remember_set(attrs, hash, depth);
             let ordered: Vec<&Attr> = lexicographic_order(ev, attrs).collect();
@@ -209,7 +212,10 @@ fn walk(
         // An attr that fails above the chunk depth is a unit of its own,
         // like a derivation there, so one chunk reports it.
         Err(_) if !admit(hash, depth, true) => {}
-        Err(e) => sink(Line::Error(error_line(ev, path, &e))),
+        Err(e) => {
+            let line = Line::Error(error_line(ev, path, &e));
+            sink(line.with_logs(&ev.take_logs()))
+        }
     }
 }
 
@@ -223,6 +229,8 @@ pub fn error_line(ev: &Evaluator, path: &[String], e: &Error) -> ErrorLine {
         error: r.text(),
         fatal: e.kind == ErrorKind::StackOverflow,
         stats: None,
+        warnings: None,
+        traces: None,
     }
 }
 

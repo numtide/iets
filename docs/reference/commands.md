@@ -636,6 +636,7 @@ nix-eval-jobs. A job:
 | `extraValue` | with `--apply` |
 | `pos` | with `--provenance`: `file:line:col` of the derivation. iets only |
 | `stats` | from worker processes, as nix-eval-jobs 2.35.3 and later write it: `wallMs`, the time to evaluate the attribute, and `allocBytes`, the arena bytes that took. Nix counts its garbage collector's bytes instead. Work that attributes share counts toward the first one that needs it. Not present with `--max-memory-size 0` |
+| `warnings`, `traces` | as nix-eval-jobs 2.35.4 writes them: the messages `builtins.warn` and `builtins.trace` printed while the attribute was evaluated, without their `evaluation warning: ` and `trace: ` prefixes and escape sequences, in order; each key only when it has one. They still go to stderr too. A value attributes share prints once, on the line of the attribute that forced it first, and what printed while a set was evaluated is on no line. nix-eval-jobs also puts Nix's own warnings here (a deprecated setting, an impure fetch); iets does not |
 
 An error line:
 
@@ -644,7 +645,8 @@ An error line:
 ```
 
 The error text has no color codes. It is also printed on stderr. An error
-line from a worker process has `stats` too.
+line from a worker process has `stats` too, and any error line its
+`warnings` and `traces`.
 
 ### Instantiation
 

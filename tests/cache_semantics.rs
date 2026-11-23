@@ -94,6 +94,34 @@ fn run(mut c: Command) -> Run {
     }
 }
 
+#[rstest]
+fn explicit_arguments_apply_to_each_final_selection(work: Work) {
+    let root = ["--arg", "x", "7", "-E", "{x}: x"];
+    let empty = ["--arg", "x", "7", "-E", "{x}: x", "-A", ""];
+    for args in [&root[..], &empty[..]] {
+        let first = work.eval(args);
+        assert_eq!((first.rc, first.out.as_str()), (0, "7"));
+        assert!(!first.status.contains("cache: hit"));
+        assert!(work.eval(args).status.contains("cache: hit"));
+    }
+
+    let result = work.eval(&[
+        "--arg",
+        "x",
+        "7",
+        "-E",
+        "{ good = {x}: x; bad = {missing}: 0; }",
+        "-A",
+        "good",
+        "-A",
+        "good",
+        "-A",
+        "bad",
+    ]);
+    assert_ne!(result.rc, 0);
+    assert_eq!(result.out, "7\n7");
+}
+
 /// Sets the mtime of `files` to `secs` after the epoch. BSD touch has no
 /// `-d` for an ISO date.
 fn touch(secs: u64, files: &[&str]) {

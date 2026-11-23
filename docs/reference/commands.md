@@ -118,6 +118,9 @@ $ iets eval --impure $nixpkgs -A hello.name
   `cannot evaluate a function that has an argument without a value ('NAME')`.
 - A function whose arguments end in `...` gets every `--arg`, named or not.
 
+For `iets eval`, explicit `--arg` and `--argstr` arguments also apply to
+the final selected function. Each repeated `-A` produces its value in order.
+
 Without an attribute path, the top level is called only when you give an
 `--arg`, as in `nix-instantiate --eval FILE`. `search` and every native
 command work the same way. Classic mode follows each Nix command.

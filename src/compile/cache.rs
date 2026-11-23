@@ -942,9 +942,9 @@ impl<'a> De<'a, '_> {
 
     /// The arena slice is reserved first and filled as the items decode,
     /// so a list costs no scratch vector.
-    fn fill<T>(&mut self, n: usize, mut item: impl FnMut(&mut Self) -> T) -> &'static [T] {
+    fn fill<T>(&mut self, n: usize, mut item: impl FnMut(&mut Self) -> T) -> &'static mut [T] {
         if n == 0 {
-            return &[];
+            return &mut [];
         }
         let p = self.ev.arena.alloc_raw(n * size_of::<T>(), align_of::<T>()) as *mut T;
         // SAFETY: fresh allocation of n elements; every slot is written
@@ -954,7 +954,7 @@ impl<'a> De<'a, '_> {
             for i in 0..n {
                 p.add(i).write(item(self));
             }
-            slice::from_raw_parts(p, n)
+            slice::from_raw_parts_mut(p, n)
         }
     }
 
@@ -1158,9 +1158,6 @@ impl<'a> De<'a, '_> {
             pos: Pos::NONE,
             scope: BindScope::Own,
         });
-        // SAFETY: `fill` handed out a fresh arena slice that nothing else
-        // holds yet; the entries are rewritten in place below.
-        let out_mut = unsafe { slice::from_raw_parts_mut(out.as_ptr() as *mut BindIr, n) };
         for i in 0..n {
             if !self.ok {
                 break;
@@ -1190,7 +1187,7 @@ impl<'a> De<'a, '_> {
                 _ => self.node(),
             };
             let new = perm.as_ref().map_or(i, |p| p[i] as usize);
-            out_mut[new] = BindIr {
+            out[new] = BindIr {
                 sym: syms[i],
                 value,
                 pos: poss[i],
@@ -1376,13 +1373,10 @@ impl<'a> De<'a, '_> {
                         default: None,
                         pos: Pos::NONE,
                     });
-                    // SAFETY: as in `binds`: a fresh slice, rewritten in place.
-                    let fm =
-                        unsafe { slice::from_raw_parts_mut(formals.as_ptr() as *mut FormalIr, n) };
                     for i in 0..n {
                         let default = self.opt_node();
                         let new = fperm.as_ref().map_or(i, |p| p[i] as usize);
-                        fm[new] = FormalIr {
+                        formals[new] = FormalIr {
                             sym: syms[i],
                             default,
                             pos: poss[i],

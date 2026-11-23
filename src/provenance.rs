@@ -49,6 +49,9 @@ pub struct SourceMap {
 impl SourceMap {
     /// Adds one mapping. Call `sort` once every mapping is in.
     pub fn insert(&mut self, prefix: &[u8], local: &[u8]) {
+        if prefix.is_empty() {
+            return;
+        }
         self.entries.push(Entry {
             prefix: prefix.to_vec(),
             local: local.to_vec(),
@@ -80,29 +83,27 @@ impl SourceMap {
         }
     }
 
-    fn find(&self, path: &[u8]) -> Option<&Entry> {
-        self.entries.iter().find(|e| path.starts_with(&e.prefix))
+    fn mapped(entries: &[Entry], path: &[u8]) -> Option<Vec<u8>> {
+        let e = entries.iter().find(|e| {
+            path.strip_prefix(&e.prefix[..]).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(b"/") || e.prefix.ends_with(b"/")
+            })
+        })?;
+        let mut out = e.local.clone();
+        out.extend_from_slice(&path[e.prefix.len()..]);
+        Some(out)
     }
 
     /// The local path `path` came from, with the tail below the mapped
     /// prefix kept.
     pub fn locate(&self, path: &[u8]) -> Option<Vec<u8>> {
-        let e = self.find(path)?;
-        let mut out = e.local.clone();
-        out.extend_from_slice(&path[e.prefix.len()..]);
-        Some(out)
+        Self::mapped(&self.entries, path)
     }
 
     /// `<input>/<tail>` for a file inside a locked input no local
     /// directory stands for.
     pub fn label(&self, path: &[u8]) -> Option<Vec<u8>> {
-        let e = self.inputs.iter().find(|e| {
-            path.strip_prefix(&e.prefix[..])
-                .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
-        })?;
-        let mut out = e.local.clone();
-        out.extend_from_slice(&path[e.prefix.len()..]);
-        Some(out)
+        Self::mapped(&self.inputs, path)
     }
 
     /// Every store path this map knows, replaced by its local path. Only
@@ -397,6 +398,23 @@ mod tests {
             SourceMap::default()
                 .locate(b"/nix/store/aaaa-source")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn source_map_requires_a_directory_boundary() {
+        let mut m = map();
+        m.insert(b"", b"/unused");
+        m.sort();
+        let sibling = b"/nix/store/aaaa-source-other/x.nix";
+        assert!(m.locate(sibling).is_none());
+        assert_eq!(m.rewrite(sibling), sibling);
+
+        m.insert(b"/nix/store/aaaa-source/sub/", b"/work/");
+        m.sort();
+        assert_eq!(
+            m.locate(b"/nix/store/aaaa-source/sub/x.nix").unwrap(),
+            b"/work/x.nix"
         );
     }
 

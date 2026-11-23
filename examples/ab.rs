@@ -33,6 +33,7 @@ mod ab {
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
     use std::ptr;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -235,18 +236,36 @@ mod ab {
     }
 
     /// Independent of line order, which eval-jobs's workers do not keep.
-    fn hash_output(r: impl Read) -> [u8; 32] {
-        let mut lines: Vec<[u8; 32]> = BufReader::new(r)
+    fn hash_output(r: impl Read, finished: mpsc::Sender<()>) -> io::Result<[u8; 32]> {
+        let lines = BufReader::new(r)
             .split(b'\n')
-            .map_while(Result::ok)
-            .map(|l| Sha256::digest(mask_stats(&l)).into())
-            .collect();
+            .map(|line| line.map(|l| Sha256::digest(mask_stats(&l)).into()))
+            .collect::<io::Result<Vec<[u8; 32]>>>();
+        // Once reading ends, sorting cannot block on an inherited writer.
+        let _ = finished.send(());
+        let mut lines = lines?;
         lines.sort_unstable();
         let mut h = Sha256::new();
         for l in &lines {
             h.update(l);
         }
-        h.finalize().into()
+        Ok(h.finalize().into())
+    }
+
+    fn finish_stdout(
+        reading: mpsc::Receiver<()>,
+        hasher: thread::JoinHandle<io::Result<[u8; 32]>>,
+        limit: Duration,
+    ) -> Result<[u8; 32], RunError> {
+        if reading.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+            return Err(RunError::Cleanup(
+                "benchmark stdout did not reach EOF".into(),
+            ));
+        }
+        hasher
+            .join()
+            .expect("the hash thread")
+            .map_err(|e| RunError::Cleanup(format!("read benchmark stdout: {e}")))
     }
 
     /// How long processes a run left behind may go on before they are killed.
@@ -421,7 +440,8 @@ mod ab {
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
-        let hasher = thread::spawn(move || hash_output(out));
+        let (finished, reading) = mpsc::channel();
+        let hasher = thread::spawn(move || hash_output(out, finished));
         let mut status = 0;
         let mut ru = MaybeUninit::<libc::rusage>::zeroed();
         // SAFETY: the pid is our child, and wait4 fills the structs it is given.
@@ -438,7 +458,7 @@ mod ab {
         // the hash thread may never end while a leftover holds stdout open
         let clean = reap_leftovers(LEFTOVER_LIMIT)
             .map_err(|e| RunError::Cleanup(format!("cannot stop the processes it left: {e}")))?;
-        let out = hasher.join().expect("the hash thread");
+        let out = finish_stdout(reading, hasher, KILL_LIMIT)?;
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
         let counts = counters.as_deref_mut().and_then(counters::read);
@@ -926,6 +946,32 @@ mod ab {
         use std::sync::Mutex;
 
         use super::*;
+
+        #[test]
+        fn a_writer_outside_the_child_tree_can_keep_stdout_open() {
+            let (reader, writer) = io::pipe().unwrap();
+            let (finished, reading) = mpsc::channel();
+            let hasher = thread::spawn(move || hash_output(reader, finished));
+            assert!(matches!(
+                finish_stdout(reading, hasher, Duration::ZERO),
+                Err(RunError::Cleanup(_))
+            ));
+            drop(writer);
+        }
+
+        #[test]
+        fn stdout_read_failure_after_a_complete_line_is_fatal_to_the_digest() {
+            struct Broken;
+            impl Read for Broken {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    Err(io::Error::other("broken reader"))
+                }
+            }
+            let (finished, reading) = mpsc::channel();
+            let result = hash_output(b"line\n".as_slice().chain(Broken), finished);
+            assert_eq!(result.unwrap_err().to_string(), "broken reader");
+            reading.try_recv().unwrap();
+        }
 
         #[test]
         fn stats_numbers_are_masked() {

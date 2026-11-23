@@ -9,6 +9,7 @@ path = "src/main.rs"
 [dependencies]
 sha2 = "0.11"
 blake3 = "1"
+base64 = "0.22"
 crc32fast = "1"
 sha1 = "0.11"
 md-5 = "0.11"

@@ -86,6 +86,20 @@ impl DrvState {
         }
     }
 
+    /// Refresh generated metadata while keeping any site already named by the walk.
+    fn record_created(&self, path: StorePath, mut info: DrvInfo) {
+        self.drvs
+            .lock()
+            .entry(path)
+            .and_modify(|old| {
+                if old.attr.is_some() {
+                    info.attr = old.attr.take();
+                    info.pos = old.pos.or(info.pos);
+                }
+            })
+            .insert_entry(info);
+    }
+
     /// The three settings of `eval::EvalConfig`.
     pub(crate) fn new(keep_aterm: bool, keep_site: bool, dump_dir: Option<PathBuf>) -> DrvState {
         DrvState {
@@ -797,7 +811,7 @@ fn derivation_strict_internal(
     } else {
         None
     };
-    ev.drv.drvs.insert(
+    ev.drv.record_created(
         drv_path.clone(),
         DrvInfo {
             outputs: drv.outputs.keys().cloned().collect(),

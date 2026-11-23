@@ -22,6 +22,10 @@ in
     recurseForDerivations = true;
     anotherone = makeTextDrv "constituent" "text";
     builtJob = mk "job1";
+    "1Password" = mk "digit-first";
+    quoted = aggregate "quoted" [ ''success."1Password"'' ];
+    unquoted = aggregate "unquoted" [ "success.1Password" ];
+    quotedGlob = globAggregate "quoted-glob" [ ''success."1Pass*"'' ];
     indirect_aggregate = aggregate "indirect_aggregate" [ "success.anotherone" ];
     direct_aggregate = aggregate "direct_aggregate" [ (mk "job1") ];
     mixed_aggregate = aggregate "mixed_aggregate" [ (mk "job1") "success.anotherone" ];

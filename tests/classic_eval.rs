@@ -1393,7 +1393,7 @@ fn ignored_flags_and_settings() {
         stdout(&ns) == "1"
             && r.len() == 1
             && r[0]["raw_msg"].as_str().unwrap_or("").starts_with(
-                "setting 'sandbox' is ignored: iets's own commands send a daemon no settings",
+                "setting 'sandbox' is ignored: this command sends a daemon no settings; classic mode does",
             ),
         stderr(&ns),
     );

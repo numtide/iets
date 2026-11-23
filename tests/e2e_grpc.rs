@@ -222,36 +222,39 @@ fn the_farm_enforces_the_build_limits() {
     let Some(g) = start() else { return };
     let s = &g.s;
     let nix = farm(s);
-    let quiet = s.write(
-        "c8/quiet.nix",
-        "derivation { name = \"iets-grpc-e2e-quiet-@NONCE@\"; system = \"@SYSTEM@\"; builder = \"@SHELL@\"; args = [ \"-c\" \"end=$((SECONDS + 20)); while [ $SECONDS -lt $end ]; do :; done; echo > $out\" ]; }\n",
-    );
-    let o = s
-        .iets_as(&nix)
-        .env("IETS_NIX_FALLBACK", "never")
-        .args([
-            "build",
-            "--store",
-            &g.url,
-            "--eval-store",
-            "auto",
-            "--no-link",
-        ])
-        .args(["--option", "max-silent-time", "2", "-f"])
-        .arg(&quiet)
-        .output()
-        .unwrap();
-    let err = stderr(&o);
-    assert!(!o.status.success(), "{err}\n{}", g.log());
-    assert!(
-        err.contains("timed out after 2 seconds"),
-        "{err}\n{}",
-        g.log()
-    );
-    assert!(
-        !err.contains("setting 'max-silent-time' is ignored"),
-        "{err}"
-    );
+    let mut classic = s.iets_as(&nix);
+    classic.env("IETS_NIX_FALLBACK", "never").args([
+        "build",
+        "--store",
+        &g.url,
+        "--eval-store",
+        "auto",
+        "--no-link",
+    ]);
+    let mut native = s.iets();
+    native.args(["build", "--builder", &g.url, "--no-tracing-cache"]);
+    for (mode, mut cmd) in [("classic", classic), ("native", native)] {
+        let quiet = s.write(
+            &format!("c8/{mode}.nix"),
+            &format!("derivation {{ name = \"iets-grpc-e2e-quiet-{mode}-@NONCE@\"; system = \"@SYSTEM@\"; builder = \"@SHELL@\"; args = [ \"-c\" \"end=$((SECONDS + 20)); while [ $SECONDS -lt $end ]; do :; done; echo > $out\" ]; }}\n"),
+        );
+        let o = cmd
+            .args(["--option", "max-silent-time", "2", "-f"])
+            .arg(&quiet)
+            .output()
+            .unwrap();
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{err}\n{}", g.log());
+        assert!(
+            err.contains("timed out after 2 seconds"),
+            "{err}\n{}",
+            g.log()
+        );
+        assert!(
+            !err.contains("setting 'max-silent-time' is ignored"),
+            "{err}"
+        );
+    }
 }
 
 /// A set of checks gets the same verdicts over grpc as over the worker

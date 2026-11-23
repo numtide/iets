@@ -352,20 +352,19 @@ as it does for a Nix client. `store` is not sent: it names the daemon. A
 list setting that only got `extra-` values goes as `extra-NAME`, which the
 daemon appends to its own value.
 
-Classic mode does this. iets's own commands (`iets eval`, `build`,
-`eval-jobs`, `print-dev-env`, `diff`) send Nix's defaults and no
-overrides. There, a store setting given with `--option` gives one warning:
+Classic mode forwards that map. Over `daemon` and `unix://`, `iets build`
+sends only the fixed fields: the evaluation’s cache keys and substituters
+therefore do not change what the builder trusts. Other native commands
+use the default fields. A store setting supplied with `--option` gives
+an `ignored-setting` warning when the command cannot apply it to the builder.
+Settings from nix.conf and `$NIX_CONFIG` do not trigger this warning.
 
-```
-warning: setting 'sandbox' is ignored: iets's own commands send a daemon no settings; classic mode does
-```
-
-A `grpc://` builder has no `SetOptions`. In classic mode each build
-request carries `timeout` and `max-silent-time` instead, so the farm stops
-a build that runs or stays silent too long, and `store` and `system` still
-name and route the builder. Every other store setting gives the same
-warning, with the reason `a grpc:// builder takes only timeout and
-max-silent-time; its URL has 'max-builds'`.
+A `grpc://` builder has no `SetOptions`. Each build request carries
+`timeout` and `max-silent-time` instead, so the farm stops a build that
+runs or stays silent too long, and `store` and `system` still name and
+route the builder. For every other store setting, classic mode and `iets
+build` give the same warning, with the reason `a grpc:// builder takes
+only timeout and max-silent-time; its URL has 'max-builds'`.
 
 **3. It holds by construction.** iets says nothing.
 

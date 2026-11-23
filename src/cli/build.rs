@@ -17,22 +17,26 @@ use crate::build::{Outcome, Target};
 use crate::cli::help::{arg_error, each_arg};
 use crate::cli::render::{self, text};
 use crate::cli::{
-    self, EvalArgs, Input, Run, build_targets, devenv, parse_eval_args, report, run_for,
+    self, EvalArgs, Input, Run, build_targets, devenv, parse_eval_args_with_overrides, report,
+    run_for,
 };
+use crate::config;
 use crate::error::Error as CrateError;
 use crate::eval::{self, Evaluator};
 use crate::log;
 use crate::provenance::{Provenance, SourceMap};
 use crate::remote::plan::{Inputs, Plan};
 use crate::remote::worker::{self, Missing};
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::settings::FixHashes;
 use crate::store::path::{StorePath, drv_name};
 use crate::syntax::symbol::FxHashMap;
 use crate::trace::run::{BuildTables, Cache};
 use crate::trace::wire;
 
+#[derive(Default)]
 struct BuildArgs {
+    config: config::Config,
     url: Option<String>,
     timings: bool,
     no_build: bool,
@@ -45,6 +49,9 @@ struct BuildArgs {
     sources: HashMap<String, PathBuf>,
     /// What names this run's roots in the roots store ([`keep_outputs`]).
     root_key: Vec<Vec<u8>>,
+    /// `--option`, `-j` and `--cores`, for the warnings about the settings
+    /// the builder does not get.
+    overrides: Vec<(String, String)>,
 }
 
 /// `iets build`: evaluate to derivations and ship their closure from memory, or (legacy)
@@ -102,19 +109,7 @@ pub fn cmd_build(argv: &[String]) -> i32 {
 }
 
 fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
-    let mut b = BuildArgs {
-        url: None,
-        timings: false,
-        no_build: false,
-        dry_run: false,
-        json: false,
-        keep_going: false,
-        fetch_to: None,
-        out_link: None,
-        outputs: Vec::new(),
-        sources: HashMap::new(),
-        root_key: Vec::new(),
-    };
+    let mut b = BuildArgs::default();
     let mut rest: Vec<String> = Vec::new();
     each_arg(argv, |s, next| match s {
         "--builder" => b.url = Some(next()),
@@ -135,8 +130,10 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         }
         s => rest.push(s.to_string()),
     });
-    let a = parse_eval_args(&rest);
+    let (a, overrides) = parse_eval_args_with_overrides(&rest);
     b.root_key = root_key(&installables(&a));
+    b.config = config::Config::load(&overrides).unwrap_or_else(|e| session::exit(e.report()));
+    b.overrides = overrides;
     (b, a)
 }
 
@@ -387,11 +384,22 @@ fn build_roots(
     if roots.is_empty() {
         return no_output("nothing to build: the expression has no derivation in it");
     }
-    let cfg = apibuild::config();
-    let transport = match apibuild::transport(b.url.as_deref(), &cfg) {
+    let transport = match apibuild::transport(b.url.as_deref(), &b.config) {
         Ok(t) => t,
         Err(e) => return e.report(),
     };
+    match transport {
+        worker::Transport::Grpc(_) => config::note_grpc(&b.overrides),
+        worker::Transport::Ssh { .. } => config::note_ssh(&b.overrides),
+        _ => config::note_unsent_overrides(&b.overrides),
+    }
+    let mut opts = match worker::Options::fields(&b.config) {
+        Ok(o) => o,
+        Err(e) => return e.report(),
+    };
+    // one root is one question, and its first failure answers it; several
+    // roots are several questions, and each one gets its verdict
+    opts.keep_going |= b.keep_going || roots.len() > 1;
     let t0 = Instant::now();
     let plan = match apibuild::plan_with(roots, inputs) {
         Ok(p) => p,
@@ -404,12 +412,6 @@ fn build_roots(
             plan.store_drvs
         );
     }
-    let opts = worker::Options {
-        // one root is one question, and its first failure answers it; several
-        // roots are several questions, and each one gets its verdict
-        keep_going: b.keep_going || roots.len() > 1,
-        ..Default::default()
-    };
     let mut d = match Dispatch::open(&transport, &opts, plan, prov.clone(), Style::detect()) {
         Ok(d) => d.overrides(b.sources.clone()),
         Err(e) => return e.report(),

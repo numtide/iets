@@ -354,20 +354,24 @@ fn belongs(name: &OsStr, shape: Shape) -> bool {
                 .is_some_and(|k| is_key(OsStr::from_bytes(k), shape)))
 }
 
-/// True when every name in `root` is one this store's own layout makes. An
-/// unreadable directory or entry counts as foreign: iets removes only what
-/// it can prove it put there.
-fn all_ours(root: &Path, shape: Shape) -> bool {
+/// Until the first version is published, several initializers can have
+/// temporary files in an otherwise empty root.
+fn unversioned(root: &Path, shape: Shape) -> Owner {
     let Ok(rd) = fs::read_dir(root) else {
-        return false;
+        return Owner::Foreign;
     };
+    let mut state = Owner::Ready;
     for e in rd {
-        match e {
-            Ok(e) if belongs(&e.file_name(), shape) => {}
-            _ => return false,
+        let Ok(e) = e else { return Owner::Foreign };
+        let name = e.file_name();
+        if !belongs(&name, shape) {
+            return Owner::Foreign;
+        }
+        if !is_tmp(&name) {
+            state = Owner::Stale("no format version");
         }
     }
-    true
+    state
 }
 
 fn owner(root: &Path, shape: Shape) -> Owner {
@@ -383,12 +387,21 @@ fn owner(root: &Path, shape: Shape) -> Owner {
     if !fs::symlink_metadata(root).is_ok_and(|m| sysfs::private_to_me(&m)) {
         return Owner::Untrusted("is open to other users");
     }
-    match fs::read(root.join(VERSION)) {
-        Ok(v) if v.trim_ascii() == format(shape) => {}
-        Ok(_) => return Owner::Stale("format version mismatch"),
-        Err(_) if empty(root) => {}
-        Err(_) if all_ours(root, shape) => return Owner::Stale("no format version"),
-        Err(_) => return Owner::Foreign,
+    let version = root.join(VERSION);
+    let v = match fs::read(&version) {
+        Ok(v) => v,
+        Err(_) => {
+            let state = unversioned(root, shape);
+            // A sibling can publish both the version and entries between
+            // the first read and the directory scan.
+            match fs::read(version) {
+                Ok(v) => v,
+                Err(_) => return state,
+            }
+        }
+    };
+    if v.trim_ascii() != format(shape) {
+        return Owner::Stale("format version mismatch");
     }
     if root.join(LOCK).is_dir() {
         return Owner::Stale("lock is not a file");
@@ -522,10 +535,6 @@ pub fn env_key() -> &'static [u8; 32] {
 }
 
 static ENV_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
-
-fn empty(root: &Path) -> bool {
-    fs::read_dir(root).is_ok_and(|mut d| d.next().is_none())
-}
 
 /// The store's single-writer lock, released when this value drops.
 pub struct WriteLock(fs::File);
@@ -1166,6 +1175,20 @@ mod tests {
         assert!(prepare(d.path(), Shape::StoreEntries, false));
         assert!(!entry.exists());
         assert_eq!(fs::read(d.path().join(VERSION)).expect("version"), b"2");
+    }
+
+    #[test]
+    fn preparing_a_fresh_store_preserves_a_siblings_version_write() {
+        let d = tempdir().unwrap();
+        let version = d.path().join(VERSION);
+        tmp::replace(&version, |f| {
+            f.write_all(FORMAT)?;
+            // The sibling has written its temporary and has yet to rename it.
+            ready(d.path());
+            Ok(())
+        })
+        .expect("publish the first writer's version");
+        assert_eq!(fs::read(version).unwrap(), FORMAT);
     }
 
     #[test]

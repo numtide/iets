@@ -232,9 +232,10 @@ classic mode the line stays off stderr and the record goes to
 The key is computed from the command *before* evaluation: the build id, the
 subcommand, the expression, or the path of the file or the flake directory,
 the `--arg` pairs, `-A`, `--strict`, `--json`, `--raw`, the lint levels, the
-search path, `builtins.currentSystem`, and the working directory only when a
-relative path literal can reach it. `--workers`, `--builder`, `--timings`
-and `--dry-run` are not in the key: they do not change the answer.
+search path, `builtins.currentSystem`, `builtins.storeDir`, and the working
+directory only when a relative path literal can reach it. `--workers`,
+`--builder`, `--timings` and `--dry-run` are not in the key: they do not
+change the answer.
 
 The key names the file by its path, and the same goes for a flake's
 `flake.nix` and `flake.lock`. They are in the read set like any other file,

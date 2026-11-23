@@ -32,6 +32,7 @@ mod ab {
     use std::fs::{self, File};
     use std::io::{self, BufRead, BufReader, Read};
     use std::mem::MaybeUninit;
+    use std::os::unix::fs::FileExt;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
     use std::ptr;
@@ -433,6 +434,25 @@ mod ab {
         }
     }
 
+    fn cleanup_error(error: String, log: &File) -> RunError {
+        let mut buf = [0; 4096];
+        let tail = log.metadata().and_then(|meta| {
+            if !meta.is_file() {
+                return Ok(0);
+            }
+            let len = meta.len().min(buf.len() as u64);
+            log.read_exact_at(&mut buf[..len as usize], meta.len() - len)?;
+            Ok(len as usize)
+        });
+        match tail {
+            Ok(n) if n > 0 => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                RunError::Cleanup(format!("{error}\nworkload stderr (tail):\n{text}"))
+            }
+            _ => RunError::Cleanup(error),
+        }
+    }
+
     fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
         // a thread of its own, so the counters it opens cover only the run
         thread::scope(|s| {
@@ -460,11 +480,18 @@ mod ab {
                 cmd.env_remove(k);
             }
         }
+        let log = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(stderr)
+            .map_err(|e| e.to_string())?;
         cmd.env("IETS_PROGRESS", "false")
             .env("XDG_CACHE_HOME", cache)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(File::create(stderr).map_err(|e| e.to_string())?);
+            .stderr(log.try_clone().map_err(|e| e.to_string())?);
         let before = children();
         #[cfg(target_os = "linux")]
         let mut counters = counters::open();
@@ -489,7 +516,7 @@ mod ab {
         let wall = t0.elapsed().as_secs_f64();
         // the hash thread may never end while a leftover holds stdout open
         let clean = reap_leftovers(LEFTOVER_LIMIT)
-            .map_err(|e| RunError::Cleanup(format!("cannot stop the processes it left: {e}")))?;
+            .map_err(|e| cleanup_error(format!("cannot stop the processes it left: {e}"), &log))?;
         let out = finish_stdout(reading, hasher, KILL_LIMIT)?;
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -984,6 +1011,23 @@ mod ab {
         use std::sync::Mutex;
 
         use super::*;
+        use std::io::Write;
+
+        #[test]
+        fn fatal_cleanup_keeps_its_context_and_only_the_stderr_tail() {
+            let mut log = tempfile::tempfile().unwrap();
+            let message = "cannot stop the processes it left: injected failure";
+            let mut data = b"distant prefix".to_vec();
+            data.extend([b'.'; 4096]);
+            data.extend(b"last line");
+            log.write_all(&data).unwrap();
+            let RunError::Cleanup(text) = cleanup_error(message.into(), &log) else {
+                panic!("expected fatal cleanup")
+            };
+            assert!(text.starts_with(message));
+            assert!(text.ends_with("last line"));
+            assert!(!text.contains("distant prefix"));
+        }
 
         #[test]
         fn a_writer_outside_the_child_tree_can_keep_stdout_open() {

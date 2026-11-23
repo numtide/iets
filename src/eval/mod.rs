@@ -141,13 +141,13 @@ impl FileInfo {
 fn newline_starts(src: &[u8]) -> Option<Vec<u32>> {
     let mut starts = Vec::with_capacity(src.len() / 32 + 2);
     starts.push(0u32);
-    let mut cr = 0u64;
     let (blocks, rest) = src.as_chunks::<64>();
     let mut off = 0u32;
     for b in blocks {
         let (mut nl, r) = masks64(b);
-        cr |= r;
-        starts.reserve(nl.count_ones() as usize);
+        if r {
+            return None;
+        }
         while nl != 0 {
             starts.push(off + nl.trailing_zeros() + 1);
             nl &= nl - 1;
@@ -161,24 +161,25 @@ fn newline_starts(src: &[u8]) -> Option<Vec<u32>> {
             _ => {}
         }
     }
-    (cr == 0).then_some(starts)
+    Some(starts)
 }
 
-/// The bits of the `\n` and of the `\r` bytes of a block.
+/// The newline positions and whether the block needs CR-aware handling.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-fn masks64(b: &[u8; 64]) -> (u64, u64) {
-    let (mut nl, mut cr) = (0u64, 0u64);
+fn masks64(b: &[u8; 64]) -> (u64, bool) {
+    let mut nl = 0u64;
     // SAFETY: SSE2 is part of x86_64, and each load reads 16 bytes of `b`.
     unsafe {
         let (n, r) = (_mm_set1_epi8(b'\n' as i8), _mm_set1_epi8(b'\r' as i8));
+        let mut cr = _mm_setzero_si128();
         for i in 0..4 {
             let v = _mm_loadu_si128(b.as_ptr().add(16 * i).cast::<__m128i>());
             nl |= u64::from(_mm_movemask_epi8(_mm_cmpeq_epi8(v, n)) as u16) << (16 * i);
-            cr |= u64::from(_mm_movemask_epi8(_mm_cmpeq_epi8(v, r)) as u16) << (16 * i);
+            cr = _mm_or_si128(cr, _mm_cmpeq_epi8(v, r));
         }
+        (nl, _mm_movemask_epi8(cr) != 0)
     }
-    (nl, cr)
 }
 
 /// As on x86_64, with NEON. NEON has no movemask: each compare is anded
@@ -187,7 +188,7 @@ fn masks64(b: &[u8; 64]) -> (u64, u64) {
 /// at 2.8 GB/s on hackage-packages.nix, this at 7.2 (Apple M4).
 #[cfg(target_arch = "aarch64")]
 #[inline]
-fn masks64(b: &[u8; 64]) -> (u64, u64) {
+fn masks64(b: &[u8; 64]) -> (u64, bool) {
     // SAFETY: NEON is part of aarch64, and the load reads the 64 bytes of `b`.
     unsafe {
         let v = vld1q_u8_x4(b.as_ptr());
@@ -198,19 +199,17 @@ fn masks64(b: &[u8; 64]) -> (u64, u64) {
             vceqq_u8(v.2, n),
             vceqq_u8(v.3, n),
         ]);
-        let cr = bits64([
-            vceqq_u8(v.0, r),
-            vceqq_u8(v.1, r),
-            vceqq_u8(v.2, r),
-            vceqq_u8(v.3, r),
-        ]);
-        (nl, cr)
+        let cr = vorrq_u8(
+            vorrq_u8(vceqq_u8(v.0, r), vceqq_u8(v.1, r)),
+            vorrq_u8(vceqq_u8(v.2, r), vceqq_u8(v.3, r)),
+        );
+        (nl, vmaxvq_u8(cr) != 0)
     }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
-fn masks64(b: &[u8; 64]) -> (u64, u64) {
+fn masks64(b: &[u8; 64]) -> (u64, bool) {
     masks64_scalar(b)
 }
 
@@ -231,11 +230,11 @@ fn bits64(m: [uint8x16_t; 4]) -> u64 {
 /// `masks64` a byte at a time: the other targets', and the tests' reference.
 #[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 #[inline]
-fn masks64_scalar(b: &[u8; 64]) -> (u64, u64) {
-    let (mut nl, mut cr) = (0u64, 0u64);
+fn masks64_scalar(b: &[u8; 64]) -> (u64, bool) {
+    let (mut nl, mut cr) = (0u64, false);
     for (j, &c) in b.iter().enumerate() {
         nl |= u64::from(c == b'\n') << j;
-        cr |= u64::from(c == b'\r') << j;
+        cr |= c == b'\r';
     }
     (nl, cr)
 }
@@ -547,12 +546,13 @@ use crate::sys;
 pub(crate) use bail;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::{
-    uint8x16_t, vandq_u8, vceqq_u8, vdupq_n_u8, vgetq_lane_u64, vld1q_u8, vld1q_u8_x4, vpaddq_u8,
-    vreinterpretq_u64_u8,
+    uint8x16_t, vandq_u8, vceqq_u8, vdupq_n_u8, vgetq_lane_u64, vld1q_u8, vld1q_u8_x4, vmaxvq_u8,
+    vorrq_u8, vpaddq_u8, vreinterpretq_u64_u8,
 };
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
-    __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+    __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8,
+    _mm_setzero_si128,
 };
 use std::hint;
 

@@ -181,6 +181,12 @@ fn scoping() {
 }
 
 #[test]
+fn has_attr_forces_the_intermediate_value_before_the_next_name() {
+    let src = r#"(builtins.tryEval ({ a = throw "value"; } ? a.${builtins.abort "name"})).success"#;
+    assert_eq!(eval_str(src), "false");
+}
+
+#[test]
 fn attrs_and_lists() {
     assert_eq!(
         eval_str("{ b = 2; a = 1; } // { a = 3; }"),

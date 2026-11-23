@@ -25,6 +25,7 @@ use crate::store::drv::{
 use crate::store::hash::{Hash, HashAlgo, hash_bytes};
 use crate::store::path::{
     DRV_EXTENSION, IngestionMethod, StorePath, check_name, hash_placeholder, output_path_name,
+    render_placeholder,
 };
 use crate::syntax::symbol::Sym;
 use crate::trace::{self, Trace};
@@ -885,11 +886,6 @@ fn unknown_derivation(parent: &Hash, output: &str) -> Hash {
         output
     );
     hash_bytes(HashAlgo::Sha256, clear.as_bytes())
-}
-
-/// Mirrors downstream-placeholder.cc:DownstreamPlaceholder::render.
-fn render_placeholder(h: &Hash) -> String {
-    format!("/{}", h.to_nix32())
 }
 
 fn downstream_placeholder(drv_path: &StorePath, drv_name: &str, output: &str) -> String {

@@ -414,10 +414,15 @@ pub fn note_unsent(overrides: &[(String, String)], applied: &[&str], why: &str) 
     }
 }
 
+/// The settings a `grpc://` builder applies: `store` and `system` name and
+/// route it, and each `BuildDerivationRequest` carries the build limits
+/// (`remote::grpc::build::Limits`).
+pub const GRPC_APPLIED: &[&str] = &["store", "system", "timeout", "max-silent-time"];
+
 /// `note_unsent` for a `grpc://` builder, which has no `SetOptions`.
 pub fn note_grpc(overrides: &[(String, String)]) {
-    let why = "a grpc:// builder takes no settings; its URL has 'max-builds'";
-    note_unsent(overrides, &["store", "system"], why);
+    let why = "a grpc:// builder takes only timeout and max-silent-time; its URL has 'max-builds'";
+    note_unsent(overrides, GRPC_APPLIED, why);
     ignored::flush();
 }
 
@@ -899,6 +904,24 @@ mod tests {
                 pair("extra-trusted-public-keys", "k:1 k:2"),
             ]
         );
+    }
+
+    /// A `grpc://` builder gets the build limits with each request, so only
+    /// the other store settings are noted.
+    #[test]
+    fn a_grpc_builder_takes_the_build_limits() {
+        let o = |n: &str| (n.to_string(), "1".to_string());
+        note_grpc(&[
+            o("timeout"),
+            o("max-silent-time"),
+            o("build-max-silent-time"),
+            o("cores"),
+        ]);
+        let ignored = ignored::noted("ignored-setting");
+        assert!(ignored.iter().any(|n| n == "cores"));
+        for applied in ["timeout", "max-silent-time"] {
+            assert!(!ignored.iter().any(|n| n == applied), "{applied}");
+        }
     }
 
     #[test]

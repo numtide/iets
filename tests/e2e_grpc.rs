@@ -214,6 +214,46 @@ fn classic_nix_build() {
     }
 }
 
+/// Each build request carries `max-silent-time` (4a194545), and the daemon
+/// enforces it: a build silent for 20 s, with a limit of 2 s, gets the
+/// farm's own `TimedOut` verdict, and no warning that the setting is ignored.
+#[test]
+fn the_farm_enforces_the_build_limits() {
+    let Some(g) = start() else { return };
+    let s = &g.s;
+    let nix = farm(s);
+    let quiet = s.write(
+        "c8/quiet.nix",
+        "derivation { name = \"iets-grpc-e2e-quiet-@NONCE@\"; system = \"@SYSTEM@\"; builder = \"@SHELL@\"; args = [ \"-c\" \"end=$((SECONDS + 20)); while [ $SECONDS -lt $end ]; do :; done; echo > $out\" ]; }\n",
+    );
+    let o = s
+        .iets_as(&nix)
+        .env("IETS_NIX_FALLBACK", "never")
+        .args([
+            "build",
+            "--store",
+            &g.url,
+            "--eval-store",
+            "auto",
+            "--no-link",
+        ])
+        .args(["--option", "max-silent-time", "2", "-f"])
+        .arg(&quiet)
+        .output()
+        .unwrap();
+    let err = stderr(&o);
+    assert!(!o.status.success(), "{err}\n{}", g.log());
+    assert!(
+        err.contains("timed out after 2 seconds"),
+        "{err}\n{}",
+        g.log()
+    );
+    assert!(
+        !err.contains("setting 'max-silent-time' is ignored"),
+        "{err}"
+    );
+}
+
 /// A set of checks gets the same verdicts over grpc as over the worker
 /// protocol on the same store.
 #[test]

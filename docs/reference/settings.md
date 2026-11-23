@@ -360,9 +360,12 @@ overrides. There, a store setting given with `--option` gives one warning:
 warning: setting 'sandbox' is ignored: iets's own commands send a daemon no settings; classic mode does
 ```
 
-A `grpc://` builder has no `SetOptions`. For it, classic mode gives
-the same warning, with the reason `a grpc:// builder takes no settings;
-its URL has 'max-builds'`. `store` and `system` still apply.
+A `grpc://` builder has no `SetOptions`. In classic mode each build
+request carries `timeout` and `max-silent-time` instead, so the farm stops
+a build that runs or stays silent too long, and `store` and `system` still
+name and route the builder. Every other store setting gives the same
+warning, with the reason `a grpc:// builder takes only timeout and
+max-silent-time; its URL has 'max-builds'`.
 
 **3. It holds by construction.** iets says nothing.
 

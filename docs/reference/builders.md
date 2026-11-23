@@ -248,7 +248,9 @@ First, one `StoreInfo` call, for the trust flag. Then:
    `Scheduler.Schedule` stream. The scheduler answers `Cached` (the verdict
    is `AlreadyValid`), `Assigned` (a worker address), or `Unplaceable`, which
    is only advice: the `Want` stays queued, and fails after `restart-grace`.
-   On `Assigned`, a `BuildDerivation` goes to that worker. Its log lines
+   On `Assigned`, a `BuildDerivation` goes to that worker, with the
+   `timeout` and `max-silent-time` settings in classic mode (0, no limit,
+   otherwise). Its log lines
    and phases become `Log` events, and its result becomes the derivation's
    verdict. A derivation whose outputs are already valid (step 4) is
    skipped, so it costs no `Want`.

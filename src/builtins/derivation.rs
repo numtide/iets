@@ -814,7 +814,7 @@ fn derivation_strict_internal(
     ev.drv.record_created(
         drv_path.clone(),
         DrvInfo {
-            outputs: drv.outputs.keys().cloned().collect(),
+            outputs,
             references,
             aterm: (ev.drv.keep_aterm || produces_drv).then(|| Arc::new(text)),
             pos: site,

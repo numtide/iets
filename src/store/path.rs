@@ -461,7 +461,15 @@ pub fn hash_placeholder(output_name: &str) -> String {
         HashAlgo::Sha256,
         format!("nix-output:{output_name}").as_bytes(),
     );
-    format!("/{}", h.to_nix32())
+    render_placeholder(&h)
+}
+
+/// Renders a placeholder hash as a slash followed by its Nix32 digits.
+pub(crate) fn render_placeholder(h: &Hash) -> String {
+    let mut s = String::with_capacity(1 + hash::nix32_encoded_len(HashAlgo::Sha256.size()));
+    s.push('/');
+    hash::nix32_encode_into(&mut s, h.bytes());
+    s
 }
 
 #[cfg(test)]

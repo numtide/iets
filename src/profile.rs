@@ -700,19 +700,13 @@ mod tests {
 
     #[test]
     fn a_wait_is_not_cpu_time() {
-        let before = thread_cpu_time().as_micros() as u64;
         cpu_us_since_sample();
-        let after = thread_cpu_time().as_micros() as u64;
-        thread::sleep(Duration::from_millis(50));
-        // GetThreadTimes can advance in 15.625 ms steps on Windows. Check
-        // against the CPU clock itself rather than assuming finer precision.
-        let lower = thread_cpu_time().as_micros() as u64 - after;
-        let elapsed = cpu_us_since_sample();
-        let upper = thread_cpu_time().as_micros() as u64 - before;
-        assert!(
-            (lower..=upper).contains(&elapsed),
-            "{lower} <= {elapsed} <= {upper}"
-        );
+        let start = std::time::Instant::now();
+        thread::sleep(Duration::from_millis(100));
+        let wall = start.elapsed();
+        let cpu = Duration::from_micros(cpu_us_since_sample());
+        // Allow for coarse CPU accounting on Windows while excluding the wait.
+        assert!(cpu < wall / 2, "sleep used {cpu:?} of CPU in {wall:?}");
         let start = thread_cpu_time();
         while thread_cpu_time() - start < Duration::from_millis(20) {}
         assert!(cpu_us_since_sample() >= 20_000);

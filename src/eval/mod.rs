@@ -3550,7 +3550,7 @@ impl Evaluator {
             std::fs::read_to_string("/proc/self/statm")
                 .ok()
                 .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
-                .map_or(0, |pages| pages * 4),
+                .map_or(0, |pages| pages * (sys::vm::page_size() as u64 / 1024)),
             c.compile,
             size_of::<Ir>()
         );

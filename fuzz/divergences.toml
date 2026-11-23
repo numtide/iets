@@ -135,13 +135,6 @@ doc = "docs/reference/divergences.md#reading-a-drv-file"
 kind = "nix-only"
 iets = "is not in the Nix store"
 
-[[drv]]
-# an iets bug, not a choice: this entry hides every difference in the
-# outputs until src/store/drv.rs keeps the first of two outputs; remove it then
-id = "drv-duplicate-output"
-doc = "docs/reference/divergences.md#reading-a-drv-file"
-kind = "aterm-outputs"
-
 [[drv-eval]]
 id = "drv-eval-builder-not-utf8"
 doc = "docs/reference/divergences.md#bytes-that-are-not-utf-8-in-a-derivation"

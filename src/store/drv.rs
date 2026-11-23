@@ -577,7 +577,8 @@ impl Derivation {
             let hash = p.string()?;
             p.expect(b")")?;
             drv.outputs
-                .insert(id, parse_output(&path, &hash_algo, &hash)?);
+                .entry(id)
+                .or_insert(parse_output(&path, &hash_algo, &hash)?);
         }
         p.expect(b",[")?;
         while !p.end_of_list()? {

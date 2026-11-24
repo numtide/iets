@@ -53,9 +53,10 @@ a file whose top level is a function (nixpkgs' `default.nix`) gets the
 ## Naming roots
 
 `plan`, `missing` and `build` take derivation paths. Write each one as
-`DRV` or `DRV!OUT[,OUT]`. With no output named, you get every output, as
-`!*` does in the worker protocol. `--roots -` reads the stdout of an
-earlier op instead: the `roots` of a `resolve`, or the `drvs` of a `plan`.
+`DRV` or `DRV!OUT[,OUT]`. Requests for the same derivation are combined.
+A bare `DRV` requests every output unless `build --out` names outputs.
+`--roots -` reads the `roots` of a `resolve` or the `drvs` of a `plan`
+from stdin.
 Stdin with neither key is the usage error
 `--roots -: no "roots" and no "drvs" on stdin`.
 

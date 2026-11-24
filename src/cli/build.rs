@@ -17,8 +17,7 @@ use crate::build::{Outcome, Target};
 use crate::cli::help::{arg_error, each_arg};
 use crate::cli::render::{self, text};
 use crate::cli::{
-    self, EvalArgs, Input, Run, build_targets, devenv, parse_eval_args_with_overrides, report,
-    run_for,
+    self, EvalArgs, Input, Run, devenv, parse_eval_args_with_overrides, report, run_for,
 };
 use crate::config;
 use crate::error::Error as CrateError;
@@ -242,14 +241,13 @@ fn build_once(argv: &[String]) -> i32 {
                 t0.elapsed().as_secs_f64()
             );
         }
-        let (root_paths, outputs) = build_targets(&b.outputs, &roots);
         let prov = Provenance::from_map(SourceMap::from_sources(&sources));
         let inputs = Inputs {
             drvs: &drvs,
             sources: &sources,
             fetched: &fetched,
         };
-        Some(build_roots(&b, &root_paths, &outputs, inputs, &prov))
+        Some(build_roots(&b, &roots, inputs, &prov))
     }) {
         return code;
     }
@@ -320,7 +318,6 @@ fn build_eval(
     if let Some(c) = &cache {
         c.write(ev, &wire::encode_roots(&roots), true);
     }
-    let (root_paths, outputs) = build_targets(&b.outputs, &roots);
     let prov = Provenance::snapshot(ev);
     let drvs = ev.drv.drvs.lock();
     let sources = ev.known.origins();
@@ -330,7 +327,7 @@ fn build_eval(
         sources: &sources,
         fetched: &fetched,
     };
-    build_roots(b, &root_paths, &outputs, inputs, &prov)
+    build_roots(b, &roots, inputs, &prov)
 }
 
 /// Legacy mode: `DRV` is a `.drv` store path, or a copy of the file named
@@ -363,8 +360,7 @@ fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
     let prov = Provenance::from_map(SourceMap::from_sources(&sources));
     build_roots(
         b,
-        &[root],
-        &b.outputs,
+        &[(root, None)],
         Inputs {
             drvs: &drvs,
             sources: &sources,
@@ -376,8 +372,7 @@ fn build_drv_file(b: &BuildArgs, root_arg: &str) -> i32 {
 
 fn build_roots(
     b: &BuildArgs,
-    roots: &[StorePath],
-    outputs: &[String],
+    roots: &[(StorePath, Option<String>)],
     inputs: Inputs<'_>,
     prov: &Provenance,
 ) -> i32 {
@@ -397,11 +392,13 @@ fn build_roots(
         Ok(o) => o,
         Err(e) => return e.report(),
     };
+    let requests = apibuild::root_outputs(roots, &b.outputs);
     // one root is one question, and its first failure answers it; several
     // roots are several questions, and each one gets its verdict
-    opts.keep_going |= b.keep_going || roots.len() > 1;
+    opts.keep_going |= b.keep_going || requests.len() > 1;
     let t0 = Instant::now();
-    let plan = match apibuild::plan_with(roots, inputs) {
+    let root_paths: Vec<StorePath> = requests.iter().map(|(p, _)| p.clone()).collect();
+    let plan = match apibuild::plan_with(&root_paths, inputs) {
         Ok(p) => p,
         Err(e) => return e.report(),
     };
@@ -418,23 +415,23 @@ fn build_roots(
     };
 
     if b.no_build {
-        if let Err(e) = d.upload_only(roots) {
+        if let Err(e) = d.upload_only(&root_paths) {
             return e.report();
         }
         timings(b, &d, plan_time);
         return 0;
     }
 
-    let targets: Vec<Target> = roots
+    let targets = requests
         .iter()
-        .map(|r| {
+        .map(|(r, outputs)| {
             // The bare attribute: the dispatcher adds the position, once.
             let name = (inputs.drvs.get(r))
                 .and_then(|i| i.attr.clone())
                 .unwrap_or_else(|| drv_name(&r.to_string()).to_string());
-            Target::new(&name, r.clone(), outputs.to_vec())
+            Target::new(&name, r.clone(), outputs.clone())
         })
-        .collect();
+        .collect::<Vec<_>>();
     if b.dry_run {
         return match d.missing(&targets) {
             Ok(m) => print_missing(&m, d.plan(), b.json),
@@ -477,7 +474,7 @@ fn build_roots(
         text::built(&report);
     }
     render::emit(&report, b.json);
-    match silence(&outcomes, outputs) {
+    match silence(&outcomes, &requests) {
         Some(why) => log::combine_exit(d.d.exit, no_output(&why)),
         None => d.d.exit,
     }
@@ -516,7 +513,7 @@ fn no_output(why: &str) -> i32 {
 /// The stdout contract, checked: why a target put no store path on stdout, or
 /// `None` when every target did. A build that failed reported itself already
 /// and its exit code carries it, so it is not named again here.
-fn silence(outcomes: &[Outcome], wanted: &[String]) -> Option<String> {
+fn silence(outcomes: &[Outcome], requests: &[(StorePath, Vec<String>)]) -> Option<String> {
     if outcomes.is_empty() {
         return Some("the builder returned no build result".to_string());
     }
@@ -528,6 +525,10 @@ fn silence(outcomes: &[Outcome], wanted: &[String]) -> Option<String> {
         if !o.success {
             continue;
         }
+        let wanted = requests
+            .iter()
+            .find(|(r, _)| r == &o.drv)
+            .map_or(&[][..], |(_, names)| names.as_slice());
         return Some(match wanted.is_empty() {
             true => format!(
                 "'{}' built, but the builder has no output path for '{}'",
@@ -612,7 +613,9 @@ mod tests {
         #[case] want: Option<&str>,
     ) {
         let flags: Vec<String> = out_flags.iter().map(|s| s.to_string()).collect();
-        let why = silence(&[outcome(ok, false, outputs)], &flags);
+        let o = outcome(ok, false, outputs);
+        let requests = [(o.drv.clone(), flags)];
+        let why = silence(&[o], &requests);
         match (why, want) {
             (None, None) => {}
             (Some(why), Some(want)) => assert!(why.contains(want), "{why}"),

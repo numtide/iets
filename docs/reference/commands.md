@@ -180,7 +180,7 @@ to evaluate stops the run before anything builds.
 | `-k`, `--keep-going` | with one root: build everything a failure does not block |
 | `-j N`, `--max-jobs N` | allow up to `N` simultaneous local builds; `auto` is the CPU count. The same as `--option max-jobs N` |
 | `--cores N` | tell builders how many cores to use via `NIX_BUILD_CORES`; 0 is all of them. The same as `--option cores N` |
-| `--out NAME` | build the output `NAME` only; repeatable |
+| `--out NAME` | request `NAME` from each derivation, plus any outputs its string contexts name; repeatable |
 | `--fetch-to DIR` | copy the outputs from the builder into `DIR` |
 | `-o`, `--out-link PATH` | bring the outputs into the local store and link them at `PATH`, `PATH-1`, ... |
 | `--source SP=LOCAL` | with a `DRV` argument: the local tree of the input source `SP` |

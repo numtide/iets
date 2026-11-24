@@ -590,7 +590,8 @@ impl Runtime {
     fn push_ready(&self, w: &mut Worker, slot: *mut Slot) {
         self.pending_ready.0.fetch_add(1, Ordering::SeqCst);
         if !self.lanes[w.idx].ready.push(slot as u64, 0) {
-            self.overflow.lock().unwrap().push(slot);
+            let mut overflow = self.overflow.lock().unwrap();
+            overflow.push(slot);
             self.overflow_len.0.fetch_add(1, Ordering::Release);
         }
         self.notify();
@@ -635,11 +636,12 @@ impl Runtime {
     /// Owner push from the worker currently running the caller.
     pub fn submit_urgent(&self, w: &Worker, t: Task) -> bool {
         let (a, b) = t.pack();
+        self.pending_tasks.0.fetch_add(1, Ordering::SeqCst);
         if self.lanes[w.idx].urgent.push(a, b) {
-            self.pending_tasks.0.fetch_add(1, Ordering::SeqCst);
             self.notify();
             true
         } else {
+            self.pending_tasks.0.fetch_sub(1, Ordering::SeqCst);
             false
         }
     }
@@ -1076,6 +1078,34 @@ mod tests {
             assert!(t0.elapsed().as_secs() < 300, "timeout");
             thread::yield_now();
         }
+    }
+
+    #[test]
+    fn rejecting_a_full_urgent_lane_leaves_no_pending_task() {
+        let rt = Runtime::start(1, Box::new(TestDriver(counter())), 1 << 20).unwrap();
+        rt.run_main(
+            ptr::null_mut(),
+            Box::new(|slot| {
+                let rt = slot.runtime();
+                let w = slot.worker();
+                let task = Task {
+                    kind: ADD,
+                    obj: Word::EMPTY,
+                    start: 0,
+                    len: 1,
+                };
+                for _ in 0..TASK_CAP {
+                    assert!(rt.submit_urgent(w, task));
+                }
+                assert!(!rt.submit_urgent(w, task));
+                assert_eq!(rt.pending_tasks.0.load(Ordering::Relaxed), TASK_CAP);
+                for _ in 0..TASK_CAP {
+                    assert_eq!(rt.take_task(w), Some(task));
+                }
+                assert_eq!(rt.pending_tasks.0.load(Ordering::Relaxed), 0);
+            }),
+        )
+        .unwrap();
     }
 
     #[test]

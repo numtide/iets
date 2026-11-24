@@ -64,6 +64,16 @@ of a file as if it were at `AS`. A change between two revisions is then a list
 of changed regions, names that came or went per set and per directory, the
 files that changed, and the first changed byte of each file.
 
+Each name occupies one text field. ASCII letters, digits, dots, underscores,
+plus signs and hyphens are written literally. File fields also permit slashes.
+Every other byte string, including the empty name, is written as `~` followed
+by its hexadecimal bytes. This keeps a quoted name containing a slash distinct
+from a nested binding path and a literal `"*"` distinct from a wildcard change.
+Region tables and flat traces carry a `V\t2` record; per-step changes carry
+`V\t3`, which also accounts for reads inside removed directories. The DAG
+carries the version in the first word of `nodes`. Regenerate older artifacts
+before comparing revisions or replaying queries.
+
 `IETS_FINE_DAG=DIR` writes the traces of a run as one graph, with the trace
 of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the

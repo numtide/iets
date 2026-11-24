@@ -92,9 +92,7 @@ pub struct Task {
 }
 
 impl Task {
-    /// 8 bits of kind, the whole 32 of start, 16 of len. A container holds
-    /// at most `u32::MAX` cells and a range is at most one batch, so
-    /// nothing is dropped.
+    /// 8 bits of kind, 32 of start, 16 of len. The caller checks the length.
     #[inline]
     fn pack(self) -> (u64, u64) {
         debug_assert!(self.len <= LEN_MAX);
@@ -634,7 +632,11 @@ impl Runtime {
     }
 
     /// Owner push from the worker currently running the caller.
+    /// Returns false if the lane is full or the task length exceeds 65,535.
     pub fn submit_urgent(&self, w: &Worker, t: Task) -> bool {
+        if t.len > LEN_MAX {
+            return false;
+        }
         let (a, b) = t.pack();
         self.pending_tasks.0.fetch_add(1, Ordering::SeqCst);
         if self.lanes[w.idx].urgent.push(a, b) {
@@ -1117,15 +1119,18 @@ mod tests {
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
-                let n = 64;
-                for i in 0..n {
-                    let t = Task {
-                        kind: SPAWN,
-                        obj: Word::EMPTY,
-                        start: 0,
-                        len: 8,
-                    };
-                    let _ = i;
+                let t = Task {
+                    kind: SPAWN,
+                    obj: Word::EMPTY,
+                    start: 0,
+                    len: 8,
+                };
+                let oversized = Task {
+                    len: LEN_MAX + 1,
+                    ..t
+                };
+                assert!(!rt.submit_urgent(slot.worker(), oversized));
+                for _ in 0..64 {
                     assert!(rt.submit_urgent(slot.worker(), t));
                 }
                 // 64 spawners, 8 adds each.

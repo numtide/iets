@@ -559,7 +559,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.flag("strict", a.strict);
     k.flag("json", a.json);
     k.flag("raw", a.raw);
-    k.field("lints", cfg.configured_lints().key().as_bytes());
+    cfg.configured_lints().add_to_key(&mut k);
     k.field("system", cfg.current_system().as_bytes());
     k.field("store-dir", store_dir().as_bytes());
     // what builtins.fetchClosure trusts

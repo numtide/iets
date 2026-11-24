@@ -376,6 +376,17 @@ fn read_dir(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             io_error(e, verb, &p, pos)
         }
     })?;
+    dir_attrs(ev, listing, pos)
+}
+
+fn dir_attrs(
+    ev: &mut Evaluator,
+    mut listing: Vec<(Vec<u8>, FileType)>,
+    pos: Pos,
+) -> EvalResult<Word> {
+    // Nix interns names while iterating SourceAccessor::DirEntries, a std::map.
+    // The assigned symbol IDs can affect the order of a later attrset comparison.
+    listing.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let names = [
         ev.mk_string(FileType::Regular.nix_name().as_bytes()),
         ev.mk_string(FileType::Directory.nix_name().as_bytes()),
@@ -387,6 +398,18 @@ fn read_dir(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         entries.push((ev.sym(&name), Pos::NONE, names[t as usize]));
     }
     ev.mk_attrs(&mut entries, pos)
+}
+
+#[test]
+fn read_dir_interns_names_in_lexical_order() {
+    let mut ev = Evaluator::new();
+    let reversed = [b"lateYq", b"lateXq"].map(|name| (name.to_vec(), FileType::Regular));
+    dir_attrs(&mut ev, reversed.into(), Pos::NONE).unwrap();
+    let result = ev.eval_string(
+        r#"(builtins.tryEval ({ lateXq = throw "x"; lateYq = 0; } == { lateXq = 1; lateYq = 1; })).success"#,
+        b"/",
+    ).unwrap();
+    assert_eq!(result, Word::FALSE);
 }
 
 fn read_file_type(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

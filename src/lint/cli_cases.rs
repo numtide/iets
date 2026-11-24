@@ -205,6 +205,47 @@ fn the_scope_is_part_of_the_cache_key() {
 }
 
 #[test]
+#[cfg(unix)]
+fn changing_lint_roots_cannot_replay_a_result_that_should_error() {
+    let (_cache, cache_dir) = cache();
+    let main = file("scope/root/main.nix");
+    let library = file("scope/lib");
+    let other = file("scope/all");
+    let joined = format!("{library}:{other}");
+    let evaluate = |flags: &[&str]| {
+        let mut args = vec![
+            "eval",
+            "--impure",
+            "--cache-dir",
+            &cache_dir,
+            "--lint",
+            "url-literal=error",
+            "-f",
+            &main,
+        ];
+        args.extend_from_slice(flags);
+        run(&args, &Host::default())
+    };
+    let first = evaluate(&["--lint-root", &joined]);
+    assert_eq!(first.rc, 0, "{}", first.stderr);
+    let split = ["--lint-root", &library, "--lint-root", &other];
+    let warm = evaluate(&split);
+    let mut uncached = split.to_vec();
+    uncached.push("--no-cache");
+    let fresh = evaluate(&uncached);
+    assert_eq!(fresh.rc, 1, "{}", fresh.stderr);
+    assert!(
+        fresh.stderr.contains("error: [url-literal]"),
+        "{}",
+        fresh.stderr
+    );
+    assert_eq!(
+        (warm.rc, warm.stdout, warm.stderr),
+        (fresh.rc, fresh.stdout, fresh.stderr)
+    );
+}
+
+#[test]
 fn an_allow_comment_is_part_of_the_cache_key_and_a_hit_replays_nothing() {
     let (_c, c) = cache();
     let (_work, work) = cache();

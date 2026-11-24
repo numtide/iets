@@ -26,6 +26,7 @@ use crate::log::{self, Site};
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, FxHasher};
 use crate::sys;
+use crate::trace::key::Key;
 use crate::{compile, ignored, parallel, project, provenance, settings};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
@@ -618,24 +619,27 @@ impl Config {
         Ok(c)
     }
 
-    /// One byte per lint plus the knobs and the scope: the cache key field.
+    /// The fingerprint of the complete lint configuration.
     pub fn key(&self) -> String {
-        let mut s: String = self.levels.iter().map(|l| level_char(*l)).collect();
-        s.push(':');
-        s.push_str(&self.max_bytes.to_string());
-        s.push(':');
-        s.push_str(self.scope.name());
-        for r in &self.roots {
-            s.push(':');
-            s.push_str(&String::from_utf8_lossy(r));
+        let mut key = Key::new("lint-config");
+        self.add_to_key(&mut key);
+        key.finish()
+    }
+
+    pub(crate) fn add_to_key(&self, key: &mut Key) {
+        key.field("lint-levels", &self.levels.map(|l| level_char(l) as u8));
+        key.field("lint-max-bytes", &self.max_bytes.to_le_bytes());
+        key.field("lint-scope", self.scope.name().as_bytes());
+        for root in &self.roots {
+            key.field("lint-root", root);
         }
         for (name, levels) in &self.inputs {
-            s.push(':');
-            s.push_str(name);
-            s.push('=');
-            s.extend(levels.iter().map(|l| l.map_or('-', level_char)));
+            key.field("lint-input", name.as_bytes());
+            key.field(
+                "lint-input-levels",
+                &levels.map(|l| l.map_or('-', level_char) as u8),
+            );
         }
-        s
     }
 
     /// The compile-time lints only: the IR cache key field. Empty when they
@@ -1296,6 +1300,15 @@ mod tests {
         let mut rooted = c.clone();
         rooted.add_root(b"/r");
         assert_ne!(rooted.key(), c.key());
+    }
+
+    #[test]
+    fn keys_preserve_the_original_root_bytes() {
+        let mut first = Config::default();
+        first.add_root(b"/lib\xff");
+        let mut second = Config::default();
+        second.add_root(b"/lib\xfe");
+        assert_ne!(first.key(), second.key());
     }
 
     #[test]

@@ -183,3 +183,33 @@ fn dash_f_is_the_positional_file(bin: Iets) {
         assert_eq!((r.rc, &r.out), (want.rc, &want.out), "{flag}");
     }
 }
+
+#[rstest]
+fn dynamic_input_outputs_can_be_the_only_difference(bin: Iets) {
+    let work = tempdir().unwrap();
+    let expr = r#"let
+      p = derivation { name = "producer.drv.drv"; system = "x86_64-linux";
+        builder = "/bin/sh"; __contentAddressed = true;
+        outputHashMode = "text"; outputHashAlgo = "sha256"; };
+      mk = output: derivation { name = "consumer"; system = "x86_64-linux";
+        builder = "/bin/sh";
+        # Empty text retains the nested output dependency in its string context.
+        edge = builtins.substring 0 0
+          (builtins.outputOf (builtins.outputOf p.outPath "first") output); };
+    in { a = mk "bin"; b = mk "dev"; }"#;
+    let r = diff(
+        &bin,
+        work.path(),
+        &["-E", expr, "-A", "a", "-A", "b", "--json"],
+    );
+    assert_eq!(r.rc, 1, "stdout: {}\nstderr: {}", r.out, r.err);
+    let j: Value = serde_json::from_str(&r.out).unwrap();
+    assert_eq!(j["equal"], false);
+    assert_eq!(j["changes"], serde_json::json!([]));
+    assert_eq!(
+        j["inputDrvs"][0]["changes"],
+        serde_json::json!([
+            {"what":"wanted","key":"/out/first","a":"bin","b":"dev"}
+        ])
+    );
+}

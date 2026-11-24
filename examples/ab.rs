@@ -39,11 +39,13 @@ mod ab {
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
-    use std::ptr;
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
+    #[cfg(target_os = "linux")]
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    use rustix::process::{WaitOptions, wait};
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
@@ -417,59 +419,65 @@ mod ab {
     /// `waitid` says which are ours, and a child stays ours until
     /// `reap_leftovers` reaps it, so the signal cannot reach another process.
     #[cfg(target_os = "linux")]
-    fn kill_leftovers() {
+    fn kill_leftovers(deadline: Instant) -> bool {
         let Ok(procs) = fs::read_dir("/proc") else {
-            return;
+            return false;
         };
+        let mut live = false;
         for pid in procs
+            .take_while(|_| Instant::now() < deadline)
             .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<libc::pid_t>().ok())
             .filter(|&pid| pid > 0)
+            .filter_map(Pid::from_raw)
         {
-            let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
-            let ask = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-            // SAFETY: waitid fills the struct it is given, and WNOWAIT reaps nothing.
-            if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, info.as_mut_ptr(), ask) } == 0
-            {
-                // SAFETY: a signal to our own child.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
+            let ask = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+            if matches!(waitid(WaitId::Pid(pid), ask), Ok(None)) {
+                live = true;
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
             }
         }
+        live
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn kill_leftovers() {}
+    fn kill_leftovers(_: Instant) -> bool {
+        false
+    }
 
     /// Waits for the processes a run left behind, and kills them after
-    /// `limit`. False when they had to be killed. An error when some are
+    /// `limit`. False when a child was still running after that limit; an error when some are
     /// still there [`KILL_LIMIT`] later.
     fn reap_leftovers(limit: Duration) -> io::Result<bool> {
-        let start = Instant::now();
+        let mut next_sweep = Instant::now() + limit;
+        let deadline = next_sweep + KILL_LIMIT;
+        let poll = Duration::from_millis(10);
         let mut clean = true;
+        let mut final_poll = false;
         loop {
             // before the poll, so a child that exits after it is not a timeout
-            let waited = start.elapsed();
-            // SAFETY: waitpid with a null status pointer is allowed.
-            match unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) } {
-                0 => {}
-                p if p > 0 => continue,
-                _ => {
-                    let e = io::Error::last_os_error();
-                    return if e.raw_os_error() == Some(libc::ECHILD) {
-                        Ok(clean)
-                    } else {
-                        Err(e)
-                    };
+            let now = Instant::now();
+            let reaped = match wait(WaitOptions::NOHANG) {
+                Ok(child) => child.is_some(),
+                Err(rustix::io::Errno::CHILD) => return Ok(clean),
+                Err(e) => return Err(e.into()),
+            };
+            if now >= deadline {
+                if !reaped || final_poll {
+                    return Err(io::ErrorKind::TimedOut.into());
                 }
+                // The child just reaped may have been the last. Check once for ECHILD.
+                final_poll = true;
+                continue;
             }
-            if waited >= limit + KILL_LIMIT {
-                return Err(io::ErrorKind::TimedOut.into());
-            }
-            if waited >= limit {
-                clean = false;
+            if now >= next_sweep {
                 // again each time: a killed process's own children come to us in turn
-                kill_leftovers();
+                let live = kill_leftovers(deadline);
+                clean &= reaped && !live;
+                next_sweep = Instant::now() + poll;
             }
-            thread::sleep(Duration::from_millis(10));
+            if !reaped {
+                thread::sleep(poll.min(deadline.saturating_duration_since(Instant::now())));
+            }
         }
     }
 
@@ -580,7 +588,7 @@ mod ab {
         }
         if !clean {
             return Err(RunError::Scenario(format!(
-                "processes still ran {}s after it exited, and were killed",
+                "processes still ran {}s after it exited",
                 LEFTOVER_LIMIT.as_secs()
             )));
         }
@@ -1062,6 +1070,8 @@ mod ab {
     #[cfg(test)]
     mod tests {
         #[cfg(target_os = "linux")]
+        use std::os::unix::process::CommandExt;
+        #[cfg(target_os = "linux")]
         use std::sync::Mutex;
 
         use super::*;
@@ -1126,15 +1136,31 @@ mod ab {
 
         #[cfg(target_os = "linux")]
         #[test]
+        fn an_exited_child_is_clean_even_with_no_grace_period() {
+            let _alone = CHILDREN.lock().unwrap();
+            enable_subreaper().unwrap();
+            let child = Command::new("true").spawn().unwrap();
+            waitid(
+                WaitId::Pid(Pid::from_child(&child)),
+                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+            )
+            .unwrap();
+            assert!(reap_leftovers(Duration::ZERO).unwrap());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
         fn a_leftover_process_is_killed_at_the_limit() {
             let _alone = CHILDREN.lock().unwrap();
             enable_subreaper().unwrap();
             let t = Instant::now();
-            Command::new("sh")
-                // a leftover with a child of its own, which comes to us once it is killed
-                .args(["-c", "(sleep 30 & wait) &"])
-                .status()
+            let parent = Command::new("sh")
+                .process_group(0)
+                .args(["-c", "sh -c 'printf x; exec sleep 30' & wait"])
+                .stdout(Stdio::piped())
+                .spawn()
                 .unwrap();
+            parent.stdout.unwrap().read_exact(&mut [0]).unwrap();
             assert!(!reap_leftovers(Duration::from_secs(1)).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
         }

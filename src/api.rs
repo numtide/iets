@@ -540,7 +540,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
             ArgKind::Expr(e) => {
                 k.field("arg", name.as_bytes());
                 k.field("val", e.as_bytes());
-                needs_cwd |= has_relative_path(e);
+                needs_cwd = needs_cwd || has_relative_path(e);
             }
             ArgKind::Str(s) => {
                 k.field("argstr", name.as_bytes());

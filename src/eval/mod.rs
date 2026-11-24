@@ -1785,15 +1785,14 @@ impl Evaluator {
 
     /// `{ file, line, column }` for `__curPos` and `unsafeGetAttrPos`.
     pub fn mk_pos_attrs(&mut self, pos: Pos) -> Word {
-        let Some((f, off)) = self.file_of(pos) else {
+        let Some((f, off)) = self.files.file_of(pos) else {
             return Word::NULL;
         };
         if f.path.starts_with(b"\xc2\xab") {
             return Word::NULL;
         }
         let (line, col) = f.line_col(off);
-        let path = f.path.clone();
-        let file = self.mk_string(&path);
+        let file = self.arena.mk_string(&f.path);
         let line = self.mk_int(line as i64);
         let col = self.mk_int(col as i64);
         let mut entries = vec![

@@ -133,7 +133,6 @@ fn cached(b: &Build, ec: EvalConfig) -> Run {
     let (first, more) = (b.c.flags.attrs.split_first()).expect("parse pushes an empty attr");
     a.attr = Some(first.clone());
     a.args = b.c.flags.args.clone();
-    a.includes = b.c.flags.includes.clone();
     a.pure = b.c.flags.pure;
     Run::on(ec).cached_more(&a, NAME, more)
 }

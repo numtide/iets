@@ -543,9 +543,9 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
             }
         }
     }
-    for (prefix, path) in full_includes(&a.includes) {
-        k.field("include-prefix", &prefix);
-        k.field("include-path", &path);
+    for (prefix, path) in cfg.configured_search_path() {
+        k.field("include-prefix", prefix);
+        k.field("include-path", path);
     }
     if a.attrs.is_empty() {
         if let Some(attr) = &a.attr {
@@ -559,7 +559,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.flag("strict", a.strict);
     k.flag("json", a.json);
     k.flag("raw", a.raw);
-    k.field("lints", lint_config(a).ok()?.key().as_bytes());
+    k.field("lints", cfg.configured_lints().key().as_bytes());
     k.field("system", cfg.current_system().as_bytes());
     k.field("store-dir", store_dir().as_bytes());
     // what builtins.fetchClosure trusts
@@ -613,6 +613,20 @@ mod tests {
         let none = key(None);
         assert_ne!(key(Some(b"/a")), key(Some(b"/b")));
         assert_ne!(key(Some(b"/a")), none);
+    }
+
+    #[test]
+    fn the_cache_key_uses_the_configured_search_path_and_lints() {
+        let mut a = EvalArgs::new();
+        a.input = Some(Input::Expr("1".into()));
+        let key = |cfg| cache_key(&a, "eval", &cfg, &[]).unwrap().finish();
+        let off = EvalConfig::new().lints(lint::Config::off());
+        let baseline = key(off.clone());
+        assert_ne!(
+            baseline,
+            key(off.search_path(vec![(b"x".to_vec(), b"/one".to_vec())]))
+        );
+        assert_ne!(baseline, key(EvalConfig::new()));
     }
 
     /// A URL stays as given; `<name>` on it is unsupported, so a classic

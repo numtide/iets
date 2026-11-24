@@ -607,7 +607,6 @@ fn key_args(s: &Search) -> EvalArgs {
             .iter()
             .map(|(n, k)| (n.clone(), k.clone()))
             .collect();
-    a.includes = s.c.flags.includes.clone();
     a.pure = s.c.flags.pure;
     a.timings = s.timings;
     a.no_tracing_cache = s.cache.no_tracing_cache;

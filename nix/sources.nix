@@ -9,7 +9,7 @@ let
 in
 {
   bin = sourceOf bin;
-  test = sourceOf (bin ++ [ ../tests ../examples ../.config/nextest.toml ]);
+  test = sourceOf (bin ++ [ ../tests ../bench/incremental/fcheck.awk ../examples ../.config/nextest.toml ]);
   fuzz = sourceOf (bin ++ [ ../fuzz ]);
   astGrep = sourceOf [ ../sgconfig.yml ./ast-grep (fs.fileFilter (f: f.hasExt "rs") root) ];
 }

@@ -32,7 +32,7 @@ fn malformed_changes_cannot_report_a_clean_job(bin: Iets) {
         ]));
     fs::write(&payload, "18").unwrap();
     let path = payload.display();
-    let change = format!("step\tCR\t{path}\t\n");
+    let change = format!("step\tV\t3\r\nstep\tCR\t{path}\t\r\n");
     fs::write(dir.join("good"), &change).unwrap();
     let check = |delta| {
         bin.cmd()
@@ -103,7 +103,7 @@ fn malformed_changes_cannot_report_a_clean_job(bin: Iets) {
 fn text_checker_routes_each_name_in_a_directory_change() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("changes");
-    fs::write(&file, "step\tCD\t/repo\tfirst second\r\n").unwrap();
+    fs::write(&file, "step\tV\t3\r\nstep\tCD\t/repo\tfirst second\r\n").unwrap();
     let trace = dir.path().join("trace");
     fs::write(&trace, "J\tobserved\nV\t2\nV\tattr-order-1\nV\texternal-reads-v1\nV\tvolatile-v1\nV\tjob-output-v1\nV\tlist-control-v1\nP\t0\tdir\t/repo\nK\t0\tsecond\n").unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");

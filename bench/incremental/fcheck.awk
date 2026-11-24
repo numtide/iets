@@ -7,7 +7,9 @@ FILENAME == ARGV[1] {
   # gawk exposes the record terminator through RT.
   if (NF < 3 || $1 == "" || $3 == "" || ("version" in PROCINFO && RT == "")) bad_change()
   s = $1
-  if ($2 == "CR" && NF == 4) cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
+  step[s] = 1
+  if ($2 == "V" && NF == 3 && $3 == "3") version[s] = 1
+  else if ($2 == "CR" && NF == 4) cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
   else if ($2 == "CF" && NF == 3) cf[$3] = cf[$3] " " s
   else if ($2 == "CL" && NF == 6 && uint($5)) { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
   else if ($2 == "CD" && NF == 4 && $4 != "") { cd[$3] = cd[$3] ";" s ":" $4; cn[$4] = 1; n = split($4, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
@@ -28,8 +30,18 @@ function entries(e, name, why,    n, x, i, y) {
     if (name == "" || y[2] == "*" || index(" " y[2] " ", " " name " ")) mark(y[1], why)
   }
 }
-function flush(   s) { if (job != "") for (s in inv) print job, s, inv[s]; delete inv; delete pc }
+function flush(   s) {
+  if (!length(version) || length(version) != length(step)) {
+    print "regenerate the changes" > "/dev/stderr"; failed = 1; exit 1
+  }
+  if (job != "") {
+    if (!trace_version) { print "regenerate job traces" > "/dev/stderr"; failed = 1; exit 1 }
+    for (s in inv) print job, s, inv[s]
+  }
+  delete inv; delete pc; trace_version = 0
+}
 $1 == "J" { flush(); job = $2; next }
+$1 == "V" && $2 == "2" { trace_version = 1; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
   if ($3 == "lit") pc[$2] = cl[$4 "\t" $5 "\t" $6]

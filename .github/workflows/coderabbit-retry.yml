@@ -1,0 +1,39 @@
+name: coderabbit-retry
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only list the PRs that would be re-requested
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coderabbit-retry
+
+jobs:
+  retry:
+    if: github.repository == 'numtide/iets'
+    runs-on: ubuntu-latest
+    env:
+      # CodeRabbit ignores commands from github-actions[bot], so this has to
+      # be a token of a user account. To replace it when it expires:
+      #
+      # 1. Open https://github.com/settings/personal-access-tokens/new?name=iets-coderabbit-retry&target_name=numtide&expires_in=90&pull_requests=write
+      # 2. Under "Repository access" choose "Only select repositories" and
+      #    pick numtide/iets. The link already selects the only permission
+      #    needed, "Pull requests: Read and write".
+      # 3. Generate the token and store it with
+      #    gh secret set CODERABBIT_RETRY_TOKEN --repo numtide/iets
+      GH_TOKEN: ${{ secrets.CODERABBIT_RETRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Re-request rate-limited reviews
+        run: python3 .github/scripts/coderabbit_retry.py ${{ inputs.dry_run && '--dry-run' || '' }}

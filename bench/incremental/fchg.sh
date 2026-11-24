@@ -5,9 +5,9 @@ export LC_ALL=C
 cd ~/incr/nixpkgs
 P=$HOME/incr/base
 I=$HOME/iets-incr/target/release/iets
-T=$(mktemp -d)
-trap 'rm -rf "$T"' EXIT
 mkdir -p ../fchg
+T=$(mktemp -d ../fchg/.work.XXXXXXXX)
+trap 'rm -rf -- "$T"' EXIT
 
 # Same byte encoding as fine-regions. Directory entry names cannot contain '/'.
 field() {
@@ -29,7 +29,9 @@ cs=($(git log --first-parent --format=%h --reverse 9dbd131e6c65~1..4e63084a455b)
 pairs() { for ((i = 1; i < ${#cs[@]}; i++)); do echo "$i ${cs[i-1]} ${cs[i]}"; done; echo "w100 ${cs[0]} ${cs[100]}"; for ((i = 10; i <= 100; i += 10)); do echo "w10-$i ${cs[i-10]} ${cs[i]}"; done; }
 pairs | while read -r n a b; do
   out=../fchg/$n.txt
-  if [[ -s $out ]] && grep -Fqx $'V\t3' "$out"; then continue; fi
+  # Earlier V3 files skipped imports without a .nix suffix.
+  receipt=../fchg/.all-imports-v3-$a-$b
+  if [[ -s $out && $out -ef $receipt ]]; then continue; fi
   {
     printf 'V\t3\n'
     git diff --no-renames --name-status -z "$a" "$b" | while IFS= read -r -d '' st && IFS= read -r -d '' p; do
@@ -67,21 +69,27 @@ pairs | while read -r n a b; do
         path_change CS "$P/$p"
         ;;
       esac
-      if [[ $p == *.nix && $st != A ]]; then
+      if [[ $st != A ]]; then
         git show "$a:$p" > "$T/a.nix"
-        "$I" fine-regions "$T/a.nix=$P/$p" > "$T/a.tab"
+        "$I" fine-regions "$T/a.nix=$P/$p" > "$T/a.tab" 2>/dev/null
         if [[ $st == D ]]; then
           printf 'V\t2\nE\n' > "$T/b.tab"
         else
           git show "$b:$p" > "$T/b.nix"
-          "$I" fine-regions "$T/b.nix=$P/$p" > "$T/b.tab"
+          "$I" fine-regions "$T/b.nix=$P/$p" > "$T/b.tab" 2>/dev/null
         fi
         field "$P/$p"
         gawk -f ../fcmp.awk "$T/a.tab" "$T/b.tab"
-        if [[ $st == D ]]; then d=1; else d=$( { cmp "$T/a.nix" "$T/b.nix" 2>/dev/null || :; } | gawk '{print $5 + 0}'); fi
-        if [[ -n $d ]]; then printf 'CX\t%s\t%d\n' "$encoded" "$((d - 1))"; fi
+        if [[ $st == D ]]; then
+          printf 'CX\t%s\t0\n' "$encoded"
+        elif ! cmp -s "$T/a.nix" "$T/b.nix"; then
+          # cmp reports EOF without a byte offset for a prefix-only edit.
+          d=$(cd "$T"; { cmp a.nix b.nix 2>/dev/null || :; } | gawk '{print $5 + 0}')
+          printf 'CX\t%s\t%d\n' "$encoded" "$((${d:-1} - 1))"
+        fi
       fi
     done
-  } | sort -u > "$out.tmp"
-  mv "$out.tmp" "$out"
+  } | sort -u > "$T/changes"
+  ln -f -- "$T/changes" "$receipt"
+  mv -f -- "$T/changes" "$out"
 done

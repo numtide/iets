@@ -168,12 +168,14 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
     let base = home.join("incr/base");
     let traces = home.join("traces");
     let dag = home.join("dag");
+    let imported = "café\tdefs";
     for root in [&repo, &base] {
         for name in ["removed", "replaced", "surviving"] {
             fs::create_dir_all(root.join(name)).unwrap();
             fs::write(root.join(name).join("child"), "").unwrap();
             fs::write(root.join(name).join("keep"), "").unwrap();
         }
+        fs::write(root.join(imported), "{ answer = 17; }").unwrap();
     }
     fs::create_dir(&traces).unwrap();
     fs::write(
@@ -181,7 +183,8 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
         "let r=builtins.readDir; a=r ./removed; b=r ./replaced; c=r ./surviving; in [
          (a ? child) (a ? absent) (builtins.attrNames a)
          (b ? child) (b ? absent) (builtins.attrNames b)
-         (c ? child) (c ? absent) (builtins.attrNames c) ]",
+         (c ? child) (c ? absent) (builtins.attrNames c)
+         ((import (./. + \"/café\tdefs\")).answer) ]",
     )
     .unwrap();
     run(bin
@@ -209,6 +212,7 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
     // The generator's historical range includes 101 first-parent revisions.
     for i in 0..102 {
         if i == 101 {
+            fs::write(repo.join(imported), "{ answer = 18; }").unwrap();
             fs::remove_dir_all(repo.join("removed")).unwrap();
             fs::remove_dir_all(repo.join("replaced")).unwrap();
             fs::write(repo.join("replaced"), "now a file").unwrap();
@@ -222,10 +226,14 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
     }
     git(&["tag", "4e63084a455b"]);
     let incremental = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental");
+    let release = home.join("iets-incr/target/release");
+    fs::create_dir_all(&release).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_iets"), release.join("iets")).unwrap();
+    fs::copy(incremental.join("fcmp.awk"), home.join("incr/fcmp.awk")).unwrap();
     let changes_dir = home.join("incr/fchg");
     fs::create_dir(&changes_dir).unwrap();
     // The generator must replace pre-fix persisted changes.
-    fs::write(changes_dir.join("100.txt"), "V\t2\n").unwrap();
+    fs::write(changes_dir.join("100.txt"), "V\t3\n").unwrap();
     run(Command::new("bash")
         .env("HOME", home)
         .arg(incremental.join("fchg.sh")));
@@ -240,7 +248,7 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
             .collect::<String>(),
     )
     .unwrap();
-    let expected = [0, 1, 2, 3, 4, 5, 6, 8];
+    let expected = [0, 1, 2, 3, 4, 5, 6, 8, 9];
     let actual = run(bin.cmd().arg("fine-check").arg(&changes).arg(&dag));
     let mut jobs: Vec<usize> = actual
         .lines()
@@ -251,7 +259,7 @@ fn git_directory_changes_reach_negative_lookups(bin: Iets) {
     let flat = home.join("flat");
     fs::write(
         &flat,
-        (0..9)
+        (0..10)
             .map(|i| {
                 format!(
                     "J\t{i}\n{}",

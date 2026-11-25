@@ -685,8 +685,6 @@ fn derivation_strict_internal(
         };
         let method = ingestion_method.unwrap_or(IngestionMethod::Flat);
         if ev.lint_on(LintId::Fod) {
-            let sri = hash.to_sri();
-            let algo = sri.split('-').next().unwrap_or("");
             let mode = match method {
                 IngestionMethod::Flat => "flat",
                 IngestionMethod::Recursive => "recursive",
@@ -694,7 +692,7 @@ fn derivation_strict_internal(
             };
             let fallback = fallback(ev);
             let site = coerce::drv_attr_pos(ev, name_pos, fallback);
-            purity::fod(ev, drv_name, mode, algo, site)?;
+            purity::fod(ev, drv_name, mode, hash.algo.name(), site)?;
         }
         let out = DerivationOutput::Fixed { method, hash };
         let path = out

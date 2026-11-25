@@ -156,11 +156,11 @@ pub type Sink = Arc<Mutex<Box<dyn FnMut(Line) + Send>>>;
 
 struct State {
     todo: BTreeSet<Vec<String>>,
-    active: BTreeSet<Vec<String>>,
+    active: usize,
     failed: Option<String>,
 }
 
-type Shared = Arc<(Mutex<State>, Condvar)>;
+type Shared = (Mutex<State>, Condvar);
 
 enum Control {
     Next,
@@ -320,15 +320,14 @@ fn read_line(from: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<bool> {
 }
 
 fn next_job(shared: &Shared) -> Option<Vec<String>> {
-    let (lock, cv) = &**shared;
+    let (lock, cv) = shared;
     let mut st = lock.lock().unwrap();
     loop {
-        if (st.todo.is_empty() && st.active.is_empty()) || st.failed.is_some() {
+        if (st.todo.is_empty() && st.active == 0) || st.failed.is_some() {
             return None;
         }
-        if let Some(p) = st.todo.iter().next().cloned() {
-            st.todo.remove(&p);
-            st.active.insert(p.clone());
+        if let Some(p) = st.todo.pop_first() {
+            st.active += 1;
             return Some(p);
         }
         st = cv.wait(st).unwrap();
@@ -407,9 +406,9 @@ fn collector(shared: &Shared, args: &[String], sink: &Sink) -> Result<()> {
                 )));
             }
         };
-        let (lock, cv) = &**shared;
+        let (lock, cv) = shared;
         let mut st = lock.lock().unwrap();
-        st.active.remove(&path);
+        st.active -= 1;
         st.todo.extend(new_attrs);
         cv.notify_all();
     }
@@ -419,21 +418,19 @@ fn collector(shared: &Shared, args: &[String], sink: &Sink) -> Result<()> {
 /// its own worker process, until the tree is walked. Every line reaches
 /// `sink` in completion order.
 pub fn run_collector(args: &[String], workers: usize, sink: Sink) -> Result<()> {
-    let shared: Shared = Arc::new((
+    let shared: Shared = (
         Mutex::new(State {
             todo: BTreeSet::from([Vec::new()]),
-            active: BTreeSet::new(),
+            active: 0,
             failed: None,
         }),
         Condvar::new(),
-    ));
+    );
     thread::scope(|s| {
         for _ in 0..workers.max(1) {
-            let shared = shared.clone();
-            let sink = sink.clone();
-            s.spawn(session::bind(move || {
+            s.spawn(session::bind(|| {
                 if let Err(e) = collector(&shared, args, &sink) {
-                    let (lock, cv) = &*shared;
+                    let (lock, cv) = &shared;
                     let mut st = lock.lock().unwrap();
                     st.failed.get_or_insert(e.to_string());
                     cv.notify_all();

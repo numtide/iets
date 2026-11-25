@@ -855,9 +855,8 @@ fn output_string(
         None => downstream_placeholder(drv_path, drv_name, output),
     };
     let output = ev.arena.alloc_bytes(output.as_bytes());
-    let bytes = ev.arena.alloc_bytes(s.as_bytes());
     Ok(ev.arena.mk_string_ctx(
-        bytes,
+        s.as_bytes(),
         &[Ctx::Built {
             drv: drv_path_bytes,
             output,
@@ -993,9 +992,10 @@ fn output_of(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let (layers, root) = split_built(drv);
     let root = parse_store_path(root, pos)?;
     let rendered = render_built(ev, &root, &layers, name, pos)?;
-    let bytes = ev.arena.alloc_bytes(rendered.as_bytes());
     let output = ev.arena.alloc_bytes(name.as_bytes());
-    Ok(ev.arena.mk_string_ctx(bytes, &[Ctx::Built { drv, output }]))
+    Ok(ev
+        .arena
+        .mk_string_ctx(rendered.as_bytes(), &[Ctx::Built { drv, output }]))
 }
 
 /// `load_derivation_from_store` plus a `File` observation of the `.drv`.

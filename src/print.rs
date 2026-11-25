@@ -114,10 +114,17 @@ pub fn lexicographic_order(
     ev: &Evaluator,
     a: &'static AttrsObj,
 ) -> impl ExactSizeIterator<Item = &'static Attr> + use<> {
+    lexicographic_entries(ev, a.iter())
+}
+
+pub(crate) fn lexicographic_entries<I: Iterator<Item = &'static Attr>>(
+    ev: &Evaluator,
+    entries: I,
+) -> impl ExactSizeIterator<Item = &'static Attr> + use<I> {
     // the dense prefix decides 97% of the compares on nixos-plasma without
     // reading the scattered names
     let names = &ev.interner;
-    let mut v: Vec<(u64, &'static Attr)> = a.iter().map(|x| (names.prefix(x.sym), x)).collect();
+    let mut v: Vec<(u64, &'static Attr)> = entries.map(|x| (names.prefix(x.sym), x)).collect();
     v.sort_unstable_by(|x, y| {
         (x.0.cmp(&y.0)).then_with(|| names.name(x.1.sym).cmp(names.name(y.1.sym)))
     });

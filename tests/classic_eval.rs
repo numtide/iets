@@ -378,7 +378,11 @@ in { a = d "classic-e2e-two-a"; b = d "classic-e2e-two-b"; }
     }
     // a name that is not UTF-8 reaches the evaluator and the fallback intact
     let ff = s.dir().join(OsStr::from_bytes(b"\xff.nix"));
-    fs::write(&ff, "{ a = 1; }\n").unwrap();
+    if let Err(e) = fs::write(&ff, "{ a = 1; }\n") {
+        // A UTF-8-only filesystem cannot create this fixture.
+        assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+        return;
+    }
     let real = f
         .real("nix-instantiate")
         .arg("--eval")

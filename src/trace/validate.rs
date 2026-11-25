@@ -509,9 +509,9 @@ mod dir_hash_tests {
         }
         fs::create_dir(d.path().join("adir")).unwrap();
         symlink("a", d.path().join("alink")).unwrap();
-        // APFS rejects names that are not UTF-8
-        if cfg!(not(target_vendor = "apple")) {
-            fs::write(d.path().join(OsStr::from_bytes(b"non\xffutf8")), b"x").unwrap();
+        // Some filesystems require UTF-8 names.
+        if let Err(e) = fs::write(d.path().join(OsStr::from_bytes(b"non\xffutf8")), b"x") {
+            assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
         }
 
         let mut entries = read_dir_kinds(d.path()).unwrap();

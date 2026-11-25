@@ -15,11 +15,12 @@
 
 use crate::sys::{self, fs as sysfs};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering as Atomic};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::cachefs;
 
@@ -48,6 +49,25 @@ const TAIL: usize = 256 * 4 + 8 + 8 + 16 + 8;
 const LZ4: u8 = 1;
 const MIN_COMPRESS: usize = 64;
 
+/// Packs a process keeps open, well under the usual descriptor limits (1024,
+/// macOS 256). Further packs are opened per read and can be gone by then.
+const OPEN_PACKS: usize = 128;
+static OPEN: AtomicUsize = AtomicUsize::new(0);
+
+/// The tests of one binary share `OPEN`: a test that fills it writes here,
+/// and a test that needs a pack held open reads.
+#[cfg(test)]
+pub(super) static OPEN_IN_TESTS: RwLock<()> = RwLock::new(());
+
+/// `FAN_IN` packs of one size class (a factor of four) merge into one of the
+/// next class. A pack of `SMALL` or more stays as it is.
+const SMALL: u64 = 64 << 20;
+const FAN_IN: usize = 4;
+
+/// How often a read lists the packs again: a pack that is not held open can
+/// go to a merge between each listing and the read of it.
+const LISTINGS: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Loc {
     offset: u64,
@@ -65,7 +85,7 @@ fn corrupt(why: &str) -> io::Error {
 
 #[derive(Debug)]
 pub struct Pack {
-    file: File,
+    file: OnceLock<File>,
     path: PathBuf,
     index: Vec<u8>,
     fanout: [u32; 256],
@@ -81,20 +101,60 @@ impl Pack {
         if !md.is_file() {
             return Ok(None);
         }
-        Ok(Pack::parse(file, path, md.len()))
+        let pack = Pack::parse(&file, path, md.len());
+        if let Some(p) = &pack {
+            let _ = p.retain(file);
+        }
+        Ok(pack)
     }
 
-    fn parse(file: File, path: &Path, len: u64) -> Option<Pack> {
+    /// Keeps `file` open for the reads to come, when the process may hold one
+    /// more; hands it back when it may not.
+    fn retain(&self, file: File) -> Result<&File, File> {
+        if OPEN.fetch_add(1, Atomic::Relaxed) >= OPEN_PACKS {
+            OPEN.fetch_sub(1, Atomic::Relaxed);
+            return Err(file);
+        }
+        if self.file.set(file).is_err() {
+            OPEN.fetch_sub(1, Atomic::Relaxed);
+        }
+        Ok(self.file.get().expect("set above, or by a sibling"))
+    }
+
+    /// The name of a pack is the checksum of its index, so the file at its
+    /// path is the pack that was parsed, or is not there.
+    fn with_file<T>(&self, f: impl FnOnce(&File) -> io::Result<T>) -> io::Result<T> {
+        if let Some(file) = self.file.get() {
+            return f(file);
+        }
+        let file = sysfs::no_follow_no_block(File::options().read(true)).open(&self.path)?;
+        let md = file.metadata()?;
+        if !md.is_file() || md.len() != self.len {
+            return Err(corrupt("changed since it was listed"));
+        }
+        match self.retain(file) {
+            Ok(file) => f(file),
+            Err(file) => f(&file),
+        }
+    }
+
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.with_file(|file| {
+            sysfs::read_exact_at(file, buf, offset).map_err(|_| corrupt("truncated"))
+        })
+    }
+
+    fn parse(file: &File, path: &Path, len: u64) -> Option<Pack> {
         if len < (MAGIC.len() + TAIL) as u64 {
             return None;
         }
         let mut magic = [0u8; 8];
-        sysfs::read_exact_at(&file, &mut magic, 0).ok()?;
+        sysfs::read_exact_at(file, &mut magic, 0).ok()?;
         if &magic != MAGIC {
             return None;
         }
         let mut tail = [0u8; TAIL];
-        sysfs::read_exact_at(&file, &mut tail, len - TAIL as u64).ok()?;
+        sysfs::read_exact_at(file, &mut tail, len - TAIL as u64).ok()?;
         if &tail[TAIL - 8..] != TRAILER {
             return None;
         }
@@ -106,7 +166,7 @@ impl Pack {
             return None;
         }
         let mut index = vec![0u8; index_len as usize];
-        sysfs::read_exact_at(&file, &mut index, start).ok()?;
+        sysfs::read_exact_at(file, &mut index, start).ok()?;
         let mut h = blake3::Hasher::new();
         h.update(&index);
         h.update(&tail[..1040]);
@@ -118,7 +178,7 @@ impl Pack {
             *f = u32::from_le_bytes(tail[i * 4..i * 4 + 4].try_into().unwrap());
         }
         let pack = Pack {
-            file,
+            file: OnceLock::new(),
             path: path.to_path_buf(),
             index,
             fanout,
@@ -206,7 +266,7 @@ impl Pack {
 
     fn stored_bytes(&self, loc: Loc) -> io::Result<Vec<u8>> {
         let mut out = vec![0u8; loc.stored as usize];
-        sysfs::read_exact_at(&self.file, &mut out, loc.offset).map_err(|_| corrupt("truncated"))?;
+        self.read_at(&mut out, loc.offset)?;
         Ok(out)
     }
 
@@ -231,6 +291,14 @@ impl Pack {
 
     pub fn file_len(&self) -> u64 {
         self.len
+    }
+}
+
+impl Drop for Pack {
+    fn drop(&mut self) {
+        if self.file.get().is_some() {
+            OPEN.fetch_sub(1, Atomic::Relaxed);
+        }
     }
 }
 
@@ -356,8 +424,7 @@ impl PackWriter {
         let mut done = 0;
         while done < loc.stored {
             let n = (loc.stored - done).min(buf.len() as u64) as usize;
-            sysfs::read_exact_at(&from.file, &mut buf[..n], loc.offset + done)
-                .map_err(|_| corrupt("truncated"))?;
+            from.read_at(&mut buf[..n], loc.offset + done)?;
             self.file.write_all(&buf[..n])?;
             done += n as u64;
         }
@@ -487,8 +554,9 @@ impl PackSet {
 }
 
 /// The packs of a store as a process sees them: one listing, taken again when
-/// an object is not in it, because a compaction since may have moved it. A
-/// pack this process has open stays readable after a sweep unlinks it.
+/// an object is not in it, or its pack is gone, because a compaction since may
+/// have moved it. A pack this process has open stays readable after a sweep
+/// unlinks it.
 #[derive(Debug)]
 pub struct Packs {
     dir: PathBuf,
@@ -521,22 +589,78 @@ impl Packs {
         self.snapshot().find(id).is_some()
     }
 
+    /// Lists the packs again and merges those of each full size class, until
+    /// no class is full: a `put` runs it after its own pack, so the store
+    /// holds a few packs per class and not one per put. The caller holds the
+    /// store's lock. It does not know what is live, and copies every object;
+    /// `collect` drops the dead ones. An error leaves the listing current.
+    pub fn merge(&self) -> io::Result<()> {
+        while self.merge_full(&self.refresh())? {}
+        Ok(())
+    }
+
+    /// Merges each full class of `set`. `false` when no class is full any
+    /// more, or a pack stayed: it is in its class for the next put.
+    fn merge_full(&self, set: &PackSet) -> io::Result<bool> {
+        let mut classes: BTreeMap<u32, Vec<&Arc<Pack>>> = BTreeMap::new();
+        for p in set.packs().iter().filter(|p| p.file_len() < SMALL) {
+            classes
+                .entry(p.file_len().max(1).ilog2() / 2)
+                .or_default()
+                .push(p);
+        }
+        classes.retain(|_, c| c.len() >= FAN_IN);
+        if classes.is_empty() {
+            return Ok(false);
+        }
+        let all = classes.into_values().try_fold(true, |all, class| {
+            io::Result::Ok(all & merge_class(&self.dir, &class)?)
+        });
+        if !matches!(all, Ok(true)) {
+            // the classes before this one are merged, and their packs gone
+            self.refresh();
+        }
+        all
+    }
+
     /// An object's bytes. `NotFound` when no pack holds it even after a fresh
     /// listing: the entry that named it is then not whole.
     pub fn read(&self, id: &Id) -> io::Result<Vec<u8>> {
-        let set = self.snapshot();
-        if let Some((p, loc)) = set.find(id) {
-            return p.read(loc);
+        self.read_listing(id, || self.refresh())
+    }
+
+    fn read_listing(&self, id: &Id, mut list: impl FnMut() -> Arc<PackSet>) -> io::Result<Vec<u8>> {
+        let mut set = self.snapshot();
+        for listing in 0..=LISTINGS {
+            match set.find(id).map(|(p, loc)| p.read(loc)) {
+                Some(Err(e)) if e.kind() == io::ErrorKind::NotFound && listing < LISTINGS => {}
+                Some(r) => return r,
+                None if listing > 0 => break,
+                None => {}
+            }
+            set = list();
         }
-        let set = self.refresh();
-        match set.find(id) {
-            Some((p, loc)) => p.read(loc),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "an object of this input is missing from the input store",
-            )),
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "an object of this input is missing from the input store",
+        ))
+    }
+}
+
+/// One pack of all that the packs of `class` hold. `false` when one of them
+/// could not be removed.
+fn merge_class(dir: &Path, class: &[&Arc<Pack>]) -> io::Result<bool> {
+    let mut w = PackWriter::new(dir)?;
+    for pack in class {
+        for (id, loc) in pack.ids() {
+            w.copy(id, pack, loc)?;
         }
     }
+    let new = w.finish()?;
+    Ok(class
+        .iter()
+        .filter(|p| new.as_deref() != Some(p.path()))
+        .all(|p| remove(p.path(), false)))
 }
 
 /// What a collection did, or would do on a dry run.
@@ -774,5 +898,136 @@ mod tests {
             "from the new pack"
         );
         assert!(reader.read(&id_of(&drop)).is_err());
+    }
+
+    fn one_pack(dir: &Path, bytes: &[u8]) -> PathBuf {
+        let mut w = PackWriter::new(dir).unwrap();
+        w.add(id_of(bytes), bytes).unwrap();
+        w.finish().unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_process_keeps_a_bounded_number_of_packs_open() {
+        let _filled = OPEN_IN_TESTS.write().unwrap();
+        let d = tempdir().unwrap();
+        let n = OPEN_PACKS + 8;
+        for i in 0..n {
+            one_pack(d.path(), format!("object {i}").as_bytes());
+        }
+        let packs = Packs::open(d.path());
+        let set = packs.snapshot();
+        assert_eq!(set.packs().len(), n);
+        for i in 0..n {
+            let bytes = format!("object {i}").into_bytes();
+            assert_eq!(packs.read(&id_of(&bytes)).unwrap(), bytes);
+        }
+        let open = set.packs().iter().filter(|p| p.file.get().is_some());
+        assert!(open.count() <= OPEN_PACKS);
+    }
+
+    /// `p` as a process past its bound lists it: not held open.
+    fn closed(p: &Pack, path: &Path, len: u64) -> Arc<Pack> {
+        Arc::new(Pack {
+            file: OnceLock::new(),
+            path: path.to_path_buf(),
+            index: p.index.clone(),
+            fanout: p.fanout,
+            len,
+        })
+    }
+
+    fn set_of(packs: impl Iterator<Item = Arc<Pack>>) -> Arc<PackSet> {
+        Arc::new(PackSet {
+            packs: packs.collect(),
+            broken: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_read_follows_a_second_merge() {
+        let d = tempdir().unwrap();
+        let real = Pack::open(&one_pack(d.path(), b"object")).unwrap().unwrap();
+        // two listings, each naming a pack that a merge removed before the read
+        let gone = |name: &str| set_of([closed(&real, &d.path().join(name), real.len)].into_iter());
+        let reader = Packs {
+            dir: d.path().to_path_buf(),
+            set: RwLock::new(gone("first.pack")),
+        };
+        let mut stale = Some(gone("second.pack"));
+        let read = reader.read_listing(&id_of(b"object"), || {
+            stale.take().unwrap_or_else(|| reader.refresh())
+        });
+        assert_eq!(read.unwrap(), b"object");
+    }
+
+    #[test]
+    fn a_merge_that_fails_part_way_lists_the_packs_again() {
+        let d = tempdir().unwrap();
+        let old: Vec<PathBuf> = (0..FAN_IN)
+            .map(|i| one_pack(d.path(), format!("object {i}").as_bytes()))
+            .collect();
+        let packs = Packs::open(d.path());
+        // a full class above, whose packs went before the copy
+        let listed = packs.snapshot();
+        let real = &listed.packs()[0];
+        let gone = (0..FAN_IN).map(|i| {
+            closed(
+                real,
+                &d.path().join(format!("gone {i}.pack")),
+                real.len << 4,
+            )
+        });
+        let set = set_of(listed.packs().iter().cloned().chain(gone));
+
+        assert!(packs.merge_full(&set).is_err());
+        assert!(old.iter().all(|p| !p.exists()));
+        let now = packs.snapshot();
+        assert_eq!(now.packs().len(), 1);
+        assert!(now.packs().iter().all(|p| p.path().exists()));
+    }
+
+    #[test]
+    fn a_reader_without_the_packs_open_follows_a_merge() {
+        let d = tempdir().unwrap();
+        let objects: Vec<Vec<u8>> = (0..FAN_IN)
+            .map(|i| format!("object {i}").into_bytes())
+            .collect();
+        let old: Vec<PathBuf> = objects.iter().map(|o| one_pack(d.path(), o)).collect();
+
+        // a reader past its bound: no pack is held open
+        let listed = PackSet::load(d.path());
+        let closed = listed.packs().iter().map(|p| closed(p, &p.path, p.len));
+        let reader = Packs {
+            dir: d.path().to_path_buf(),
+            set: RwLock::new(set_of(closed)),
+        };
+
+        Packs::open(d.path()).merge().unwrap();
+        assert!(old.iter().all(|p| !p.exists()));
+        assert_eq!(PackSet::load(d.path()).packs().len(), 1);
+        for o in &objects {
+            assert_eq!(&reader.read(&id_of(o)).unwrap(), o);
+        }
+    }
+
+    #[test]
+    fn a_merge_after_each_pack_keeps_the_packs_few() {
+        let d = tempdir().unwrap();
+        let reader = Packs::open(d.path());
+        let objects: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("object {i} ").repeat(1 + i % 7).into_bytes())
+            .collect();
+        for (i, o) in objects.iter().enumerate() {
+            one_pack(d.path(), o);
+            reader.merge().unwrap();
+            if i == FAN_IN - 2 {
+                assert_eq!(PackSet::load(d.path()).packs().len(), FAN_IN - 1);
+            }
+        }
+        let left = PackSet::load(d.path()).packs().len();
+        assert!(left < 4 * FAN_IN, "{left} packs for 200 puts");
+        for o in &objects {
+            assert_eq!(&reader.read(&id_of(o)).unwrap(), o);
+        }
     }
 }

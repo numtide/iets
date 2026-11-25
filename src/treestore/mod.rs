@@ -537,8 +537,9 @@ fn store(
         if !path.exists() {
             cachefs::write_atomic(root, name, &[&index]).map_err(Rejected::Io)?;
         }
+        // the tree is stored; a merge that fails leaves the packs as they are
+        let _ = packs.merge();
     }
-    packs.refresh();
     let tree = Tree::stored(stored_root, packs);
     Ok((name.to_string(), StoredTree::new(tree, nar_hash, nar_size)))
 }
@@ -727,6 +728,7 @@ mod tests {
     /// before the collection still reads it.
     #[test]
     fn collect_keeps_what_an_entry_names() {
+        let _held = pack::OPEN_IN_TESTS.read().unwrap();
         let root = tempdir().unwrap();
         let big = vec![b'x'; 50_000];
         let a = put_in(root.path(), &[("shared", b"shared bytes"), ("big", &big)]);

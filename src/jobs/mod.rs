@@ -178,31 +178,23 @@ fn walk(
             remember_set(attrs, hash, depth);
             let ordered: Vec<&Attr> = lexicographic_order(ev, attrs).collect();
             let cells = attrs.attrs();
-            let index: Vec<usize> = ordered
-                .iter()
-                .map(|a| (*a as *const Attr as usize - cells.as_ptr() as usize) / size_of::<Attr>())
-                .collect();
-            for (n, attr) in ordered.iter().enumerate() {
-                if n % WINDOW == 0 {
-                    // the cell range is in sym order, not walk order, but it
-                    // covers the whole window before the walk reaches it
-                    let lo = index[n..(n + WINDOW).min(ordered.len())]
-                        .iter()
-                        .copied()
-                        .min()
-                        .unwrap_or(0);
-                    let hi = index[n..(n + WINDOW).min(ordered.len())]
-                        .iter()
-                        .copied()
-                        .max()
-                        .map_or(0, |i| i + 1);
+            for window in ordered.chunks(WINDOW) {
+                if ev.par.on {
+                    // Lexical neighbors can be far apart in symbol order.
+                    let (lo, hi) = window.iter().fold((usize::MAX, 0), |(lo, hi), &attr| {
+                        let i = (attr as *const Attr as usize - cells.as_ptr() as usize)
+                            / size_of::<Attr>();
+                        (lo.min(i), hi.max(i + 1))
+                    });
                     fanout_range(ev, T_JOB, Word::from_ref(attrs), lo, hi, JOB_BATCH);
                 }
-                let name = ev.interner.name_str(attr.sym).to_string();
-                let h = fnv_step(hash, name.as_bytes());
-                path.push(name);
-                walk(ev, attr.cell.get(), path, h, sink);
-                path.pop();
+                for attr in window {
+                    let name = ev.interner.name_str(attr.sym).to_string();
+                    let h = fnv_step(hash, name.as_bytes());
+                    path.push(name);
+                    walk(ev, attr.cell.get(), path, h, sink);
+                    path.pop();
+                }
             }
         }
         Ok(Node::Skip) => {}

@@ -595,7 +595,10 @@ fn references(ev: &Evaluator, sp: Option<StorePath>) -> BTreeSet<StorePath> {
             .and_then(|o| o.text_refs().cloned())
             .unwrap_or_default(),
         Some(k) if k.flake.is_some() => BTreeSet::new(),
-        _ => locate::references_of(&sp),
+        _ => {
+            let _entered = ev.session().enter();
+            locate::references_of(&sp)
+        }
     }
 }
 

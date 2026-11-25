@@ -936,7 +936,7 @@ impl Evaluator {
         extra_scope: Option<&[Sym]>,
     ) -> EvalResult<IrRef> {
         let file = self.files.add_text(path, &src);
-        let lints = self.config_for_file(path);
+        let lints = self.compile_lints(path);
         self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
@@ -950,7 +950,7 @@ impl Evaluator {
         extra_scope: Option<&[Sym]>,
     ) -> EvalResult<IrRef> {
         let file = self.add_file(path, &src);
-        let lints = self.config_for_file(path);
+        let lints = self.compile_lints(path);
         self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
@@ -1034,7 +1034,7 @@ impl Evaluator {
             return self.compile_path(path, src, base_dir, None);
         }
         let t0 = Instant::now();
-        let lints = self.config_for_file(path);
+        let lints = self.compile_lints(path);
         let key = cache.key(
             path,
             &src,

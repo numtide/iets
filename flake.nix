@@ -85,6 +85,14 @@
             repo = "numtide/iets";
           };
         };
+        onSchedule.coderabbit-retry = {
+          when = { hour = lib.range 0 23; minute = 43; };
+          outputs.effects.retry = import ./nix/coderabbit-retry-effect.nix {
+            pkgs = x86;
+            hci-effects = hercules-ci-effects.lib.withPkgs x86;
+            repo = "numtide/iets";
+          };
+        };
       };
     };
 }

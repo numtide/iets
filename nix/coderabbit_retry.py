@@ -11,7 +11,7 @@ from typing import Any
 BOT = "coderabbitai"
 NOTICE_MARKER = "rate limited by coderabbit.ai"
 COMMAND = "@coderabbitai review"
-# Anything else after the mention is treated as chat and starts no review.
+# anything longer is chat to CodeRabbit, not a command
 REVIEW_COMMANDS = {COMMAND, "@coderabbitai full review"}
 
 QUERY = """
@@ -61,11 +61,10 @@ def is_bot(node: dict[str, Any]) -> bool:
 
 
 def pending_since(pr: dict[str, Any]) -> str | None:
-    """Return when the PR was rate limited, or None if nothing is pending.
+    """When the PR was rate limited, or None if it is not waiting.
 
-    CodeRabbit keeps the notice in its summary comment after a later review
-    succeeds, so only a notice newer than every review and every retry request
-    is still waiting. ISO 8601 UTC timestamps compare correctly as strings.
+    The notice outlives a later review, so it only counts while newer than
+    every review and retry request.
     """
     comments = pr["comments"]["nodes"]
     notices = [
@@ -95,8 +94,7 @@ def main() -> None:
         "--max",
         type=int,
         default=2,
-        help="PRs to re-request per run; the free OSS quota only hands out a "
-        "few reviews per hour, so more just produces fresh notices",
+        help="PRs to re-request per run; more than the quota only adds notices",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -106,8 +104,7 @@ def main() -> None:
         for pr in open_pull_requests(args.repo)
         if (since := pending_since(pr))
     ]
-    # Oldest first: a retry that is limited again refreshes the notice and
-    # moves to the back of the queue.
+    # oldest first; a retry that is limited again moves to the back
     pending.sort()
     print(f"{len(pending)} PRs waiting for a CodeRabbit review")
     for since, number in pending[: max(args.max, 0)]:

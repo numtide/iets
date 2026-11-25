@@ -229,7 +229,7 @@ fn map_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     for attr in a.iter() {
         let name = ev.sym_string(attr.sym);
         let v = ev.arena.mk_thunk_app2(f, name, attr.cell.get());
-        out.push((attr.sym, attr.pos, v));
+        out.push((attr.sym, Pos::NONE, v));
     }
     Ok(ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsMap))
 }

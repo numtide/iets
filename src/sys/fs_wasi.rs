@@ -193,8 +193,8 @@ pub fn try_lock(_f: &File) -> bool {
     true
 }
 
-pub fn lock(_f: &File) -> bool {
-    true
+pub fn lock(_f: &File) -> io::Result<()> {
+    Ok(())
 }
 
 pub fn unlock(_f: &File) {}

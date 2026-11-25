@@ -584,7 +584,7 @@ pub fn try_write_lock(root: &Path) -> io::Result<Option<WriteLock>> {
 
 /// The store's writer lock, waited for: for a writer that must not drop its
 /// write, and for work that holds the lock longer than `LOCK_TIMEOUT`.
-pub fn store_lock(root: &Path) -> Option<WriteLock> {
+pub fn store_lock(root: &Path) -> io::Result<WriteLock> {
     wait_lock(&root.join(LOCK), || {})
 }
 
@@ -594,21 +594,19 @@ pub fn store_lock(root: &Path) -> Option<WriteLock> {
 /// touched, so a sweep never takes a lock file that is in use. A sweep may
 /// remove the file while a waiter queues on it, and the waiter then holds a
 /// lock nobody else can see, so it locks the file at `path` again.
-pub fn wait_lock(path: &Path, on_wait: impl FnOnce()) -> Option<WriteLock> {
+pub fn wait_lock(path: &Path, on_wait: impl FnOnce()) -> io::Result<WriteLock> {
     let mut on_wait = Some(on_wait);
     loop {
-        let f = open_lock(path).ok()?;
+        let f = open_lock(path)?;
         if !sysfs::try_lock(&f) {
             if let Some(w) = on_wait.take() {
                 w();
             }
-            if !sysfs::lock(&f) {
-                return None;
-            }
+            sysfs::lock(&f)?;
         }
         if sysfs::same_file(&f, path) {
             sysfs::touch_open(&f);
-            return Some(WriteLock(f));
+            return Ok(WriteLock(f));
         }
     }
 }
@@ -1155,7 +1153,7 @@ mod tests {
         let held = wait_lock(&f, || panic!("nobody holds it")).expect("first lock");
         let waited = Arc::new(AtomicBool::new(false));
         let (w, f2) = (waited.clone(), f.clone());
-        let t = thread::spawn(move || wait_lock(&f2, || w.store(true, Ordering::SeqCst)).is_some());
+        let t = thread::spawn(move || wait_lock(&f2, || w.store(true, Ordering::SeqCst)).is_ok());
         while !waited.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(1));
         }

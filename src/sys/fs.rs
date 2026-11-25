@@ -169,13 +169,13 @@ pub fn try_lock(f: &File) -> bool {
     flock(f, FlockOperation::NonBlockingLockExclusive).is_ok()
 }
 
-/// Takes an exclusive lock on `f`, waiting for it. `false` on a real error.
-pub fn lock(f: &File) -> bool {
+/// Takes an exclusive lock on `f`, waiting for it.
+pub fn lock(f: &File) -> io::Result<()> {
     loop {
         match flock(f, FlockOperation::LockExclusive) {
-            Ok(()) => return true,
+            Ok(()) => return Ok(()),
             Err(Errno::INTR) => {}
-            Err(_) => return false,
+            Err(e) => return Err(e.into()),
         }
     }
 }

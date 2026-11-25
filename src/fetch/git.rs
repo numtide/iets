@@ -308,7 +308,7 @@ fn lock(dir: &Path) -> Result<cachefs::WriteLock, String> {
     cachefs::wait_lock(&path, || {
         log::line(&format!("waiting for the lock on '{}'", dir.display()))
     })
-    .ok_or_else(|| format!("iets: cannot lock '{}'", path.display()))
+    .map_err(|e| format!("iets: cannot lock '{}': {e}", path.display()))
 }
 
 /// The URL submodule URLs are relative to: `origin`'s, else the repository.

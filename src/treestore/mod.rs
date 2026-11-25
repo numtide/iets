@@ -328,7 +328,7 @@ pub fn stage(name: &str) -> Option<Staged> {
 /// stored (`reopen`). The lock file is named like a temporary, so the sweep
 /// removes it once it is a day old and unused.
 pub fn fetch_lock(name: &str, on_wait: impl FnOnce()) -> Option<cachefs::WriteLock> {
-    cachefs::wait_lock(&root()?.join(format!(".{name}.fetching.tmp")), on_wait)
+    cachefs::wait_lock(&root()?.join(format!(".{name}.fetching.tmp")), on_wait).ok()
 }
 
 /// [`get`], past a miss this process recorded earlier.
@@ -523,7 +523,7 @@ fn store(
         // `collect` holds the lock for as long as a compaction takes, so this
         // waits rather than drop a whole download; under it, a pack this tree
         // relied on may have gone, and its objects come from the spool instead
-        let _lock = cachefs::store_lock(root).ok_or(Rejected::Unstorable)?;
+        let _lock = cachefs::store_lock(root).map_err(Rejected::Io)?;
         let now = packs.refresh();
         for (id, at) in &elsewhere {
             if now.find(id).is_none() {
@@ -548,7 +548,7 @@ fn store(
 /// does not decode goes too. Runs under the store's lock, so no `put` publishes
 /// an entry between the marking and the sweeping.
 pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
-    let Some(_lock) = cachefs::store_lock(root) else {
+    let Ok(_lock) = cachefs::store_lock(root) else {
         return pack::Collected::default();
     };
     let mut live = HashSet::new();

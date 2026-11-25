@@ -1087,12 +1087,17 @@ impl Evaluator {
             self.compile_source_inner(path, src, base_dir, None, Origin::File)?;
         let t1 = Instant::now();
         let allows = self.files[file.0 as usize].allows();
-        if !used_home && let Some(bytes) = cache::serialize(self, ir, base, &diags, allows) {
-            cache.write(&key, &bytes);
-        }
+        let stored = !used_home
+            && cache::serialize(self, ir, base, &diags, allows)
+                .is_some_and(|bytes| cache.store(&key, &bytes));
         if cache.stats {
+            let (action, phase) = if stored {
+                ("store", "write")
+            } else {
+                ("compile", "cache")
+            };
             errln!(
-                "ir-cache store {} {}us (write {}us)",
+                "ir-cache {action} {} {}us ({phase} {}us)",
                 String::from_utf8_lossy(path),
                 (t1 - t0).as_micros(),
                 t1.elapsed().as_micros()

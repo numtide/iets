@@ -454,19 +454,63 @@ fn pack_files(dir: &Path) -> io::Result<impl Iterator<Item = PathBuf>> {
     }))
 }
 
+// Leave descriptors for the evaluator, worker pipes and files opened while writing a pack.
+fn reader_budget() -> usize {
+    #[cfg(unix)]
+    if let Some(limit) = rustix::process::getrlimit(rustix::process::Resource::Nofile).current {
+        return (limit / 2).clamp(1, 128) as usize;
+    }
+    128
+}
+
+/// Under the store writer lock. Keep the largest packs and combine the rest
+/// to leave room for more imports. No source is removed before publication.
+fn consolidate(dir: &Path, paths: Vec<PathBuf>, budget: usize) -> io::Result<()> {
+    let mut sizes = Vec::with_capacity(paths.len());
+    for path in paths {
+        sizes.push((fs::symlink_metadata(&path)?.len(), path));
+    }
+    sizes.sort_unstable();
+    sizes.truncate(sizes.len() - budget / 2);
+    let mut writer = PackWriter::new(dir)?;
+    let mut copied = Vec::new();
+    for (_, path) in sizes {
+        if let Some(pack) = Pack::open(&path)? {
+            for (id, loc) in pack.ids() {
+                writer.copy(id, &pack, loc)?;
+            }
+            copied.push(path);
+        }
+    }
+    if let Some(new) = writer.finish()? {
+        for path in copied {
+            if path != new {
+                fs::remove_file(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reader_paths(dir: &Path, lock: Option<&cachefs::WriteLock>) -> Vec<PathBuf> {
+    let list = || pack_files(dir).into_iter().flatten().collect::<Vec<_>>();
+    let paths = list();
+    if lock.is_some() && paths.len() > reader_budget() {
+        let _ = consolidate(dir, paths, reader_budget());
+        return list();
+    }
+    paths
+}
+
 impl PackSet {
-    /// Every whole pack in `dir`. Only regular files count, so a link never
-    /// leads a later removal out of the store.
+    #[cfg(test)]
     pub fn load(dir: &Path) -> PackSet {
-        Self::reload(dir, &[])
+        Self::reload(reader_paths(dir, None), &[])
     }
 
-    fn reload(dir: &Path, previous: &[Arc<Pack>]) -> PackSet {
+    fn reload(paths: Vec<PathBuf>, previous: &[Arc<Pack>]) -> PackSet {
         let by_path: HashMap<_, _> = previous.iter().map(|p| (p.path(), p)).collect();
         let mut set = PackSet::default();
-        let Ok(paths) = pack_files(dir) else {
-            return set;
-        };
         for path in paths {
             if let Some(pack) = by_path.get(path.as_path())
                 && sysfs::same_file(&pack.file, &path)
@@ -502,11 +546,26 @@ pub struct Packs {
 }
 
 impl Packs {
+    #[cfg(test)]
     pub fn open(dir: &Path) -> Packs {
+        Self::from_paths(dir.to_path_buf(), reader_paths(dir, None))
+    }
+
+    fn from_paths(dir: PathBuf, paths: Vec<PathBuf>) -> Packs {
         Packs {
-            dir: dir.to_path_buf(),
-            set: RwLock::new(Arc::new(PackSet::load(dir))),
+            dir,
+            set: RwLock::new(Arc::new(PackSet::reload(paths, &[]))),
         }
+    }
+
+    pub(super) fn open_store(root: &Path) -> Packs {
+        let dir = root.join(PACKS);
+        let mut paths = reader_paths(&dir, None);
+        if paths.len() > reader_budget() {
+            // Another process may have combined the packs while we waited.
+            let _ = cachefs::store_lock(root).map(|lock| paths = reader_paths(&dir, Some(&lock)));
+        }
+        Self::from_paths(dir, paths)
     }
 
     pub fn dir(&self) -> &Path {
@@ -517,9 +576,12 @@ impl Packs {
         self.set.read().unwrap().clone()
     }
 
-    pub fn refresh(&self) -> Arc<PackSet> {
+    pub fn refresh(&self, lock: Option<&cachefs::WriteLock>) -> Arc<PackSet> {
         let mut current = self.set.write().unwrap();
-        let fresh = Arc::new(PackSet::reload(&self.dir, current.packs()));
+        let fresh = Arc::new(PackSet::reload(
+            reader_paths(&self.dir, lock),
+            current.packs(),
+        ));
         *current = fresh.clone();
         fresh
     }
@@ -535,7 +597,7 @@ impl Packs {
         if let Some((p, loc)) = set.find(id) {
             return p.read(loc);
         }
-        let set = self.refresh();
+        let set = self.refresh(None);
         match set.find(id) {
             Some((p, loc)) => p.read(loc),
             None => Err(io::Error::new(
@@ -739,6 +801,25 @@ mod tests {
     }
 
     #[test]
+    fn combining_packs_keeps_new_and_existing_readers_working() {
+        let dir = tempdir().unwrap();
+        for byte in 0..6 {
+            let mut w = PackWriter::new(dir.path()).unwrap();
+            w.add(id_of(&[byte]), &[byte]).unwrap();
+            w.finish().unwrap();
+        }
+        let early = Packs::open(dir.path());
+        let paths = pack_files(dir.path()).unwrap().collect();
+        consolidate(dir.path(), paths, 4).unwrap();
+        let later = Packs::open(dir.path());
+        assert_eq!(later.snapshot().packs().len(), 3);
+        for byte in 0..6 {
+            assert_eq!(early.read(&id_of(&[byte])).unwrap(), [byte]);
+            assert_eq!(later.read(&id_of(&[byte])).unwrap(), [byte]);
+        }
+    }
+
+    #[test]
     fn a_reader_sees_a_pack_written_after_it_listed() {
         let d = tempdir().unwrap();
         let packs = Packs::open(d.path());
@@ -747,7 +828,10 @@ mod tests {
         w.finish().unwrap();
         assert_eq!(packs.read(&id_of(b"late")).unwrap(), b"late");
         let before = packs.snapshot();
-        assert!(Arc::ptr_eq(&before.packs()[0], &packs.refresh().packs()[0]));
+        assert!(Arc::ptr_eq(
+            &before.packs()[0],
+            &packs.refresh(None).packs()[0]
+        ));
     }
 
     #[test]
@@ -781,7 +865,7 @@ mod tests {
             keep,
             "from the unlinked pack"
         );
-        assert_eq!(reader.refresh().packs().len(), 1);
+        assert_eq!(reader.refresh(None).packs().len(), 1);
         assert_eq!(
             reader.read(&id_of(&keep)).unwrap(),
             keep,

@@ -192,7 +192,7 @@ fn packs() -> Option<Arc<pack::Packs>> {
     session()
         .trees
         .packs
-        .get_or_init(|| Some(Arc::new(pack::Packs::open(&root()?.join(pack::PACKS)))))
+        .get_or_init(|| Some(Arc::new(pack::Packs::open_store(&root()?))))
         .clone()
 }
 
@@ -523,9 +523,9 @@ fn store(
         // `collect` holds the lock for as long as a compaction takes, so this
         // waits rather than drop a whole download; under it, a pack this tree
         // relied on may have gone, and its objects come from the spool instead
-        let _lock = cachefs::store_lock(root).ok_or(Rejected::Unstorable)?;
+        let lock = cachefs::store_lock(root).ok_or(Rejected::Unstorable)?;
         if !elsewhere.is_empty() {
-            let now = packs.refresh();
+            let now = packs.refresh(None);
             for (id, at) in &elsewhere {
                 if now.find(id).is_none() {
                     writer
@@ -539,8 +539,8 @@ fn store(
         if !path.exists() {
             cachefs::write_atomic(root, name, &[&index]).map_err(Rejected::Io)?;
         }
+        packs.refresh(Some(&lock));
     }
-    packs.refresh();
     let tree = Tree::stored(stored_root, packs);
     Ok((name.to_string(), StoredTree::new(tree, nar_hash, nar_size)))
 }

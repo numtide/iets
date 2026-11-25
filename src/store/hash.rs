@@ -362,21 +362,18 @@ pub fn nix32_encode(bytes: &[u8]) -> String {
 
 /// `nix32_encode` appended to a buffer the caller keeps.
 pub fn nix32_encode_into(s: &mut String, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
-    }
-    let len = nix32_encoded_len(bytes.len());
-    for n in (0..len).rev() {
-        let b = n * 5;
-        let i = b / 8;
-        let j = b % 8;
-        let lo = bytes[i] >> j;
-        let hi = if i + 1 < bytes.len() {
-            bytes[i + 1].checked_shl((8 - j) as u32).unwrap_or(0)
-        } else {
-            0
-        };
-        s.push(NIX32_CHARS[((lo | hi) & 0x1f) as usize] as char);
+    // The first digit contains the high bits of the last byte, zero-padded
+    // on the left. Every five input bytes produce eight complete digits.
+    let tail_bits = bytes.len() % 5 * 8;
+    let mut available = tail_bits.next_multiple_of(5) - tail_bits;
+    let mut bits = 0u16;
+    for &byte in bytes.iter().rev() {
+        bits = (bits << 8) | u16::from(byte);
+        available += 8;
+        while available >= 5 {
+            available -= 5;
+            s.push(NIX32_CHARS[((bits >> available) & 31) as usize] as char);
+        }
     }
 }
 
@@ -529,6 +526,19 @@ mod tests {
     #[case::md5(HashAlgo::Md5, "3jgzhjhz9zjvbb0kyj7jc500ch")]
     fn nix32(#[case] algo: HashAlgo, #[case] want: &str) {
         assert_eq!(hash_bytes(algo, b"abc").to_nix32(), want);
+    }
+
+    #[test]
+    fn nix32_appends_partial_groups() {
+        let mut out = String::from("prefix:");
+        for (n, suffix) in ["", "7z", "1zzz", "gzzzz", "3zzzzzz", "zzzzzzzz"]
+            .into_iter()
+            .enumerate()
+        {
+            out.truncate("prefix:".len());
+            nix32_encode_into(&mut out, &[0xff; 5][..n]);
+            assert_eq!(out, format!("prefix:{suffix}"));
+        }
     }
 
     // printf abc | ALGOsum, printf '' | sha256sum

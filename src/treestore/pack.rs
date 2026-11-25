@@ -604,7 +604,11 @@ impl Packs {
     }
 
     pub fn refresh(&self) -> Arc<PackSet> {
-        let fresh = Arc::new(PackSet::load(&self.dir));
+        self.refresh_with(|_, _| {})
+    }
+
+    fn refresh_with(&self, on_error: impl FnMut(&Path, io::Error)) -> Arc<PackSet> {
+        let fresh = Arc::new(PackSet::list(&self.dir, on_error));
         *self.set.write().unwrap() = fresh.clone();
         fresh
     }
@@ -648,9 +652,19 @@ impl Packs {
     }
 
     /// An object's bytes. `NotFound` when no pack holds it even after fresh
-    /// listings: the entry that named it is then not whole.
+    /// listings. A miss after an incomplete listing reports its I/O error.
     pub fn read(&self, id: &Id) -> io::Result<Vec<u8>> {
-        self.read_listing(id, || self.refresh())
+        let mut listing_error = None;
+        let result = self.read_listing(id, || {
+            listing_error = None;
+            self.refresh_with(|_, e| {
+                listing_error.get_or_insert(e);
+            })
+        });
+        match result {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(listing_error.unwrap_or(e)),
+            other => other,
+        }
     }
 
     fn read_listing(&self, id: &Id, mut list: impl FnMut() -> Arc<PackSet>) -> io::Result<Vec<u8>> {
@@ -951,6 +965,16 @@ mod tests {
         }
         let open = set.packs().iter().filter(|p| p.file.get().is_some());
         assert!(open.count() <= OPEN_PACKS);
+    }
+
+    #[test]
+    fn a_miss_reports_why_the_directory_could_not_be_listed() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        File::create(&file).unwrap();
+        let expected = fs::read_dir(&file).unwrap_err();
+        let err = Packs::open(&file).read(&id_of(b"object")).unwrap_err();
+        assert_eq!(err.raw_os_error(), expected.raw_os_error());
     }
 
     /// `p` as a process past its bound lists it: not held open.

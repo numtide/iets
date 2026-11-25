@@ -381,18 +381,26 @@ impl<'a> Compiler<'a> {
                 default,
             } => {
                 let path = ast.elems(*path);
-                if let Expr::Var(s) = ast.expr(*subject)
-                    && *s == self.sym_builtins
-                    && !self.lexically_bound(*s)
-                    && let Some(AttrElem::Static(first)) = path.first()
+                let (subject, path) = if let Some(word) =
+                    self.builtin_select_head(*subject, path, default.is_none(), pos)?
                 {
-                    self.global_ref(self.interner.name(*first), pos)?;
-                }
-                if let Some(folded) = self.fold_builtins_select(*subject, path, default.is_none()) {
-                    return Ok(folded);
-                }
-                let subject = self.expr(*subject)?;
-                let path = self.attr_path(path)?;
+                    if path.len() == 1 {
+                        if let Some(d) = default {
+                            // Bind the fallback for diagnostics only. Its reads are absent from the emitted IR.
+                            let enclosing = mem::take(&mut self.lambdas);
+                            let used_home = self.used_home.get();
+                            let result = self.expr(*d);
+                            self.lambdas = enclosing;
+                            self.used_home.set(used_home);
+                            result?;
+                        }
+                        return Ok(Ir::Const(word));
+                    }
+                    let rest = self.attr_path(&path[1..])?;
+                    (self.alloc(Ir::Const(word)), rest)
+                } else {
+                    (self.expr(*subject)?, self.attr_path(path)?)
+                };
                 let default = match default {
                     Some(d) => Some(self.expr(*d)?),
                     None => None,
@@ -548,41 +556,33 @@ impl<'a> Compiler<'a> {
             .any(|scope| matches!(scope, Scope::Lexical { names, .. } if names.contains_key(&sym)))
     }
 
-    /// `builtins.x` where `builtins` is the global: fold to the constant.
-    fn fold_builtins_select(
+    /// The first field of an unshadowed global `builtins` selection.
+    fn builtin_select_head(
         &mut self,
         subject: ExprId,
         path: &[AttrElem],
         strict: bool,
-    ) -> Option<Ir> {
-        let Expr::Var(s) = self.ast.expr(subject) else {
-            return None;
+        pos: Pos,
+    ) -> CResult<Option<Word>> {
+        let Expr::Var(sym) = self.ast.expr(subject) else {
+            return Ok(None);
         };
-        if *s != self.sym_builtins || self.lexically_bound(*s) {
-            return None;
-        }
-        if self.scopes.iter().any(|s| matches!(s, Scope::With)) {
-            return None;
-        }
-        let b = self.globals.builtins?;
-        let AttrElem::Static(first) = path.first()? else {
-            return None;
+        let Some(AttrElem::Static(first)) = path.first() else {
+            return Ok(None);
         };
-        let attr = b.get(*first)?;
-        let w = attr.cell.get();
-        if w.is_thunk() {
-            return None;
+        if *sym != self.sym_builtins || self.lexically_bound(*sym) {
+            return Ok(None);
         }
-        if path.len() == 1 {
-            return Some(Ir::Const(w));
+        self.global_ref(self.interner.name(*first), pos)?;
+        if (!strict && path.len() != 1) || self.scopes.iter().any(|s| matches!(s, Scope::With)) {
+            return Ok(None);
         }
-        if !strict {
-            return None;
-        }
-        let rest = self.attr_path(&path[1..]).ok()?;
-        let subject = self.alloc(Ir::Const(w));
-        let pos = self.pos(subject_pos_hack(path));
-        Some(self.mk_select(subject, rest, None, pos))
+        Ok(self
+            .globals
+            .builtins
+            .and_then(|b| b.get(*first))
+            .map(|attr| attr.cell.get())
+            .filter(|word| !word.is_thunk()))
     }
 
     /// One static element stays inline as `Select1`; anything else is boxed.
@@ -1322,10 +1322,6 @@ fn frame_end(body: IrRef, end: u32) -> u32 {
         Ir::Let(l) if l.base != LetIr::OWN_ENV => l.base + (l.binds.len() + l.from.len()) as u32,
         _ => end,
     }
-}
-
-fn subject_pos_hack(_path: &[AttrElem]) -> ExprId {
-    ExprId(0)
 }
 
 impl Ir {

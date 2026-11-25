@@ -276,19 +276,14 @@ impl Dispatcher {
     /// Uploads what the batch needs and builds it in one op. Targets whose
     /// drv was already dispatched are dropped.
     pub fn submit(&mut self, up: &mut dyn Uploader, batch: Vec<Target>) -> Result<Vec<Outcome>> {
+        let mut pending = HashSet::new();
         let batch: Vec<Target> = batch
             .into_iter()
-            .filter(|t| self.seen.insert(t.drv.clone()))
+            .filter(|t| !self.seen.contains(&t.drv) && pending.insert(t.drv.clone()))
             .collect();
         if batch.is_empty() {
             return Ok(Vec::new());
         }
-        let out = self.submit_once(up, &batch)?;
-        self.exit = (out.iter()).fold(self.exit, |e, o| log::combine_exit(e, o.exit));
-        Ok(out)
-    }
-
-    fn submit_once(&mut self, up: &mut dyn Uploader, batch: &[Target]) -> Result<Vec<Outcome>> {
         let by_drv: HashMap<String, String> = (batch.iter())
             .map(|t| (t.drv.to_string(), t.attr.clone()))
             .collect();
@@ -298,27 +293,31 @@ impl Dispatcher {
         // for one derivation, and neither says whether it succeeded.
         self.reporter.owns(by_drv.keys().cloned());
 
-        let built = static_outputs(up, batch, &roots);
+        let built = static_outputs(up, &batch, &roots);
         let held = match &built {
             Some(o) => {
                 let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
                 let (held, valid) = already_built(&mut *self.backend, &roots, o, &mut on_event)?;
-                up.roots_answered(&roots, &valid);
+                if !held {
+                    up.roots_answered(&roots, &valid);
+                }
                 held
             }
             None => false,
         };
+        if !held {
+            let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
+            let stats = up.upload(&mut *self.backend, &roots, &mut on_event)?;
+            self.upload.merge(stats);
+        }
+        // A failed preflight never dispatched a build. Once submitted, a transport
+        // error can leave the remote outcome unknown.
+        self.seen.extend(pending);
         let status = match held {
             true => (by_drv.keys())
                 .map(|d| (d.clone(), backend::Status::ok()))
                 .collect(),
             false => {
-                let stats = {
-                    let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
-                    up.upload(&mut *self.backend, &roots, &mut on_event)?
-                };
-                self.upload.merge(stats);
-
                 let jobs: Vec<backend::Job> = batch.iter().map(backend::Job::from).collect();
                 let drvs = |deep: bool| up.drvs(&roots, deep);
                 let b = backend::Batch {
@@ -336,7 +335,7 @@ impl Dispatcher {
         };
         let earlier_failed = status.values().any(|s| !s.ok);
         let mut out = Vec::with_capacity(batch.len());
-        for t in batch {
+        for t in &batch {
             let drv = t.drv.to_string();
             let elapsed = self.reporter.duration(&drv);
             match status.get(&drv) {
@@ -450,6 +449,9 @@ impl Dispatcher {
             self.reporter.render.lock().unwrap().unfinished(unbuilt);
         }
         self.reporter.release();
+        self.exit = out
+            .iter()
+            .fold(self.exit, |e, o| log::combine_exit(e, o.exit));
         Ok(out)
     }
 
@@ -713,6 +715,8 @@ mod tests {
     use crate::remote::event::{Failed, Log, Started, Stopped};
     use crate::remote::plan::Object;
 
+    use std::cell::Cell;
+    use std::slice;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::Sender;
 
@@ -860,6 +864,51 @@ mod tests {
         }
 
         fn roots_answered(&mut self, _roots: &[StorePath], _valid: &HashSet<String>) {}
+    }
+
+    #[test]
+    fn failed_preflight_leaves_the_batch_retryable() {
+        let (a, b, input) = (drv("a"), drv("b"), drv("input"));
+        let plan = Plan {
+            drvs: vec![
+                Object::drv(a.clone(), Arc::default(), [input.clone()].into()),
+                Object::drv(b.clone(), Arc::default(), Default::default()),
+            ],
+            sources: vec![input],
+            ..Plan::default()
+        };
+        let fail = Cell::new(true);
+        let locate = |_: &[StorePath]| {
+            if fail.replace(false) {
+                Err(Error::Plan("unavailable".into()))
+            } else {
+                Ok(vec![None])
+            }
+        };
+        let mut up = upload::PlanUpload::new(&plan, &locate);
+        let mut d = Dispatcher::with_backend(
+            Box::new(Fan {
+                limit: 1,
+                peak: Arc::default(),
+                verdicts: true,
+            }),
+            Provenance::off(),
+            Reporter::new(Style::detect()),
+        );
+        let targets = || vec![Target::new("a", a.clone(), vec![])];
+
+        assert!(d.submit(&mut up, targets()).is_err());
+        assert!(d.submit(&mut up, targets()).unwrap()[0].success);
+        assert_eq!(d.upload.added, 1);
+        assert!(d.submit(&mut up, targets()).unwrap().is_empty());
+
+        up.roots_answered(
+            slice::from_ref(&a),
+            &HashSet::from([a.base_name().to_owned()]),
+        );
+        let queried = d.upload.queried;
+        d.upload_only(&mut up, &[b]).unwrap();
+        assert_eq!((d.upload.queried - queried, d.upload.added), (1, 2));
     }
 
     /// Concurrent builds keep the cap, and every build's log comes out as one

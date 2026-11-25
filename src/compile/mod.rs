@@ -753,13 +753,13 @@ impl<'a> Compiler<'a> {
             return Ok(Ir::SearchPath { name, pos });
         }
         let all_lit = parts.iter().all(|p| matches!(p, StrPart::Lit(_)));
-        let first_lit: Vec<u8> = match parts.first() {
-            Some(StrPart::Lit(l)) => ast.bytes(*l).to_vec(),
-            _ => Vec::new(),
+        let (first_lit, rest) = match parts {
+            [StrPart::Lit(l), rest @ ..] => (ast.bytes(*l), rest),
+            _ => (&[][..], parts),
         };
-        self.lint_path_literal(kind, &first_lit, pos)?;
+        self.lint_path_literal(kind, first_lit, pos)?;
         let trailing_slash = first_lit.ends_with(b"/") && !all_lit;
-        let mut resolved = self.resolve_path_literal(kind, &first_lit);
+        let mut resolved = self.resolve_path_literal(kind, first_lit);
         if trailing_slash && !resolved.ends_with(b"/") {
             resolved.push(b'/');
         }
@@ -769,11 +769,6 @@ impl<'a> Compiler<'a> {
         }
         let mut v = Vec::with_capacity(parts.len());
         v.push(self.alloc(Ir::Const(first)));
-        let rest = if matches!(parts.first(), Some(StrPart::Lit(_))) {
-            &parts[1..]
-        } else {
-            parts
-        };
         for p in rest {
             v.push(self.str_part(p)?);
         }

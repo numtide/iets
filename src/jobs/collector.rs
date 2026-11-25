@@ -168,10 +168,19 @@ enum Control {
     Error(Line),
 }
 
+struct Reap(Child);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        let _ = self.0.wait();
+    }
+}
+
 struct Proc {
-    child: Child,
     to: ChildStdin,
     from: BufReader<ChildStdout>,
+    // Close both pipes before waiting, including on protocol errors.
+    child: Reap,
 }
 
 impl Proc {
@@ -181,7 +190,7 @@ impl Proc {
             .spawned
             .fetch_add(1, Ordering::Relaxed);
         let exe = env::current_exe().map_err(|e| Error::io("current_exe", e))?;
-        let mut child = Command::new(exe)
+        let child = Command::new(exe)
             .arg("eval-jobs")
             .arg("--worker")
             .env("IETS_SESSION_ID", log::session_id())
@@ -191,11 +200,14 @@ impl Proc {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| Error::io("spawning worker process", e))?;
+        let mut child = Reap(child);
         let to = child
+            .0
             .stdin
             .take()
             .ok_or_else(|| Error::Protocol("worker process has no stdin pipe".into()))?;
         let out = child
+            .0
             .stdout
             .take()
             .ok_or_else(|| Error::Protocol("worker process has no stdout pipe".into()))?;
@@ -213,7 +225,7 @@ impl Proc {
 
     /// nix-eval-jobs.cc:handleBrokenWorkerPipe: what a dead worker means.
     fn broken(&mut self, what: &str) -> String {
-        match self.child.wait() {
+        match self.child.0.wait() {
             Ok(st) if st.code() == Some(1) => format!(
                 "while {what}, evaluation worker exited with exit code 1, (possible infinite recursion)"
             ),
@@ -289,7 +301,6 @@ impl Proc {
                 (sink.lock().unwrap())(Line::parse(&buf)?);
             }
         }
-        let _ = self.child.wait();
         Ok(())
     }
 }

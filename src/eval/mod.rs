@@ -3528,6 +3528,10 @@ impl Evaluator {
             store_adds: self.nr_store_adds,
             compile: self.t_compile,
         });
+        self.clear_local_counts();
+    }
+
+    pub(crate) fn clear_local_counts(&mut self) {
         self.nr_thunks = 0;
         self.nr_function_calls = 0;
         self.nr_store_adds = 0;

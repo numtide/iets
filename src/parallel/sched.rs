@@ -968,6 +968,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::Evaluator;
     use rstest::rstest;
     use std::sync::atomic::{AtomicPtr, AtomicU64};
 
@@ -988,6 +989,18 @@ mod tests {
         };
         let (a, b) = t.pack();
         assert_eq!(Task::unpack(a, b), t);
+    }
+
+    #[test]
+    fn a_helper_does_not_recount_the_templates_derivations() {
+        let mut ev = Evaluator::new();
+        ev.drv.nr_derivations = 1;
+        let driver = Box::new(force::SyncEv(ev.clone()));
+        let rt = Runtime::start(1, driver, fiber::DEFAULT_STACK).unwrap();
+        // Switch a helper payload in and out without running any evaluation.
+        let user = rt.driver.new_user(&rt);
+        rt.run_main(user, Box::new(|_| {})).unwrap();
+        assert_eq!(ev.counts().derivations, 1);
     }
 
     struct Counter {

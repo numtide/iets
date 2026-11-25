@@ -48,7 +48,10 @@ unsafe impl Send for SyncEv {}
 
 impl Driver for SyncEv {
     fn new_user(&self, _rt: &Runtime) -> *mut () {
-        Box::into_raw(Box::new(self.0.clone())) as *mut ()
+        let mut ev = self.0.clone();
+        // Pre-existing work belongs to the evaluator that did it.
+        ev.clear_local_counts();
+        Box::into_raw(Box::new(ev)) as *mut ()
     }
 
     fn drop_user(&self, user: *mut ()) {

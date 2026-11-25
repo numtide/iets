@@ -312,17 +312,21 @@ impl Found {
 /// what it names must be a regular file, and its length must be one an entry
 /// can have. `O_NONBLOCK` keeps the open of a FIFO from waiting for a writer.
 pub fn open_entry(path: &Path) -> Found {
-    let Ok(f) = sysfs::no_follow_no_block(fs::OpenOptions::new().read(true)).open(path) else {
-        return match path.symlink_metadata() {
-            Ok(md) if !md.is_file() => Found::Foreign,
-            _ => Found::Missing,
-        };
-    };
-    match f.metadata() {
-        Ok(md) if md.is_file() && md.len() <= MAX_ENTRY => Found::File(f, md),
-        Ok(_) => Found::Foreign,
+    match try_open_entry(path) {
+        Ok(Some((f, md))) => Found::File(f, md),
+        Ok(None) => Found::Foreign,
         Err(_) => Found::Missing,
     }
+}
+
+pub(crate) fn try_open_entry(path: &Path) -> io::Result<Option<(fs::File, fs::Metadata)>> {
+    let f = match sysfs::no_follow_no_block(fs::OpenOptions::new().read(true)).open(path) {
+        Ok(f) => f,
+        Err(_) if path.symlink_metadata().is_ok_and(|md| !md.is_file()) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let md = f.metadata()?;
+    Ok((md.is_file() && md.len() <= MAX_ENTRY).then_some((f, md)))
 }
 
 /// Whose directory a store root is, before iets writes to it.

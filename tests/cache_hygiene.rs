@@ -474,7 +474,7 @@ mod unix_only {
     use iets::cachefs;
     use iets::trace::store::{Opened, Part, Store};
 
-    use super::{ENTRY, hit_entry, key_of};
+    use super::{ENTRY, Iets, bin, hit_entry, key_of, rstest};
     use tempfile::tempdir;
 
     /// Only a plain file is an entry, whatever else sits where one should.
@@ -503,6 +503,42 @@ mod unix_only {
 
     /// A regular file that does not open is how Windows shows an entry a
     /// sibling is renaming over: a miss, and the entry stays.
+    #[rstest]
+    fn gc_reports_an_unreadable_index_or_pack(bin: Iets) {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("inputs");
+        let packs = root.join("packs");
+        fs::create_dir_all(&packs).unwrap();
+        let index = root.join(format!("{}-source", "0".repeat(32)));
+        let mut writer = iets::treestore::pack::PackWriter::new(&packs).unwrap();
+        writer
+            .add(iets::treestore::pack::id_of(b"data"), b"data")
+            .unwrap();
+        let pack = writer.finish().unwrap().unwrap();
+        fs::write(&index, b"invalid index").unwrap();
+        for path in [&index, &pack] {
+            fs::set_permissions(path, Permissions::from_mode(0o000)).unwrap();
+            let Err(error) = fs::File::open(path) else {
+                return;
+            }; // root can still open it
+            let out = bin
+                .cmd()
+                .args(["cache", "gc", "--cache-dir"])
+                .arg(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            let stderr = String::from_utf8(out.stderr).unwrap();
+            assert!(
+                stderr.contains(&format!("{}: {error}", path.display())),
+                "{stderr}"
+            );
+            assert!(pack.exists());
+            assert!(path.exists());
+            fs::remove_file(path).unwrap();
+        }
+    }
+
     #[test]
     fn an_entry_that_does_not_open_is_a_miss_and_stays() {
         let dir = tempdir().unwrap();

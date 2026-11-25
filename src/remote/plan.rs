@@ -444,16 +444,19 @@ pub fn walk(
         }
         let (aterm, refs, stored) = load_drv(&p, drv)?;
         from_store += usize::from(stored);
-        stack.push((p, Some((aterm, refs.clone()))));
-        for r in refs {
+        let pending = stack.len();
+        stack.push((p, None));
+        for r in &refs {
             if r.is_derivation() {
-                if !known.contains(&r) && !seen.contains(&r) {
-                    stack.push((r, None));
+                if !known.contains(r) && !seen.contains(r) {
+                    stack.push((r.clone(), None));
                 }
             } else {
-                source(r, known, text_refs, &mut seen, &mut srcs);
+                source(r.clone(), known, text_refs, &mut seen, &mut srcs);
             }
         }
+        // Only pushes occur above, so this index still names our post-order visit.
+        stack[pending].1 = Some((aterm, refs));
     }
     Ok((drvs, srcs, from_store))
 }

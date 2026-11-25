@@ -210,26 +210,21 @@ pub fn report_timings() {
     }
 }
 
-/// `None` when the entry does not open now (`cachefs::Found::Missing`), and
-/// `Some(None)` when it opens and is not one.
-fn read_entry(path: &Path) -> Option<Option<(Node, Hash, u64)>> {
-    let f = match cachefs::open_entry(path) {
-        cachefs::Found::File(f, _) => f,
-        cachefs::Found::Missing => return None,
-        cachefs::Found::Foreign => return Some(None),
+/// A readable but invalid entry is `Ok(None)`.
+fn read_entry(path: &Path) -> io::Result<Option<(Node, Hash, u64)>> {
+    let Some((f, _)) = cachefs::try_open_entry(path)? else {
+        return Ok(None);
     };
     let mut bytes = Vec::new();
-    if io::Read::read_to_end(&mut &f, &mut bytes).is_err() {
-        return Some(None);
-    }
-    Some(spool::decode_index(&bytes))
+    io::Read::read_to_end(&mut &f, &mut bytes)?;
+    Ok(spool::decode_index(&bytes))
 }
 
 /// The entry `name` of the store at `root`. One whose index does not decode is
 /// wiped: the next evaluation fetches it again.
 fn open(root: &Path, packs: Arc<pack::Packs>, name: &str) -> Option<StoredTree> {
     let path = root.join(name);
-    match read_entry(&path)? {
+    match read_entry(&path).ok()? {
         Some((tree, nar_hash, nar_size)) => {
             cachefs::touch(&path);
             Some(StoredTree::new(
@@ -549,34 +544,58 @@ fn store(
 /// does not decode goes too. Runs under the store's lock, so no `put` publishes
 /// an entry between the marking and the sweeping.
 pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
-    let Ok(_lock) = cachefs::store_lock(root) else {
-        return pack::Collected::default();
+    let skip = |path: &Path, e: io::Error| {
+        errln!("cache: skipping input pack sweep: {}: {e}", path.display());
+        pack::Collected::default()
     };
     let mut live = HashSet::new();
-    let Ok(rd) = fs::read_dir(root) else {
-        return pack::Collected::default();
+    let _lock = match cachefs::store_lock(root) {
+        Ok(lock) => lock,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && matches!(root.try_exists(), Ok(false)) => {
+            return pack::Collected::default();
+        }
+        Err(e) => return skip(root, e),
     };
-    for e in rd.flatten() {
+    let rd = match fs::read_dir(root) {
+        Ok(rd) => rd,
+        Err(e) => return skip(root, e),
+    };
+    for entry in rd {
+        let e = match entry {
+            Ok(e) => e,
+            Err(e) => return skip(root, e),
+        };
         let path = e.path();
         let is_entry = e
             .file_name()
             .to_str()
             .is_some_and(|n| StorePath::from_base_name(n).is_ok());
-        if !is_entry || !e.file_type().is_ok_and(|t| t.is_file()) {
+        if !is_entry {
             continue;
         }
+        match e.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            Ok(_) => continue,
+            Err(e) => return skip(&path, e),
+        }
         match read_entry(&path) {
-            Some(Some((tree, _, _))) => spool::object_ids(&tree, &mut live),
-            Some(None) if !dry_run => {
+            Ok(Some((tree, _, _))) => spool::object_ids(&tree, &mut live),
+            Ok(None) if !dry_run => {
                 let _ = fs::remove_file(&path);
             }
-            Some(None) => {}
+            Ok(None) => {}
             // its objects are unknown, so no pack can be proved dead
-            None if path.exists() => return pack::Collected::default(),
-            None => {}
+            Err(e) => return skip(&path, e),
         }
     }
-    pack::collect(&root.join(pack::PACKS), &live, dry_run).unwrap_or_default()
+    let dir = root.join(pack::PACKS);
+    pack::collect(&dir, &live, dry_run).unwrap_or_else(|e| {
+        errln!(
+            "cache: input pack collection failed at {}: {e}",
+            dir.display()
+        );
+        pack::Collected::default()
+    })
 }
 
 /// The one observation a read of the tree store leaves in the read set. The

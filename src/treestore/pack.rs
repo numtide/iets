@@ -101,7 +101,7 @@ impl Pack {
         if !md.is_file() {
             return Ok(None);
         }
-        let pack = Pack::parse(&file, path, md.len());
+        let pack = Pack::parse(&file, path, md.len())?;
         if let Some(p) = &pack {
             let _ = p.retain(file);
         }
@@ -144,34 +144,36 @@ impl Pack {
         })
     }
 
-    fn parse(file: &File, path: &Path, len: u64) -> Option<Pack> {
+    fn parse(file: &File, path: &Path, len: u64) -> io::Result<Option<Pack>> {
         if len < (MAGIC.len() + TAIL) as u64 {
-            return None;
+            return Ok(None);
         }
         let mut magic = [0u8; 8];
-        sysfs::read_exact_at(file, &mut magic, 0).ok()?;
+        sysfs::read_exact_at(file, &mut magic, 0)?;
         if &magic != MAGIC {
-            return None;
+            return Ok(None);
         }
         let mut tail = [0u8; TAIL];
-        sysfs::read_exact_at(file, &mut tail, len - TAIL as u64).ok()?;
+        sysfs::read_exact_at(file, &mut tail, len - TAIL as u64)?;
         if &tail[TAIL - 8..] != TRAILER {
-            return None;
+            return Ok(None);
         }
         let word = |at: usize| u64::from_le_bytes(tail[at..at + 8].try_into().unwrap());
         let count = word(1024);
         let start = word(1032);
-        let index_len = count.checked_mul(ENTRY as u64)?;
-        if start < MAGIC.len() as u64 || start.checked_add(index_len)? + TAIL as u64 != len {
-            return None;
+        let Some(index_len) = count.checked_mul(ENTRY as u64) else {
+            return Ok(None);
+        };
+        if start < MAGIC.len() as u64 || start.checked_add(index_len) != Some(len - TAIL as u64) {
+            return Ok(None);
         }
         let mut index = vec![0u8; index_len as usize];
-        sysfs::read_exact_at(file, &mut index, start).ok()?;
+        sysfs::read_exact_at(file, &mut index, start)?;
         let mut h = blake3::Hasher::new();
         h.update(&index);
         h.update(&tail[..1040]);
         if h.finalize().as_bytes()[..16] != tail[1040..1056] {
-            return None;
+            return Ok(None);
         }
         let mut fanout = [0u32; 256];
         for (i, f) in fanout.iter_mut().enumerate() {
@@ -184,7 +186,7 @@ impl Pack {
             fanout,
             len,
         };
-        pack.well_formed(start).then_some(pack)
+        Ok(pack.well_formed(start).then_some(pack))
     }
 
     /// The index is sorted, the fanout agrees with it, and every payload lies
@@ -519,27 +521,49 @@ impl PackSet {
     /// Every whole pack in `dir`. Only regular files count, so a link never
     /// leads a later removal out of the store.
     pub fn load(dir: &Path) -> PackSet {
+        Self::list(dir, |_, _| {})
+    }
+
+    fn list(dir: &Path, mut on_error: impl FnMut(&Path, io::Error)) -> PackSet {
         let mut set = PackSet::default();
-        let Ok(rd) = fs::read_dir(dir) else {
-            return set;
-        };
-        for e in rd.flatten() {
-            let path = e.path();
-            if path.extension().is_none_or(|x| x != "pack")
-                || !e.file_type().is_ok_and(|t| t.is_file())
-            {
-                continue;
-            }
-            match Pack::open(&path) {
-                Ok(Some(p)) => set.packs.push(Arc::new(p)),
-                Ok(None) => {
-                    let len = e.metadata().map_or(0, |m| m.len());
-                    set.broken.push((path, len));
+        let rd = match fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    on_error(dir, e);
                 }
-                Err(_) => {}
+                return set;
+            }
+        };
+        for entry in rd {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    on_error(dir, e);
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.extension().is_some_and(|x| x == "pack")
+                && let Err(e) = set.add_entry(&path, &entry)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                on_error(&path, e);
             }
         }
         set
+    }
+
+    fn add_entry(&mut self, path: &Path, entry: &fs::DirEntry) -> io::Result<()> {
+        if entry.file_type()?.is_file() {
+            match Pack::open(path)? {
+                Some(p) => self.packs.push(Arc::new(p)),
+                None => self
+                    .broken
+                    .push((path.to_owned(), entry.metadata().map_or(0, |m| m.len()))),
+            }
+        }
+        Ok(())
     }
 
     pub fn find(&self, id: &Id) -> Option<(&Arc<Pack>, Loc)> {
@@ -686,7 +710,9 @@ fn remove(path: &Path, dry_run: bool) -> bool {
 /// a reader that has a pack open keeps reading it after the unlink.
 pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Collected> {
     let mut out = Collected::default();
-    let set = PackSet::load(dir);
+    let set = PackSet::list(dir, |path, e| {
+        errln!("cache: skipping input pack {}: {e}", path.display());
+    });
     // a pack that does not parse is a cache file whose objects come back
     // with the inputs that need them
     for (path, len) in &set.broken {

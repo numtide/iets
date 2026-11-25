@@ -336,9 +336,17 @@ pub fn is_nix32_char(c: u8) -> bool {
     NIX32_DIGITS[c as usize] != 0xff
 }
 
-/// Mirrors base-nix-32.hh:BaseNix32::encodedLength.
+/// Number of Nix32 digits needed for `n` bytes.
+///
+/// # Panics
+///
+/// Panics if the encoded length exceeds `usize::MAX`.
 pub fn nix32_encoded_len(n: usize) -> usize {
-    (n * 8 - 1) / 5 + 1
+    // Each complete five-byte group contributes eight digits. A partial group adds at most seven.
+    let full = (n / 5)
+        .checked_mul(8)
+        .expect("Nix32 encoded length exceeds usize");
+    full + (n % 5 * 8).div_ceil(5)
 }
 
 #[cfg(test)]
@@ -601,13 +609,24 @@ mod tests {
 
     #[test]
     fn nix32_roundtrip_and_reject() {
-        for n in 1..70 {
+        for n in 0..70 {
             let data: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
-            assert_eq!(nix32_decode(&nix32_encode(&data)).unwrap(), data);
+            let encoded = nix32_encode(&data);
+            assert_eq!(nix32_encoded_len(n), encoded.len());
+            assert_eq!(nix32_decode(&encoded).unwrap(), data);
         }
         assert!(nix32_decode("e").is_err());
         assert_eq!(nix32_decode(&"z".repeat(32)).unwrap().len(), 20);
         assert!(Hash::from_nix32(HashAlgo::Sha256, &"z".repeat(52)).is_err());
+    }
+
+    #[test]
+    fn nix32_encoded_len_boundaries() {
+        // usize::MAX is 7 modulo 8. The largest encodable input produces
+        // usize::MAX digits, and one more byte needs usize::MAX + 1.
+        let last = usize::MAX / 8 * 5 + 4;
+        assert_eq!(nix32_encoded_len(last), usize::MAX);
+        assert!(std::panic::catch_unwind(|| nix32_encoded_len(last + 1)).is_err());
     }
 
     #[test]

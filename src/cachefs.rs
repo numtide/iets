@@ -584,8 +584,8 @@ pub fn try_write_lock(root: &Path) -> io::Result<Option<WriteLock>> {
 
 /// The store's writer lock, waited for: for a writer that must not drop its
 /// write, and for work that holds the lock longer than `LOCK_TIMEOUT`.
-pub fn store_lock(root: &Path) -> Option<WriteLock> {
-    wait_lock(&root.join(LOCK), || {})
+pub fn store_lock(root: &Path) -> io::Result<WriteLock> {
+    try_wait_lock(&root.join(LOCK), || {})
 }
 
 /// An exclusive `flock` on the file `path`, taken without a timeout: the one
@@ -595,20 +595,23 @@ pub fn store_lock(root: &Path) -> Option<WriteLock> {
 /// remove the file while a waiter queues on it, and the waiter then holds a
 /// lock nobody else can see, so it locks the file at `path` again.
 pub fn wait_lock(path: &Path, on_wait: impl FnOnce()) -> Option<WriteLock> {
+    try_wait_lock(path, on_wait).ok()
+}
+
+/// [`wait_lock`] that says why there is no lock.
+pub fn try_wait_lock(path: &Path, on_wait: impl FnOnce()) -> io::Result<WriteLock> {
     let mut on_wait = Some(on_wait);
     loop {
-        let f = open_lock(path).ok()?;
+        let f = open_lock(path)?;
         if !sysfs::try_lock(&f) {
             if let Some(w) = on_wait.take() {
                 w();
             }
-            if !sysfs::lock(&f) {
-                return None;
-            }
+            sysfs::lock(&f)?;
         }
         if sysfs::same_file(&f, path) {
             sysfs::touch_open(&f);
-            return Some(WriteLock(f));
+            return Ok(WriteLock(f));
         }
     }
 }

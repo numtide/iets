@@ -44,6 +44,33 @@ impl Root {
     }
 }
 
+/// Wanted outputs per derivation in first-seen order. Each root adds its context
+/// output to the command-line selections. With no flags a bare root wants all
+/// outputs, including when another root names one output of the same drv.
+pub fn root_outputs(
+    roots: &[(StorePath, Option<String>)],
+    wanted: &[String],
+) -> Vec<(StorePath, Vec<String>)> {
+    let mut indices = HashMap::new();
+    let mut targets = Vec::new();
+    for (drv, output) in roots {
+        let (i, all) = indices.entry(drv).or_insert_with(|| {
+            targets.push((drv.clone(), wanted.to_vec()));
+            (targets.len() - 1, false)
+        });
+        let outputs = &mut targets[*i].1;
+        if let Some(output) = output {
+            if !*all && !outputs.contains(output) {
+                outputs.push(output.clone());
+            }
+        } else if wanted.is_empty() {
+            outputs.clear();
+            *all = true;
+        }
+    }
+    targets
+}
+
 /// The Nix settings the native commands read: they take no `--option`, and an
 /// unreadable nix.conf leaves the defaults.
 pub fn config() -> Config {

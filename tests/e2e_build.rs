@@ -254,3 +254,75 @@ fn no_build_uploads_every_installable() {
     assert!(r.status.success(), "{}", stderr(&r));
     assert!(stderr(&r).contains("query: 2 paths"), "{}", stderr(&r));
 }
+
+#[test]
+fn each_root_builds_its_own_outputs() {
+    let s = store!();
+    let file = s.write(
+        "outputs.nix",
+        r#"
+        let mk = name: derivation {
+          inherit name; outputs = [ "out" "dev" "doc" ];
+          system = "@SYSTEM@"; builder = "@SHELL@";
+          args = [ "-c" "echo a > $out; echo b > $dev; echo c > $doc" ];
+        };
+        a = mk "pick-a"; b = mk "pick-b"; c = mk "pick-c";
+        in { inherit a b c; selected = [ a.dev.outPath b.doc.outPath c.dev.outPath c ]; }
+    "#,
+    );
+    let file = file.to_str().unwrap();
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--json", "--timings", file, "-A", "selected"];
+        args.extend_from_slice(extra);
+        let r = build(&s, &args);
+        assert!(r.status.success(), "{}", stderr(&r));
+        r
+    };
+    let keys = |r: &Output| -> Vec<Vec<String>> {
+        json(r)["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["outputs"].as_object().unwrap().keys().cloned().collect())
+            .collect()
+    };
+    for flags in [&[][..], &["--out", "out"][..]] {
+        let expected = if flags.is_empty() {
+            vec![vec!["dev"], vec!["doc"], vec!["dev", "doc", "out"]]
+        } else {
+            vec![vec!["dev", "out"], vec!["doc", "out"], vec!["dev", "out"]]
+        };
+        assert_eq!(keys(&run(flags)), expected);
+        let piped = e2e::pipe(
+            s.iets().args([
+                "plumbing",
+                "resolve",
+                "--dump-drvs",
+                "dump",
+                file,
+                "-A",
+                "selected",
+            ]),
+            s.iets()
+                .args(["plumbing", "build", "--roots", "-"])
+                .args(flags),
+        );
+        assert!(piped.status.success(), "{}", stderr(&piped));
+        assert_eq!(keys(&piped), expected);
+    }
+    let warm = run(&[]);
+    assert!(stderr(&warm).contains("eval: skipped"), "{}", stderr(&warm));
+    // An unrequested output of A may disappear without making a warm dry-run rebuild it.
+    let j = json(&warm);
+    let a = j["outcomes"][0]["drv"].as_str().unwrap();
+    let outputs = s.nix_store(&["-q", "--outputs", a]);
+    let doc = outputs
+        .lines()
+        .find(|p| p.ends_with("-pick-a-doc"))
+        .unwrap();
+    s.nix_store(&["--delete", doc]);
+    assert_eq!(
+        json(&run(&["--dry-run"]))["willBuild"],
+        serde_json::json!([])
+    );
+}

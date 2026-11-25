@@ -90,7 +90,7 @@ derivations is built whole, each member to its own verdict: 'iets build
   -k, --keep-going      one root: build what a failure does not block
   -j, --max-jobs N      allow up to N simultaneous local builds
   --cores N             tell builders how many cores to use (0: all)
-  --out NAME            build the output NAME only (repeatable)
+  --out NAME            request NAME from each root (repeatable)
   --fetch-to DIR        copy the outputs from the builder to DIR
   -o, --out-link PATH   bring the outputs into the local store and link
                         them at PATH, PATH-1, ... (GC roots)

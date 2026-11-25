@@ -443,7 +443,8 @@ pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)>
 }
 
 /// The derivations to build and the outputs to print: `wanted` plus the
-/// outputs the roots' string context named.
+/// outputs the roots' string context named. For per-derivation output selections,
+/// use [`build::root_outputs`].
 pub fn build_targets(
     wanted: &[String],
     roots: &[(StorePath, Option<String>)],

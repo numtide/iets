@@ -64,8 +64,8 @@ pub(super) static OPEN_IN_TESTS: RwLock<()> = RwLock::new(());
 const SMALL: u64 = 64 << 20;
 const FAN_IN: usize = 4;
 
-/// How often a read lists the packs again: a pack that is not held open can
-/// go to a merge between each listing and the read of it.
+/// How often a read lists the packs again: a merge can remove a pack during
+/// a listing, or between the listing and the read of a pack not held open.
 const LISTINGS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -623,27 +623,29 @@ impl Packs {
         all
     }
 
-    /// An object's bytes. `NotFound` when no pack holds it even after a fresh
-    /// listing: the entry that named it is then not whole.
+    /// An object's bytes. `NotFound` when no pack holds it even after fresh
+    /// listings: the entry that named it is then not whole.
     pub fn read(&self, id: &Id) -> io::Result<Vec<u8>> {
         self.read_listing(id, || self.refresh())
     }
 
     fn read_listing(&self, id: &Id, mut list: impl FnMut() -> Arc<PackSet>) -> io::Result<Vec<u8>> {
         let mut set = self.snapshot();
-        for listing in 0..=LISTINGS {
+        for _ in 0..LISTINGS {
             match set.find(id).map(|(p, loc)| p.read(loc)) {
-                Some(Err(e)) if e.kind() == io::ErrorKind::NotFound && listing < LISTINGS => {}
+                Some(Err(e)) if e.kind() == io::ErrorKind::NotFound => {}
                 Some(r) => return r,
-                None if listing > 0 => break,
                 None => {}
             }
             set = list();
         }
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "an object of this input is missing from the input store",
-        ))
+        match set.find(id) {
+            Some((p, loc)) => p.read(loc),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "an object of this input is missing from the input store",
+            )),
+        }
     }
 }
 
@@ -954,6 +956,23 @@ mod tests {
             set: RwLock::new(gone("first.pack")),
         };
         let mut stale = Some(gone("second.pack"));
+        let read = reader.read_listing(&id_of(b"object"), || {
+            stale.take().unwrap_or_else(|| reader.refresh())
+        });
+        assert_eq!(read.unwrap(), b"object");
+    }
+
+    #[test]
+    fn a_read_follows_a_merge_its_listing_ran_into() {
+        let d = tempdir().unwrap();
+        one_pack(d.path(), b"object");
+        // a listing that saw the old packs go and not yet the new one
+        let empty = || set_of([].into_iter());
+        let reader = Packs {
+            dir: d.path().to_path_buf(),
+            set: RwLock::new(empty()),
+        };
+        let mut stale = Some(empty());
         let read = reader.read_listing(&id_of(b"object"), || {
             stale.take().unwrap_or_else(|| reader.refresh())
         });

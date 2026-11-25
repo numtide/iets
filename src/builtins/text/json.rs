@@ -218,14 +218,14 @@ impl Parser<'_> {
         self.depth -= 1;
         // duplicate keys: the last value wins (insert_or_assign)
         entries.sort_by_key(|e| e.0);
-        let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(entries.len());
-        for e in entries {
-            match out.last_mut() {
-                Some(last) if last.0 == e.0 => *last = e,
-                _ => out.push(e),
+        entries.dedup_by(|later, earlier| {
+            if later.0 != earlier.0 {
+                return false;
             }
-        }
-        Ok(self.ev.arena.mk_attrs_sorted(&out))
+            *earlier = *later;
+            true
+        });
+        Ok(self.ev.arena.mk_attrs_sorted(&entries))
     }
 
     fn array(&mut self) -> EvalResult<Word> {

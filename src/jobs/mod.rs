@@ -13,6 +13,7 @@ pub mod line;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::iter;
+use std::str;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, OnceLock};
 
@@ -149,10 +150,22 @@ pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<
 }
 
 /// Walk `root` and hand every job or error line to `sink`, in
-/// lexicographic depth-first order.
-pub fn run(ev: &mut Evaluator, root: Word, sink: &mut dyn FnMut(Line)) {
-    let mut path = Vec::new();
-    walk(ev, root, &mut path, FNV_BASIS, sink);
+/// lexicographic depth-first order. Invalid UTF-8 in a job path aborts the walk.
+pub fn run(ev: &mut Evaluator, root: Word, sink: &mut dyn FnMut(Line)) -> EvalResult<()> {
+    walk(ev, root, &mut Vec::new(), FNV_BASIS, sink)
+}
+
+fn validate_names(ev: &Evaluator, attrs: &[Attr]) -> EvalResult<()> {
+    for attr in attrs {
+        if str::from_utf8(ev.interner.name(attr.sym)).is_err() {
+            return Err(Error::boxed(
+                ErrorKind::Eval,
+                "JSON serialization error: invalid UTF-8 byte in attribute name",
+                Pos::NONE,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub enum Node {
@@ -167,14 +180,15 @@ fn walk(
     path: &mut Vec<String>,
     hash: u64,
     sink: &mut dyn FnMut(Line),
-) {
+) -> EvalResult<()> {
     let depth = path.len() as u32;
     if depth == config().opts.chunk_depth && !admit(hash, depth, false) {
-        return;
+        return Ok(());
     }
     match node(ev, w, path, hash) {
         Ok(Node::Job(job)) => sink(Line::Job(job)),
         Ok(Node::Recurse(attrs)) => {
+            validate_names(ev, attrs.attrs())?;
             remember_set(attrs, hash, depth);
             let ordered: Vec<&Attr> = lexicographic_order(ev, attrs).collect();
             let cells = attrs.attrs();
@@ -192,8 +206,9 @@ fn walk(
                     let name = ev.interner.name_str(attr.sym).to_string();
                     let h = fnv_step(hash, name.as_bytes());
                     path.push(name);
-                    walk(ev, attr.cell.get(), path, h, sink);
+                    let result = walk(ev, attr.cell.get(), path, h, sink);
                     path.pop();
+                    result?;
                 }
             }
         }
@@ -203,6 +218,7 @@ fn walk(
         Err(_) if !admit(hash, depth, true) => {}
         Err(e) => sink(Line::Error(error_line(ev, path, &e))),
     }
+    Ok(())
 }
 
 /// The error line for `path`, also printed to stderr as nix-eval-jobs does.
@@ -798,9 +814,13 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
 /// in `start..end` of `attrs`. Never parks on a cell another fiber holds;
 /// an evaluation error in one child does not stop the others.
 pub fn prefetch_range(ev: &mut Evaluator, attrs: &'static AttrsObj, start: usize, end: usize) {
+    let range = &attrs.attrs()[start..end];
+    if bail_requested(ev) || ev.par.cancelled || validate_names(ev, range).is_err() {
+        return;
+    }
     // A set the walk never registered is treated as below the chunk depth.
     let (hash, depth) = recall_set(attrs).unwrap_or((FNV_BASIS, u32::MAX - 1));
-    for attr in &attrs.attrs()[start..end] {
+    for attr in range {
         if prefetch_child(ev, attr, hash, depth).is_err() {
             return;
         }
@@ -869,6 +889,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
         return Ok(());
     }
     let a = ev.arena.flat(a);
+    validate_names(ev, a.attrs())?;
     remember_set(a, hash, depth);
     fanout_range(ev, T_JOB, Word::from_ref(a), 0, a.len(), JOB_BATCH);
     for attr in a.attrs() {
@@ -907,7 +928,6 @@ fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::eval::EvalConfig;
     use crate::lint::{Config, Level, Scope};
 

@@ -25,6 +25,7 @@ use super::instantiate::Instantiator;
 use super::line::{Line, json_str, json_str_list, split_object, stats_json};
 use super::{
     FNV_BASIS, Node, admit, attr_join, config, error_line, find_along_attr_path, fnv_step, node,
+    validate_names,
 };
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
@@ -121,6 +122,7 @@ pub fn run_worker(
                     MSG_OK.into()
                 }
                 Ok(Node::Recurse(attrs)) => {
+                    validate_names(ev, attrs.attrs()).map_err(Error::Eval)?;
                     let names = lexicographic_order(ev, attrs);
                     let mut v = b"{\"attr\":".to_vec();
                     v.extend(json_str(&attr_join(&path)));

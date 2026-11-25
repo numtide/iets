@@ -476,6 +476,32 @@ fn ci(bin: &Iets) -> Command {
 }
 
 #[rstest]
+#[case::walk("0")]
+#[case::collector("1024")]
+fn job_paths_require_utf8(bin: Iets, #[case] memory: &str) {
+    let run = |name| {
+        ci(&bin)
+            .args(["--max-memory-size", memory, "--arg", "name", name, "--expr"])
+            .arg(r#"{ name }: let job = derivation { name = "job"; system = "x"; builder = ":"; }; in { a = job; ${name} = job; }"#)
+            .output()
+            .unwrap()
+    };
+    let invalid = run(r#"builtins.substring 0 1 "é""#);
+    assert!(!invalid.status.success());
+    let error = stderr(&invalid);
+    assert!(error.contains("invalid UTF-8"), "{error}");
+    assert!(invalid.stdout.is_empty());
+
+    let valid = run(r#""<non-utf8>""#);
+    assert!(valid.status.success(), "{}", stderr(&valid));
+    assert!(
+        norm(&valid)
+            .iter()
+            .any(|line| line.contains(r#""attrPath":["<non-utf8>"]"#))
+    );
+}
+
+#[rstest]
 fn worker_keeps_flag_shaped_include_operand(bin: Iets) {
     let system = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs/system.txt");
     let output = ok(ci(&bin).stdin(File::open(system).unwrap()).args([

@@ -16,6 +16,7 @@ use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::str;
 
 use e2e::{Store, ok, stderr};
 use serde_json::Value;
@@ -670,4 +671,33 @@ fn iets_options_reach_the_workers(bin: Iets) {
         .args(["--workers", "2", "--no-instantiate", "ci.nix"]);
     ok(&mut c);
     assert!(cache.exists());
+}
+
+#[rstest]
+fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
+    let input = tempfile::NamedTempFile::new().unwrap();
+    fs::write(input.path(), "do []\nexit\n").unwrap();
+    let expr = r#"{ c = throw "unused"; b = null; M = null; a = null; }"#;
+    for (chunk, depth, names) in [
+        ("0", "1", vec!["M", "a", "c"]),
+        ("1", "1", vec!["b"]),
+        ("0", "2", vec!["M", "a", "b", "c"]),
+    ] {
+        let output = ok(ci(&bin)
+            .args([
+                "--worker",
+                "--chunks",
+                "2",
+                "--chunk",
+                chunk,
+                "--chunk-depth",
+                depth,
+                "--expr",
+                expr,
+            ])
+            .stdin(File::open(input.path()).unwrap()));
+        let text = str::from_utf8(&output.stdout).unwrap();
+        let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(response["attrs"], serde_json::json!(names));
+    }
 }

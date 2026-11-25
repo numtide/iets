@@ -24,7 +24,7 @@ use crate::{session, treestore};
 #[derive(Debug, Default)]
 pub struct Report {
     pub entries: usize,
-    /// Files and trees whose contents were rehashed because their stat changed.
+    /// Files and trees rehashed after their metadata or filtered directory listing changed.
     pub rehashed: usize,
     /// Entries whose stat fields were refreshed; the read set should be rewritten.
     pub refreshed: usize,
@@ -156,8 +156,11 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 .as_ref()
                 .map(|f| f.accepted.iter().map(|p| os(p)).collect());
             let root_p = os(root);
+            let expected_seen = filtered.as_ref().and_then(|f| f.seen_hash);
             match tree_fingerprint(&root_p, accepted.as_ref()) {
-                Ok((sh, _)) if sh == *stat_hash => return Outcome::Same,
+                Ok((sh, seen)) if sh == *stat_hash && expected_seen.is_none_or(|s| s == seen) => {
+                    return Outcome::Same;
+                }
                 Ok(_) => {}
                 Err(e) => return unreadable(root, &e),
             }
@@ -166,11 +169,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 Ok(t) => t,
                 Err(e) => return unreadable(root, &e),
             };
-            if nar != *nar_hash
-                || filtered
-                    .as_ref()
-                    .is_some_and(|f| f.seen_hash.is_some_and(|s| s != seen))
-            {
+            if nar != *nar_hash || expected_seen.is_some_and(|s| s != seen) {
                 return Outcome::Changed(format!("source tree {} changed", lossy(root)));
             }
             if newest.is_some_and(|n| n != now) {
@@ -290,7 +289,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Trace, sha256};
+    use super::super::{Filtered, Trace, sha256};
     use super::*;
     use tempfile::tempdir;
 
@@ -299,6 +298,33 @@ mod tests {
     /// Windows lets only a handle opened for writing change the times.
     fn open_rw(p: &Path) -> fs::File {
         fs::OpenOptions::new().write(true).open(p).unwrap()
+    }
+
+    #[test]
+    fn a_filtered_tree_checks_offered_names_when_its_stat_matches() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let accepted = HashSet::new();
+        fs::write(root.join("before"), b"").unwrap();
+        let (_, seen) = tree_fingerprint(root, Some(&accepted)).unwrap();
+        fs::rename(root.join("before"), root.join("after")).unwrap();
+
+        // A directory can change names without changing its metadata (e.g.
+        // procfs). Use the current stat to exercise that case on any filesystem.
+        let (nar, _, stat, _) = tree_rehash(root, Some(&accepted)).unwrap();
+        let root = sys::path_to_internal(root);
+        let expected = format!("source tree {} changed", lossy(&root));
+        let mut obs = [Obs::Tree {
+            root,
+            nar_hash: nar,
+            stat_hash: stat,
+            filtered: Some(Filtered {
+                seen_hash: Some(seen),
+                accepted: Vec::new(),
+            }),
+            newest: None,
+        }];
+        assert_eq!(validate(&mut obs, 1).unwrap_err().0, expected);
     }
 
     /// A rewrite of the same size in the same timestamp tick leaves the stat

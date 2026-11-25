@@ -524,12 +524,14 @@ fn store(
         // waits rather than drop a whole download; under it, a pack this tree
         // relied on may have gone, and its objects come from the spool instead
         let _lock = cachefs::store_lock(root).ok_or(Rejected::Unstorable)?;
-        let now = packs.refresh();
-        for (id, at) in &elsewhere {
-            if now.find(id).is_none() {
-                writer
-                    .add(*id, &tree.read(at).map_err(Rejected::Io)?)
-                    .map_err(Rejected::Io)?;
+        if !elsewhere.is_empty() {
+            let now = packs.refresh();
+            for (id, at) in &elsewhere {
+                if now.find(id).is_none() {
+                    writer
+                        .add(*id, &tree.read(at).map_err(Rejected::Io)?)
+                        .map_err(Rejected::Io)?;
+                }
             }
         }
         writer.finish().map_err(Rejected::Io)?;

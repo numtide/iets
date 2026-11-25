@@ -15,7 +15,7 @@
 
 use crate::sys::{self, fs as sysfs};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -444,32 +444,38 @@ impl Drop for PackWriter {
 #[derive(Default, Debug)]
 pub struct PackSet {
     packs: Vec<Arc<Pack>>,
-    /// Packs that do not parse, with their size, for [`collect`] to remove.
-    broken: Vec<(PathBuf, u64)>,
+}
+
+fn pack_files(dir: &Path) -> io::Result<impl Iterator<Item = PathBuf>> {
+    Ok(fs::read_dir(dir)?.flatten().filter_map(|entry| {
+        let path = entry.path();
+        (path.extension().is_some_and(|x| x == "pack") && entry.file_type().ok()?.is_file())
+            .then_some(path)
+    }))
 }
 
 impl PackSet {
     /// Every whole pack in `dir`. Only regular files count, so a link never
     /// leads a later removal out of the store.
     pub fn load(dir: &Path) -> PackSet {
+        Self::reload(dir, &[])
+    }
+
+    fn reload(dir: &Path, previous: &[Arc<Pack>]) -> PackSet {
+        let by_path: HashMap<_, _> = previous.iter().map(|p| (p.path(), p)).collect();
         let mut set = PackSet::default();
-        let Ok(rd) = fs::read_dir(dir) else {
+        let Ok(paths) = pack_files(dir) else {
             return set;
         };
-        for e in rd.flatten() {
-            let path = e.path();
-            if path.extension().is_none_or(|x| x != "pack")
-                || !e.file_type().is_ok_and(|t| t.is_file())
+        for path in paths {
+            if let Some(pack) = by_path.get(path.as_path())
+                && sysfs::same_file(&pack.file, &path)
             {
+                set.packs.push(Arc::clone(pack));
                 continue;
             }
-            match Pack::open(&path) {
-                Ok(Some(p)) => set.packs.push(Arc::new(p)),
-                Ok(None) => {
-                    let len = e.metadata().map_or(0, |m| m.len());
-                    set.broken.push((path, len));
-                }
-                Err(_) => {}
+            if let Ok(Some(pack)) = Pack::open(&path) {
+                set.packs.push(Arc::new(pack));
             }
         }
         set
@@ -512,8 +518,9 @@ impl Packs {
     }
 
     pub fn refresh(&self) -> Arc<PackSet> {
-        let fresh = Arc::new(PackSet::load(&self.dir));
-        *self.set.write().unwrap() = fresh.clone();
+        let mut current = self.set.write().unwrap();
+        let fresh = Arc::new(PackSet::reload(&self.dir, current.packs()));
+        *current = fresh.clone();
         fresh
     }
 
@@ -560,16 +567,21 @@ fn remove(path: &Path, dry_run: bool) -> bool {
 /// a reader that has a pack open keeps reading it after the unlink.
 pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Collected> {
     let mut out = Collected::default();
-    let set = PackSet::load(dir);
-    // a pack that does not parse is a cache file whose objects come back
-    // with the inputs that need them
-    for (path, len) in &set.broken {
-        if remove(path, dry_run) {
-            out.removed += 1;
-            out.freed += len;
-        }
-    }
-    for pack in set.packs() {
+    // Snapshot names before rewriting any of them. Only the current pack needs to stay open.
+    let paths: Vec<_> = pack_files(dir)?.collect();
+    for path in paths {
+        let pack = match Pack::open(&path) {
+            Ok(Some(pack)) => pack,
+            Ok(None) => {
+                let len = fs::symlink_metadata(&path).map_or(0, |m| m.len());
+                if remove(&path, dry_run) {
+                    out.removed += 1;
+                    out.freed += len;
+                }
+                continue;
+            }
+            Err(_) => continue,
+        };
         let (mut keep, mut dead) = (0u64, 0u64);
         for (id, loc) in pack.ids() {
             if live.contains(&id) {
@@ -587,7 +599,7 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
             if !dry_run {
                 let mut w = PackWriter::new(dir)?;
                 for (id, loc) in pack.ids().filter(|(id, _)| live.contains(id)) {
-                    w.copy(id, pack, loc)?;
+                    w.copy(id, &pack, loc)?;
                 }
                 let new = w.finish()?;
                 if new.as_deref() != Some(pack.path()) && !remove(pack.path(), false) {
@@ -734,6 +746,8 @@ mod tests {
         w.add(id_of(b"late"), b"late").unwrap();
         w.finish().unwrap();
         assert_eq!(packs.read(&id_of(b"late")).unwrap(), b"late");
+        let before = packs.snapshot();
+        assert!(Arc::ptr_eq(&before.packs()[0], &packs.refresh().packs()[0]));
     }
 
     #[test]

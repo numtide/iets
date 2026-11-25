@@ -11,5 +11,6 @@
     depMeta = derivation { name = "dep-meta"; system = "s"; builder = "b"; v = dep.narHash; };
     # iets: allow tree-meta-in-drv
     allowed = derivation { name = "allowed"; system = "s"; builder = "b"; v = self.narHash; };
+    inputCopy = dep.copy (/. + "@DEP@/../plain");
   };
 }

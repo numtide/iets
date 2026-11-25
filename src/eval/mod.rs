@@ -364,6 +364,7 @@ pub struct Evaluator {
     pub project_markers: SharedMap<Vec<u8>, bool>,
     /// Lint levels (docs/reference/lints.md).
     lint_config: lint::Config,
+    pub(crate) lint_enabled: lint::allow::Mask,
     /// The warnings emitted so far.
     pub lints: Lints,
     pub drv: DrvState,
@@ -801,6 +802,7 @@ impl EvalConfig {
             known: Default::default(),
             input_names: Default::default(),
             project_markers: Default::default(),
+            lint_enabled: self.lints.enabled_anywhere(),
             lint_config: self.lints,
             lints: Default::default(),
             drv: DrvState::new(self.keep_aterm, self.keep_site, self.dump_dir),

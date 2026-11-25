@@ -523,7 +523,7 @@ fn store(
         // `collect` holds the lock for as long as a compaction takes, so this
         // waits rather than drop a whole download; under it, a pack this tree
         // relied on may have gone, and its objects come from the spool instead
-        let _lock = cachefs::store_lock(root).ok_or(Rejected::Unstorable)?;
+        let _lock = cachefs::store_lock(root).map_err(Rejected::Io)?;
         let now = packs.refresh();
         for (id, at) in &elsewhere {
             if now.find(id).is_none() {
@@ -537,8 +537,9 @@ fn store(
         if !path.exists() {
             cachefs::write_atomic(root, name, &[&index]).map_err(Rejected::Io)?;
         }
+        // the tree is stored; a merge that fails leaves the packs as they are
+        let _ = packs.merge();
     }
-    packs.refresh();
     let tree = Tree::stored(stored_root, packs);
     Ok((name.to_string(), StoredTree::new(tree, nar_hash, nar_size)))
 }
@@ -548,7 +549,7 @@ fn store(
 /// does not decode goes too. Runs under the store's lock, so no `put` publishes
 /// an entry between the marking and the sweeping.
 pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
-    let Some(_lock) = cachefs::store_lock(root) else {
+    let Ok(_lock) = cachefs::store_lock(root) else {
         return pack::Collected::default();
     };
     let mut live = HashSet::new();
@@ -727,6 +728,7 @@ mod tests {
     /// before the collection still reads it.
     #[test]
     fn collect_keeps_what_an_entry_names() {
+        let _held = pack::OPEN_IN_TESTS.read().unwrap();
         let root = tempdir().unwrap();
         let big = vec![b'x'; 50_000];
         let a = put_in(root.path(), &[("shared", b"shared bytes"), ("big", &big)]);

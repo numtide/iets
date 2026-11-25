@@ -233,8 +233,8 @@ pub fn try_lock(f: &File) -> bool {
     f.try_lock().is_ok()
 }
 
-pub fn lock(f: &File) -> bool {
-    f.lock().is_ok()
+pub fn lock(f: &File) -> io::Result<()> {
+    f.lock()
 }
 
 pub fn unlock(f: &File) {

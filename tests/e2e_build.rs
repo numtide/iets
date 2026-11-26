@@ -157,6 +157,26 @@ fn one_root() {
 }
 
 #[test]
+fn a_cold_build_reads_a_nested_text_source() {
+    let s = store!();
+    let expr = s.write(
+        "text.nix",
+        r#"let
+          inner = builtins.toFile "inner" "nested contents\n";
+          outer = builtins.toFile "outer" "${inner}\n";
+        in derivation {
+          name = "nested-text";
+          system = "@SYSTEM@";
+          builder = "@SHELL@";
+          args = [ "-e" "-c" "read -r path < ${outer}; read -r line < $path; echo \"$line\" > $out" ];
+        }"#,
+    );
+    let r = build(&s, &[expr.to_str().unwrap()]);
+    assert!(r.status.success(), "{}", stderr(&r));
+    assert_eq!(fs::read_to_string(stdout(&r)).unwrap(), "nested contents\n");
+}
+
+#[test]
 fn dry_run_over_a_tree() {
     let s = store!();
     let flake = checks_flake(&s, "fresh");

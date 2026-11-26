@@ -43,35 +43,14 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The kind a `FileType` names. `of` takes the same decision from a
-    /// `Metadata`; a directory entry already carries the type, so a listing
-    /// needs no second `stat`.
+    /// Classify the file type supplied by a directory entry.
     pub fn of_file_type(ft: &fs::FileType) -> Kind {
-        if ft.is_symlink() {
-            Kind::Symlink
-        } else if ft.is_dir() {
-            Kind::Directory
-        } else if ft.is_file() {
-            Kind::Regular
-        } else {
-            Kind::Other
-        }
+        nar_kind(FileType::of(*ft))
     }
 
     pub fn of(r: &io::Result<fs::Metadata>) -> Kind {
         match r {
-            Ok(m) => {
-                let ft = m.file_type();
-                if ft.is_symlink() {
-                    Kind::Symlink
-                } else if ft.is_dir() {
-                    Kind::Directory
-                } else if ft.is_file() {
-                    Kind::Regular
-                } else {
-                    Kind::Other
-                }
-            }
+            Ok(m) => Self::of_file_type(&m.file_type()),
             Err(_) => Kind::Missing,
         }
     }
@@ -870,7 +849,7 @@ fn tree_rehash_with(
     Ok((hash_to_digest(&h), seen_hash, stat_hash, newest))
 }
 
-fn nar_kind(t: FileType) -> Kind {
+pub(crate) fn nar_kind(t: FileType) -> Kind {
     match t {
         FileType::Regular => Kind::Regular,
         FileType::Directory => Kind::Directory,

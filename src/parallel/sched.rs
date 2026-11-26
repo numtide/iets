@@ -3,6 +3,7 @@
 //! payload and runs tasks.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
@@ -19,7 +20,6 @@ use crate::runtime::{Arena, Word};
 use crate::session::{self, Session};
 use crate::sys;
 
-pub const READY_CAP: usize = 4096;
 pub const TASK_CAP: usize = 4096;
 const PREWARM: usize = 4;
 /// Pool fibers beyond this many are trimmed when the worker parks.
@@ -42,9 +42,7 @@ pub fn any_failed() -> bool {
 /// Cells one range task may cover, from the packed `Task`.
 const LEN_MAX: u32 = u16::MAX as u32;
 
-/// The three scheduler tunables, read once on the starting thread. A
-/// fiber migrates between threads, so the scheduler reads no thread-local
-/// (ARCHITECTURE.md, "Changing the evaluator").
+/// Scheduler tunables, read once on the starting thread.
 struct Tuning {
     /// Scans of 64 polls an idle searcher makes before it parks (~2 ms). A
     /// shorter spin (64 scans) saved no user time once searchers were capped,
@@ -122,36 +120,39 @@ pub trait Driver: Sync {
     /// Frees a payload `new_user` made, at teardown. Its fiber never runs
     /// again, but may be parked in the middle of a task.
     fn drop_user(&self, _user: *mut ()) {}
-    /// Run `slot.task`. Called on the fiber's own stack.
+    /// Run `slot.task` on the fiber stack. Waiting for another fiber on
+    /// this runtime must park the slot so its worker can run the peer.
     fn run_task(&self, rt: &Runtime, slot: &mut Slot);
     /// Called on the worker's stack right before switching into `slot`
     /// and right after it switched out (arena swap).
-    fn on_switch(&self, slot: &mut Slot, worker: &mut Worker);
+    fn on_switch(&self, _slot: &mut Slot, _arena: &mut Arena, _cache: &mut interner::Cache) {}
 }
 
 pub type MainEntry = Box<dyn FnOnce(&mut Slot)>;
 
 pub struct Slot {
-    pub fiber: Fiber,
-    /// Claimer id: nonzero, unique per slot, stable across migration.
+    pub(super) fiber: Fiber,
+    /// Nonzero claimer id, unique per slot.
     pub id: u32,
+    /// Only this worker may run the slot, including after a wake from another worker.
+    owner: usize,
     pub cancel: AtomicBool,
     pub is_main: bool,
     pub user: *mut (),
     pub task: Task,
     main_entry: Option<MainEntry>,
     /// Worker currently running this fiber. Valid while RUNNING.
-    pub worker: *mut Worker,
-    pub rt: *const Runtime,
+    worker: *mut Worker,
+    rt: *const Runtime,
     /// Stack pages beyond the warm top were returned to the OS.
     trimmed: bool,
 }
 
 pub struct Worker {
-    pub idx: usize,
-    pub arena: Arena,
+    idx: usize,
+    arena: Arena,
     /// The interner cache this worker lends the fiber it runs.
-    pub icache: interner::Cache,
+    icache: interner::Cache,
     pool: Vec<*mut Slot>,
     spinning: bool,
     rng: u64,
@@ -159,7 +160,9 @@ pub struct Worker {
 }
 
 struct Lanes {
-    ready: Deque,
+    ready: Mutex<Vec<*mut Slot>>,
+    has_ready: AtomicBool,
+    sleeping: AtomicBool,
     urgent: Deque,
 }
 
@@ -169,12 +172,8 @@ struct Padded<T>(T);
 pub struct Runtime {
     pub n: usize,
     lanes: Vec<Lanes>,
-    overflow: Mutex<Vec<*mut Slot>>,
-    overflow_len: Padded<AtomicUsize>,
-    /// Summaries of queued work so idle workers poll two words instead of
-    /// touching every lane's deque lines.
+    /// Summary of stealable work across all lanes.
     pending_tasks: Padded<AtomicUsize>,
-    pending_ready: Padded<AtomicUsize>,
     /// Per-worker running flag, busy time and task count.
     wstat: Vec<WorkerStat>,
     /// Idle workers searching for work. A push wakes a sleeper only when
@@ -182,7 +181,9 @@ pub struct Runtime {
     /// it wakes one more sleeper if work remains (one wake per handoff,
     /// never one per push).
     spinners: Padded<AtomicUsize>,
-    sleepers: Padded<AtomicUsize>,
+    /// Low word counts sleepers. The high word changes each time one leaves,
+    /// so a worker that wakes and parks again invalidates an idle snapshot.
+    sleepers: Padded<AtomicU64>,
     /// Wake a sleeper for every queued task. For drivers whose fibers
     /// busy-wait on a queued peer instead of parking (tests).
     eager_wakes: AtomicBool,
@@ -208,6 +209,7 @@ pub struct Runtime {
     /// would otherwise start the same failing computation again.
     failed: [AtomicU64; FAILED_SLOTS],
     pub deadlocks: AtomicUsize,
+    /// Ready-fiber steals reported by IETS_PAR_STATS. This remains zero with pinned fibers.
     pub stat_steals: AtomicUsize,
     pub stat_parks: AtomicUsize,
     pub stat_main_parks: AtomicUsize,
@@ -224,7 +226,6 @@ pub struct Runtime {
 // slot fields other than atomics are touched only by its current owner).
 unsafe impl Sync for Runtime {}
 unsafe impl Send for Runtime {}
-unsafe impl Send for Worker {}
 
 impl Runtime {
     /// Create the runtime and spawn workers `1..n`. The caller's thread is
@@ -241,17 +242,16 @@ impl Runtime {
             n,
             lanes: (0..n)
                 .map(|_| Lanes {
-                    ready: Deque::new(READY_CAP),
+                    ready: Mutex::new(Vec::new()),
+                    has_ready: AtomicBool::new(false),
+                    sleeping: AtomicBool::new(false),
                     urgent: Deque::new(TASK_CAP),
                 })
                 .collect(),
-            overflow: Mutex::new(Vec::new()),
-            overflow_len: Padded(AtomicUsize::new(0)),
             pending_tasks: Padded(AtomicUsize::new(0)),
-            pending_ready: Padded(AtomicUsize::new(0)),
             wstat: (0..n).map(|_| WorkerStat::default()).collect(),
             spinners: Padded(AtomicUsize::new(0)),
-            sleepers: Padded(AtomicUsize::new(0)),
+            sleepers: Padded(AtomicU64::new(0)),
             eager_wakes: AtomicBool::new(false),
             epoch: Padded(AtomicU32::new(0)),
             shutdown: AtomicBool::new(false),
@@ -304,7 +304,7 @@ impl Runtime {
         fiber::install_overflow_handler();
         let mut w = Worker::new(0);
         // the demand path keeps the stack it has at one worker
-        let slot = match self.new_slot(fiber::MAIN_STACK, || user) {
+        let slot = match self.new_slot(0, fiber::MAIN_STACK, || user) {
             Ok(s) => s,
             Err(e) => {
                 self.driver.drop_user(user);
@@ -381,7 +381,7 @@ impl Runtime {
             if idle < scans && self.may_spin(w) {
                 // Poll the two summary words until something appears.
                 for _ in 0..64 {
-                    if self.has_work() {
+                    if self.has_work(w) {
                         break;
                     }
                     hint::spin_loop();
@@ -438,19 +438,20 @@ impl Runtime {
             w.spinning = false;
             if self.spinners.0.fetch_sub(1, Ordering::SeqCst) == 1
                 && self.worth_a_wake()
-                && self.sleepers.0.load(Ordering::SeqCst) > 0
+                && self.sleepers.0.load(Ordering::SeqCst) as u32 > 0
             {
                 self.wake_one();
             }
         }
     }
 
-    fn new_helper_slot(&self) -> Result<*mut Slot, fiber::StackError> {
-        self.new_slot(self.stack_size, || self.driver.new_user(self))
+    fn new_helper_slot(&self, owner: usize) -> Result<*mut Slot, fiber::StackError> {
+        self.new_slot(owner, self.stack_size, || self.driver.new_user(self))
     }
 
     fn new_slot(
         &self,
+        owner: usize,
         stack: usize,
         user: impl FnOnce() -> *mut (),
     ) -> Result<*mut Slot, fiber::StackError> {
@@ -458,6 +459,7 @@ impl Runtime {
         let slot = Box::into_raw(Box::new(Slot {
             fiber: Fiber::new(stack, slot_entry, ptr::null_mut())?,
             id,
+            owner,
             cancel: AtomicBool::new(false),
             is_main: false,
             user: user(),
@@ -486,7 +488,7 @@ impl Runtime {
 
     fn prewarm(&self, w: &mut Worker) {
         for _ in 0..PREWARM {
-            match self.new_helper_slot() {
+            match self.new_helper_slot(w.idx) {
                 Ok(s) => w.pool.push(s),
                 Err(e) => return self.report_no_stack(&e),
             }
@@ -500,7 +502,7 @@ impl Runtime {
                 if self.stack_failed.load(Ordering::Relaxed) {
                     return;
                 }
-                match self.new_helper_slot() {
+                match self.new_helper_slot(w.idx) {
                     Ok(s) => s,
                     Err(e) => return self.report_no_stack(&e),
                 }
@@ -522,26 +524,27 @@ impl Runtime {
         // SAFETY: ownership per the wake handshake (docs/explanation/evaluation.md).
         unsafe {
             let s = &mut *slot;
+            debug_assert_eq!(s.owner, w.idx);
             s.fiber.state.store(fiber::RUNNING, Ordering::Relaxed);
-            s.worker = w;
-            self.driver.on_switch(s, w);
+            self.driver.on_switch(s, &mut w.arena, &mut w.icache);
             let t0 = Instant::now();
             let st = &self.wstat[w.idx];
             st.running.store(1, Ordering::Relaxed);
+            s.worker = w;
             s.fiber.resume();
+            s.worker = ptr::null_mut();
             st.running.store(0, Ordering::Relaxed);
             st.busy_ns
                 .fetch_add(t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
-            self.driver.on_switch(s, w);
+            self.driver.on_switch(s, &mut w.arena, &mut w.icache);
             match s.fiber.state.load(Ordering::Acquire) {
                 fiber::FINISHED => {
-                    s.worker = ptr::null_mut();
                     w.pool.push(slot);
                 }
                 // A waker may already have moved PARKING to WOKEN.
                 fiber::PARKING | fiber::WOKEN => {
                     if s.fiber.state.swap(fiber::SUSPENDED, Ordering::AcqRel) == fiber::WOKEN {
-                        self.push_ready(w, slot);
+                        self.wake(w, slot);
                     }
                 }
                 st => panic!("fiber switched out in state {st}"),
@@ -554,9 +557,9 @@ impl Runtime {
     ///
     /// # Safety
     /// `slot` must point at a live slot (slots live until the teardown).
-    pub unsafe fn wake(&self, w: &mut Worker, slot: *mut Slot) {
-        // SAFETY: per the contract; only the atomic state is touched.
-        let st = unsafe { &(*slot).fiber.state };
+    pub unsafe fn wake(&self, w: &Worker, slot: *mut Slot) {
+        // SAFETY: the slot lives through teardown and its owner never changes.
+        let (st, owner) = unsafe { (&(*slot).fiber.state, (*slot).owner) };
         loop {
             match st.load(Ordering::Acquire) {
                 fiber::SUSPENDED => {
@@ -569,7 +572,7 @@ impl Runtime {
                         )
                         .is_ok()
                     {
-                        self.push_ready(w, slot);
+                        self.push_ready(w, owner, slot);
                         return;
                     }
                 }
@@ -591,50 +594,29 @@ impl Runtime {
         }
     }
 
-    fn push_ready(&self, w: &mut Worker, slot: *mut Slot) {
-        self.pending_ready.0.fetch_add(1, Ordering::SeqCst);
-        if !self.lanes[w.idx].ready.push(slot as u64, 0) {
-            let mut overflow = self.overflow.lock().unwrap();
-            overflow.push(slot);
-            self.overflow_len.0.fetch_add(1, Ordering::Release);
+    fn push_ready(&self, w: &Worker, owner: usize, slot: *mut Slot) {
+        let lane = &self.lanes[owner];
+        let mut ready = lane.ready.lock().unwrap();
+        ready.push(slot);
+        lane.has_ready.store(true, Ordering::SeqCst);
+        drop(ready);
+        // Paired with sleeping.store then has_ready.load in park. Either
+        // the owner sees the work or we see it preparing to sleep.
+        if owner != w.idx && lane.sleeping.load(Ordering::SeqCst) {
+            self.epoch.0.fetch_add(1, Ordering::Release);
+            sys::futex_wake_mask(&self.epoch.0, worker_mask(owner));
         }
-        self.notify();
     }
 
-    fn take_ready(&self, w: &mut Worker) -> Option<*mut Slot> {
-        if self.pending_ready.0.load(Ordering::Acquire) == 0 {
+    fn take_ready(&self, w: &Worker) -> Option<*mut Slot> {
+        let lane = &self.lanes[w.idx];
+        if !lane.has_ready.load(Ordering::Acquire) {
             return None;
         }
-        let got = self.take_ready_scan(w);
-        if got.is_some() {
-            self.pending_ready.0.fetch_sub(1, Ordering::SeqCst);
-        }
-        got
-    }
-
-    fn take_ready_scan(&self, w: &mut Worker) -> Option<*mut Slot> {
-        if let Some((a, _)) = self.lanes[w.idx].ready.pop() {
-            return Some(a as *mut Slot);
-        }
-        if self.overflow_len.0.load(Ordering::Acquire) > 0 {
-            let mut o = self.overflow.lock().unwrap();
-            if let Some(s) = o.pop() {
-                self.overflow_len.0.fetch_sub(1, Ordering::Release);
-                return Some(s);
-            }
-        }
-        let start = w.next_victim();
-        for k in 0..self.n {
-            let v = (start + k) % self.n;
-            if v == w.idx {
-                continue;
-            }
-            if let Some((a, _)) = self.lanes[v].ready.steal() {
-                self.stat_steals.fetch_add(1, Ordering::Relaxed);
-                return Some(a as *mut Slot);
-            }
-        }
-        None
+        let mut ready = lane.ready.lock().unwrap();
+        let slot = ready.pop();
+        lane.has_ready.store(!ready.is_empty(), Ordering::Release);
+        slot
     }
 
     /// Owner push from the worker currently running the caller.
@@ -685,8 +667,8 @@ impl Runtime {
     }
 
     #[inline]
-    fn has_work(&self) -> bool {
-        self.pending_ready.0.load(Ordering::Acquire) > 0
+    fn has_work(&self, w: &Worker) -> bool {
+        self.lanes[w.idx].has_ready.load(Ordering::SeqCst)
             || (!self.main_done.load(Ordering::Relaxed)
                 && self.pending_tasks.0.load(Ordering::Acquire) > 0)
     }
@@ -695,7 +677,7 @@ impl Runtime {
     /// searcher is awake to find it; the searcher hands off (`found_work`).
     fn notify(&self) {
         fence(Ordering::SeqCst);
-        if self.sleepers.0.load(Ordering::Relaxed) > 0
+        if self.sleepers.0.load(Ordering::Relaxed) as u32 > 0
             && self.spinners.0.load(Ordering::Relaxed) == 0
             && self.worth_a_wake()
         {
@@ -703,14 +685,11 @@ impl Runtime {
         }
     }
 
-    /// A runnable fiber always is. Queued tasks are when the queue is
+    /// Wake another task searcher when the queue is
     /// deeper than `handoff` per awake worker, or when the caller
     /// is the only worker awake (its own fiber may run for a long time).
     #[inline]
     fn worth_a_wake(&self) -> bool {
-        if self.pending_ready.0.load(Ordering::Acquire) > 0 {
-            return true;
-        }
         if self.main_done.load(Ordering::Relaxed) {
             return false;
         }
@@ -721,7 +700,7 @@ impl Runtime {
         if self.eager_wakes.load(Ordering::Relaxed) {
             return true;
         }
-        let awake = self.n - self.sleepers.0.load(Ordering::Relaxed);
+        let awake = self.n - self.sleepers.0.load(Ordering::Relaxed) as u32 as usize;
         awake <= 1 || tasks > self.tune.handoff * awake
     }
 
@@ -740,28 +719,36 @@ impl Runtime {
         sys::futex_wake(&self.epoch.0, i32::MAX as u32);
     }
 
+    fn all_idle(&self, snapshot: u64) -> bool {
+        self.pending_tasks.0.load(Ordering::Acquire) == 0
+            && !self
+                .lanes
+                .iter()
+                .any(|lane| lane.has_ready.load(Ordering::Acquire))
+            && self.sleepers.0.load(Ordering::SeqCst) == snapshot
+            && !self.main_done.load(Ordering::Acquire)
+    }
+
     fn park(&self, w: &mut Worker, done: &impl Fn() -> bool) {
         w.parks += 1;
         self.stat_parks.fetch_add(1, Ordering::Relaxed);
         self.trim_pool(w);
-        let s = self.sleepers.0.fetch_add(1, Ordering::SeqCst) + 1;
+        let lane = &self.lanes[w.idx];
+        lane.sleeping.store(true, Ordering::SeqCst);
+        let snapshot = self.sleepers.0.fetch_add(1, Ordering::SeqCst) + 1;
         let e = self.epoch.0.load(Ordering::Acquire);
-        if done() || self.has_work() {
-            self.sleepers.0.fetch_sub(1, Ordering::SeqCst);
-            return;
+        if !done() && !self.has_work(w) {
+            if snapshot as u32 as usize == self.n && self.all_idle(snapshot) {
+                self.resolve_deadlock(w, snapshot);
+            } else {
+                sys::futex_wait_mask(&self.epoch.0, e, worker_mask(w.idx));
+            }
         }
-        if s == self.n && !self.main_done.load(Ordering::Acquire) {
-            // Everyone is asleep and main is not finished: every fiber is
-            // parked on another parked fiber. Break the cycle.
-            self.resolve_deadlock(w);
-            self.sleepers.0.fetch_sub(1, Ordering::SeqCst);
-            return;
-        }
-        sys::futex_wait(&self.epoch.0, e);
-        self.sleepers.0.fetch_sub(1, Ordering::SeqCst);
+        lane.sleeping.store(false, Ordering::SeqCst);
+        self.sleepers.0.fetch_add(u32::MAX as u64, Ordering::SeqCst);
     }
 
-    fn resolve_deadlock(&self, w: &mut Worker) {
+    fn resolve_deadlock(&self, w: &mut Worker, snapshot: u64) {
         // before the wake-ups: a woken fiber can finish main first
         self.deadlocks.fetch_add(1, Ordering::Relaxed);
         let all = self.all.lock().unwrap();
@@ -778,10 +765,7 @@ impl Runtime {
             woken += 1;
         }
         drop(all);
-        if woken == 0 {
-            if self.has_work() {
-                return;
-            }
+        if woken == 0 && self.all_idle(snapshot) {
             errln!("iets: internal error: all workers idle with the main fiber parked");
             process::abort();
         }
@@ -861,7 +845,7 @@ impl Runtime {
                     (busy - last_busy) as f64 / 20e6,
                     tasks - last_tasks,
                     self.pending_tasks.0.load(Ordering::Relaxed),
-                    self.sleepers.0.load(Ordering::Relaxed),
+                    self.sleepers.0.load(Ordering::Relaxed) as u32,
                     pos,
                 );
                 last_busy = busy;
@@ -886,6 +870,8 @@ impl Handle {
     /// Runs the main fiber, then the teardown: when this returns, every
     /// helper thread has exited and the runtime, its fibers and their
     /// payloads are freed.
+    /// While waiting for queued work, park the calling fiber. Blocking the
+    /// worker thread also blocks every fiber that must resume there.
     pub fn run_main(self, user: *mut (), entry: MainEntry) -> Result<(), fiber::StackError> {
         let rt = self.0;
         let r = rt.run_main(user, entry);
@@ -935,10 +921,9 @@ impl Slot {
 
     /// The worker currently running this fiber.
     #[inline]
-    pub fn worker(&mut self) -> &mut Worker {
-        // SAFETY: valid while the fiber runs; set by `run_slot`. Exclusive
-        // through `&mut self`: the fiber is the worker's only running code.
-        unsafe { &mut *self.worker }
+    pub fn worker(&self) -> &Worker {
+        // SAFETY: run_slot sets the pointer only while its worker runs the fiber.
+        unsafe { self.worker.as_ref() }.expect("slot is not running")
     }
 
     #[inline]
@@ -948,7 +933,16 @@ impl Slot {
     }
 }
 
+// Workers sharing a bit may receive a spurious wake, including above 32 workers.
+fn worker_mask(idx: usize) -> NonZeroU32 {
+    NonZeroU32::new(1u32.rotate_left(idx as u32)).unwrap()
+}
+
 impl Worker {
+    pub fn index(&self) -> usize {
+        self.idx
+    }
+
     fn new(idx: usize) -> Worker {
         Worker {
             idx,
@@ -1051,17 +1045,22 @@ mod tests {
                     c.done.fetch_add(1, Ordering::Release);
                 }
                 PARK => {
+                    let owner = slot.worker().idx;
                     slot.fiber.state.store(fiber::PARKING, Ordering::Release);
                     c.parked.store(slot, Ordering::Release);
                     unsafe { slot.park() };
+                    assert_eq!(slot.worker().idx, owner);
                     assert!(!slot.cancel.load(Ordering::Relaxed));
                     c.sum.fetch_add(1000, Ordering::Relaxed);
                     c.done.fetch_add(1, Ordering::Release);
                 }
                 WAKE => loop {
                     let p = c.parked.load(Ordering::Acquire);
-                    if !p.is_null() {
-                        // SAFETY: `p` is a leaked slot.
+                    // SAFETY: a published slot lives until the workers have finished.
+                    if !p.is_null()
+                        && unsafe { (*p).fiber.state.load(Ordering::Acquire) } == fiber::SUSPENDED
+                    {
+                        // SAFETY: the suspended slot belongs to this runtime.
                         unsafe { rt.wake(slot.worker(), p) };
                         c.done.fetch_add(1, Ordering::Release);
                         return;
@@ -1071,7 +1070,6 @@ mod tests {
                 _ => unreachable!(),
             }
         }
-        fn on_switch(&self, _slot: &mut Slot, _w: &mut Worker) {}
     }
 
     impl TestDriver {
@@ -1103,29 +1101,23 @@ mod tests {
     #[test]
     fn rejecting_a_full_urgent_lane_leaves_no_pending_task() {
         let rt = Runtime::start(1, Box::new(TestDriver(counter())), 1 << 20).unwrap();
-        rt.run_main(
-            ptr::null_mut(),
-            Box::new(|slot| {
-                let rt = slot.runtime();
-                let w = slot.worker();
-                let task = Task {
-                    kind: ADD,
-                    obj: Word::EMPTY,
-                    start: 0,
-                    len: 1,
-                };
-                for _ in 0..TASK_CAP {
-                    assert!(rt.submit_urgent(w, task));
-                }
-                assert!(!rt.submit_urgent(w, task));
-                assert_eq!(rt.pending_tasks.0.load(Ordering::Relaxed), TASK_CAP);
-                for _ in 0..TASK_CAP {
-                    assert_eq!(rt.take_task(w), Some(task));
-                }
-                assert_eq!(rt.pending_tasks.0.load(Ordering::Relaxed), 0);
-            }),
-        )
-        .unwrap();
+        let mut w = Worker::new(0);
+        let task = Task {
+            kind: ADD,
+            obj: Word::EMPTY,
+            start: 0,
+            len: 1,
+        };
+        for _ in 0..TASK_CAP {
+            assert!(rt.submit_urgent(&w, task));
+        }
+        assert!(!rt.submit_urgent(&w, task));
+        assert_eq!(rt.pending_tasks.0.load(Ordering::Relaxed), TASK_CAP);
+        for _ in 0..TASK_CAP {
+            assert_eq!(rt.take_task(&mut w), Some(task));
+        }
+        assert_eq!(rt.pending_tasks.0.load(Ordering::Relaxed), 0);
+        rt.run_main(ptr::null_mut(), Box::new(|_| {})).unwrap();
     }
 
     #[test]
@@ -1206,9 +1198,14 @@ mod tests {
                     len: 0,
                 };
                 assert!(rt.submit_urgent(slot.worker(), wake));
+                // The helper must claim the wake task before worker zero can drain it.
+                while rt.pending_tasks.0.load(Ordering::Acquire) != 0 {
+                    thread::yield_now();
+                }
                 slot.fiber.state.store(fiber::PARKING, Ordering::Release);
                 c.parked.store(slot, Ordering::Release);
                 unsafe { slot.park() };
+                assert_eq!(slot.worker().idx, 0);
                 c.sum.fetch_add(7, Ordering::Relaxed);
                 wait_done(c, 1);
             }),

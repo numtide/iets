@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -31,6 +32,15 @@ pub fn futex_wake(_word: &AtomicU32, n: u32) {
     } else {
         SLEEP.1.notify_all();
     }
+}
+
+pub(crate) fn futex_wait_mask(word: &AtomicU32, expected: u32, _mask: NonZeroU32) {
+    futex_wait(word, expected);
+}
+
+pub(crate) fn futex_wake_mask(word: &AtomicU32, _mask: NonZeroU32) {
+    // A condvar cannot select the owner. Its peers will recheck and sleep again.
+    futex_wake(word, i32::MAX as u32);
 }
 
 /// No huge pages here.

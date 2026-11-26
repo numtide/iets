@@ -55,6 +55,7 @@ pub use ffi::{
 pub use imp::{
     advise_huge, beneath, discard, futex_wait, futex_wake, note_allocator_arena, start_writeback,
 };
+pub(crate) use imp::{futex_wait_mask, futex_wake_mask};
 pub use vm::resident;
 
 /// `p` in the internal form, for a test to put into an expression.

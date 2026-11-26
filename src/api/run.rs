@@ -93,6 +93,17 @@ impl Run {
     /// `f` returning `None` is a miss, so the run goes on.
     pub fn hit<T>(&self, f: impl FnOnce(&Cache) -> Option<T>) -> Option<T> {
         let c = self.cache.as_ref()?;
+        // A hit must respect the same configured reservation limit as a fresh run.
+        // On rejection, go through the runtime's usual error path.
+        if let Some(size) = parallel::helper_stack_size(self.workers, self.cfg.configured_session())
+        {
+            // The runtime reports a failed zero-byte mapping and carries on
+            // with the demand fiber. A replay would suppress that diagnostic.
+            if size == 0 {
+                return None;
+            }
+            parallel::fiber::check_reservation(self.workers, size).ok()?;
+        }
         if !c.lookup() {
             return None;
         }

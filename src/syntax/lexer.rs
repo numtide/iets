@@ -575,6 +575,16 @@ impl<'a> Lexer<'a> {
         Some(i)
     }
 
+    /// The parser accepts `or` as a bare attribute name.
+    pub(crate) fn is_bare_attr_name(name: &[u8]) -> bool {
+        let Some((&first, rest)) = name.split_first() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == b'_')
+            && rest.iter().copied().all(is_id_char)
+            && matches!(Self::keyword(name), Tok::Id | Tok::Or)
+    }
+
     fn keyword(text: &[u8]) -> Tok {
         match text {
             b"if" => Tok::If,

@@ -1543,8 +1543,10 @@ mod tests {
 
     use std::collections::HashSet;
     use std::iter;
+    use std::sync::Arc;
     use std::thread::Builder;
 
+    use crate::eval::EvalConfig;
     use crate::print;
 
     const SRC: &str = "let f = a: with { x = a; }; [ x 1 true null \"s\" ./p 2.5 ]; in f 3\n";
@@ -1575,6 +1577,30 @@ mod tests {
             Ok(s) => s,
             Err(e) => format!("error: {}", e.msg),
         }
+    }
+
+    #[test]
+    fn compile_file_cache_respects_an_explicit_relative_path_base() {
+        let dir = tempdir().unwrap();
+        let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        cache.min_size = 0;
+        cache.stats = false;
+        let cache = Arc::new(cache);
+        let mut ev = EvalConfig::new().ir_cache(Some(cache.clone())).build();
+        let source = b"./payload";
+        let read = |ev: &mut Evaluator, base: &[u8]| {
+            let ir = ev.compile_file(PATH, source.to_vec(), base).unwrap();
+            let value = ev.eval(ev.root_env, ir).unwrap();
+            let runtime::Value::Path(path) = value.view() else {
+                panic!("path")
+            };
+            path.path.to_vec()
+        };
+        assert_eq!(read(&mut ev, b"/other"), b"/other/payload");
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(read(&mut ev, b"/other"), b"/other/payload");
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(cache.hits(), 1);
     }
 
     /// Every case runs against one evaluator: building one and compiling

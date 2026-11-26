@@ -12,6 +12,7 @@ pub mod instantiate;
 pub mod line;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 use std::iter;
 use std::str;
 use std::sync::atomic::AtomicUsize;
@@ -345,7 +346,7 @@ pub fn find_along_attr_path(ev: &mut Evaluator, root: Word, path: &[String]) -> 
     for (i, name) in path.iter().enumerate() {
         v = ev.auto_call(v, cfg.auto_args)?;
         v = ev.force(v)?;
-        let selection = attr_join(&path[..=i]);
+        let selection = fmt::from_fn(|f| f.write_str(&attr_join(&path[..=i])));
         if is_index(name) && v.as_attrs().is_none() {
             let Some(l) = v.as_list() else {
                 return Err(Error::boxed(
@@ -394,14 +395,7 @@ pub fn find_along_attr_path(ev: &mut Evaluator, root: Word, path: &[String]) -> 
 fn coerce_store_path(ev: &mut Evaluator, w: Word, pos: Pos, what: &str) -> EvalResult<StorePath> {
     let mut ctx = Vec::new();
     let s = ev.coerce_to_string(w, &mut ctx, pos, what, false, false, true)?;
-    let s = String::from_utf8_lossy(&s).into_owned();
-    if !s.starts_with(store_dir()) {
-        return Err(Error::boxed(
-            ErrorKind::Eval,
-            format!("path '{s}' is not in the Nix store"),
-            pos,
-        ));
-    }
+    let s = String::from_utf8_lossy(&s);
     StorePath::parse(&s).map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))
 }
 

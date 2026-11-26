@@ -666,7 +666,7 @@ pub fn read_dir_kinds(p: &Path) -> io::Result<Vec<(Vec<u8>, Kind)>> {
     for e in fs::read_dir(p)? {
         let e = e?;
         let kind = Kind::of_file_type(&e.file_type()?);
-        out.push((e.file_name().as_bytes().to_vec(), kind));
+        out.push((e.file_name().into_encoded_bytes(), kind));
     }
     Ok(out)
 }
@@ -773,13 +773,13 @@ fn tree_fingerprint_with(
 ) -> io::Result<(Digest32, Digest32)> {
     let mut stat_h = Sha256::new();
     let mut seen_h = Sha256::new();
-    walk_fp(root, b"", accept, &mut stat_h, &mut seen_h, 0)?;
+    walk_fp(root, &mut Vec::new(), accept, &mut stat_h, &mut seen_h, 0)?;
     Ok((stat_h.finalize().into(), seen_h.finalize().into()))
 }
 
 fn walk_fp(
     path: &Path,
-    rel: &[u8],
+    rel: &mut Vec<u8>,
     accept: &mut dyn FnMut(&Path) -> bool,
     stat_h: &mut Sha256,
     seen_h: &mut Sha256,
@@ -793,15 +793,18 @@ fn walk_fp(
     if kind == Kind::Directory {
         let mut entries = read_dir_kinds(path)?;
         entries.sort();
+        let parent_len = rel.len();
+        let mut child = PathBuf::new();
         for (name, ekind) in entries {
-            let child = path.join(OsStr::from_bytes(&name));
-            let mut crel = rel.to_vec();
-            crel.push(b'/');
-            crel.extend_from_slice(&name);
-            hash_tree_entry(seen_h, &crel, ekind);
+            path.clone_into(&mut child);
+            child.push(OsStr::from_bytes(&name));
+            rel.push(b'/');
+            rel.extend_from_slice(&name);
+            hash_tree_entry(seen_h, rel, ekind);
             if accept(&child) {
-                walk_fp(&child, &crel, accept, stat_h, seen_h, depth + 1)?;
+                walk_fp(&child, rel, accept, stat_h, seen_h, depth + 1)?;
             }
+            rel.truncate(parent_len);
         }
     }
     Ok(())

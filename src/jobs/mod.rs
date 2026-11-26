@@ -792,7 +792,10 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
         extra.insert("meta".into(), m);
     }
     if cfg.opts.provenance
-        && let Some(pos) = ev.drv.drvs.get(&drv_path).and_then(|i| i.pos)
+        && let Some(pos) = {
+            let drvs = ev.drv.drvs.lock();
+            drvs.get(&drv_path).and_then(|i| i.pos)
+        }
         && let Some(s) = provenance::describe_pos(ev, pos)
     {
         extra.insert("pos".into(), line::json_str(&s));

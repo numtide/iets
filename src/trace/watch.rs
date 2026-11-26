@@ -59,13 +59,13 @@ pub fn watched(obs: &[Obs], skip: &[&Path]) -> Vec<Watched> {
             }
         }
     }
+    let mut seen = HashSet::new();
+    out.retain(|(p, _)| p.to_str().is_some() && seen.insert(p.clone()));
     for (root, filtered) in &trees {
         if trees.iter().any(|(r, _)| root != r && root.starts_with(r)) {
-            members(root, *filtered, &mut out);
+            members(root, *filtered, &mut out, &mut seen);
         }
     }
-    let mut seen = HashSet::new();
-    out.retain(|(p, _)| seen.insert(p.clone()));
     out.into_iter()
         .filter_map(|(p, kind)| {
             p.into_os_string()
@@ -78,11 +78,18 @@ pub fn watched(obs: &[Obs], skip: &[&Path]) -> Vec<Watched> {
 
 /// `p` and what the copy took below it; the directories too, because an
 /// entry that comes or goes changes the copy.
-fn members(p: &Path, filtered: Option<&Filtered>, out: &mut Vec<(PathBuf, &'static str)>) {
+fn members(
+    p: &Path,
+    filtered: Option<&Filtered>,
+    out: &mut Vec<(PathBuf, &'static str)>,
+    seen: &mut HashSet<PathBuf>,
+) {
     if out.len() > MAX {
         return;
     }
-    out.push((p.to_path_buf(), "member"));
+    if p.to_str().is_some() && seen.insert(p.to_path_buf()) {
+        out.push((p.to_path_buf(), "member"));
+    }
     if !p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
         return;
     }
@@ -96,7 +103,7 @@ fn members(p: &Path, filtered: Option<&Filtered>, out: &mut Vec<(PathBuf, &'stat
     for k in kids {
         let name = k.as_os_str().as_encoded_bytes();
         if filtered.is_none_or(|f| f.accepted.binary_search_by(|a| (**a).cmp(name)).is_ok()) {
-            members(&k, filtered, out);
+            members(&k, filtered, out, seen);
         }
     }
 }
@@ -193,5 +200,20 @@ mod tests {
             "src/keep/a",
         ];
         assert_eq!(got, want.map(|p| at(p).to_str().unwrap().to_string()));
+
+        // Enough direct reads overlap this copied tree to exhaust a budget
+        // counted before deduplication. The final new member must still fit.
+        let mut obs = vec![tree("", None), tree("src/keep", None)];
+        for i in 0..=MAX / 2 {
+            let name = format!("src/keep/a{i:03}");
+            fs::write(at(&name), "").unwrap();
+            obs.push(file(b(&name)));
+        }
+        let last = at("src/keep/z");
+        fs::write(&last, "").unwrap();
+        let paths = watched(&obs, &[]);
+        assert_eq!(paths.len(), MAX / 2 + 4);
+        assert_eq!(paths[0].kind, "content");
+        assert_eq!(paths.last().unwrap().path, last.to_str().unwrap());
     }
 }

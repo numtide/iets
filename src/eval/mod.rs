@@ -1791,7 +1791,7 @@ impl Evaluator {
         let file = self.arena.mk_string(&f.path);
         let line = self.mk_int(line as i64);
         let col = self.mk_int(col as i64);
-        let mut entries = vec![
+        let mut entries = [
             (self.s.file, Pos::NONE, file),
             (self.s.line, Pos::NONE, line),
             (self.s.column, Pos::NONE, col),

@@ -247,7 +247,7 @@ fn parse_drv_name(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
     let (name, version) = parse_drv_name_bytes(s);
     let n = ev.arena.mk_string(name);
     let v = ev.arena.mk_string(version);
-    let mut entries = vec![(ev.s.name, Pos::NONE, n), (ev.s.version, Pos::NONE, v)];
+    let mut entries = [(ev.s.name, Pos::NONE, n), (ev.s.version, Pos::NONE, v)];
     ev.mk_attrs(&mut entries, pos)
 }
 

@@ -158,6 +158,8 @@ pub struct Census {
     /// and forces of older thunks inside it (each one writes a value
     /// built inside the scope into memory that outlives it).
     pub scope_open: bool,
+    /// A parallel scope attempt made this arena's scope metrics incomplete.
+    pub scope_unavailable: bool,
     pub scope_thunks: HashSet<u64>,
     pub scope_escapes: u64,
     pub scope_start: usize,
@@ -181,9 +183,11 @@ fn by_bucket(counts: &[u64]) -> String {
 
 impl Census {
     /// Open an escape-tracking scope at `bytes` allocated; false when one
-    /// is already open (nested scopes are not tracked).
-    pub(crate) fn scope_enter(&mut self, bytes: usize) -> bool {
-        if self.scope_open {
+    /// is already open (nested scopes are not tracked). A parallel attempt
+    /// makes this arena's assessment unavailable, including later serial use.
+    pub(crate) fn scope_enter(&mut self, bytes: usize, parallel: bool) -> bool {
+        self.scope_unavailable |= parallel;
+        if self.scope_unavailable || self.scope_open {
             return false;
         }
         self.scope_open = true;
@@ -581,18 +585,25 @@ impl Census {
             self.lambda_closed
         );
         let _ = writeln!(out, "unsafeGetAttrPos calls: {}", self.get_attr_pos_calls);
-        let t = &self.try_scopes;
-        let _ = writeln!(
-            out,
-            "tryEval scopes (outermost): calls={} failed={} bytes inside failed={} failed without escape={} ({} bytes)",
-            t[0], t[1], t[2], t[3], t[4]
-        );
-        let j = &self.job_scopes;
-        let _ = writeln!(
-            out,
-            "eval-jobs units: {} ({} bytes inside); without escape: {} ({} bytes)",
-            j[0], j[1], j[2], j[3]
-        );
+        if !self.scope_unavailable {
+            let t = &self.try_scopes;
+            let _ = writeln!(
+                out,
+                "tryEval scopes (outermost): calls={} failed={} bytes inside failed={} failed without escape={} ({} bytes)",
+                t[0], t[1], t[2], t[3], t[4]
+            );
+            let j = &self.job_scopes;
+            let _ = writeln!(
+                out,
+                "eval-jobs units: {} ({} bytes inside); without escape: {} ({} bytes)",
+                j[0], j[1], j[2], j[3]
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "scoped-release assessment: unavailable (parallel scope attempted)"
+            );
+        }
         let mut files: Vec<(u32, u64)> = self.ir_by_file.clone();
         files.sort_by_key(|f| Reverse(f.1));
         let total: u64 = files.iter().map(|f| f.1).sum();
@@ -605,5 +616,23 @@ impl Census {
         for (f, b) in files.iter().take(12) {
             let _ = writeln!(out, "  file{f} {b}");
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_availability_tests {
+    use super::Census;
+
+    #[test]
+    fn parallel_scope_attempt_stays_unavailable() {
+        let mut c = Census::default();
+        assert!(c.scope_enter(0, false));
+        assert_eq!(c.scope_leave(7), (7, 0));
+        assert!(!c.scope_enter(7, true));
+        assert!(!c.scope_enter(7, false));
+        let mut out = String::new();
+        c.report(&mut out);
+        assert!(out.contains("scoped-release assessment: unavailable"));
+        assert!(!out.contains("tryEval scopes ("));
     }
 }

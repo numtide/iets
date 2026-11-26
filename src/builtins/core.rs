@@ -244,7 +244,11 @@ fn add_error_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<
 
 fn try_eval(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     #[cfg(feature = "stats2")]
-    let scope = ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated);
+    let scope = ev
+        .arena
+        .stats
+        .census
+        .scope_enter(ev.arena.bytes_allocated, ev.par.on);
     let r = ev.force(args[0]);
     #[cfg(feature = "stats2")]
     if scope {

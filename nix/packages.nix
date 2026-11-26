@@ -1,7 +1,18 @@
-{ iets, ietsStatic, ietsWasi, classic, fuzz }:
+{
+  iets,
+  ietsStatic,
+  ietsWasi,
+  classic,
+  fuzz,
+  benchmarks,
+}:
 {
   default = iets;
   inherit classic;
+  bench-compare = benchmarks.compare;
+  bench-ab = benchmarks.ab;
+  bench-callgrind = benchmarks.callgrind;
+  bench-workloads = benchmarks.workloads;
   # one musl file that needs nothing on the machine (docs/explanation/static-build.md)
   static = ietsStatic;
   # `bin/iets.wasm` for a browser (docs/explanation/webassembly.md)

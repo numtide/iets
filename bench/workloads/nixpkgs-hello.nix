@@ -1,0 +1,1 @@
+(import <nixpkgs> { }).hello.drvPath

@@ -282,6 +282,7 @@ mod tests {
             (&["--extra-substituters", "s"], 1, "extra-substituters", "s"),
             (&["--keep-going"], 0, "keep-going", "true"),
             (&["--no-keep-going"], 0, "keep-going", "false"),
+            (&["--relaxed-sandbox"], 0, "sandbox", "relaxed"),
         ] {
             let want = vec![(name.to_string(), value.to_string())];
             assert_eq!(set(line), (Ok(true), values, want), "{line:?}");

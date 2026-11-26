@@ -661,7 +661,11 @@ fn apply_json(ev: &mut Evaluator, f: Word, a: &'static AttrsObj) -> EvalResult<V
 /// constituents, `--apply`, name, drvPath, outputs, the `.drv`, meta.
 fn job(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalResult<Job> {
     #[cfg(feature = "stats2")]
-    let scope = ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated);
+    let scope = ev
+        .arena
+        .stats
+        .census
+        .scope_enter(ev.arena.bytes_allocated, ev.par.on);
     let r = job_inner(ev, a, path);
     #[cfg(feature = "stats2")]
     if scope {

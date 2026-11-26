@@ -840,12 +840,8 @@ fn derivation_strict_internal(
         },
     );
 
-    let drv_path_s = drv_path.to_full_string();
-    let drv_path_bytes = ev.arena.alloc_bytes(drv_path_s.as_bytes());
+    let (dp, drv_path_bytes) = drv_path_string(ev, drv_path.to_full_string().as_bytes());
     let mut entries = Vec::with_capacity(1 + drv.outputs.len());
-    let dp = ev
-        .arena
-        .mk_string_ctx(drv_path_bytes, &[Ctx::DrvDeep(drv_path_bytes)]);
     entries.push((ev.s.drv_path, Pos::NONE, dp));
     for (name, out) in &drv.outputs {
         entries.push((
@@ -855,6 +851,13 @@ fn derivation_strict_internal(
         ));
     }
     ev.mk_attrs(&mut entries, pos)
+}
+
+/// Intern the path once for the string and the contexts we construct.
+fn drv_path_string(ev: &mut Evaluator, path: &[u8]) -> (Word, &'static [u8]) {
+    let bytes = ev.arena.intern_bytes(path).bytes;
+    let ctx = ev.arena.intern_ctx(&[Ctx::DrvDeep(bytes)]);
+    (ev.arena.mk_string_static(bytes, ctx), bytes)
 }
 
 /// Mirrors eval.cc:EvalState::mkOutputString: the output path, or a
@@ -1124,11 +1127,8 @@ pub fn import_derivation(ev: &mut Evaluator, path: &[u8], pos: Pos) -> EvalResul
     let drv_name = Derivation::name_from_path(&sp)
         .map_err(|e| drv_err(e, pos))?
         .to_string();
-    let path_bytes = ev.arena.alloc_bytes(path);
+    let (dp, path_bytes) = drv_path_string(ev, path);
     let mut entries = Vec::with_capacity(3 + drv.outputs.len());
-    let dp = ev
-        .arena
-        .mk_string_ctx(path_bytes, &[Ctx::DrvDeep(path_bytes)]);
     entries.push((ev.s.drv_path, Pos::NONE, dp));
     let name = ev.mk_string(drv.env_get("name").unwrap_or(b""));
     entries.push((ev.s.name, Pos::NONE, name));

@@ -56,7 +56,7 @@ pub fn locate(ev: &Evaluator, path: &[u8]) -> Option<SrcPath> {
     let at = match ev.known.origin(&sp) {
         Some(o) => o.at,
         None if base.ends_with(".drv") => SrcPath {
-            src: Src::Mem(ev.drv.drvs.get(&sp)?.aterm?),
+            src: Src::Mem(ev.drv.aterm(&sp)?),
             rel: Vec::new(),
         },
         None => return None,

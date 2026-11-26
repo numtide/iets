@@ -73,7 +73,7 @@ impl NarInfo {
             match key {
                 "StorePath" => path = Some(path_of(value)?),
                 "URL" => url = Some(value.to_string()),
-                "Compression" => compression = Some(value.to_string()),
+                "Compression" => compression = Some(value).filter(|v| !v.is_empty()),
                 "FileSize" => file_size = num()?,
                 "NarHash" => {
                     let h = Hash::parse_any(value, None).map_err(|e| corrupt(&e.0))?;
@@ -104,7 +104,7 @@ impl NarInfo {
         }
         Ok(NarInfo {
             url: url.ok_or_else(|| corrupt("no URL"))?,
-            compression: compression.unwrap_or_else(|| "bzip2".into()),
+            compression: compression.unwrap_or("bzip2").into(),
             file_size,
             nar_hash: nar_hash.ok_or_else(|| corrupt("no NarHash"))?,
             nar_size: nar_size

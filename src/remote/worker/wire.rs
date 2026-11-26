@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
-use crate::fetch::http::decompress_reader;
+use crate::fetch::http::Compression;
 use crate::remote::plan::{DrvHashes, Object};
 use crate::store::hash::{Hash, HashAlgo, base64_decode, base64_encode, hash_bytes};
 use crate::store::nar::{dump_string, flat_hash};
@@ -429,8 +429,8 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
             dump_string(aterm, w)
         }
         Object::Closure { fetched, nar } => {
-            let file = File::open(&**nar)?;
-            let mut nar = decompress_reader(Box::new(file), u64::MAX).map_err(io::Error::other)?;
+            let method = Compression::nar_method(&fetched.info.compression)?;
+            let mut nar = method.reader(Box::new(File::open(&**nar)?))?;
             write_fetched(w, fetched, &mut nar, &mut || Ok(()))
         }
     }

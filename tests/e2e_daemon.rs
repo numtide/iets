@@ -352,7 +352,7 @@ mk "fc-dep" "echo ${big} > $out"
     ]));
     let pk = fs::read_to_string(&pk).unwrap();
     let cache = format!("file://{}/fc-cache", s.dir().display());
-    let to = format!("{cache}?compression=zstd&secret-key={}", sk.display());
+    let to = format!("{cache}?compression=br&secret-key={}", sk.display());
     ok(s.nix("nix").args(["copy", "--to", &to, &dep]));
     let case = s.write(
         "fc/case.nix",

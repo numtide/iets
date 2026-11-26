@@ -426,6 +426,8 @@ ways:
 - A build copies the paths the builder lacks from the cache, with the
   cache's signatures. A NAR that does not match its narinfo fails the
   build, where Nix fails evaluation.
+- For a cached NAR, iets supports `none`, `br`, `bzip2`, `gzip`, `lz4`,
+  `lzip`, `xz` and `zstd` in the narinfo's `Compression` field.
 - A path that is not in the store yet cannot be read during evaluation.
 - `toPath` is not supported. In classic mode the call falls back to the
   real nix.

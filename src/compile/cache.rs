@@ -207,8 +207,9 @@ impl IrCache {
             lint_key.as_bytes(),
             &[u8::from(pure)][..],
         ] {
+            // Public byte/string inputs may contain NUL; delimiters are ambiguous.
+            h.update(&(part.len() as u64).to_le_bytes());
             h.update(part);
-            h.update(b"\0");
         }
         h.update(src);
         h.finalize().to_hex().to_string()
@@ -1768,6 +1769,26 @@ mod tests {
         cache.write(&other, &stored);
         fs::copy(&file, dir.path().join("ir").join("ab").join(&other[2..])).expect("copy");
         assert!(cache.read(&other).is_none(), "an entry under another key");
+    }
+
+    #[test]
+    fn key_distinguishes_nul_in_the_path_from_nul_in_the_system() {
+        let dir = tempdir().unwrap();
+        let cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        let key = |path: &[u8], system: &str| {
+            cache.key(
+                path,
+                b"builtins.currentSystem",
+                system,
+                b"/nix/store",
+                "",
+                false,
+            )
+        };
+        assert_ne!(
+            key(b"/t/f.nix\0left", "right"),
+            key(b"/t/f.nix", "left\0right")
+        );
     }
 
     /// The nesting cap is sized for the evaluator's stack, not a test

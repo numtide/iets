@@ -678,13 +678,13 @@ fn check_declared_inputs(
         }
     }
     for (sym, how) in declared {
-        let name = ev.interner.name(sym).to_vec();
-        if !lock.root_inputs().any(|k| k.as_bytes() == name) {
+        let name = ev.interner.name(sym);
+        if !lock.has_root_input(name) {
             return Err(EvalError::boxed(
                 ErrorKind::Unsupported,
                 format!(
                     "{LOCK_ERROR} (input '{}'{how} has no lock entry)",
-                    String::from_utf8_lossy(&name)
+                    String::from_utf8_lossy(name)
                 ),
                 pos,
             ));

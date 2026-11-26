@@ -241,44 +241,33 @@ pub fn missing_top_down<N: Copy + Eq + Hashable>(
 
 impl Plan {
     /// The plan's paths in the closure of `roots` that the store lacks
-    /// (`missing_top_down`). A valid drv answers for all it references.
+    /// (`missing_top_down`). A valid path answers for its references.
     pub fn query_missing<'a>(
         &'a self,
         roots: &[StorePath],
         answered: Option<&HashSet<String>>,
         query: &mut dyn FnMut(&[StorePath]) -> Result<HashSet<String>>,
     ) -> Result<HashSet<&'a StorePath>> {
-        let planned: HashSet<&StorePath> = self
-            .sources
-            .iter()
-            .chain(self.drvs.iter().map(Object::store_path))
-            .collect();
-        let refs: HashMap<&StorePath, Vec<&StorePath>> = self
-            .drvs
-            .iter()
-            .filter_map(|o| match o {
-                Object::Drv {
-                    path, references, ..
-                } => Some((
-                    path,
-                    references
-                        .iter()
-                        .filter_map(|r| planned.get(r).copied())
-                        .collect(),
-                )),
-                Object::Source { .. } | Object::Closure { .. } => None,
-            })
-            .collect();
-        let roots = roots.iter().filter_map(|r| planned.get(r).copied());
+        let mut planned = HashMap::with_capacity(self.sources.len() + self.drvs.len());
+        planned.extend(self.sources.iter().map(|p| (p, None)));
+        for object in &self.drvs {
+            let refs = planned.entry(object.store_path()).or_default();
+            if let Object::Drv { references, .. } = object {
+                *refs = Some(references);
+            }
+        }
+        let planned_path = |p: &StorePath| planned.get_key_value(p).map(|(&path, _)| path);
+        let roots = roots.iter().filter_map(planned_path);
         let want = |p: &'a StorePath| (p, vec![p.clone()]);
         missing_top_down(
             roots.map(want).collect(),
             &|p| {
+                let refs = planned[p].or_else(|| self.origins.get(p)?.text_refs());
                 Ok(refs
-                    .get(p)
                     .into_iter()
                     .flatten()
-                    .map(|&r| want(r))
+                    .filter_map(planned_path)
+                    .map(want)
                     .collect())
             },
             answered,

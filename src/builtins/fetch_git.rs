@@ -72,40 +72,8 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
     if ev.pure() {
         check_locked(&args, &fixed, pos)?;
     }
-    let root = workdir_root(&fixed);
-    // a local repository is a source on this machine: a pure evaluation
-    // reads one only where it may read
-    // (docs/explanation/pure-eval-and-local-sources.md)
-    let root = match root {
-        Some(r) if ev.pure() => {
-            let dir = store_hooks::local_dir(ev, r.as_bytes(), pos)?;
-            Some(dir.to_string_lossy().into_owned())
-        }
-        root => root,
-    };
     let shown = input_string(&args, &fixed).unwrap_or(url.clone());
-    if submodules && bool_attr(&args, "exportIgnore") == Some(true) {
-        bail!(
-            ErrorKind::Unsupported,
-            pos,
-            "exportIgnore and submodules are not supported together yet"
-        );
-    }
-    let url = fixed;
-    let unpinned = !args.contains_key("rev") && !args.contains_key("ref");
-    let workdir = root
-        .as_deref()
-        .map(Path::new)
-        .filter(|r| r.join(".git").exists());
-    let mut tree = match workdir {
-        Some(root) if unpinned => {
-            let tree = from_workdir(ev, &args, root, pos)?;
-            let rev = str_attr(&tree.attrs, "rev").filter(|r| *r != NULL_REV);
-            verify(&args, rev.map(|r| (root, r)), &shown, pos)?;
-            tree
-        }
-        _ => from_commit(ev, &args, &url, workdir, pos)?,
-    };
+    let mut tree = tree(ev, &args, &fixed, &shown, pos)?;
     // fetchTree.cc:emitTreeAttrs with `emptyRevFallback`
     if tree.counter.is_none() {
         tree.attrs
@@ -114,6 +82,39 @@ pub fn fetch_git(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
     }
     check_nar_hash(&args, &tree, &shown, pos)?;
     emit_tree_attrs(ev, &tree, None, pos)
+}
+
+/// git.cc:getAccessor reads an unpinned local checkout from the working tree.
+pub(crate) fn tree(
+    ev: &mut Evaluator,
+    args: &Attrs,
+    url: &str,
+    shown: &str,
+    pos: Pos,
+) -> EvalResult<Tree> {
+    let root = local_git_path(url)
+        .filter(|p| p.starts_with('/'))
+        .map(|p| store_hooks::local_dir(ev, p.as_bytes(), pos))
+        .transpose()?;
+    if bool_attr(args, "submodules") == Some(true) && bool_attr(args, "exportIgnore") == Some(true)
+    {
+        bail!(
+            ErrorKind::Unsupported,
+            pos,
+            "exportIgnore and submodules are not supported together yet"
+        );
+    }
+    let unpinned = !args.contains_key("rev") && !args.contains_key("ref");
+    let workdir = root.as_deref().filter(|r| r.join(".git").exists());
+    match workdir {
+        Some(root) if unpinned => {
+            let tree = from_workdir(ev, args, root, pos)?;
+            let rev = str_attr(&tree.attrs, "rev").filter(|r| *r != NULL_REV);
+            verify(args, rev.map(|r| (root, r)), shown, pos)?;
+            Ok(tree)
+        }
+        _ => from_commit(ev, args, url, workdir, pos),
+    }
 }
 
 /// git.cc:getPublicKeys. `publicKeys` is the JSON of a list of keys, and
@@ -246,10 +247,14 @@ fn check_locked(args: &Attrs, url: &str, pos: Pos) -> EvalResult<()> {
     )
 }
 
-/// git.cc:getRepoInfo: the path of a `file:` URL, when it is absolute. It
-/// is a working tree when it has a `.git`; any other is a repository.
-fn workdir_root(url: &str) -> Option<String> {
-    flakeref::file_url_path(url).filter(|p| p.starts_with('/'))
+/// git.cc:getRepoInfo: the local path of a Git input, if it has one.
+pub(crate) fn local_git_path(url: &str) -> Option<String> {
+    let url = url.strip_prefix("git+").unwrap_or(url);
+    if url.starts_with('/') {
+        Some(url.to_string())
+    } else {
+        flakeref::file_url_path(url)
+    }
 }
 
 /// git.cc:getAccessorFromWorkdir, with fetchTree.cc:emitTreeAttrs'
@@ -412,13 +417,10 @@ mod tests {
     #[case("/r/a b", Some("/r/a b"))]
     #[case("file:///r/x", Some("/r/x"))]
     #[case("git+file:///r/x", Some("/r/x"))]
-    #[case("rel/x", None)]
+    #[case("rel/x", Some("rel/x"))]
     #[case("https://x.org/a.git", None)]
-    fn a_working_tree_is_a_file_url_of_an_absolute_path(
-        #[case] url: &str,
-        #[case] root: Option<&str>,
-    ) {
+    fn a_local_git_url_names_its_path(#[case] url: &str, #[case] root: Option<&str>) {
         let fixed = flakeref::fix_git_url(url).unwrap();
-        assert_eq!(workdir_root(&fixed).as_deref(), root);
+        assert_eq!(local_git_path(&fixed).as_deref(), root);
     }
 }

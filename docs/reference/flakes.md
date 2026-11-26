@@ -136,9 +136,10 @@ The root tree and `path:` inputs never need this.
    decides. When no daemon answers, iets skips this step without a word.
 3. **iets downloads it.** `github`, `gitlab`, `sourcehut` and `tarball`
    inputs are one download each, into the input store.
-4. **iets clones it.** A `git` input goes into a shallow clone under
-   `$XDG_CACHE_HOME/iets/git/`, and its tree must match the lock's
-   `narHash`.
+4. **Git inputs.** iets reads a local checkout in place. Without a `ref`
+   or `rev` it reads the tracked working-tree contents, including local edits.
+   Other repositories use a clone under `$XDG_CACHE_HOME/iets/git/`.
+   The tree must match the lock's `narHash`.
 
 `file` inputs are not supported. Their store path is the flat hash of the
 bytes, which the lock's `narHash` does not give.

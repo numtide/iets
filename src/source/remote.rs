@@ -1,8 +1,7 @@
 //! A locked reference's tree: read from `/nix/store` when it is there, else
 //! from the user-level input store (`crate::treestore`), else substituted by
-//! a daemon if one is reachable, else downloaded into the input store by
-//! iets itself (`github`, `gitlab`, `sourcehut`, `tarball`, and `git` as a
-//! clone). Any other type is unsupported.
+//! a daemon if one is reachable, else fetched by iets itself (`github`,
+//! `gitlab`, `sourcehut`, `tarball`, and `git`).
 //!
 //! The `narHash` is known before the fetch, so the tree names itself and the
 //! input store refuses anything that does not hash to it.
@@ -20,7 +19,6 @@ use crate::builtins::{fetch_git, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::fetch::spool;
-use crate::flake::flakeref;
 use crate::log;
 use crate::remote::event;
 use crate::remote::worker::{Connection, Transport};
@@ -265,7 +263,7 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
 /// user-level input store; a tarball-shaped input in neither is downloaded into
 /// that, and reads come out of the spool by offset (`crate::treestore`). A
 /// reachable daemon is asked to substitute first, since a local copy beats a
-/// download. A `git` input is cloned, and any other type is unsupported.
+/// download. Git inputs use their local checkout or a clone.
 /// Never called for the root tree or a `path` input.
 pub fn ensure_readable(
     ev: &mut Evaluator,
@@ -531,12 +529,7 @@ fn check_local(ev: &Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<()> {
         return Ok(());
     };
     if str_attr(attrs, "type") == Some("git") {
-        let url = url.strip_prefix("git+").unwrap_or(url);
-        let dir = match url.strip_prefix('/') {
-            Some(_) => Some(url.to_string()),
-            None => flakeref::file_url_path(url),
-        };
-        if let Some(dir) = dir {
+        if let Some(dir) = fetch_git::local_git_path(url) {
             store_hooks::local_dir(ev, dir.as_bytes(), pos)?;
         }
         return Ok(());
@@ -734,8 +727,7 @@ fn fetch_tarball(
     })
 }
 
-/// A locked `git` input, read by iets (`fetch_git::from_commit`). The tree
-/// must hash to what the lock says.
+/// A Git input must hash to the tree named by the lock.
 fn fetch_git_input(
     ev: &mut Evaluator,
     sp: &StorePath,
@@ -756,7 +748,7 @@ fn fetch_git_input(
         }
         None => url.to_string(),
     };
-    let tree = fetch_git::from_commit(ev, attrs, &url, None, pos)?;
+    let tree = fetch_git::tree(ev, attrs, &url, name, pos)?;
     if tree.path != *sp {
         let got = str_attr(&tree.attrs, "narHash").unwrap_or("");
         let mut e = Error::new(

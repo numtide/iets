@@ -300,7 +300,7 @@ impl Runtime {
         fiber::install_overflow_handler();
         let mut w = Worker::new(0);
         // the demand path keeps the stack it has at one worker
-        let slot = match self.new_slot_sized(user, fiber::MAIN_STACK) {
+        let slot = match self.new_slot(fiber::MAIN_STACK, || user) {
             Ok(s) => s,
             Err(e) => {
                 self.driver.drop_user(user);
@@ -441,18 +441,22 @@ impl Runtime {
         }
     }
 
-    fn new_slot(&self, user: *mut ()) -> Result<*mut Slot, fiber::StackError> {
-        self.new_slot_sized(user, self.stack_size)
+    fn new_helper_slot(&self) -> Result<*mut Slot, fiber::StackError> {
+        self.new_slot(self.stack_size, || self.driver.new_user(self))
     }
 
-    fn new_slot_sized(&self, user: *mut (), stack: usize) -> Result<*mut Slot, fiber::StackError> {
+    fn new_slot(
+        &self,
+        stack: usize,
+        user: impl FnOnce() -> *mut (),
+    ) -> Result<*mut Slot, fiber::StackError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let slot = Box::into_raw(Box::new(Slot {
             fiber: Fiber::new(stack, slot_entry, ptr::null_mut())?,
             id,
             cancel: AtomicBool::new(false),
             is_main: false,
-            user,
+            user: user(),
             task: Task {
                 kind: 0,
                 obj: Word::EMPTY,
@@ -478,8 +482,7 @@ impl Runtime {
 
     fn prewarm(&self, w: &mut Worker) {
         for _ in 0..PREWARM {
-            let user = self.driver.new_user(self);
-            match self.new_slot(user) {
+            match self.new_helper_slot() {
                 Ok(s) => w.pool.push(s),
                 Err(e) => return self.report_no_stack(&e),
             }
@@ -493,8 +496,7 @@ impl Runtime {
                 if self.stack_failed.load(Ordering::Relaxed) {
                     return;
                 }
-                let user = self.driver.new_user(self);
-                match self.new_slot(user) {
+                match self.new_helper_slot() {
                     Ok(s) => s,
                     Err(e) => return self.report_no_stack(&e),
                 }

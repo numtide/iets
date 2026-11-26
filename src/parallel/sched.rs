@@ -120,6 +120,10 @@ pub trait Driver: Sync {
     /// Frees a payload `new_user` made, at teardown. Its fiber never runs
     /// again, but may be parked in the middle of a task.
     fn drop_user(&self, _user: *mut ()) {}
+    /// A cancelled helper can resume once to release its claims and return.
+    fn finish_cancelled(&self) -> bool {
+        false
+    }
     /// Run `slot.task` on the fiber stack. Waiting for another fiber on
     /// this runtime must park the slot so its worker can run the peer.
     fn run_task(&self, rt: &Runtime, slot: &mut Slot);
@@ -153,6 +157,7 @@ pub struct Worker {
     arena: Arena,
     /// The interner cache this worker lends the fiber it runs.
     icache: interner::Cache,
+    helpers: Vec<*mut Slot>,
     pool: Vec<*mut Slot>,
     spinning: bool,
     rng: u64,
@@ -363,6 +368,9 @@ impl Runtime {
         let scans = self.tune.spin;
         loop {
             if done() {
+                if self.driver.finish_cancelled() {
+                    self.finish_parked(w);
+                }
                 return;
             }
             if let Some(s) = self.take_ready(w) {
@@ -391,6 +399,25 @@ impl Runtime {
             self.stop_spinning(w);
             idle = 0;
             self.park(w, &done);
+        }
+    }
+
+    fn finish_parked(&self, w: &mut Worker) {
+        // A late wake can still be publishing a ready entry. Visit each of
+        // this worker's parked slots once, independently of its ready queue.
+        for i in 0..w.helpers.len() {
+            let s = w.helpers[i];
+            // SAFETY: only this worker resumes its slots, and teardown
+            // keeps them allocated until all workers have returned.
+            unsafe {
+                if matches!(
+                    (*s).fiber.state.load(Ordering::Acquire),
+                    fiber::SUSPENDED | fiber::RUNNABLE
+                ) {
+                    (*s).cancel.store(true, Ordering::Release);
+                    self.run_slot(w, s);
+                }
+            }
         }
     }
 
@@ -445,8 +472,10 @@ impl Runtime {
         }
     }
 
-    fn new_helper_slot(&self, owner: usize) -> Result<*mut Slot, fiber::StackError> {
-        self.new_slot(owner, self.stack_size, || self.driver.new_user(self))
+    fn new_helper_slot(&self, w: &mut Worker) -> Result<*mut Slot, fiber::StackError> {
+        let slot = self.new_slot(w.idx, self.stack_size, || self.driver.new_user(self))?;
+        w.helpers.push(slot);
+        Ok(slot)
     }
 
     fn new_slot(
@@ -488,7 +517,7 @@ impl Runtime {
 
     fn prewarm(&self, w: &mut Worker) {
         for _ in 0..PREWARM {
-            match self.new_helper_slot(w.idx) {
+            match self.new_helper_slot(w) {
                 Ok(s) => w.pool.push(s),
                 Err(e) => return self.report_no_stack(&e),
             }
@@ -502,7 +531,7 @@ impl Runtime {
                 if self.stack_failed.load(Ordering::Relaxed) {
                     return;
                 }
-                match self.new_helper_slot(w.idx) {
+                match self.new_helper_slot(w) {
                     Ok(s) => s,
                     Err(e) => return self.report_no_stack(&e),
                 }
@@ -518,8 +547,7 @@ impl Runtime {
         self.run_slot(w, slot);
     }
 
-    /// Resume `slot` on this worker. Requires ownership: the slot is NEW,
-    /// or this thread took its single ready entry.
+    /// Resume this worker's new or ready slot, or its canceled slot at shutdown.
     fn run_slot(&self, w: &mut Worker, slot: *mut Slot) {
         // SAFETY: ownership per the wake handshake (docs/explanation/evaluation.md).
         unsafe {
@@ -948,6 +976,7 @@ impl Worker {
             idx,
             arena: Arena::new(),
             icache: interner::empty_cache(),
+            helpers: Vec::new(),
             pool: Vec::new(),
             spinning: false,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (idx as u64 + 1),

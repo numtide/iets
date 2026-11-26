@@ -46,6 +46,10 @@ unsafe impl Sync for SyncEv {}
 unsafe impl Send for SyncEv {}
 
 impl Driver for SyncEv {
+    fn finish_cancelled(&self) -> bool {
+        true
+    }
+
     fn new_user(&self, _rt: &Runtime) -> *mut () {
         let mut ev = self.0.clone();
         // Pre-existing work belongs to the evaluator that did it.
@@ -265,7 +269,9 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
                 ));
             }
             Claim::Busy(cur) => {
-                if thunk::wait(unsafe { slot_mut(ev) }, cell, cur).is_err() {
+                if slot_ref(ev).runtime().shutdown.load(Ordering::Acquire)
+                    || thunk::wait(unsafe { slot_mut(ev) }, cell, cur).is_err()
+                {
                     ev.par.cancelled = true;
                     return Err(cancelled());
                 }
@@ -873,6 +879,73 @@ mod tests {
 
     use super::*;
     use crate::parallel;
+
+    use crate::eval::EvalConfig;
+    use crate::parallel::try_run;
+    use crate::runtime::PrimFn;
+    use crate::session::Session;
+    use std::sync::atomic::AtomicUsize;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn returned_thunk_retries_after_a_parked_helper_is_cancelled() {
+        fn wait_until(done: impl Fn() -> bool) {
+            let start = Instant::now();
+            while !done() {
+                assert!(start.elapsed() < Duration::from_secs(30), "helper timeout");
+                thread::yield_now();
+            }
+        }
+
+        // Each helper owns one thunk and waits on the other. Serial
+        // demand has no competing helper and returns immediately.
+        fn held(ev: &mut Evaluator, args: &[Word], _: Pos) -> EvalResult<Word> {
+            if ev.par.on {
+                wait_until(|| args[0].thunk_state_cell().get().is_blackhole());
+                ev.force(args[0])
+            } else {
+                Ok(Word::TRUE)
+            }
+        }
+
+        static MESSAGES: AtomicUsize = AtomicUsize::new(0);
+        fn message(ev: &mut Evaluator, _: &[Word], _: Pos) -> EvalResult<Word> {
+            MESSAGES.fetch_add(1, Ordering::Relaxed);
+            Ok(ev.mk_string(b"on demand"))
+        }
+
+        let before = MESSAGES.load(Ordering::Relaxed);
+        let mut ev = EvalConfig::new().session(Session::new()).build();
+        for (name, f) in [("held", held as PrimFn), ("message", message)] {
+            let sym = ev.sym(name.as_bytes());
+            let op = ev.arena.mk_primop(name, 1, f, sym);
+            ev.globals.table.insert(sym, op);
+        }
+        let result = try_run(3, ev.clone(), |ev| {
+            let list = ev
+                .eval_string(
+                    r#"let a = held b; b = held a; msg = { __toString = self: message self; };
+                       in builtins.deepSeq msg
+                         [ a (builtins.addErrorContext msg (builtins.seq b (throw "body"))) false false ]"#,
+                    b"/",
+                )
+                .unwrap();
+            let rt = slot_ref(ev).runtime();
+            rt.set_eager_wakes();
+            fanout_range(ev, T_LIST_WHNF, list, 0, 4, 1);
+            wait_until(|| rt.stat_fiber_parks.load(Ordering::Acquire) == 2);
+            list.as_list().unwrap().cells()[1].get()
+        })
+        .unwrap();
+
+        assert_eq!(MESSAGES.load(Ordering::Relaxed), before);
+        let error = ev.force(result).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Throw);
+        assert_eq!(error.msg, "body");
+        assert!(error.trace.iter().any(|(_, text)| text == "on demand"));
+        assert_eq!(MESSAGES.load(Ordering::Relaxed), before + 1);
+    }
 
     #[test]
     fn coercion_walk_stops_cancelled_helper() {

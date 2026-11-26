@@ -225,6 +225,7 @@ fn warn(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 fn add_error_context(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     match ev.force(args[1]) {
         Ok(v) => Ok(v),
+        Err(e) if e.kind == ErrorKind::Cancelled => Err(e),
         Err(mut e) => {
             let mut ctx = Vec::new();
             let msg = ev.coerce_to_string(

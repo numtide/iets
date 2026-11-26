@@ -695,7 +695,7 @@ impl TreeFp {
     /// dump never offers to the filter. `None` when the root cannot be read.
     pub fn new(root: &Path) -> Option<TreeFp> {
         let mut fp = TreeFp {
-            root_len: root.as_os_str().as_bytes().len(),
+            root_len: nar::walk_root(root).len(),
             stat_h: Sha256::new(),
             seen_h: Sha256::new(),
             newest: i64::MIN,
@@ -958,6 +958,17 @@ mod tests {
                 tree_fingerprint(&dir, accepted.as_ref()).unwrap()
             );
         }
+    }
+
+    #[rstest]
+    #[case("/")]
+    #[case("////////////////")]
+    fn rehash_matches_walk_with_trailing_separators(#[from(tree)] dir: Tree, #[case] suffix: &str) {
+        let mut spelling = dir.as_os_str().to_owned();
+        spelling.push(suffix);
+        let root = Path::new(&spelling);
+        let (_, seen, stat, _) = tree_rehash(root, None).unwrap();
+        assert_eq!((stat, seen), tree_fingerprint(root, None).unwrap());
     }
 
     #[rstest]

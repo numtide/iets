@@ -399,26 +399,29 @@ pub fn walk(
     drv: &dyn Fn(&StorePath) -> Option<DrvInfo>,
     text_refs: &dyn Fn(&StorePath) -> Option<BTreeSet<StorePath>>,
 ) -> Result<(Vec<Node>, Vec<StorePath>, usize)> {
-    fn source(
-        p: StorePath,
-        known: &HashSet<StorePath>,
-        text_refs: &dyn Fn(&StorePath) -> Option<BTreeSet<StorePath>>,
-        seen: &mut HashSet<StorePath>,
-        out: &mut Vec<StorePath>,
-    ) {
-        if known.contains(&p) || !seen.insert(p.clone()) {
-            return;
-        }
-        for r in text_refs(&p).unwrap_or_default() {
-            if !r.is_derivation() {
-                source(r, known, text_refs, seen, out);
-            }
-        }
-        out.push(p);
-    }
     let mut seen: HashSet<StorePath> = HashSet::new();
     let mut drvs: Vec<Node> = Vec::new();
     let mut srcs: Vec<StorePath> = Vec::new();
+    let mut source_stack = Vec::new();
+    let mut source = |root, seen: &mut HashSet<StorePath>| {
+        source_stack.push((root, false));
+        while let Some((p, done)) = source_stack.pop() {
+            if done {
+                srcs.push(p);
+            } else if !known.contains(&p) && seen.insert(p.clone()) {
+                if let Some(refs) = text_refs(&p) {
+                    source_stack.push((p, true));
+                    for r in refs.into_iter().rev() {
+                        if !r.is_derivation() {
+                            source_stack.push((r, false));
+                        }
+                    }
+                } else {
+                    srcs.push(p);
+                }
+            }
+        }
+    };
     let mut from_store = 0;
     type Pending = Option<(Arc<Vec<u8>>, BTreeSet<StorePath>)>;
     let mut stack: Vec<(StorePath, Pending)> =
@@ -441,7 +444,7 @@ pub fn walk(
                     stack.push((r.clone(), None));
                 }
             } else {
-                source(r.clone(), known, text_refs, &mut seen, &mut srcs);
+                source(r.clone(), &mut seen);
             }
         }
         // Only pushes occur above, so this index still names our post-order visit.
@@ -526,6 +529,8 @@ fn hash_sources(sources: &[&StorePath], infos: &[SourceOrigin]) -> Result<Vec<Ob
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::build;
+    use crate::eval::Evaluator;
     use crate::store::nar::tests::{Tree, tree};
     use crate::store::nar::{nar_hash, nar_size};
     use rstest::rstest;
@@ -631,5 +636,47 @@ mod tests {
         let (h, size) = hash_source(&o.at).unwrap();
         assert_eq!(h, crate::store::nar::nar_hash_of_string(b"hello\n"));
         assert!(size > 0);
+    }
+
+    #[test]
+    fn plan_deep_to_file_chain_on_a_small_stack() {
+        let mut ev = Evaluator::new();
+        let value = ev.eval_string(
+            r#"let text = builtins.foldl' (prev: i: builtins.toFile "item" "${toString i} ${prev}")
+                 (builtins.toFile "item" "start") (builtins.genList (i: i) 2048);
+               in (derivation { name = "deep-source-walk"; system = "x86_64-linux";
+                 builder = "/bin/sh"; inherit text; }).drvPath"#,
+            b"/",
+        ).unwrap();
+        let value = ev.force(value).unwrap();
+        let root =
+            StorePath::parse(str::from_utf8(value.as_string().unwrap().bytes).unwrap()).unwrap();
+        let drvs = ev.drv.drvs.lock();
+        let sources = ev.known.origins();
+        thread::scope(|scope| {
+            thread::Builder::new()
+                .stack_size(256 << 10)
+                .spawn_scoped(scope, || {
+                    let plan = build::plan_with(
+                        &[root],
+                        Inputs {
+                            drvs: &drvs,
+                            sources: &sources,
+                            fetched: &HashMap::new(),
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(plan.sources.len(), 2049);
+                    for pair in plan.sources.windows(2) {
+                        assert_eq!(
+                            sources[&pair[1]].text_refs().unwrap().first(),
+                            Some(&pair[0])
+                        );
+                    }
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        });
     }
 }

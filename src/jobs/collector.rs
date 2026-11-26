@@ -292,7 +292,7 @@ impl Proc {
                             .unwrap_or_default();
                         return Err(Error::Protocol(format!("worker error: {msg}")));
                     }
-                    let line = Line::parse(s)?;
+                    let line = Line::from_fields(fields)?;
                     match line {
                         Line::Error(_) => return Ok(Control::Error(line)),
                         Line::Job(_) => (sink.lock().unwrap())(line),

@@ -89,33 +89,27 @@ pub struct Run {
     pub spawned: AtomicUsize,
 }
 
-fn remember_set(a: &'static AttrsObj, hash: u64, depth: u32) {
-    Session::current()
-        .jobs
-        .sets
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(a as *const AttrsObj as u64, (hash, depth));
-}
+impl Run {
+    fn remember_set(&self, a: &'static AttrsObj, hash: u64, depth: u32) {
+        self.sets
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(a as *const AttrsObj as u64, (hash, depth));
+    }
 
-fn recall_set(a: &'static AttrsObj) -> Option<(u64, u32)> {
-    Session::current()
-        .jobs
-        .sets
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|m| m.get(&(a as *const AttrsObj as u64)).copied())
-}
+    fn recall_set(&self, a: &'static AttrsObj) -> Option<(u64, u32)> {
+        self.sets
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get(&(a as *const AttrsObj as u64)).copied())
+    }
 
-/// A copy, not a reference: the callers hold it across a `&mut Evaluator`.
-fn config() -> Config {
-    *Session::current()
-        .jobs
-        .config
-        .get()
-        .expect("eval-jobs config")
+    /// A copy, not a reference: the callers hold it across a `&mut Evaluator`.
+    fn config(&self) -> Config {
+        *self.config.get().expect("eval-jobs config")
+    }
 }
 
 /// Cells per helper task. A leaf costs a whole build graph, so batches
@@ -144,7 +138,7 @@ pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<
         constituents: ev.sym(b"constituents"),
         glob_constituents: ev.sym(b"_hydraGlobConstituents"),
     };
-    let _ = Session::current().jobs.config.set(Config {
+    let _ = ev.session().jobs.config.set(Config {
         opts,
         syms,
         auto_args,
@@ -185,14 +179,15 @@ fn walk(
     sink: &mut dyn FnMut(Line),
 ) -> EvalResult<()> {
     let depth = path.len() as u32;
-    if depth == config().opts.chunk_depth && !admit(hash, depth, false) {
+    let opts = ev.session().jobs.config().opts;
+    if depth == opts.chunk_depth && !opts.admit(hash, depth, false) {
         return Ok(());
     }
     match node(ev, w, path, hash) {
         Ok(Node::Job(job)) => sink(Line::Job(job)),
         Ok(Node::Recurse(attrs)) => {
             validate_names(ev, attrs.attrs())?;
-            remember_set(attrs, hash, depth);
+            ev.session().jobs.remember_set(attrs, hash, depth);
             let ordered: Vec<&Attr> = lexicographic_order(ev, attrs).collect();
             let cells = attrs.attrs();
             for window in ordered.chunks(WINDOW) {
@@ -218,7 +213,7 @@ fn walk(
         Ok(Node::Skip) => {}
         // An attr that fails above the chunk depth is a unit of its own,
         // like a derivation there, so one chunk reports it.
-        Err(_) if !admit(hash, depth, true) => {}
+        Err(_) if !opts.admit(hash, depth, true) => {}
         Err(e) => sink(Line::Error(error_line(ev, path, &e))),
     }
     Ok(())
@@ -291,11 +286,20 @@ pub fn fnv_step(h: u64, name: &[u8]) -> u64 {
 /// the paths of length `chunk_depth` and the derivations above it; every
 /// deeper node belongs to its unit.
 pub fn admit(hash: u64, depth: u32, leaf: bool) -> bool {
-    let o = config().opts;
-    if o.chunks <= 1 || depth > o.chunk_depth || (depth < o.chunk_depth && !leaf) {
-        return true;
+    Session::current()
+        .jobs
+        .config()
+        .opts
+        .admit(hash, depth, leaf)
+}
+
+impl Opts {
+    fn admit(self, hash: u64, depth: u32, leaf: bool) -> bool {
+        if self.chunks <= 1 || depth > self.chunk_depth || (depth < self.chunk_depth && !leaf) {
+            return true;
+        }
+        hash % self.chunks as u64 == self.chunk as u64
     }
-    hash % o.chunks as u64 == o.chunk as u64
 }
 
 /// attr-path.cc: an all-digit component is a list index. Under an attrset it
@@ -308,14 +312,14 @@ fn is_index(name: &str) -> bool {
 /// worker.cc:processJobRequest for one attribute path: what to print or
 /// where to recurse.
 pub fn node(ev: &mut Evaluator, w: Word, path: &[String], hash: u64) -> EvalResult<Node> {
-    let cfg = config();
+    let cfg = ev.session().jobs.config();
     let v = ev.auto_call(w, cfg.auto_args)?;
     let v = ev.force(v)?;
     let Some(attrs) = v.as_attrs() else {
         return Ok(Node::Skip);
     };
     if ev.is_derivation(v)? {
-        if !admit(hash, path.len() as u32, true) {
+        if !cfg.opts.admit(hash, path.len() as u32, true) {
             return Ok(Node::Skip);
         }
         return job(ev, attrs, path).map(Node::Job);
@@ -341,7 +345,7 @@ pub fn node(ev: &mut Evaluator, w: Word, path: &[String], hash: u64) -> EvalResu
 /// attr-path.cc:findAlongAttrPath with nix-eval-jobs's auto-call at every
 /// step: the value at `path` under `root`.
 pub fn find_along_attr_path(ev: &mut Evaluator, root: Word, path: &[String]) -> EvalResult<Word> {
-    let cfg = config();
+    let cfg = ev.session().jobs.config();
     let mut v = root;
     for (i, name) in path.iter().enumerate() {
         v = ev.auto_call(v, cfg.auto_args)?;
@@ -408,7 +412,7 @@ fn outputs(
     with_paths: bool,
 ) -> EvalResult<BTreeMap<String, Option<StorePath>>> {
     let mut out = BTreeMap::new();
-    match a.get(config().syms.outputs) {
+    match a.get(ev.session().jobs.config().syms.outputs) {
         Some(o) => {
             let l = ev.force_list(
                 o.cell.get(),
@@ -513,7 +517,7 @@ fn check_meta_inner(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<bool> {
 
 /// drv.cc:queryMeta: `null` without usable entries, else an object.
 fn meta_json(ev: &mut Evaluator, a: &'static AttrsObj, out: &mut Vec<u8>) -> EvalResult<()> {
-    let Some(m) = a.get(config().syms.meta) else {
+    let Some(m) = a.get(ev.session().jobs.config().syms.meta) else {
         out.extend_from_slice(b"null");
         return Ok(());
     };
@@ -567,7 +571,7 @@ fn extract_constituents(
     ev: &mut Evaluator,
     a: &'static AttrsObj,
 ) -> EvalResult<(Vec<StorePath>, Vec<String>, bool)> {
-    let syms = &config().syms;
+    let syms = &ev.session().jobs.config().syms;
     let Some(agg) = a.get(syms.hydra_aggregate) else {
         return Ok((Vec::new(), Vec::new(), false));
     };
@@ -667,7 +671,7 @@ fn job(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalResult<
 }
 
 fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalResult<Job> {
-    let cfg = config();
+    let cfg = ev.session().jobs.config();
     let (constituents, named, glob) = if cfg.opts.constituents {
         extract_constituents(ev, a)?
     } else {
@@ -813,7 +817,11 @@ pub fn prefetch_range(ev: &mut Evaluator, attrs: &'static AttrsObj, start: usize
         return;
     }
     // A set the walk never registered is treated as below the chunk depth.
-    let (hash, depth) = recall_set(attrs).unwrap_or((FNV_BASIS, u32::MAX - 1));
+    let (hash, depth) = ev
+        .session()
+        .jobs
+        .recall_set(attrs)
+        .unwrap_or((FNV_BASIS, u32::MAX - 1));
     for attr in range {
         if prefetch_child(ev, attr, hash, depth).is_err() {
             return;
@@ -832,10 +840,10 @@ fn prefetch_child(
     if bail_requested(ev) || ev.par.cancelled {
         return Err(());
     }
-    let cfg = config();
+    let cfg = ev.session().jobs.config();
     let h = fnv_step(hash, ev.interner.name(attr.sym));
     let d = depth + 1;
-    if d == cfg.opts.chunk_depth && !admit(h, d, false) {
+    if d == cfg.opts.chunk_depth && !cfg.opts.admit(h, d, false) {
         return Ok(());
     }
     // only the demand path may unbox a cell and take the effects a helper
@@ -860,7 +868,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
     if depth > 64 {
         return Ok(());
     }
-    let cfg = config();
+    let cfg = ev.session().jobs.config();
     let Some(a) = v.as_attrs() else {
         return Ok(());
     };
@@ -870,7 +878,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
         return Ok(());
     }
     if ev.is_derivation(v)? {
-        if admit(hash, depth, true) {
+        if cfg.opts.admit(hash, depth, true) {
             prefetch_job(ev, a)?;
         }
         return Ok(());
@@ -884,7 +892,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
     }
     let a = ev.arena.flat(a);
     validate_names(ev, a.attrs())?;
-    remember_set(a, hash, depth);
+    ev.session().jobs.remember_set(a, hash, depth);
     fanout_range(ev, T_JOB, Word::from_ref(a), 0, a.len(), JOB_BATCH);
     for attr in a.attrs() {
         if prefetch_child(ev, attr, hash, depth).is_err() {
@@ -895,7 +903,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
 }
 
 fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
-    let cfg = config();
+    let cfg = ev.session().jobs.config();
     // Coercing a path can run a user-defined __toString. Only the shared
     // field values can carry speculative work to the demand walk.
     for sym in [ev.s.name, ev.s.drv_path] {
@@ -924,6 +932,40 @@ mod tests {
     use super::*;
     use crate::eval::EvalConfig;
     use crate::lint::{Config, Level, Scope};
+
+    #[test]
+    fn walk_uses_the_evaluators_chunk() {
+        let ambient = Session::new();
+        let _entered = ambient.enter();
+        let mut first = EvalConfig::new().session(ambient.clone()).build();
+        let mut second = EvalConfig::new().session(Session::new()).build();
+        for (ev, chunk) in [(&mut first, 0), (&mut second, 1)] {
+            let args = ev.empty_attrs();
+            configure(
+                ev,
+                Opts {
+                    chunks: 2,
+                    chunk,
+                    chunk_depth: 0,
+                    ..Opts::default()
+                },
+                args,
+                None,
+            );
+        }
+        let root = second
+            .eval_string(r#"{ fail = throw "boom"; }"#, b"/")
+            .unwrap();
+        let mut paths = Vec::new();
+        run(&mut second, root, &mut |line| {
+            assert!(!admit(FNV_BASIS, 0, false));
+            if let Line::Error(error) = line {
+                paths.push(error.attr);
+            }
+        })
+        .unwrap();
+        assert_eq!(paths, ["fail"]);
+    }
 
     #[test]
     fn job_prefetch_leaves_function_calls_and_path_coercions_to_demand() {

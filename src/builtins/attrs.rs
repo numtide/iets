@@ -263,17 +263,20 @@ fn list_to_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
             n.pos,
             "while evaluating the `name` attribute of an element of the list passed to builtins.listToAttrs",
         )?;
-        if !seen.insert(sym) {
-            continue;
+        if seen.insert(sym)
+            && let Some(v) = a.get(ev.s.value)
+        {
+            entries.push((sym, v.pos, v.cell.get()));
         }
-        let Some(v) = a.get(ev.s.value) else {
-            bail!(
-                ErrorKind::Type,
-                pos,
-                "attribute 'value' missing in a {{name=...; value=...;}} pair"
-            );
-        };
-        entries.push((sym, v.pos, v.cell.get()));
+    }
+    // Nix forces every name before it reports a missing value slot. Only the
+    // first pair for each name needs that slot, and its contents stay lazy.
+    if entries.len() != seen.len() {
+        bail!(
+            ErrorKind::Type,
+            pos,
+            "attribute 'value' missing in a {{name=...; value=...;}} pair"
+        );
     }
     entries.sort_by_key(|e| e.0);
     Ok(ev.arena.mk_attrs_sorted_as(&entries, Stat::AttrsListTo))

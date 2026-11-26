@@ -21,15 +21,16 @@
 //! `import` included, comes back out of those packs instead of out of
 //! `/nix/store` (docs/reference/flakes.md).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+use crate::sys::OsStrExt;
 use crate::sys::fs as sysfs;
 use crate::sys::vm::FileMap;
-use crate::sys::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::{result, str};
 
@@ -334,7 +335,7 @@ impl Tree {
                     continue;
                 }
                 let pax = pax_sparse(&mut entry)?;
-                let name = member_name(&pax, &entry)?;
+                let name = member_name(pax.as_ref(), &entry)?;
                 let parts = parts_of(&unpack::member_path(&name));
                 if parts.is_empty() {
                     continue;
@@ -387,14 +388,12 @@ impl Tree {
                                 Some(f) => f,
                                 None => sparse.insert(scratch()?),
                             };
-                            expand(&mut entry, pax.as_ref(), side, sparse_at, size).map_err(
-                                |e| {
-                                    Error::io(
-                                        format!("cannot read '{}' from the tarball", show(&parts)),
-                                        e,
-                                    )
-                                },
-                            )?;
+                            expand(&mut entry, pax, side, sparse_at).map_err(|e| {
+                                Error::io(
+                                    format!("cannot read '{}' from the tarball", show(&parts)),
+                                    e,
+                                )
+                            })?;
                             let at = Blob::Spool {
                                 offset: sparse_at,
                                 size,
@@ -921,8 +920,8 @@ fn get_node(d: &mut Idx<'_>, depth: usize) -> Option<Node> {
 /// really has, the size it expands to, and its data blocks. `map` is `None` for
 /// format 1.0, which holds the map at the head of the member's data instead.
 pub(super) struct Sparse {
-    pub(super) name: Option<Vec<u8>>,
-    pub(super) size: u64,
+    name: Option<Vec<u8>>,
+    size: u64,
     map: Option<Vec<(u64, u64)>>,
 }
 
@@ -931,16 +930,15 @@ fn number(v: &[u8]) -> Option<u64> {
 }
 
 /// The name the pax sparse records give the member, else the header's.
-pub(super) fn member_name(
-    pax: &Option<Sparse>,
-    entry: &tar::Entry<'_, impl Read>,
-) -> Result<PathBuf> {
-    match pax.as_ref().and_then(|s| s.name.clone()) {
-        Some(n) => Ok(OsString::from_vec(n).into()),
-        None => Ok(entry
+pub(super) fn member_name<'a>(
+    pax: Option<&'a Sparse>,
+    entry: &'a tar::Entry<'_, impl Read>,
+) -> Result<Cow<'a, Path>> {
+    match pax.and_then(|s| s.name.as_deref()) {
+        Some(n) => Ok(Cow::Borrowed(Path::new(OsStr::from_bytes(n)))),
+        None => entry
             .path()
-            .map_err(|e| Error::io("cannot read a tarball member name", e))?
-            .into_owned()),
+            .map_err(|e| Error::io("cannot read a tarball member name", e)),
     }
 }
 
@@ -1010,10 +1008,9 @@ pub(super) fn pax_sparse(entry: &mut tar::Entry<'_, impl Read>) -> Result<Option
 /// blocks where they belong, and holes for the rest.
 pub(super) fn expand(
     entry: &mut tar::Entry<'_, impl Read>,
-    pax: Option<&Sparse>,
+    pax: Option<Sparse>,
     side: &File,
     base: u64,
-    size: u64,
 ) -> io::Result<()> {
     let Some(pax) = pax else {
         // an old-style GNU sparse member: the tar reader expands it itself
@@ -1022,8 +1019,9 @@ pub(super) fn expand(
         io::copy(entry, &mut side)?;
         return Ok(());
     };
-    let map = match &pax.map {
-        Some(m) => m.clone(),
+    let size = pax.size;
+    let map = match pax.map {
+        Some(m) => m,
         None => read_map(entry)?,
     };
     let mut buf = vec![0u8; CHUNK];

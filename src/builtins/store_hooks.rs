@@ -406,15 +406,6 @@ fn below(root: &Path, rel: &[u8]) -> PathBuf {
     }
 }
 
-fn kind_of(t: FileType) -> Kind {
-    match t {
-        FileType::Directory => Kind::Directory,
-        FileType::Regular => Kind::Regular,
-        FileType::Symlink => Kind::Symlink,
-        FileType::Unknown => Kind::Other,
-    }
-}
-
 impl SrcPath {
     /// The path on disk, for [`Src::Fs`].
     pub fn local(&self) -> Option<PathBuf> {
@@ -492,7 +483,8 @@ impl SrcPath {
             }
             At::Spool(tree, name) => {
                 treestore::record(ev, &tree, name);
-                Ok(kind_of(tree.stat(&self.rel, follow).ok_or_else(missing)?))
+                let kind = tree.stat(&self.rel, follow).ok_or_else(missing)?;
+                Ok(trace::nar_kind(kind))
             }
             At::Mem(_) => Ok(Kind::Regular),
         }
@@ -562,19 +554,10 @@ impl SrcPath {
                 let mut listing = Vec::new();
                 for e in rd {
                     let e = e.map_err(|e| ("reading directory", e))?;
-                    let ft = e.file_type().map_err(|e| (STAT, e))?;
-                    let (t, kind) = if ft.is_symlink() {
-                        (FileType::Symlink, Kind::Symlink)
-                    } else if ft.is_dir() {
-                        (FileType::Directory, Kind::Directory)
-                    } else if ft.is_file() {
-                        (FileType::Regular, Kind::Regular)
-                    } else {
-                        (FileType::Unknown, Kind::Other)
-                    };
+                    let t = FileType::of(e.file_type().map_err(|e| (STAT, e))?);
                     let name = e.file_name().into_vec();
                     if ev.trace().is_on() {
-                        listing.push((name.clone(), kind));
+                        listing.push((name.clone(), trace::nar_kind(t)));
                     }
                     if self.accepts(&e.path()) {
                         out.push((name, t));

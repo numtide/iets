@@ -7,6 +7,7 @@ use std::str;
 use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::{self, thunk};
 use crate::runtime::{Attr, AttrsObj, Ctx, Value, Word};
+use crate::syntax::lexer::Lexer;
 use crate::syntax::symbol::FxHashSet;
 
 /// C's `%g` with precision 6, as `std::ostream << double` prints.
@@ -84,25 +85,10 @@ pub fn print_literal_string(out: &mut Vec<u8>, s: &[u8]) {
     out.push(b'"');
 }
 
-/// `print.cc: isVarName`.
-fn is_var_name(s: &[u8]) -> bool {
-    const KEYWORDS: [&[u8]; 9] = [
-        b"if", b"then", b"else", b"assert", b"with", b"let", b"in", b"rec", b"inherit",
-    ];
-    if s.is_empty() || KEYWORDS.contains(&s) {
-        return false;
-    }
-    if matches!(s[0], b'0'..=b'9' | b'-' | b'\'') {
-        return false;
-    }
-    s.iter()
-        .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'\''))
-}
-
 /// `print.cc: printAttributeName`: bare when it is a valid identifier,
 /// a string literal otherwise.
 pub fn print_attr_name(out: &mut Vec<u8>, name: &[u8]) {
-    if is_var_name(name) {
+    if Lexer::is_bare_attr_name(name) {
         out.extend_from_slice(name);
     } else {
         print_literal_string(out, name);

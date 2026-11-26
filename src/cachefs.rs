@@ -25,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use std::str::from_utf8;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{env, fs, io, thread};
+use std::{fs, io, thread};
 
 use crate::compile::cache::IrCache;
 use crate::session::Session;
@@ -102,9 +102,9 @@ pub fn root(override_dir: Option<&str>) -> Option<PathBuf> {
     if let Some(d) = &session.settings().cache_dir {
         return Some(d.clone());
     }
-    let base = match env::var_os("XDG_CACHE_HOME") {
+    let base = match session.env.var_os("XDG_CACHE_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x),
-        _ => PathBuf::from(env::var_os("HOME")?).join(".cache"),
+        _ => PathBuf::from(session.env.var_os("HOME")?).join(".cache"),
     };
     Some(base.join("iets"))
 }

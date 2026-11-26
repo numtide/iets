@@ -160,8 +160,9 @@ impl Run {
 mod tests {
     use super::*;
     use crate::api::{self, EvalArgs, Input};
+    use crate::env::Env;
     use crate::settings::Settings;
-    use crate::sys;
+    use crate::{sys, treestore};
     use tempfile::tempdir;
 
     use std::path::Path;
@@ -288,6 +289,36 @@ mod tests {
         let four = derivations(args(&expr, d.path(), 4), one);
         assert_eq!(one, n as u64, "one derivation per list element");
         assert_eq!(four, one, "the helper fibers' derivations are counted too");
+    }
+
+    #[test]
+    fn cache_paths_follow_the_runs_session() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        let xdg = dir.path().join("xdg");
+        let by_home = Session::with_env(Env::from_pairs([("HOME", &home)]));
+        let by_xdg = Session::with_env(Env::from_pairs([("XDG_CACHE_HOME", &xdg)]));
+        for (owner, ambient, root) in [
+            (&by_xdg, &by_home, xdg.join("iets")),
+            (&by_home, &by_xdg, home.join(".cache/iets")),
+        ] {
+            let _entered = ambient.enter();
+            let args = EvalArgs {
+                input: Some(Input::Expr("1".into())),
+                no_ir_cache: false,
+                no_tracing_cache: false,
+                workers: 1,
+                ..EvalArgs::new()
+            };
+            Run::over(EvalConfig::new().session(owner.clone()), &args)
+                .unwrap()
+                .cached(&args, "eval")
+                .go(|_, _| treestore::root().unwrap())
+                .unwrap();
+            for store in ["ir", "trace", "inputs"] {
+                assert!(root.join(store).join("version").is_file(), "{store}");
+            }
+        }
     }
 
     /// A host's `cache_dir` holds the input store at any worker count.

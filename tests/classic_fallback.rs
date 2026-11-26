@@ -19,9 +19,14 @@ use e2e::classic::{Both, Checks, Farm, NAMES, show};
 use e2e::{Store, ok, resolved, stderr, stdout};
 use sha2::{Digest, Sha256};
 
-/// `nix __dump-cli` is what Nix makes its manual of.
+/// `nix __dump-cli` is what Nix makes its manual of. The Nix on `PATH` is the
+/// pinned one in the flake check only, and the settings are those of Linux:
+/// macOS has `darwin-log-sandbox-violations` more.
 #[test]
 fn a_setting_flag_of_nix_is_one_here() {
+    if env::var_os("IETS_TEST_E2E").is_none() || !cfg!(target_os = "linux") {
+        return;
+    }
     let out = Command::new(resolved("nix"))
         .arg("__dump-cli")
         .output()

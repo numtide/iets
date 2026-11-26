@@ -544,6 +544,6 @@ fn partition(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     }
     let r = ev.mk_list(&right);
     let w = ev.mk_list(&wrong);
-    let mut entries = vec![(ev.s.right, Pos::NONE, r), (ev.s.wrong, Pos::NONE, w)];
+    let mut entries = [(ev.s.right, Pos::NONE, r), (ev.s.wrong, Pos::NONE, w)];
     ev.mk_attrs(&mut entries, pos)
 }

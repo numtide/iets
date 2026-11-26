@@ -265,7 +265,7 @@ fn try_eval(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         Err(e) if e.is_catchable() => (Word::FALSE, Word::FALSE),
         Err(e) => return Err(e),
     };
-    let mut entries = vec![
+    let mut entries = [
         (ev.s.success, Pos::NONE, success),
         (ev.s.value, Pos::NONE, value),
     ];

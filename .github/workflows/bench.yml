@@ -20,30 +20,20 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - uses: cachix/install-nix-action@v31
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # into the same target directory, so both share the cached dependencies
-      - name: Build the base
+      - name: Build the base with the candidate's locked inputs
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git worktree add "$RUNNER_TEMP/base" "$BASE"
-          cargo build --release --locked --bin iets \
-            --manifest-path "$RUNNER_TEMP/base/Cargo.toml" --target-dir target
-          cp target/release/iets "$RUNNER_TEMP/iets-base"
-      - name: Build the pull request
-        run: cargo build --release --locked --bin iets --example ab
-      # Ubuntu forbids perf counters to users by default
+        run: >
+          nix build "git+file://$PWD?rev=$BASE#default" -o result-base --inputs-from .
+          --override-input nixpkgs flake:nixpkgs --override-input crane flake:crane
       - run: sudo sysctl kernel.perf_event_paranoid=2
-      # shared runners vary by about 1 %, and only scenarios that take
-      # milliseconds by more
-      - name: Compare
-        run: |
-          set -o pipefail
-          ./target/release/examples/ab "$RUNNER_TEMP/iets-base" \
-            target/release/iets --threshold 5 --json ab.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Compare native performance and Callgrind instructions
+        shell: bash
+        run: nix run .#bench-compare -- result-base/bin/iets | tee -a "$GITHUB_STEP_SUMMARY"
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: ab
-          path: ab.json
+          path: |
+            ab.json
+            target/gungraun

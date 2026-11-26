@@ -1,0 +1,26 @@
+[package]
+name = "iets-bench"
+version = "0.0.0"
+license = "LGPL-2.1-or-later"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+gungraun = "0.20"
+serde_json = "1"
+
+[dependencies]
+# The matching executable is built by Nix from this same resolved graph.
+gungraun-runner = { version = "0.20", default-features = false, optional = true }
+
+[features]
+runner = ["dep:gungraun-runner", "gungraun-runner/runner"]
+
+[[bench]]
+name = "eval"
+path = "eval.rs"
+harness = false
+
+[profile.bench]
+opt-level = 3
+debug = 1

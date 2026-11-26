@@ -1,6 +1,7 @@
 //! Framing of the Nix worker protocol (libutil/serialise.hh): every integer is a u64 in
 //! little-endian; a string is its length, its bytes, and zero padding to a multiple of 8.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
@@ -9,7 +10,7 @@ use crate::remote::plan::{DrvHashes, Object};
 use crate::store::hash::{Hash, HashAlgo, base64_decode, base64_encode, hash_bytes};
 use crate::store::nar::{dump_string, flat_hash};
 use crate::store::narinfo::Fetched;
-use crate::store::path::{StorePath, check_name};
+use crate::store::path::{StorePath, check_name, store_dir};
 use crate::store::source::{SourceKind, Src};
 
 pub fn write_u64(w: &mut dyn Write, n: u64) -> io::Result<()> {
@@ -31,6 +32,22 @@ pub fn write_strs<S: AsRef<[u8]>>(w: &mut dyn Write, items: &[S]) -> io::Result<
     write_u64(w, items.len() as u64)?;
     for s in items {
         write_str(w, s.as_ref())?;
+    }
+    Ok(())
+}
+
+/// A worker-protocol StorePathSet is a count followed by full path strings.
+pub(crate) fn write_paths(w: &mut dyn Write, paths: &BTreeSet<StorePath>) -> io::Result<()> {
+    if paths.is_empty() {
+        return write_u64(w, 0);
+    }
+    let mut full = format!("{}/", store_dir());
+    let prefix_len = full.len();
+    write_u64(w, paths.len() as u64)?;
+    for path in paths {
+        full.truncate(prefix_len);
+        full.push_str(path.base_name());
+        write_str(w, full.as_bytes())?;
     }
     Ok(())
 }
@@ -347,11 +364,15 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
             nar_size,
             ..
         } => {
-            let (ca, references): (String, Vec<String>) = match kind {
-                SourceKind::Source => (format!("fixed:r:sha256:{}", nar_hash.to_nix32()), vec![]),
+            let no_references = BTreeSet::new();
+            let (ca, references) = match kind {
+                SourceKind::Source => (
+                    format!("fixed:r:sha256:{}", nar_hash.to_nix32()),
+                    &no_references,
+                ),
                 SourceKind::Flat { hash } => (
                     format!("fixed:{}:{}", hash.algo.name(), hash.to_nix32()),
-                    vec![],
+                    &no_references,
                 ),
                 SourceKind::Text { references } => {
                     let flat = match (&at.src, at.local()) {
@@ -359,10 +380,7 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
                         (_, Some(path)) => flat_hash(&path, HashAlgo::Sha256)?,
                         _ => return Err(io::Error::other("a text path cannot come from a NAR")),
                     };
-                    (
-                        format!("text:sha256:{}", flat.to_nix32()),
-                        references.iter().map(|r| r.to_string()).collect(),
-                    )
+                    (format!("text:sha256:{}", flat.to_nix32()), references)
                 }
             };
             write_info(
@@ -371,7 +389,7 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
                     path: &path.to_string(),
                     deriver: "",
                     nar_hash_base16: &nar_hash.to_base16(),
-                    references: &references,
+                    references,
                     nar_size: *nar_size,
                     sigs: &[],
                     ca: &ca,
@@ -396,14 +414,13 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
             hashes,
         } => {
             let h = hashes.get_or_init(|| DrvHashes::of(aterm));
-            let references: Vec<String> = references.iter().map(|r| r.to_string()).collect();
             write_info(
                 w,
                 Info {
                     path: &path.to_string(),
                     deriver: "",
                     nar_hash_base16: &h.nar_hash.to_base16(),
-                    references: &references,
+                    references,
                     nar_size: h.nar_size,
                     sigs: &[],
                     ca: &format!("text:sha256:{}", h.text.to_nix32()),
@@ -429,7 +446,6 @@ pub fn write_fetched(
     before_end: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     let i = &fetched.info;
-    let references: Vec<String> = i.all_references().iter().map(|r| r.to_string()).collect();
     let deriver = i
         .deriver
         .as_ref()
@@ -441,7 +457,7 @@ pub fn write_fetched(
             path: &i.path.to_string(),
             deriver: &deriver,
             nar_hash_base16: &i.nar_hash.to_base16(),
-            references: &references,
+            references: &i.all_references(),
             nar_size: i.nar_size,
             sigs: &i.sigs,
             ca: i.ca.as_deref().unwrap_or(""),
@@ -468,7 +484,7 @@ struct Info<'a> {
     path: &'a str,
     deriver: &'a str,
     nar_hash_base16: &'a str,
-    references: &'a [String],
+    references: &'a BTreeSet<StorePath>,
     nar_size: u64,
     sigs: &'a [String],
     ca: &'a str,
@@ -478,7 +494,7 @@ fn write_info(w: &mut dyn Write, i: Info<'_>) -> io::Result<()> {
     write_str(w, i.path.as_bytes())?;
     write_str(w, i.deriver.as_bytes())?;
     write_str(w, i.nar_hash_base16.as_bytes())?;
-    write_strs(w, i.references)?;
+    write_paths(w, i.references)?;
     write_u64(w, 0)?;
     write_u64(w, i.nar_size)?;
     write_u64(w, 0)?;

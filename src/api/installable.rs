@@ -332,14 +332,17 @@ fn string_list(ev: &mut Evaluator, w: Word, not_list: &str, ctx: &str) -> EvalRe
         .collect()
 }
 
-/// `type = "derivation"`, the test both the get-drvs walk and the output
-/// selection start from.
+/// Flake output selection requires a string when the type tag is present.
 fn is_derivation(ev: &mut Evaluator, attrs: &'static AttrsObj) -> EvalResult<bool> {
     let Some(t) = attrs.get(ev.s.type_) else {
         return Ok(false);
     };
-    let t = forced_string(ev, t.cell.get(), "while evaluating the 'type' attribute")?;
-    Ok(t == "derivation")
+    let t = ev.force_string(
+        t.cell.get(),
+        Pos::NONE,
+        "while evaluating the 'type' attribute",
+    )?;
+    Ok(t.bytes == b"derivation")
 }
 
 /// The `drvPath` of a derivation attrset.
@@ -556,7 +559,7 @@ fn one_derivation(
     let Some(attrs) = v.as_attrs() else {
         return Ok(false);
     };
-    if !is_derivation(ev, attrs)? {
+    if !ev.is_derivation_set(attrs)? {
         return Ok(false);
     }
     let drv = drv_of(ev, attrs)?;

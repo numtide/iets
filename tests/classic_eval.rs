@@ -232,6 +232,10 @@ fn nix_instantiate() {
     let outpath = format!("({{ outPath = {rawp}; }}).outPath");
     let evals: &[(&str, &[&str])] = &[
         (
+            "non-string derivation tag",
+            &["-E", "{ a = { type = 1; }; }"],
+        ),
+        (
             "--eval --strict --json",
             &["--eval", "--strict", "--json", "-E", "{ a = 1; }"],
         ),
@@ -579,6 +583,7 @@ fn nix_eval_of_a_flake() {
     );
     for (label, e) in [
         ("a nested error", "{ a = throw \"boom\"; b = 1; }"),
+        ("a non-string derivation tag", "{ type = 1; }"),
         (
             "repeated and empty values",
             "let a = { x = 1; }; in [ a a {} {} [] ]",

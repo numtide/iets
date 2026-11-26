@@ -1704,16 +1704,18 @@ impl Evaluator {
     /// Mirrors eval.cc:EvalState::isDerivation, which lets an error of the
     /// `type` attribute reach the caller.
     pub fn is_derivation(&mut self, w: Word) -> EvalResult<bool> {
-        match w.view() {
-            Value::Attrs(a) => match a.get(self.s.type_) {
-                Some(attr) => {
-                    let t = self.force_cell(&attr.cell)?;
-                    Ok(t.as_string().is_some_and(|s| s.bytes == b"derivation"))
-                }
-                None => Ok(false),
-            },
-            _ => Ok(false),
+        match w.as_attrs() {
+            Some(attrs) => self.is_derivation_set(attrs),
+            None => Ok(false),
         }
+    }
+
+    pub(crate) fn is_derivation_set(&mut self, attrs: &'static AttrsObj) -> EvalResult<bool> {
+        let Some(attr) = attrs.get(self.s.type_) else {
+            return Ok(false);
+        };
+        let tag = self.force_cell(&attr.cell)?;
+        Ok(tag.as_string().is_some_and(|s| s.bytes == b"derivation"))
     }
 
     pub fn mk_string(&mut self, bytes: &[u8]) -> Word {

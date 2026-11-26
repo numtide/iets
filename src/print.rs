@@ -209,8 +209,8 @@ fn print_value<const MODERN: bool>(
                 out.extend_from_slice("«repeated»".as_bytes());
                 return Ok(());
             }
-            if MODERN && print_derivation(ev, a, out)? {
-                return Ok(());
+            if MODERN && ev.is_derivation_set(a)? {
+                return print_derivation(ev, a, out);
             }
             out.extend_from_slice(b"{ ");
             for attr in printer_attr_order(ev, a) {
@@ -270,18 +270,7 @@ fn print_derivation(
     ev: &mut Evaluator,
     attrs: &'static AttrsObj,
     out: &mut Vec<u8>,
-) -> EvalResult<bool> {
-    let Some(t) = attrs.get(ev.s.type_) else {
-        return Ok(false);
-    };
-    let t = ev.force_string(
-        t.cell.get(),
-        Pos::NONE,
-        "while evaluating the 'type' attribute",
-    )?;
-    if t.bytes != b"derivation" {
-        return Ok(false);
-    }
+) -> EvalResult<()> {
     let path = match attrs.get(ev.s.drv_path) {
         Some(dp) => ev.coerce_to_string(
             dp.cell.get(),
@@ -300,7 +289,7 @@ fn print_derivation(
         out.extend_from_slice(&path);
     }
     out.extend_from_slice("»".as_bytes());
-    Ok(true)
+    Ok(())
 }
 
 /// Short rendering for error messages: like the modern printer with limits.

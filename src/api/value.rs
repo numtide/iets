@@ -224,9 +224,9 @@ impl<'e> Eval<'e> {
         self.ev
     }
 
-    /// Evaluate an expression; relative paths resolve against `base_dir`.
-    pub fn eval_expr(&mut self, src: &str, base_dir: &[u8]) -> EvalResult<Value<'e>> {
-        self.ev.eval_string(src, base_dir).map(val)
+    /// Evaluate Nix source as bytes; relative paths resolve against `base_dir`.
+    pub fn eval_expr(&mut self, src: impl AsRef<[u8]>, base_dir: &[u8]) -> EvalResult<Value<'e>> {
+        self.ev.eval_bytes(src.as_ref(), base_dir).map(val)
     }
 
     /// Evaluate what `args` names: an expression, a file or a flake output.
@@ -379,6 +379,16 @@ mod tests {
             assert!(!a.is_null());
             assert_eq!(e.force(a).unwrap().as_int(), Some(2));
         });
+    }
+
+    #[test]
+    fn expression_preserves_unicode_and_non_utf8_bytes() {
+        let mut ev = Evaluator::new();
+        let mut e = Eval::new(&mut ev);
+        for src in ["\"\u{10ffff}\"".as_bytes(), b"\"\xff\""] {
+            let v = e.eval_expr(src, b"/").unwrap();
+            assert_eq!(e.force(v).unwrap().as_bytes(), Some(&src[1..src.len() - 1]));
+        }
     }
 
     #[test]

@@ -127,7 +127,7 @@ Methods on `Eval` may evaluate, intern a name or allocate.
 |:---|:---|
 | Borrow an evaluator | `value::Eval::new(&mut Evaluator)` |
 | Shared access to the underlying evaluator | `Eval::evaluator()` |
-| Evaluate an expression | `Eval::eval_expr(src, base_dir)` |
+| Evaluate an expression from UTF-8 text or raw bytes | `Eval::eval_expr(src, base_dir)` |
 | Evaluate an `EvalArgs` | `Eval::evaluate(args)` |
 | Force to weak head normal form | `Eval::force(v)` |
 | Force through lists and sets | `Eval::force_deep(v)` |

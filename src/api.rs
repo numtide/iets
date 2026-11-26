@@ -124,10 +124,11 @@ impl EvalArgs {
         if let Some(d) = &self.cache_dir {
             base.configured_session().set_cache_dir(d);
         }
+        let includes = includes_in(base.configured_session(), &self.includes);
         let c = base
             .lints(lint_config(self)?)
             .ir_cache(self.ir_cache())
-            .search_path(full_includes(&self.includes));
+            .search_path(includes);
         let Some(dir) = &self.dump_drvs else {
             return Ok(c);
         };
@@ -424,12 +425,15 @@ pub fn abs_path(f: &str, cwd: &[u8]) -> Vec<u8> {
 /// nix.conf this run loaded, as `(prefix, path)` pairs. Nix's channel
 /// defaults are not here.
 pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let session = Session::current();
+    includes_in(&Session::current(), includes)
+}
+
+fn includes_in(session: &Session, includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let (replaces, setting) = session
         .nix_conf
         .get()
         .map_or((false, Vec::new()), |c| c.nix_path());
-    let env = env::var("NIX_PATH").ok().filter(|_| !replaces);
+    let env = session.env.var("NIX_PATH").filter(|_| !replaces);
     let env = env
         .iter()
         .flat_map(|np| search_path::split(np))
@@ -585,6 +589,17 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_search_path_uses_the_configured_session() {
+        let ambient = Session::with_env(Env::isolated().with([("NIX_PATH", "x=/ambient")]));
+        let _entered = ambient.enter();
+        let owner = Session::with_env(Env::isolated().with([("NIX_PATH", "x=/owner")]));
+        let mut args = EvalArgs::new();
+        args.no_ir_cache = true;
+        let cfg = args.config(EvalConfig::new().session(owner)).unwrap();
+        assert_eq!(cfg.configured_search_path(), &[parse_include("x=/owner")]);
+    }
 
     #[test]
     fn the_cache_key_uses_the_configured_ifd_policy() {

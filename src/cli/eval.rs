@@ -67,6 +67,9 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         }
         // each value goes out as it is made, as in nix-instantiate --eval
         render::bytes(&out[start..]);
+        if cache.is_none() {
+            out.clear();
+        }
         Ok(())
     });
     drop(evaluating);

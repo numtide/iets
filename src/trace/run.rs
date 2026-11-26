@@ -153,6 +153,7 @@ impl Cache {
             Part::NixConfig,
             Part::Drvs,
             Part::Sources,
+            Part::Fetched,
             Part::Result,
         ]
         .into_iter()
@@ -276,5 +277,28 @@ impl Cache {
             }
         }
         tables
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn refreshing_the_readset_preserves_fetched_closures() {
+        let dir = tempdir().unwrap();
+        let open = || Cache::open(dir.path().to_str(), Key::new("build"), false).unwrap();
+        let cache = open();
+        let parts: &[(Part, &[u8])] = &[(Part::Readset, b"old"), (Part::Fetched, b"fetched")];
+        assert!(cache.store.publish(&cache.key, parts).unwrap());
+        let Opened::Entry(entry) = cache.opened() else {
+            panic!("expected the published entry");
+        };
+        cache.republish(entry, b"new");
+
+        let next = open();
+        assert_eq!(next.part(Part::Readset).as_deref(), Some(&b"new"[..]));
+        assert_eq!(next.part(Part::Fetched).as_deref(), Some(&b"fetched"[..]));
     }
 }

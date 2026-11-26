@@ -548,22 +548,7 @@ fn meta_json(ev: &mut Evaluator, a: &'static AttrsObj, out: &mut Vec<u8>) -> Eva
 
 /// derivation-options.cc:getRequiredSystemFeatures.
 fn required_system_features(drv: &Derivation) -> BTreeSet<String> {
-    let mut set: BTreeSet<String> = match &drv.structured_attrs {
-        Some(json) => serde_json::from_str::<serde_json::Value>(json)
-            .ok()
-            .and_then(|v| v.get("requiredSystemFeatures").cloned())
-            .and_then(|v| v.as_array().cloned())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        None => drv
-            .env_str("requiredSystemFeatures")
-            .map(|s| s.split_whitespace().map(str::to_owned).collect())
-            .unwrap_or_default(),
-    };
+    let mut set = drv.declared_system_features();
     let known = drv.outputs.values().all(|o| {
         matches!(
             o,
@@ -993,6 +978,17 @@ mod tests {
         let err = check_meta(&mut ev, nested, Pos::NONE).unwrap_err();
         assert_eq!(err.kind, ErrorKind::StackOverflow);
         assert_eq!(ev.call_depth, MAX_CALL_DEPTH);
+    }
+
+    #[test]
+    fn unknown_outputs_require_ca_in_addition_to_declared_features() {
+        let mut drv = Derivation::default();
+        drv.env_set("requiredSystemFeatures", b"kvm".to_vec());
+        drv.outputs.insert("out".into(), DerivationOutput::Deferred);
+        assert_eq!(
+            required_system_features(&drv),
+            BTreeSet::from(["ca-derivations".into(), "kvm".into()])
+        );
     }
 
     #[test]

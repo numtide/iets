@@ -18,8 +18,9 @@ use std::time::Duration;
 use std::{result, thread};
 
 use http_body_util::BodyExt;
+use tokio::sync::oneshot;
 
-use super::{Limits, bad, get_or_read, local_path, shown};
+use super::{Limits, MAX_FILTERS, bad, get_or_read, local_path, read, shown};
 use crate::error::{Error, Result};
 use crate::fetch::roots;
 use crate::log;
@@ -287,6 +288,26 @@ fn tls() -> Result<Arc<rustls::ClientConfig>> {
     Ok(TLS.get_or_init(|| Arc::new(cfg)).clone())
 }
 
+const ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+
+fn content_codings(url: &str, headers: &hyper::HeaderMap) -> Result<Vec<String>> {
+    let mut codings = Vec::new();
+    for value in headers.get_all("content-encoding") {
+        let value = value
+            .to_str()
+            .map_err(|_| bad(url, "invalid Content-Encoding"))?;
+        for coding in value.split(',').map(str::trim) {
+            if !coding.is_empty() && !coding.eq_ignore_ascii_case("identity") {
+                if codings.len() == MAX_FILTERS {
+                    return Err(bad(url, "too many HTTP content codings"));
+                }
+                codings.push(coding.to_ascii_lowercase());
+            }
+        }
+    }
+    Ok(codings)
+}
+
 /// GETs to one origin over one connection that stays open between them, for
 /// many small bodies such as a binary cache's narinfos, where a new
 /// connection per request costs more than the request. Anything but a 200 on
@@ -311,7 +332,15 @@ impl Kept {
         if local_path(url).is_none() && !Session::current().settings().offline {
             let rt = &self.rt;
             match rt.block_on(Self::kept(&mut self.conn, url, limits)) {
-                Ok(Some(body)) => return Ok(body),
+                Ok(Some((body, codings))) => {
+                    if codings.is_empty() {
+                        return Ok(body);
+                    }
+                    let mut decoded = Vec::new();
+                    let raw = Box::new(io::Cursor::new(body));
+                    read(url, raw, limits, false, &codings, &mut decoded)?;
+                    return Ok(decoded);
+                }
                 Ok(None) | Err(_) => self.conn = None,
             }
         }
@@ -325,7 +354,7 @@ impl Kept {
         conn: &mut Option<(String, Sender, Driver)>,
         url: &str,
         limits: Limits,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<(Vec<u8>, Vec<String>)>> {
         let u = Url::parse(url)?;
         let origin = format!(
             "{}://{}",
@@ -350,6 +379,7 @@ impl Kept {
         let mut req = hyper::Request::builder()
             .uri(&u.target)
             .header("host", u.authority())
+            .header("accept-encoding", ACCEPT_ENCODING)
             .header("user-agent", concat!("iets/", env!("CARGO_PKG_VERSION")));
         if let Some((name, value)) = u.basic() {
             req = req.header(name.as_str(), value.as_str());
@@ -364,6 +394,7 @@ impl Kept {
         if res.status().as_u16() != 200 {
             return Ok(None);
         }
+        let codings = content_codings(url, res.headers())?;
         let mut body = Vec::new();
         while let Some(frame) = res.frame().await {
             let frame =
@@ -376,7 +407,7 @@ impl Kept {
                 }
             }
         }
-        Ok(Some(body))
+        Ok(Some((body, codings)))
     }
 }
 
@@ -395,9 +426,10 @@ pub(super) fn fetch(
     headers: &[(String, String)],
     body: Option<Vec<u8>>,
     limits: Limits,
-    read: impl FnOnce(Box<dyn Read>) -> Result<u64>,
+    read: impl FnOnce(Box<dyn Read>, &[String]) -> Result<u64>,
 ) -> Result<u64> {
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
+    let (head, codings) = oneshot::channel();
     let target = url.to_string();
     let sent = headers.to_vec();
     let download = thread::spawn(move || -> Result<()> {
@@ -405,18 +437,20 @@ pub(super) fn fetch(
             .enable_all()
             .build()
             .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
-        rt.block_on(stream(&target, &sent, body, limits, tx))
+        rt.block_on(stream(&target, &sent, body, limits, head, tx))
     });
     let queued = Queued {
         rx,
         at: Vec::new(),
         pos: 0,
     };
-    let got = read(Box::new(queued));
+    let got = codings
+        .blocking_recv()
+        .map(|codings| read(Box::new(queued), &codings));
     download
         .join()
         .map_err(|_| Error::Store("the download thread panicked".into()))??;
-    got
+    got.map_err(|_| bad(url, "missing HTTP response headers"))?
 }
 
 /// The reading half of the queue: hyper's frames, one after the other.
@@ -451,6 +485,7 @@ async fn stream(
     headers: &[(String, String)],
     mut body: Option<Vec<u8>>,
     limits: Limits,
+    head: oneshot::Sender<Vec<String>>,
     tx: tokio::sync::mpsc::Sender<result::Result<Vec<u8>, String>>,
 ) -> Result<()> {
     let first = Url::parse(url)?;
@@ -462,10 +497,11 @@ async fn stream(
     let (mut redirects, mut attempt) = (0usize, 0u32);
     loop {
         let creds = if credentials { headers } else { &[] };
-        let (status, location, mut res, driver) =
-            once(&current, creds, body.as_deref(), limits).await?;
+        let (mut res, driver) = once(&current, creds, body.as_deref(), limits).await?;
+        let status = res.status().as_u16();
         match status {
             200 => {
+                let _ = head.send(content_codings(&current, res.headers())?);
                 let mut sent = Ok(());
                 loop {
                     let next = res.frame().await.transpose().map_err(|e| {
@@ -499,10 +535,10 @@ async fn stream(
                 if redirects > MAX_REDIRECTS {
                     return Err(bad(url, &format!("more than {MAX_REDIRECTS} redirects")));
                 }
-                let Some(to) = location else {
+                let Some(to) = res.headers().get("location").and_then(|v| v.to_str().ok()) else {
                     return Err(bad(&current, &format!("HTTP {status} with no Location")));
                 };
-                let next = resolve(&current, &to);
+                let next = resolve(&current, to);
                 // RFC 9110: only 307 and 308 repeat the method
                 if !matches!(status, 307 | 308) {
                     body = None;
@@ -542,7 +578,7 @@ fn transient(status: u16) -> Option<u64> {
     }
 }
 
-type Started = (u16, Option<String>, hyper::body::Incoming, Driver);
+type Started = (hyper::Response<hyper::body::Incoming>, Driver);
 
 /// One request: the status, the `Location` header, the body not yet read, and
 /// the connection task that must live as long as the body. The wait for the
@@ -560,6 +596,7 @@ async fn once(
         .method(if body.is_some() { "POST" } else { "GET" })
         .uri(&u.target)
         .header("host", u.authority())
+        .header("accept-encoding", ACCEPT_ENCODING)
         .header("user-agent", concat!("iets/", env!("CARGO_PKG_VERSION")));
     for (name, value) in headers {
         req = req.header(name.as_str(), value.as_str());
@@ -576,13 +613,7 @@ async fn once(
             bad(url, &format!("request failed: {e}"))
         }
     })?;
-    let status = res.status().as_u16();
-    let location = res
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    Ok((status, location, res.into_body(), driver))
+    Ok((res, driver))
 }
 
 type Sender = hyper::client::conn::http1::SendRequest<http_body_util::Full<hyper::body::Bytes>>;

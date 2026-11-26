@@ -129,6 +129,7 @@ pub fn put(
         Box::new(io::Cursor::new(bytes)),
         limits,
         decompress,
+        &[],
         sink,
     )
 }
@@ -138,10 +139,33 @@ fn read(
     raw: Box<dyn Read>,
     limits: Limits,
     decompress: bool,
+    codings: &[String],
     sink: &mut dyn Write,
 ) -> Result<u64> {
     let read_in = Rc::new(Cell::new(0));
-    let raw: Box<dyn Read> = Box::new(Counted(raw, read_in.clone()));
+    let mut raw: Box<dyn Read> = Box::new(Counted(raw, read_in.clone()));
+    if !codings.is_empty() {
+        // HTTP lists content codings in the order applied. Undo them before
+        // interpreting the payload, which can itself be a compressed archive.
+        // Even an empty coded body has framing at each layer.
+        let left = Rc::new(Cell::new(layers_budget(limits.max_size.saturating_add(32))));
+        for coding in codings.iter().rev() {
+            raw = Box::new(Charged {
+                inner: raw,
+                left: left.clone(),
+            });
+            raw = match coding.as_str() {
+                "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(raw)),
+                "deflate" => Box::new(flate2::read::ZlibDecoder::new(raw)),
+                "br" => Box::new(brotli_decompressor::Decompressor::new(raw, 4096)),
+                "zstd" => Box::new(
+                    zstd::stream::read::Decoder::new(raw)
+                        .map_err(|e| Error::io("cannot start the zstd decoder", e))?,
+                ),
+                other => return Err(bad(url, &format!("unsupported Content-Encoding '{other}'"))),
+            };
+        }
+    }
     let read = if decompress {
         decompress_reader(raw, layers_budget(limits.max_size))?
     } else {
@@ -187,7 +211,7 @@ pub fn get_or_read(
     offline(url)?;
     let file = File::open(sys::path_from_internal(path.as_bytes()))
         .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
-    read(url, Box::new(file), limits, decompress, sink)
+    read(url, Box::new(file), limits, decompress, &[], sink)
 }
 
 /// [`get`] with a POST of `body`, for an API such as Git LFS's batch API.
@@ -209,18 +233,9 @@ fn request(
     decompress: bool,
     sink: &mut dyn Write,
 ) -> Result<u64> {
-    let undo = |r: Box<dyn Read>| {
-        if decompress {
-            decompress_reader(r, layers_budget(limits.max_size))
-        } else {
-            Ok(r)
-        }
-    };
     offline(url)?;
-    let read_in = Rc::new(Cell::new(0));
-    client::fetch(url, headers, body, limits, |queued| {
-        undo(Box::new(Counted(queued, read_in.clone())))
-            .and_then(|r| drain(url, r, &read_in, limits, sink))
+    client::fetch(url, headers, body, limits, |queued, codings| {
+        read(url, queued, limits, decompress, codings, sink)
     })
 }
 
@@ -581,6 +596,29 @@ mod tests {
             connect: None,
             stall: None,
             max_size: 1 << 30,
+        }
+    }
+
+    #[test]
+    fn compressed_narinfo_on_kept_and_redirected_connections() {
+        let text = b"x";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(text).unwrap();
+        let body = zstd::encode_all(&gzip.finish().unwrap()[..], 1).unwrap();
+        let (port, _) = serve(4, move |head, c| {
+            if head.starts_with("get /redirect ") {
+                respond(c, "302 Found", "Location: /info\r\n", b"");
+            } else {
+                respond(c, "200 OK", "Content-Encoding: gzip, zstd\r\n", &body);
+            }
+        });
+        for (path, max_size) in [("info", limits().max_size), ("redirect", 1)] {
+            let url = format!("http://127.0.0.1:{port}/{path}");
+            let limits = Limits {
+                max_size,
+                ..limits()
+            };
+            assert_eq!(Kept::new().unwrap().get(&url, limits).unwrap(), text);
         }
     }
 

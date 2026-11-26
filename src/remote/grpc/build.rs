@@ -333,7 +333,7 @@ impl Job {
         input_srcs: BTreeSet<StorePath>,
         limits: Limits,
     ) -> Job {
-        let features = required_system_features(&drv);
+        let features = drv.declared_system_features().into_iter().collect();
         Job {
             drv_path,
             drv,
@@ -378,32 +378,6 @@ impl Job {
             system: self.drv.platform.clone(),
         }
     }
-}
-
-/// nix-compat.hh:`requiredSystemFeatures`, which the balancer routes on: the
-/// `requiredSystemFeatures` environment variable, space separated, or the same
-/// key of `__json` when the derivation has structured attributes.
-fn required_system_features(drv: &Derivation) -> Vec<String> {
-    if let Some(json) = &drv.structured_attrs {
-        let mut out: BTreeSet<String> = BTreeSet::new();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
-            && let Some(list) = v.get("requiredSystemFeatures").and_then(|l| l.as_array())
-        {
-            for f in list {
-                if let Some(s) = f.as_str() {
-                    out.insert(s.to_string());
-                }
-            }
-        }
-        return out.into_iter().collect();
-    }
-    drv.env_str("requiredSystemFeatures")
-        .unwrap_or("")
-        .split_whitespace()
-        .map(str::to_string)
-        .collect::<BTreeSet<String>>()
-        .into_iter()
-        .collect()
 }
 
 /// One derivation through the scheduler (build.cc:`Run::resultFor`): a `Want`,
@@ -895,6 +869,7 @@ mod tests {
     use super::*;
 
     use crate::build::backend::tests::every_timing;
+    use crate::store::drv::DerivationOutput;
 
     #[test]
     fn upload_chunks_always_request_signature_checks() {
@@ -1053,17 +1028,20 @@ mod tests {
 
     #[test]
     fn required_features_come_from_the_env_or_structured_attrs() {
-        let mut drv = Derivation {
-            name: "x".into(),
-            platform: "x86_64-linux".into(),
-            ..Derivation::default()
+        let mut drv = Derivation::default();
+        drv.outputs.insert("out".into(), DerivationOutput::Deferred);
+        let want_features = |drv| {
+            let path = StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x.drv").unwrap();
+            Job::new(path, drv, BTreeSet::new(), Limits::default())
+                .want()
+                .required_features
         };
-        drv.env_set("requiredSystemFeatures", "kvm big-parallel".into());
-        assert_eq!(
-            required_system_features(&drv),
-            vec!["big-parallel".to_string(), "kvm".to_string()]
-        );
-        drv.structured_attrs = Some(r#"{"requiredSystemFeatures":["kvm"]}"#.into());
-        assert_eq!(required_system_features(&drv), vec!["kvm".to_string()]);
+        drv.env_set("requiredSystemFeatures", b"kvm big-parallel kvm".to_vec());
+        assert_eq!(want_features(drv.clone()), ["big-parallel", "kvm"]);
+        let json = r#"{"requiredSystemFeatures":["kvm"]}"#;
+        drv.structured_attrs = Some(json.into());
+        assert_eq!(want_features(drv.clone()), ["kvm"]);
+        drv.structured_attrs = Some("{".into());
+        assert!(want_features(drv).is_empty());
     }
 }

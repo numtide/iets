@@ -833,14 +833,13 @@ fn path(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     )?;
     let mut ctx = Vec::new();
     let mut p: Option<Vec<u8>> = None;
-    let mut name: Vec<u8> = Vec::new();
+    let mut name: &[u8] = &[];
     let mut filter: Option<Word> = None;
     let mut method = IngestionMethod::Recursive;
     let mut expected: Option<Hash> = None;
     for attr in a.iter() {
-        let n: Vec<u8> = ev.interner.name(attr.sym).to_vec();
         let v = attr.cell.get();
-        match n.as_slice() {
+        match ev.interner.name(attr.sym) {
             b"path" => {
                 p = Some(coerce_to_path(
                     ev,
@@ -851,13 +850,11 @@ fn path(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
                 )?)
             }
             b"name" => {
-                name = ev
-                    .force_string_no_ctx(
-                        v,
-                        attr.pos,
-                        "while evaluating the `name` attribute passed to builtins.path",
-                    )?
-                    .to_vec()
+                name = ev.force_string_no_ctx(
+                    v,
+                    attr.pos,
+                    "while evaluating the `name` attribute passed to builtins.path",
+                )?
             }
             b"filter" => {
                 filter = Some(ev.force_function(
@@ -885,11 +882,11 @@ fn path(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
                 )?;
                 expected = Some(parse_sha256_allow_empty(s, attr.pos)?);
             }
-            _ => bail!(
+            name => bail!(
                 ErrorKind::Eval,
                 attr.pos,
                 "unsupported argument '{}' to 'builtins.path'",
-                lossy(&n)
+                lossy(name)
             ),
         }
     }
@@ -901,10 +898,10 @@ fn path(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         );
     };
     if name.is_empty() {
-        name = base_name(&p).to_vec();
+        name = base_name(&p);
     }
     let in_store = in_store(ev, &p, &ctx);
-    let sp = add_path(ev, pos, &name, &p, filter, method, expected, in_store)?;
+    let sp = add_path(ev, pos, name, &p, filter, method, expected, in_store)?;
     Ok(store_path_string(ev, &sp))
 }
 

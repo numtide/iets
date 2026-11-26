@@ -96,20 +96,12 @@ impl Clone for LazyStore {
 }
 
 impl LazyStore {
-    fn get(&mut self) -> Option<&mut Connection> {
+    fn get(&mut self, session: &Session) -> Option<&mut Connection> {
         if !self.tried {
             self.tried = true;
-            let session = Session::current();
-            match Transport::parse(&nix_conf(&session).store()) {
-                Some(Transport::Grpc(_)) | None => {}
-                // a missing daemon is not an error: the input store holds the
-                // fetched inputs and evaluation writes no store
-                Some(t) => {
-                    if let Ok(c) = Connection::open(&t, &mut |_| {}) {
-                        self.conn = Some(c);
-                    }
-                }
-            }
+            // A missing daemon is not an error: the input store holds the
+            // fetched inputs and evaluation writes no store.
+            self.conn = eval_store(session).and_then(|t| Connection::open(&t, &mut |_| {}).ok());
         }
         self.conn.as_mut()
     }
@@ -128,14 +120,19 @@ struct Validity {
 impl Validity {
     /// `None` when there is no local daemon to ask. The first query also asks
     /// about `more`, which the evaluation is likely to ask about next.
-    fn registered(&mut self, path: &str, more: impl FnOnce() -> Vec<String>) -> Option<bool> {
+    fn registered(
+        &mut self,
+        session: &Session,
+        path: &str,
+        more: impl FnOnce() -> Vec<String>,
+    ) -> Option<bool> {
         if self.valid.contains(path) {
             return Some(true);
         }
         let mut ask = vec![path.to_string()];
         if !self.tried {
             self.tried = true;
-            self.conn = local_daemon();
+            self.conn = local_daemon(session);
             if self.conn.is_some() {
                 ask.extend(more());
             }
@@ -153,8 +150,12 @@ impl Validity {
     }
 }
 
-pub(crate) fn local_daemon() -> Option<Connection> {
-    match Transport::parse(&nix_conf(&Session::current()).store())? {
+fn eval_store(session: &Session) -> Option<Transport> {
+    Transport::parse_worker(&nix_conf(session).store(), &session.env).ok()?
+}
+
+pub(crate) fn local_daemon(session: &Session) -> Option<Connection> {
+    match eval_store(session)? {
         t @ Transport::Unix(_) => Connection::open(&t, &mut |_| {}).ok(),
         _ => None,
     }
@@ -188,7 +189,7 @@ pub fn valid_in_store(
         validity
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .registered(&full, locked)
+            .registered(ev.session(), &full, locked)
     };
     match valid_kind(Path::new(&full), method, hash, registered) {
         Some(kind) => {
@@ -240,7 +241,8 @@ fn hashes_to(path: &Path, method: IngestionMethod, hash: &Hash) -> bool {
 /// `Store::substitutePaths` and answers with the paths it now has
 /// (daemon.cc:performOp, >= 1.27). Nothing is evaluated or built.
 fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
-    let Some(conn) = ev.store.get() else {
+    let session = ev.session().clone();
+    let Some(conn) = ev.store.get(&session) else {
         return false;
     };
     // the daemon's own lines, such as a substituter it retries
@@ -554,11 +556,9 @@ fn adopt_file(ev: &mut Evaluator, sp: &StorePath, entry: &StoredTree, flat: Hash
 
 /// nix.conf, read once: `store` for the eval store and `access-tokens` for the
 /// forge headers. The file cannot change under a running evaluation.
-pub fn nix_conf(s: &Arc<Session>) -> &config::Config {
-    s.nix_conf.get_or_init(|| {
-        let _entered = s.enter();
-        config::Config::read(&[]).unwrap_or_else(|_| config::Config::empty())
-    })
+pub fn nix_conf(s: &Session) -> &config::Config {
+    s.nix_conf
+        .get_or_init(|| config::Config::read_in(&s.env, &[]).unwrap_or_default())
 }
 
 /// The types whose fetch is "download one archive and unpack it"
@@ -785,7 +785,14 @@ mod tests {
     fn nix_conf_reads_its_own_sessions_environment() {
         let ambient = Session::with_env(Env::isolated());
         let _entered = ambient.enter();
-        let owner = Session::with_env(Env::isolated().with([("NIX_CONFIG", "cores = 3")]));
+        let owner = Session::with_env(Env::isolated().with([
+            ("NIX_CONFIG", "cores = 3"),
+            ("NIX_DAEMON_SOCKET_PATH", "/owner/socket"),
+        ]));
+        assert_eq!(
+            eval_store(&owner),
+            Some(Transport::Unix("/owner/socket".into()))
+        );
         assert_eq!(nix_conf(&owner).str("cores"), Some("3"));
         assert!(Arc::ptr_eq(&Session::current(), &ambient));
     }

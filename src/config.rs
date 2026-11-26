@@ -166,9 +166,6 @@ const CLIENT: &[&str] = &[
     "use-registries",
     "warn-dirty",
 ];
-fn env(name: &str) -> Option<String> {
-    Session::current().env.non_empty(name)
-}
 
 /// `$XDG_CONFIG_HOME` or `~/.config` (unix/xdg-dirs.cc:getConfigHome).
 pub fn config_home() -> PathBuf {
@@ -184,8 +181,8 @@ pub fn config_home_in(e: &Env) -> PathBuf {
 }
 
 /// `$XDG_CONFIG_DIRS` or `/etc/xdg` (unix/xdg-dirs.cc:getConfigDirs).
-fn config_dirs() -> Vec<PathBuf> {
-    env("XDG_CONFIG_DIRS")
+fn config_dirs(env: &Env) -> Vec<PathBuf> {
+    env.non_empty("XDG_CONFIG_DIRS")
         .unwrap_or_else(|| "/etc/xdg".into())
         .split(':')
         .filter(|s| !s.is_empty())
@@ -195,7 +192,12 @@ fn config_dirs() -> Vec<PathBuf> {
 
 /// `$NIX_CONF_DIR` or the compiled-in `/etc/nix` (globals.cc:nixConfDir).
 pub fn conf_dir() -> PathBuf {
-    env("NIX_CONF_DIR").map_or_else(|| PathBuf::from("/etc/nix"), PathBuf::from)
+    conf_dir_in(&Session::current().env)
+}
+
+fn conf_dir_in(env: &Env) -> PathBuf {
+    env.non_empty("NIX_CONF_DIR")
+        .map_or_else(|| PathBuf::from("/etc/nix"), PathBuf::from)
 }
 
 /// globals.cc:nixUserConfFiles. `$NIX_USER_CONF_FILES` replaces the XDG list
@@ -204,17 +206,21 @@ pub fn conf_dir() -> PathBuf {
 /// A set but empty variable is an empty list, so no user file is read at all:
 /// globals.cc:167 tests `has_value()`, not the text.
 pub fn user_conf_files() -> Vec<PathBuf> {
-    if let Some(files) = Session::current().env.var_os("NIX_USER_CONF_FILES") {
+    user_conf_files_in(&Session::current().env)
+}
+
+fn user_conf_files_in(env: &Env) -> Vec<PathBuf> {
+    if let Some(files) = env.var_os("NIX_USER_CONF_FILES") {
         return split_paths(&files)
             .filter(|p| !p.as_os_str().is_empty())
             .collect();
     }
     let mut files = vec![
-        env("NIX_CONFIG_HOME")
-            .map_or_else(|| config_home().join("nix"), PathBuf::from)
+        env.non_empty("NIX_CONFIG_HOME")
+            .map_or_else(|| config_home_in(env).join("nix"), PathBuf::from)
             .join("nix.conf"),
     ];
-    files.extend(config_dirs().into_iter().map(|d| d.join("nix/nix.conf")));
+    files.extend(config_dirs(env).into_iter().map(|d| d.join("nix/nix.conf")));
     files
 }
 
@@ -463,14 +469,18 @@ impl Config {
     /// `load` without the warnings, for a reader inside iets: the log sink,
     /// the fetcher.
     pub fn read(overrides: &[(String, String)]) -> Result<Config> {
+        Self::read_in(&Session::current().env, overrides)
+    }
+
+    pub(crate) fn read_in(env: &Env, overrides: &[(String, String)]) -> Result<Config> {
         let mut c = Config::empty();
-        c.apply_file_if_present(&conf_dir().join("nix.conf"))?;
+        c.apply_file_if_present(&conf_dir_in(env).join("nix.conf"), env)?;
         c.overridden.clear();
-        for f in user_conf_files().iter().rev() {
-            c.apply_file_if_present(f)?;
+        for f in user_conf_files_in(env).iter().rev() {
+            c.apply_file_if_present(f, env)?;
         }
-        if let Some(text) = env("NIX_CONFIG") {
-            c.apply(&text, Path::new("NIX_CONFIG"))?;
+        if let Some(text) = env.non_empty("NIX_CONFIG") {
+            c.apply_in(&text, Path::new("NIX_CONFIG"), env)?;
         }
         for (name, value) in overrides {
             check_value(canonical(name), value)?;
@@ -480,19 +490,23 @@ impl Config {
     }
 
     /// An unreadable file is skipped, as loadConfFile's `catch (SystemError &)` does.
-    fn apply_file_if_present(&mut self, path: &Path) -> Result<()> {
+    fn apply_file_if_present(&mut self, path: &Path, env: &Env) -> Result<()> {
         match fs::read_to_string(path) {
-            Ok(text) => self.apply(&text, path),
+            Ok(text) => self.apply_in(&text, path, env),
             Err(_) => Ok(()),
         }
     }
 
     pub fn apply(&mut self, text: &str, origin: &Path) -> Result<()> {
+        self.apply_in(text, origin, &Session::current().env)
+    }
+
+    fn apply_in(&mut self, text: &str, origin: &Path, env: &Env) -> Result<()> {
+        let has_nix_path = env.var_os("NIX_PATH").is_some();
         for e in parse(text, origin)? {
             // NIX_PATH, even an empty one, must override the setting
             // (configuration.cc:192)
-            let set = Session::current().env.var_os("NIX_PATH").is_some();
-            if (e.name == "nix-path" || e.name == "extra-nix-path") && set {
+            if has_nix_path && (e.name == "nix-path" || e.name == "extra-nix-path") {
                 continue;
             }
             check_value(canonical(&e.name), &e.value)?;

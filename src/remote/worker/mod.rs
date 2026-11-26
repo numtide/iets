@@ -19,6 +19,7 @@ use super::event::{Event, Failed, Log, Phase, Started, Stopped};
 use super::grpc::GrpcConfig;
 use super::grpc::drvwire::PathInfo;
 use crate::config::{self, Config};
+use crate::env::Env;
 use crate::error::{self, Error, Result};
 use crate::log::{
     self, ACT_BUILD, ACT_BUILDS, LVL_INFO, RES_BUILD_LOG_LINE, RES_PROGRESS, RES_SET_PHASE,
@@ -149,7 +150,11 @@ const DEFAULT_SOCKET: &str = "/nix/var/nix/daemon-socket/socket";
 /// The local daemon's socket, as uds-remote-store.cc:getDaemonSocketPath
 /// picks it.
 pub fn default_socket() -> PathBuf {
-    let var = |n| env::var_os(n).filter(|v| !v.is_empty());
+    default_socket_in(&Env::process())
+}
+
+fn default_socket_in(env: &Env) -> PathBuf {
+    let var = |n| env.var_os(n).filter(|v| !v.is_empty());
     if let Some(p) = var("NIX_DAEMON_SOCKET_PATH") {
         return PathBuf::from(p);
     }
@@ -195,7 +200,7 @@ impl Transport {
         if let Some(cfg) = GrpcConfig::parse(url, default_system) {
             return Ok(Some(Transport::Grpc(Box::new(cfg?))));
         }
-        Transport::parse_worker(url)
+        Transport::parse_worker(url, &Env::process())
     }
 
     /// The store as Nix's getHumanReadableURI names it, for the log.
@@ -213,11 +218,11 @@ impl Transport {
         }
     }
 
-    fn parse_worker(url: &str) -> Result<Option<Transport>> {
+    pub(crate) fn parse_worker(url: &str, env: &Env) -> Result<Option<Transport>> {
         // `auto` is nix.conf's default `store`, which iets answers with the
         // daemon: it has no local store of its own (docs/reference/settings.md).
         if url == "daemon" || url == "unix://" || url == "auto" || url.is_empty() {
-            return Ok(Some(Transport::Unix(default_socket())));
+            return Ok(Some(Transport::Unix(default_socket_in(env))));
         }
         if let Some(path) = url.strip_prefix("unix://") {
             return Ok(Some(Transport::Unix(PathBuf::from(path))));

@@ -19,30 +19,78 @@ use e2e::classic::{Both, Checks, Farm, NAMES, show};
 use e2e::{Store, ok, resolved, stderr, stdout};
 use sha2::{Digest, Sha256};
 
-/// `nix __dump-cli` is what Nix makes its manual of. The Nix on `PATH` is the
-/// pinned one in the flake check only, and the settings are those of Linux:
-/// macOS has `darwin-log-sandbox-violations` more.
+/// `UPDATE_NIX_SETTINGS=1` writes `src/config/nix.rs`, on Linux. The Nix on
+/// `PATH` is the pinned one in the flake check only, so this runs there.
 #[test]
-fn a_setting_flag_of_nix_is_one_here() {
-    if env::var_os("IETS_TEST_E2E").is_none() || !cfg!(target_os = "linux") {
+fn the_settings_are_those_of_nix() {
+    let update = env::var_os("UPDATE_NIX_SETTINGS").is_some();
+    if !update && env::var_os("IETS_TEST_E2E").is_none() {
         return;
     }
-    let out = Command::new(resolved("nix"))
-        .arg("__dump-cli")
-        .output()
-        .unwrap();
-    let cli: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let flags = cli["args"]["flags"].as_object().unwrap();
+    let nix = |args: &[&str]| -> serde_json::Value {
+        // the sandbox of the flake check has no nix.conf to enable it
+        let out = Command::new(resolved("nix"))
+            .args(args)
+            .env("NIX_CONFIG", "extra-experimental-features = nix-command")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "nix {args:?}: {}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let flags = nix(&["__dump-cli"])["args"]["flags"].take();
+    let mut rows = Vec::new();
+    for (name, s) in nix(&["config", "show", "--json"]).as_object().unwrap() {
+        let default = &s["defaultValue"];
+        let kind = if default.is_boolean() {
+            "Bool"
+        } else if default.is_number() {
+            "Int"
+        } else if flags.get(format!("extra-{name}")).is_some() {
+            "List"
+        } else {
+            "Other"
+        };
+        let aliases = s["aliases"].as_array().unwrap().iter();
+        let mut aliases: Vec<String> = aliases.map(|a| a.to_string()).collect();
+        aliases.sort();
+        let aliases = aliases.join(", ");
+        rows.push(format!("    (\"{name}\", Kind::{kind}, &[{aliases}]),\n"));
+    }
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config/nix.rs");
+    if cfg!(target_os = "macos") {
+        // Nix has no setting of the Linux sandbox here
+        let have = fs::read_to_string(&file).unwrap();
+        for row in rows {
+            assert!(have.contains(&row), "{row}");
+        }
+    } else {
+        // the one setting that Nix has on macOS only
+        rows.push("    (\"darwin-log-sandbox-violations\", Kind::Bool, &[]),\n".into());
+        rows.sort();
+        let want = format!(
+            "//! The settings of Nix on Linux and on macOS, each with its old names.\n\
+             //! tests/classic_fallback.rs writes this file.\n\n\
+             use super::Kind;\n\n\
+             #[rustfmt::skip]\n\
+             pub const SETTINGS: &[(&str, Kind, &[&str])] = &[\n{}];\n",
+            rows.concat()
+        );
+        if update {
+            fs::write(&file, &want).unwrap();
+        }
+        let have = fs::read_to_string(&file).unwrap();
+        assert!(have == want, "{} is not what Nix says", file.display());
+    }
+
     let settings = flags
+        .as_object()
+        .unwrap()
         .iter()
         .filter(|(_, f)| f["category"] == "Options to override configuration settings");
-    let mut seen = 0;
     for (name, f) in settings {
         let ours = iets::config::flag(&format!("--{name}")).map(|(_, v)| u64::from(v.is_none()));
         assert_eq!(ours, f["arity"].as_u64(), "--{name}");
-        seen += 1;
     }
-    assert!(seen > 100, "{seen}");
 }
 
 #[test]

@@ -16,100 +16,33 @@ use crate::error::{Error, Result};
 use crate::session::Session;
 use crate::{ignored, log};
 
-/// Settings whose values are whitespace-separated lists, so `extra-<name>`
-/// appends instead of replacing (configuration.cc:Config::set, `isAppendable`).
-const APPENDABLE: &[&str] = &[
-    "access-tokens",
-    "allowed-uris",
-    "allowed-users",
-    "build-hook",
-    "experimental-features",
-    "extra-platforms",
-    "hashed-mirrors",
-    "ignored-acls",
-    "impure-env",
-    "nix-path",
-    "sandbox-paths",
-    "secret-key-files",
-    "substituters",
-    "system-features",
-    "trusted-public-keys",
-    "trusted-substituters",
-    "trusted-users",
-];
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Bool,
+    Int,
+    /// Whitespace-separated, so `extra-<name>` appends instead of replacing
+    /// (configuration.cc:Config::set, `isAppendable`).
+    List,
+    Other,
+}
 
-/// Every setting of Nix 2.34.8 (`nix config show`); `ALIASES` has the old
-/// names. A name in neither list is `warning: unknown setting 'NAME'`, the
-/// text Nix gives (configuration.cc:warnUnknownSettings).
-const KNOWN: &str = "\
-    abort-on-warn accept-flake-config access-tokens allow-dirty \
-    allow-dirty-locks allow-import-from-derivation allow-new-privileges \
-    allow-symlinked-store allow-unsafe-native-code-during-evaluation \
-    allowed-impure-host-deps allowed-uris allowed-users \
-    always-allow-substitutes auto-allocate-uids auto-optimise-store \
-    bash-prompt bash-prompt-prefix bash-prompt-suffix build-dir build-hook \
-    build-poll-interval build-users-group builders builders-use-substitutes \
-    commit-lock-file-summary compress-build-log connect-timeout cores \
-    debugger-on-trace debugger-on-warn diff-hook download-attempts \
-    download-buffer-size download-speed \
-    eval-attrset-update-layer-rhs-threshold eval-cache eval-profile-file \
-    eval-profiler eval-profiler-frequency eval-system experimental-features \
-    external-builders extra-platforms fallback filter-syscalls \
-    flake-registry fsync-metadata fsync-store-paths gc-reserved-space \
-    hashed-mirrors http-connections http2 id-count ignore-try ignored-acls \
-    impersonate-linux-26 impure-env json-log-path keep-build-log \
-    keep-derivations keep-env-derivations keep-failed keep-going \
-    keep-outputs lint-absolute-path-literals lint-short-path-literals \
-    lint-url-literals log-lines max-build-log-size max-call-depth max-free \
-    max-jobs max-silent-time max-substitution-jobs min-free \
-    min-free-check-interval nar-buffer-size narinfo-cache-meta-ttl \
-    narinfo-cache-negative-ttl narinfo-cache-positive-ttl netrc-file \
-    nix-path nix-shell-always-looks-for-shell-nix \
-    nix-shell-shebang-arguments-relative-to-script plugin-files \
-    post-build-hook pre-build-hook preallocate-contents print-missing \
-    pure-eval require-drop-supplementary-groups require-sigs restrict-eval \
-    run-diff-hook sandbox sandbox-build-dir sandbox-dev-shm-size \
-    sandbox-fallback sandbox-paths secret-key-files show-trace \
-    ssl-cert-file stalled-download-timeout start-id store substitute \
-    substituters sync-before-registering system system-features tarball-ttl \
-    timeout trace-function-calls trace-import-from-derivation trace-verbose \
-    trust-tarballs-from-git-forges trusted-public-keys trusted-substituters \
-    trusted-users upgrade-nix-store-path-url use-case-hack use-cgroups \
-    use-registries use-sqlite-wal use-xdg-base-directories \
-    user-agent-suffix warn-dirty warn-large-path-threshold \
-    warn-short-path-literals";
+mod nix;
 
-/// The Boolean settings of Nix 2.34.8 (`nix config show`). Nix parses a value
-/// the moment it is set, so a spelling outside `parse_bool` stops the run.
-const BOOLS: &str = "\
-    abort-on-warn accept-flake-config allow-dirty allow-dirty-locks \
-    allow-import-from-derivation allow-new-privileges allow-symlinked-store \
-    allow-unsafe-native-code-during-evaluation always-allow-substitutes \
-    auto-allocate-uids auto-optimise-store builders-use-substitutes \
-    compress-build-log debugger-on-trace debugger-on-warn eval-cache fallback \
-    filter-syscalls fsync-metadata fsync-store-paths http2 ignore-try \
-    impersonate-linux-26 keep-build-log keep-derivations keep-env-derivations \
-    keep-failed keep-going keep-outputs nix-shell-always-looks-for-shell-nix \
-    nix-shell-shebang-arguments-relative-to-script preallocate-contents \
-    print-missing pure-eval require-drop-supplementary-groups require-sigs \
-    restrict-eval run-diff-hook sandbox-fallback show-trace substitute \
-    sync-before-registering trace-function-calls \
-    trace-import-from-derivation trace-verbose trust-tarballs-from-git-forges \
-    use-case-hack use-cgroups use-registries use-sqlite-wal \
-    use-xdg-base-directories warn-dirty warn-short-path-literals";
+/// `sandbox` also takes `relaxed`, and `max-jobs` `auto`: `check_value` has
+/// these two.
+fn kind(name: &str) -> Option<Kind> {
+    match name {
+        "sandbox" | "max-jobs" => Some(Kind::Other),
+        _ => nix::SETTINGS
+            .binary_search_by_key(&name, |s| s.0)
+            .ok()
+            .map(|i| nix::SETTINGS[i].1),
+    }
+}
 
-/// The integer settings. `sandbox` and `max-jobs` take a word beside their
-/// type and are checked on their own.
-const INTS: &str = "\
-    build-poll-interval connect-timeout cores download-attempts \
-    download-buffer-size download-speed \
-    eval-attrset-update-layer-rhs-threshold eval-profiler-frequency \
-    gc-reserved-space http-connections id-count log-lines max-build-log-size \
-    max-call-depth max-free max-silent-time max-substitution-jobs min-free \
-    min-free-check-interval nar-buffer-size narinfo-cache-meta-ttl \
-    narinfo-cache-negative-ttl narinfo-cache-positive-ttl \
-    stalled-download-timeout start-id tarball-ttl timeout \
-    warn-large-path-threshold";
+fn is(name: &str, k: Kind) -> bool {
+    kind(name) == Some(k)
+}
 
 /// The integer settings Nix keeps in a 32-bit field, so a larger value is an
 /// error there. `max-jobs` is one of them.
@@ -118,32 +51,6 @@ const NARROW: &str = "\
     eval-attrset-update-layer-rhs-threshold eval-profiler-frequency id-count \
     max-call-depth max-jobs max-substitution-jobs narinfo-cache-meta-ttl \
     narinfo-cache-negative-ttl narinfo-cache-positive-ttl start-id tarball-ttl";
-
-const ALIASES: &[(&str, &str)] = &[
-    ("binary-cache-public-keys", "trusted-public-keys"),
-    ("binary-caches", "substituters"),
-    ("binary-caches-parallel-connections", "http-connections"),
-    ("build-chroot-dirs", "sandbox-paths"),
-    ("build-compress-log", "compress-build-log"),
-    ("build-cores", "cores"),
-    ("build-fallback", "fallback"),
-    ("build-impersonate-linux-26", "impersonate-linux-26"),
-    ("build-keep-log", "keep-build-log"),
-    ("build-max-jobs", "max-jobs"),
-    ("build-max-log-size", "max-build-log-size"),
-    ("build-max-silent-time", "max-silent-time"),
-    ("build-sandbox-paths", "sandbox-paths"),
-    ("build-timeout", "timeout"),
-    ("build-use-chroot", "sandbox"),
-    ("build-use-sandbox", "sandbox"),
-    ("build-use-substitutes", "substitute"),
-    ("commit-lockfile-summary", "commit-lock-file-summary"),
-    ("env-keep-derivations", "keep-env-derivations"),
-    ("gc-keep-derivations", "keep-derivations"),
-    ("gc-keep-outputs", "keep-outputs"),
-    ("substitution-max-jobs", "max-substitution-jobs"),
-    ("trusted-binary-caches", "trusted-substituters"),
-];
 
 const NO_DEBUGGER: &str = "iets has no debugger";
 const NO_RESTRICTED_MODE: &str =
@@ -354,7 +261,7 @@ fn in_list(list: &str, name: &str) -> bool {
 /// The value check Nix does when a setting is set. `name` is canonical.
 pub fn check_value(name: &str, v: &str) -> Result<()> {
     let bad = |text: String| Err(Error::Config(text));
-    if in_list(BOOLS, name) {
+    if is(name, Kind::Bool) {
         return parse_bool(name, v).map(|_| ());
     }
     match name {
@@ -365,7 +272,7 @@ pub fn check_value(name: &str, v: &str) -> Result<()> {
         "max-jobs" if v != "auto" && parse_int(v, true).is_none() => {
             bad("configuration setting 'max-jobs' should be 'auto' or an integer".into())
         }
-        n if in_list(INTS, n) && parse_int(v, in_list(NARROW, n)).is_none() => {
+        n if is(n, Kind::Int) && parse_int(v, in_list(NARROW, n)).is_none() => {
             bad(format!("setting '{name}' has invalid value '{v}'"))
         }
         _ => Ok(()),
@@ -377,11 +284,8 @@ pub fn check_value(name: &str, v: &str) -> Result<()> {
 /// (config-impl.hh:convertToArg).
 pub fn flag(s: &str) -> Option<(&str, Option<&'static str>)> {
     let name = s.strip_prefix("--")?;
-    let is_bool = |n| in_list(BOOLS, n);
-    let is_list = |n: &str| {
-        n.strip_prefix("extra-")
-            .is_some_and(|b| APPENDABLE.contains(&b))
-    };
+    let is_bool = |n| is(n, Kind::Bool);
+    let is_list = |n: &str| n.strip_prefix("extra-").is_some_and(|b| is(b, Kind::List));
     match name.strip_prefix("no-") {
         // globals.cc: `sandbox` is no Boolean, and makes its own three flags
         _ if name == "sandbox" => Some((name, Some("true"))),
@@ -405,15 +309,15 @@ pub struct Config {
 }
 
 fn is_known(name: &str) -> bool {
-    KNOWN.split_ascii_whitespace().any(|k| k == name)
+    kind(name).is_some()
 }
 
 /// `name` as the setting it sets: no `extra-`, no alias.
 fn canonical(name: &str) -> &str {
-    let alias = |n| ALIASES.iter().find(|(a, _)| *a == n).map(|(_, to)| *to);
+    let alias = |n: &str| nix::SETTINGS.iter().find(|s| s.2.contains(&n)).map(|s| s.0);
     let bare = name.strip_prefix("extra-").map(|b| alias(b).unwrap_or(b));
     match bare {
-        Some(b) if APPENDABLE.contains(&b) => b,
+        Some(b) if is(b, Kind::List) => b,
         _ => alias(name).unwrap_or(name),
     }
 }
@@ -548,6 +452,7 @@ impl Config {
     }
 
     /// `load` for iets's own commands but `iets build`, which send a daemon no
+    /// kay
     /// settings.
     pub fn load_native(overrides: &[(String, String)]) -> Result<Config> {
         let why = "this command sends a daemon no settings; classic mode does";
@@ -602,7 +507,7 @@ impl Config {
     pub fn set(&mut self, name: &str, value: &str) {
         let to = canonical(name);
         self.overridden.insert(to.to_string());
-        if name.starts_with("extra-") && APPENDABLE.contains(&to) {
+        if name.starts_with("extra-") && is(to, Kind::List) {
             if !self.settings.contains_key(to) {
                 self.extra_only.insert(to.to_string());
             }
@@ -874,26 +779,15 @@ mod tests {
 
     #[test]
     fn the_setting_tables_name_nix_settings() {
-        let aliased = ALIASES.iter().map(|(_, to)| *to);
+        // `kind` searches it
+        assert!(nix::SETTINGS.is_sorted_by_key(|s| s.0));
         let ignored = UNIMPLEMENTED.iter().map(|(n, _, _)| *n);
-        let all = aliased.chain(ignored).chain(CLIENT.iter().copied());
-        for name in all.chain(APPENDABLE.iter().copied()) {
+        for name in ignored.chain(CLIENT.iter().copied()) {
             assert!(is_known(name), "{name}");
         }
-        assert!(ALIASES.iter().all(|(a, _)| !is_known(a)));
         assert!(CLIENT.iter().all(|n| unimplemented(n).is_none()));
-        let typed = BOOLS
-            .split_ascii_whitespace()
-            .chain(INTS.split_ascii_whitespace());
-        for name in typed.chain(NARROW.split_ascii_whitespace()) {
-            assert!(is_known(name), "{name}");
-            assert!(!APPENDABLE.contains(&name), "{name}");
-        }
-        for name in BOOLS.split_ascii_whitespace() {
-            assert!(!in_list(INTS, name), "{name}");
-        }
         for name in NARROW.split_ascii_whitespace() {
-            assert!(in_list(INTS, name) || name == "max-jobs", "{name}");
+            assert!(is(name, Kind::Int) || name == "max-jobs", "{name}");
         }
     }
 

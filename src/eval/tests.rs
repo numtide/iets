@@ -868,3 +868,24 @@ fn selection_stops_before_later_names_and_forces_the_final_value(
     let src = r#"builtins.tryEval ((throw "subject").${builtins.abort "name"})"#;
     assert_eq!(eval_str(src), "{ success = false; value = false; }");
 }
+
+#[cfg(feature = "stats2")]
+#[test]
+fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
+    let mut ev = Evaluator::new();
+    let f = ev.eval_string("_: _: true", b"/").unwrap();
+    let src = ev.eval_string("{ a = true; b = true; }", b"/").unwrap();
+    let src = src.as_attrs().unwrap();
+
+    ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated);
+    let mapped = ev.arena.mk_map_attrs(f, src);
+    let entries = mapped.as_attrs().unwrap().attrs_raw();
+    ev.force(entries[1].cell.get()).unwrap();
+    let (_, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);
+    assert_eq!(escapes, 0);
+
+    ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated);
+    ev.force(entries[0].cell.get()).unwrap();
+    let (_, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);
+    assert_eq!(escapes, 1);
+}

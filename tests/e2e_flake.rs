@@ -1399,10 +1399,7 @@ fn online_inputs() {
     });
 }
 
-/// iets has no git fetcher, so a missing git input goes to Nix, and without
-/// Nix it is an error that names the input. Nix locks in a store of its own,
-/// so the daemon's store has the input only once iets's Nix fetches it: the
-/// case without Nix runs first.
+/// Nix locks the Git input in a separate store, so iets must fetch it itself.
 #[test]
 fn a_git_input_needs_no_nix() {
     let Some(mut f) = F::new().map(F::local_inputs) else {
@@ -1457,6 +1454,18 @@ fn a_git_input_needs_no_nix() {
                 .is_some_and(|h| h.contains("export-subst")),
         || format!("git mismatch: {rec}"),
     );
+
+    write(
+        &Path::new(&lib).join("flake.nix"),
+        r#"{ outputs = { self }: { greeting = "dirty"; }; }"#,
+    );
+    ok(f.s
+        .nix("nix")
+        .args(["flake", "update", "lib", "--allow-dirty-locks"])
+        .args(["--store", &f.w("gitstore")])
+        .current_dir(&gitf));
+    let o = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+    assert_eq!(stdout(&o), "dirty", "{}", stderr(&o));
 }
 
 #[test]

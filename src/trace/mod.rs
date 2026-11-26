@@ -709,12 +709,9 @@ impl TreeFp {
     /// answered. Rejected entries reach `seen_hash` only, as in `walk_fp`.
     pub fn entry(&mut self, p: &Path, t: FileType, accepted: bool) {
         let rel = &p.as_os_str().as_bytes()[self.root_len..];
-        self.seen_h.update((rel.len() as u64).to_le_bytes());
-        self.seen_h.update(rel);
-        self.seen_h.update([nar_kind(t).to_u8()]);
+        hash_tree_entry(&mut self.seen_h, rel, nar_kind(t));
         if accepted {
-            let rel = rel.to_vec();
-            self.stat(p, &rel);
+            self.stat(p, rel);
         }
     }
 
@@ -723,23 +720,9 @@ impl TreeFp {
             self.ok = false;
             return;
         };
-        let kind = Kind::of(&Ok(st.clone()));
         self.newest = self.newest.max(mtime_secs(&st));
-        self.stat_h.update((rel.len() as u64).to_le_bytes());
-        self.stat_h.update(rel);
-        self.stat_h.update([kind.to_u8()]);
-        self.stat_h.update(st.len().to_le_bytes());
-        self.stat_h.update(mtime_ns(&st).to_le_bytes());
-        let (dev, ino) = file_id(p, &st);
-        self.stat_h.update(ctime_ns(p, &st).to_le_bytes());
-        self.stat_h.update(dev.to_le_bytes());
-        self.stat_h.update(ino.to_le_bytes());
-        self.stat_h.update(exec_bit(&st).to_le_bytes());
-        if kind == Kind::Symlink {
-            match fs::read_link(p) {
-                Ok(t) => self.stat_h.update(t.as_os_str().as_bytes()),
-                Err(_) => self.ok = false,
-            }
+        if hash_tree_stat(&mut self.stat_h, p, rel, &st).is_err() {
+            self.ok = false;
         }
     }
 
@@ -749,6 +732,28 @@ impl TreeFp {
         self.ok
             .then(|| (self.stat_h.finalize().into(), self.seen_h.finalize().into()))
     }
+}
+
+fn hash_tree_entry(h: &mut Sha256, rel: &[u8], kind: Kind) {
+    h.update((rel.len() as u64).to_le_bytes());
+    h.update(rel);
+    h.update([kind.to_u8()]);
+}
+
+fn hash_tree_stat(h: &mut Sha256, path: &Path, rel: &[u8], st: &fs::Metadata) -> io::Result<Kind> {
+    let kind = Kind::of_file_type(&st.file_type());
+    hash_tree_entry(h, rel, kind);
+    h.update(st.len().to_le_bytes());
+    h.update(mtime_ns(st).to_le_bytes());
+    let (dev, ino) = file_id(path, st);
+    h.update(ctime_ns(path, st).to_le_bytes());
+    h.update(dev.to_le_bytes());
+    h.update(ino.to_le_bytes());
+    h.update(exec_bit(st).to_le_bytes());
+    if kind == Kind::Symlink {
+        h.update(fs::read_link(path)?.as_os_str().as_bytes());
+    }
+    Ok(kind)
 }
 
 /// Walks `root` like the NAR dump does (sorted entries, no descent into
@@ -784,39 +789,20 @@ fn walk_fp(
         return Err(io::Error::other("tree too deep"));
     }
     let st = fs::symlink_metadata(path)?;
-    let kind = Kind::of(&Ok(st.clone()));
-    stat_h.update((rel.len() as u64).to_le_bytes());
-    stat_h.update(rel);
-    stat_h.update([kind.to_u8()]);
-    stat_h.update(st.len().to_le_bytes());
-    stat_h.update(mtime_ns(&st).to_le_bytes());
-    let (dev, ino) = file_id(path, &st);
-    stat_h.update(ctime_ns(path, &st).to_le_bytes());
-    stat_h.update(dev.to_le_bytes());
-    stat_h.update(ino.to_le_bytes());
-    stat_h.update(exec_bit(&st).to_le_bytes());
-    match kind {
-        Kind::Symlink => {
-            let t = fs::read_link(path)?;
-            stat_h.update(t.as_os_str().as_bytes());
-        }
-        Kind::Directory => {
-            let mut entries = read_dir_kinds(path)?;
-            entries.sort();
-            for (name, ekind) in entries {
-                let child = path.join(OsStr::from_bytes(&name));
-                let mut crel = rel.to_vec();
-                crel.push(b'/');
-                crel.extend_from_slice(&name);
-                seen_h.update((crel.len() as u64).to_le_bytes());
-                seen_h.update(&crel);
-                seen_h.update([ekind.to_u8()]);
-                if accept(&child) {
-                    walk_fp(&child, &crel, accept, stat_h, seen_h, depth + 1)?;
-                }
+    let kind = hash_tree_stat(stat_h, path, rel, &st)?;
+    if kind == Kind::Directory {
+        let mut entries = read_dir_kinds(path)?;
+        entries.sort();
+        for (name, ekind) in entries {
+            let child = path.join(OsStr::from_bytes(&name));
+            let mut crel = rel.to_vec();
+            crel.push(b'/');
+            crel.extend_from_slice(&name);
+            hash_tree_entry(seen_h, &crel, ekind);
+            if accept(&child) {
+                walk_fp(&child, &crel, accept, stat_h, seen_h, depth + 1)?;
             }
         }
-        _ => {}
     }
     Ok(())
 }

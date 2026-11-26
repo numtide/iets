@@ -3580,11 +3580,15 @@ impl Evaluator {
         for i in 0..self.interner.len() {
             sym_bytes += self.interner.name(Sym(i as u32)).len();
         }
-        let (mut drvs, mut aterm_bytes) = (0usize, 0usize);
-        for (_, d) in self.drv.drvs.iter() {
-            drvs += 1;
-            aterm_bytes += d.aterm.as_ref().map_or(0, |a| a.len());
-        }
+        let (drvs, aterm_bytes) = {
+            let drvs = self.drv.drvs.lock();
+            let bytes: usize = drvs
+                .values()
+                .filter_map(|d| d.aterm.as_ref())
+                .map(|a| a.len())
+                .sum();
+            (drvs.len(), bytes)
+        };
         errln!(
             "non-arena: line_tables={line_table} file_paths={file_paths} symbols={} (name bytes {sym_bytes}, map entries ~{}) import_cache={} drvs={drvs} (aterm bytes {aterm_bytes}) regex_cache={}",
             self.interner.len(),

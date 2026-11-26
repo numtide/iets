@@ -372,6 +372,27 @@ pub fn check_value(name: &str, v: &str) -> Result<()> {
     }
 }
 
+/// The setting the flag `s` sets, and its value unless that is the next
+/// argument. Nix makes these of every setting, but not of an alias
+/// (config-impl.hh:convertToArg).
+pub fn flag(s: &str) -> Option<(&str, Option<&'static str>)> {
+    let name = s.strip_prefix("--")?;
+    let is_bool = |n| in_list(BOOLS, n);
+    let is_list = |n: &str| {
+        n.strip_prefix("extra-")
+            .is_some_and(|b| APPENDABLE.contains(&b))
+    };
+    match name.strip_prefix("no-") {
+        // globals.cc: `sandbox` is no Boolean, and makes its own three flags
+        _ if name == "sandbox" => Some((name, Some("true"))),
+        _ if name == "no-sandbox" => Some(("sandbox", Some("false"))),
+        _ if name == "relaxed-sandbox" => Some(("sandbox", Some("relaxed"))),
+        Some(bare) if is_bool(bare) => Some((bare, Some("false"))),
+        _ if is_known(name) || is_list(name) => Some((name, is_bool(name).then_some("true"))),
+        _ => None,
+    }
+}
+
 /// The Nix settings that apply to this process.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {

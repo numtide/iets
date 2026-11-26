@@ -19,6 +19,32 @@ use e2e::classic::{Both, Checks, Farm, NAMES, show};
 use e2e::{Store, ok, resolved, stderr, stdout};
 use sha2::{Digest, Sha256};
 
+/// `nix __dump-cli` is what Nix makes its manual of. The Nix on `PATH` is the
+/// pinned one in the flake check only, and the settings are those of Linux:
+/// macOS has `darwin-log-sandbox-violations` more.
+#[test]
+fn a_setting_flag_of_nix_is_one_here() {
+    if env::var_os("IETS_TEST_E2E").is_none() || !cfg!(target_os = "linux") {
+        return;
+    }
+    let out = Command::new(resolved("nix"))
+        .arg("__dump-cli")
+        .output()
+        .unwrap();
+    let cli: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let flags = cli["args"]["flags"].as_object().unwrap();
+    let settings = flags
+        .iter()
+        .filter(|(_, f)| f["category"] == "Options to override configuration settings");
+    let mut seen = 0;
+    for (name, f) in settings {
+        let ours = iets::config::flag(&format!("--{name}")).map(|(_, v)| u64::from(v.is_none()));
+        assert_eq!(ours, f["arity"].as_u64(), "--{name}");
+        seen += 1;
+    }
+    assert!(seen > 100, "{seen}");
+}
+
 #[test]
 fn fallbacks() {
     let s = store!();

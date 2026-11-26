@@ -30,37 +30,32 @@ const NAME: &str = "nix";
 /// filetransfer.hh: the default of `http-connections`.
 const HTTP_CONNECTIONS: usize = 25;
 
-/// The flags accepted before the subcommand, and how many values each takes.
-/// `global_flag` applies them; `find_sub` only needs the arity.
+/// The flags accepted before the subcommand beside the settings
+/// (`config::flag`), and how many values each takes. `global_flag` applies
+/// them; `find_sub` only needs the arity.
 const GLOBALS: &[(&str, usize)] = &[
     ("--impure", 0),
-    ("--pure-eval", 0),
-    ("--no-pure-eval", 0),
-    ("--accept-flake-config", 0),
-    ("--show-trace", 0),
     ("--log-format", 1),
-    ("--experimental-features", 1),
-    ("--extra-experimental-features", 1),
     ("--option", 2),
     ("-I", 1),
     ("--include", 1),
     ("--arg", 2),
     ("--argstr", 2),
-    ("--store", 1),
-    ("--flake-registry", 1),
     // The `nix-farm` wrapper passes `--eval-store auto` because the farm
     // refuses the worker-protocol tunnel; iets always evaluates locally.
     ("--eval-store", 1),
     ("-j", 1),
-    ("--max-jobs", 1),
-    ("--cores", 1),
     // nixos-rebuild passes these to `nix build`.
     ("--verbose", 0),
     ("-v", 0),
     ("--quiet", 0),
     ("-k", 0),
-    ("--keep-going", 0),
 ];
+
+fn global_arity(s: &str) -> Option<usize> {
+    let listed = GLOBALS.iter().find(|(f, _)| *f == s).map(|(_, n)| *n);
+    listed.or_else(|| config::flag(s).map(|(_, v)| usize::from(v.is_none())))
+}
 
 #[derive(Default)]
 pub(super) struct Nix {
@@ -117,7 +112,7 @@ fn find_sub(argv: &[String]) -> Result<usize, String> {
         if !s.starts_with('-') {
             return Ok(i);
         }
-        let Some((_, arity)) = GLOBALS.iter().find(|(f, _)| *f == s.as_str()) else {
+        let Some(arity) = global_arity(s) else {
             return Err(format!("'{s}' is not implemented"));
         };
         i += 1 + arity;
@@ -127,15 +122,11 @@ fn find_sub(argv: &[String]) -> Result<usize, String> {
 
 /// `Ok(true)`: consumed. `Ok(false)`: not one of ours. `Err`: fall back.
 pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String> {
-    if !GLOBALS.iter().any(|(f, _)| *f == s) {
+    if global_arity(s).is_none() {
         return Ok(false);
     }
     match s {
         "--accept-flake-config" => ignored::flag_for_nix_config(s),
-        // iets has every feature
-        "--experimental-features" | "--extra-experimental-features" => {
-            a.value(s)?;
-        }
         "--eval-store" => match a.value(s)?.as_str() {
             "auto" | "daemon" | "" => {
                 ignored::flag(s, "iets evaluates in memory and needs no evaluation store")

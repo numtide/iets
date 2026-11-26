@@ -75,6 +75,9 @@ Flags:
   `--read-write-mode`, `--dry-run`.
 - `--show-trace`, `--no-gc-warning`, `--option`, `--store`,
   `-j`/`--max-jobs`, `--cores`, `-k`, `-K`, `-Q`, `--quiet`, `-v`.
+- Every setting as a flag: `--NAME VALUE`, `--extra-NAME VALUE` for a list,
+  `--NAME` and `--no-NAME` for a Boolean. It does what `--option` does.
+  `nix-build`, `nix-shell` and `nix` take these too.
 
 By default it evaluates, finds the derivations in the value, registers
 their closure with the daemon, and prints one root per line. A root is the

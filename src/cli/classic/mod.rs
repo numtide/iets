@@ -111,18 +111,20 @@ pub fn common_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
     let set = &mut c.flags.overrides;
     match s {
         "-E" | "--expr" => c.from_args = true,
-        "--store" => set.push(("store".into(), a.value(s)?)),
-        "--flake-registry" => set.push(("flake-registry".into(), a.value(s)?)),
         "-j" | "--max-jobs" => set.push(("max-jobs".into(), a.number(s, "max-jobs")?)),
         "--cores" => set.push(("cores".into(), a.number(s, "cores")?)),
-        "-k" | "--keep-going" => set.push(("keep-going".into(), "true".into())),
-        "-K" | "--keep-failed" => set.push(("keep-failed".into(), "true".into())),
+        "-k" => set.push(("keep-going".into(), "true".into())),
+        "-K" => set.push(("keep-failed".into(), "true".into())),
         "--quiet" => c.quiet = true,
         "-v" | "--verbose" => ignored::flag("--verbose", ignored::ONE_LOG_LEVEL),
         // `--indirect` does nothing in Nix either (nix-build.cc: "obsolete").
         // Only nix-instantiate has the GC warning, and it takes that flag itself.
         "--no-gc-warning" | "--indirect" => {}
-        _ => return Ok(false),
+        _ => match config::flag(s) {
+            Some((name, Some(v))) => set.push((name.into(), v.into())),
+            Some((name, None)) => set.push((name.into(), a.value(s)?)),
+            None => return Ok(false),
+        },
     }
     Ok(true)
 }
@@ -265,6 +267,30 @@ mod tests {
         let all: Vec<String> = line.iter().map(|s| s.to_string()).collect();
         let mut a = Argv { all: &all, i: 0 };
         nix::global_flag(&mut Common::default(), &mut a, &all[0])
+    }
+
+    #[test]
+    fn every_setting_is_a_flag() {
+        let set = |line: &[&str]| {
+            let all: Vec<String> = line.iter().map(|s| s.to_string()).collect();
+            let (mut c, mut a) = (Common::default(), Argv { all: &all, i: 0 });
+            let took = common_flag(&mut c, &mut a, &all[0]);
+            (took, a.i, c.flags.overrides)
+        };
+        for (line, values, name, value) in [
+            (&["--store", "daemon"][..], 1, "store", "daemon"),
+            (&["--extra-substituters", "s"], 1, "extra-substituters", "s"),
+            (&["--keep-going"], 0, "keep-going", "true"),
+            (&["--no-keep-going"], 0, "keep-going", "false"),
+            (&["--relaxed-sandbox"], 0, "sandbox", "relaxed"),
+        ] {
+            let want = vec![(name.to_string(), value.to_string())];
+            assert_eq!(set(line), (Ok(true), values, want), "{line:?}");
+        }
+        // `--no-` is for Booleans, `--extra-` for lists, and an alias has no flag
+        for f in ["--no-store", "--extra-store", "--build-cores"] {
+            assert_eq!(set(&[f, "x"]), (Ok(false), 0, vec![]), "{f}");
+        }
     }
 
     #[test]

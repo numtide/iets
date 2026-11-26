@@ -9,7 +9,8 @@ use crate::eval::{Error, ErrorKind, Pos};
 use crate::lint::{self, Level, LintId};
 use crate::runtime::{Arena, AttrsObj, Word};
 use crate::syntax::ast::{
-    Ast, AttrElem, BinOp, Bind, BindKind, Expr, ExprId, Note, Param, PathKind, Range, StrPart, UnOp,
+    Ast, AttrElem, BinOp, Bind, BindKind, Expr, ExprId, Note, Param, PathKind, Range, Span,
+    StrPart, UnOp,
 };
 use crate::syntax::symbol::{FxHashMap, Interner, Sym};
 use crate::sys;
@@ -58,8 +59,9 @@ pub struct Compiler<'a> {
     /// Open lambdas, innermost last: the index in `scopes` of the param
     /// frame and whether the body has read a variable from outside it.
     lambdas: Vec<(usize, Cell<bool>)>,
-    /// Sorted start offsets of each symbol's `Var`s and `inherit` names,
-    /// built on the file's first `x: e`.
+    /// Scan directly for the first identifier parameter and build an index on the second.
+    scanned_param: bool,
+    /// Sorted start offsets of each symbol's variable references and inherited names.
     var_uses: Option<FxHashMap<Sym, Vec<u32>>>,
     /// Directory of the file being compiled, for relative paths.
     base_dir: Vec<u8>,
@@ -85,7 +87,7 @@ fn err<T>(kind: ErrorKind, msg: String, pos: Pos) -> CResult<T> {
 }
 
 /// Every variable reference is a `Var` or an `inherit` name.
-fn var_uses(ast: &Ast) -> FxHashMap<Sym, Vec<u32>> {
+fn var_refs(ast: &Ast) -> impl Iterator<Item = (Sym, &Span)> {
     let vars = ast
         .exprs
         .iter()
@@ -95,8 +97,12 @@ fn var_uses(ast: &Ast) -> FxHashMap<Sym, Vec<u32>> {
             _ => None,
         });
     let inherits = ast.names.iter().map(|(v, s)| (*v, s));
+    vars.chain(inherits)
+}
+
+fn var_uses(ast: &Ast) -> FxHashMap<Sym, Vec<u32>> {
     let mut m: FxHashMap<Sym, Vec<u32>> = FxHashMap::default();
-    for (v, s) in vars.chain(inherits) {
+    for (v, s) in var_refs(ast) {
         m.entry(v).or_default().push(s.start);
     }
     for v in m.values_mut() {
@@ -165,6 +171,7 @@ impl<'a> Compiler<'a> {
             globals,
             scopes: Vec::new(),
             lambdas: Vec::new(),
+            scanned_param: false,
             var_uses: None,
             base_dir: base_dir.to_vec(),
             base,
@@ -1168,6 +1175,11 @@ impl<'a> Compiler<'a> {
         }
         let ast: &'a Ast = self.ast;
         let span = ast.span(body);
+        if !self.scanned_param {
+            self.scanned_param = true;
+            return var_refs(ast)
+                .any(|(v, s)| v == sym && span.start <= s.start && s.start < span.end);
+        }
         let uses = self.var_uses.get_or_insert_with(|| var_uses(ast));
         uses.get(&sym).is_some_and(|v| {
             let i = v.partition_point(|&p| p < span.start);

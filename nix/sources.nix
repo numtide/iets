@@ -29,7 +29,11 @@ in
       ../.config/nextest.toml
     ]
   );
-  ab = sourceOf (bin ++ [ ../examples/ab.rs ]);
+  ab = sourceOf [
+    ../Cargo.toml
+    ../Cargo.lock
+    ../examples/ab.rs
+  ];
   bench = sourceOf [
     ../bench/Cargo.toml
     ../bench/Cargo.lock

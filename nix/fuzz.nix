@@ -9,6 +9,13 @@ let
       ln -sf "$f" "seeds/$(echo "$f" | sha1sum | cut -c1-40)"
     done
   '';
+  cachedSeeds = script: let
+    corpus = pkgs.runCommand "iets-parse-seeds" { } ''
+      mkdir seeds
+      ${script}
+      mv seeds "$out"
+    '';
+  in ''cp -R ${corpus}/. seeds/'';
   # what each libFuzzer binary is run with; the seeds go to a directory `seeds`.
   # `runs` is the number of inputs of a check, seeds included; the comments of
   # the checks give the time this takes on an x86_64 builder.
@@ -16,7 +23,7 @@ let
     parse = {
       flags = "-max_len=4096 -dict=${../fuzz/parse.dict}";
       # an eighth of nixpkgs in a check
-      seeds = every: ''
+      seeds = every: cachedSeeds ''
         find ${nixpkgs} -name '*.nix' -size -32k | awk 'NR % ${toString every} == 0' | while read -r f; do
           ln -s "$f" "seeds/$(echo "$f" | sha1sum | cut -c1-40)"
         done

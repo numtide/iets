@@ -9,6 +9,7 @@
 //! [`bind`]. docs/reference/library.md says what a host owns.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::panic;
 use std::path::PathBuf;
 use std::process;
@@ -101,7 +102,7 @@ impl Session {
     #[inline(never)]
     pub fn enter(self: &Arc<Session>) -> Entered {
         let prev = CURRENT.with(|c| c.borrow_mut().replace(self.clone()));
-        Entered(prev)
+        Entered(prev, PhantomData)
     }
 
     /// This session's settings: the environment knobs alone until
@@ -157,8 +158,13 @@ pub fn exit(code: i32) -> ! {
     process::exit(code)
 }
 
-/// Puts back the session [`Session::enter`] replaced.
-pub struct Entered(Option<Arc<Session>>);
+/// Puts back the session [`Session::enter`] replaced on the thread that entered it.
+///
+/// ```compile_fail,E0277
+/// let guard = iets::session::Session::new().enter();
+/// std::thread::spawn(move || drop(guard));
+/// ```
+pub struct Entered(Option<Arc<Session>>, PhantomData<dyn Sync>);
 
 impl Drop for Entered {
     #[inline(never)]

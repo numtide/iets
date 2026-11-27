@@ -11,7 +11,7 @@ pub(super) fn fetch(
     _: &[(String, String)],
     _: Option<Vec<u8>>,
     _: Limits,
-    _: impl FnOnce(Box<dyn Read>) -> Result<u64>,
+    _: impl FnOnce(Box<dyn Read>, &[String]) -> Result<u64>,
 ) -> Result<u64> {
     Err(bad(url, "this platform has no network"))
 }

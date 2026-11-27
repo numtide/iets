@@ -24,8 +24,7 @@ use std::{env, fs, thread};
 use super::instantiate::Instantiator;
 use super::line::{Line, json_str, json_str_list, split_object, stats_json};
 use super::{
-    FNV_BASIS, Node, admit, attr_join, config, error_line, find_along_attr_path, fnv_step, node,
-    validate_names,
+    FNV_BASIS, Node, attr_join, error_line, find_along_attr_path, fnv_step, node, validate_names,
 };
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
@@ -76,7 +75,7 @@ pub fn run_worker(
 ) -> Result<()> {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
-    let opts = config().opts;
+    let opts = ev.session().jobs.config().opts;
     let flush = |inst: &mut Option<Instantiator>| -> Result<()> {
         if let Some(i) = inst.take() {
             i.finish()?;
@@ -102,7 +101,7 @@ pub fn run_worker(
             .iter()
             .fold(FNV_BASIS, |h, n| fnv_step(h, n.as_bytes()));
         let depth = path.len() as u32;
-        let response: Vec<u8> = if depth == opts.chunk_depth && !admit(hash, depth, false) {
+        let response: Vec<u8> = if depth == opts.chunk_depth && !opts.admit(hash, depth, false) {
             MSG_OK.into()
         } else {
             let (t, alloc) = (Instant::now(), ev.arena.bytes_allocated);
@@ -127,7 +126,7 @@ pub fn run_worker(
                     let names = if at_boundary {
                         let selected = attrs.iter().filter(|a| {
                             let name = ev.interner.name_str(a.sym);
-                            admit(fnv_step(hash, name.as_bytes()), depth + 1, false)
+                            opts.admit(fnv_step(hash, name.as_bytes()), depth + 1, false)
                         });
                         json_str_list(
                             lexicographic_entries(ev, selected)
@@ -148,7 +147,7 @@ pub fn run_worker(
                     v
                 }
                 Ok(Node::Skip) => MSG_OK.into(),
-                Err(_) if !admit(hash, depth, true) => MSG_OK.into(),
+                Err(_) if !opts.admit(hash, depth, true) => MSG_OK.into(),
                 Err(e) => {
                     let mut line = error_line(ev, &path, &e);
                     line.stats = Some(stats);

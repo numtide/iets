@@ -54,9 +54,13 @@ impl References {
 /// answer. primops.cc:addPath needs them for a store path it is given with a
 /// context, and swallows `queryPathInfo`'s error the same way.
 pub fn references_of(path: &StorePath) -> BTreeSet<StorePath> {
+    references_in(path, &Session::current())
+}
+
+pub(crate) fn references_in(path: &StorePath, session: &Arc<Session>) -> BTreeSet<StorePath> {
     let full = path.to_string();
-    let (s, _) = Session::current().references.slot(&full);
-    s.get_or_query(|| query_references(&full))
+    let (s, _) = session.references.slot(&full);
+    s.get_or_query(|| query_references(&full, session))
         .cloned()
         .unwrap_or_default()
 }
@@ -73,14 +77,15 @@ pub fn prefetch_references(path: StorePath, session: Arc<Session>) {
     let (s, new) = session.references.slot(&full);
     if new && STARTED.fetch_add(1, Ordering::Relaxed) < MAX_PREFETCH {
         thread::spawn(move || {
-            let _entered = session.enter();
-            s.get_or_query(|| query_references(&full));
+            s.get_or_query(|| query_references(&full, &session));
         });
     }
 }
 
-fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
-    let info = source::local_daemon()?
+fn query_references(full: &str, session: &Arc<Session>) -> Option<BTreeSet<StorePath>> {
+    // The worker protocol sends daemon activities to the thread's log.
+    let _entered = session.enter();
+    let info = source::local_daemon(session)?
         .query_path_info(full, &mut |_| {})
         .ok()??;
     info.references
@@ -100,7 +105,7 @@ pub fn locate_in_store(
     let mut daemon = paths
         .iter()
         .any(|p| !overrides.contains_key(&p.to_string()))
-        .then(source::local_daemon)
+        .then(|| source::local_daemon(&Session::current()))
         .flatten();
     paths
         .iter()

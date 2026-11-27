@@ -27,6 +27,16 @@ fn eval_err(src: &str) -> String {
     eval_with(Evaluator::new(), src).expect_err("expected an error")
 }
 
+#[test]
+fn float_plus_starts_at_positive_zero() {
+    assert_eq!(
+        eval_str(
+            r#"let x = builtins.fromJSON "-0.0"; in [ (toString (x + x)) (toString (builtins.add x x)) ]"#
+        ),
+        r#"[ "0.000000" "-0.000000" ]"#
+    );
+}
+
 #[rstest]
 #[case::flat("a 0 30", "a 5 40")]
 #[case::few_in_union("a 3 6", "a 0 20 // b 0 400 // a 10 30 // c 0 50")]

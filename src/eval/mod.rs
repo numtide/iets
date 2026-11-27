@@ -3022,7 +3022,8 @@ impl Evaluator {
     ) -> EvalResult<Word> {
         let (mut n, mut nf, mut float) = match v.view() {
             Value::Int(i) => (i, 0.0, false),
-            Value::Float(f) => (0, f, true),
+            // Nix starts the + accumulator at positive zero, even for -0.0.
+            Value::Float(f) => (0, 0.0 + f, true),
             _ => unreachable!("concat_numbers starts at a number"),
         };
         for part in rest {

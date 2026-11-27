@@ -117,6 +117,10 @@ Only `import` uses it. `scopedImport`, `-E` and a file with a `~/` path
 literal compile from source, and small files (`IETS_IR_MIN`) aren't cached, because
 the load costs what the compile costs.
 
+An IR hit replays the parser’s symbol order, including names removed by
+folding. Files that introduce a non-builtin symbol only during compilation
+are compiled from source because their symbol order can depend on earlier imports.
+
 The key holds the build id, so a new binary never reads an old entry. It
 also holds everything the compiler folds out of the evaluator's
 configuration, because a folded constant is stored by content: the system,

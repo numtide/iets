@@ -484,6 +484,50 @@ fn uncacheable_runs_write_nothing(work: Work) {
 }
 
 #[rstest]
+#[case::folded_fallback(
+    r#"builtins.length or { "throw$marker" = 0; "unequal$marker" = 0; }"#,
+    r#"{ "unequal$marker" = 0; "throw$marker" = 0; }"#,
+    "load"
+)]
+#[case::compiler_only_names(
+    "let a = {}.${''throw''$marker''} or 0; b = {}.${''unequal''$marker''} or 0; in 1",
+    "{ b = 0; a = 0; }",
+    "compile"
+)]
+fn ir_cache_preserves_symbol_order(
+    work: Work,
+    #[case] src: &str,
+    #[case] prefix: &str,
+    #[case] action: &str,
+) {
+    let seed = work.write("seed.nix", src);
+    let compare = work.write(
+        "compare.nix",
+        r#"builtins.tryEval ({ "unequal$marker" = 1; "throw$marker" = throw "forced"; }
+                          == { "unequal$marker" = 2; "throw$marker" = 0; })"#,
+    );
+    let eval = |prefix: &str| {
+        let expr = format!(
+            "builtins.seq ({prefix}) (builtins.seq (import {seed}) (import {compare}).success)"
+        );
+        let mut c = work.iets();
+        c.env("IETS_IR_MIN", "0").env("IETS_IR_STATS", "1").args([
+            "eval",
+            "--impure",
+            "--no-tracing-cache",
+            "-E",
+            &expr,
+        ]);
+        hermetic::ok(&mut c)
+    };
+    // The writer encounters the mismatch first. A fresh evaluator reaches the throw.
+    assert_eq!(stdout(&eval(prefix)), "true");
+    let reader = eval("null");
+    assert_eq!(stdout(&reader), "false");
+    assert!(stderr(&reader).contains(&format!("ir-cache {action} {seed} ")));
+}
+
+#[rstest]
 fn flags_that_turn_the_cache_off(work: Work) {
     let main = main_nix(&work);
     let main = strs(&main);

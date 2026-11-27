@@ -205,7 +205,7 @@ fn concat_lists(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
             "while evaluating a value of the list passed to builtins.concatLists",
         )?);
     }
-    Ok(ev.concat_lists(&lists))
+    ev.concat_lists(&lists, pos)
 }
 
 fn concat_map(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -229,7 +229,7 @@ fn concat_map(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             "while evaluating the return value of the function passed to builtins.concatMap",
         )?);
     }
-    Ok(ev.concat_lists(&lists))
+    ev.concat_lists(&lists, pos)
 }
 
 fn gen_list(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

@@ -2591,7 +2591,7 @@ impl Evaluator {
             *pos,
             "in the right operand of the list concatenation operator",
         )?;
-        Ok(self.concat_lists(&[a, b]))
+        self.concat_lists(&[a, b], *pos)
     }
 
     #[inline(never)]
@@ -3240,11 +3240,18 @@ impl Evaluator {
         census.note_upd(path, a, b, out, bytes, file);
     }
 
-    pub fn concat_lists(&mut self, lists: &[&'static ListObj]) -> Word {
-        let total: usize = lists.iter().map(|l| l.len as usize).sum();
-        if let Some(l) = lists.iter().find(|l| l.len as usize == total) {
-            return Word::from_ref(*l);
+    /// Each list fits a `ListObj`; their sum need not.
+    pub fn concat_lists(&mut self, lists: &[&'static ListObj], pos: Pos) -> EvalResult<Word> {
+        let total: u64 = lists.iter().map(|l| u64::from(l.len)).sum();
+        if let Some(l) = lists.iter().find(|l| u64::from(l.len) == total) {
+            return Ok(Word::from_ref(*l));
         }
+        let Some(total) = usize::try_from(total)
+            .ok()
+            .filter(|&n| Arena::list_bytes(n).is_some())
+        else {
+            bail!(ErrorKind::Eval, pos, "out of memory");
+        };
         let out = self.arena.alloc_list_as(total, Stat::ListConcat);
         let cells = out.cells();
         let mut k = 0;
@@ -3254,7 +3261,7 @@ impl Evaluator {
                 k += 1;
             }
         }
-        Word::from_ref(out)
+        Ok(Word::from_ref(out))
     }
 
     pub fn arith(&mut self, a: Word, b: Word, op: ArithOp, pos: Pos) -> EvalResult<Word> {

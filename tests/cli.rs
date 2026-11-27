@@ -497,3 +497,17 @@ fn dynamic_selection_preserves_name_and_value_effect_order(
     assert_eq!(stdout(&o), "42");
     assert_eq!(stderr(&o), "trace: NAME\ntrace: VALUE\n");
 }
+
+/// Each list fits; their concatenation does not.
+#[rstest]
+fn a_concatenation_too_long_for_a_list_is_out_of_memory(bin: Iets) {
+    let expr = "let l = builtins.genList (x: x) 65536; in \
+                builtins.length (builtins.concatLists (builtins.genList (_: l) 65536))";
+    let o = run(&bin, &["eval", "-E", expr]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("error: out of memory"),
+        "{}",
+        stderr(&o)
+    );
+}

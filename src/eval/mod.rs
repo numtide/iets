@@ -1576,17 +1576,20 @@ impl Evaluator {
                     return Ok(());
                 }
                 for attr in a.iter() {
-                    let v = self.force_cell(&attr.cell).map_err(|mut e| {
-                        e.add_trace(
-                            attr.pos,
-                            format!(
-                                "while evaluating the attribute '{}'",
-                                self.interner.name_str(attr.sym)
-                            ),
-                        );
-                        e
-                    })?;
-                    self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen))?;
+                    // the frame is for an error anywhere below the attribute,
+                    // as in Nix's `forceValueDeep` and the parallel walk
+                    self.force_cell(&attr.cell)
+                        .and_then(|v| self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen)))
+                        .map_err(|mut e| {
+                            e.add_trace(
+                                attr.pos,
+                                format!(
+                                    "while evaluating the attribute '{}'",
+                                    self.interner.name_str(attr.sym)
+                                ),
+                            );
+                            e
+                        })?;
                 }
             }
             Value::List(l) => {

@@ -498,6 +498,22 @@ fn dynamic_selection_preserves_name_and_value_effect_order(
     assert_eq!(stderr(&o), "trace: NAME\ntrace: VALUE\n");
 }
 
+/// `--strict` names every attribute above a failure, with one worker as
+/// with several.
+#[rstest]
+fn a_strict_error_names_the_attributes_above_it(bin: Iets, #[values("1", "4")] workers: &str) {
+    let expr = r#"{ v = { a = throw "t"; }; }"#;
+    let o = run(
+        &bin,
+        &["eval", "--strict", "--workers", workers, "-E", expr],
+    );
+    let err = stderr(&o);
+    for name in ["a", "v"] {
+        let frame = format!("while evaluating the attribute '{name}'");
+        assert!(err.contains(&frame), "{workers} workers: {err}");
+    }
+}
+
 /// Each list fits; their concatenation does not.
 #[rstest]
 fn a_concatenation_too_long_for_a_list_is_out_of_memory(bin: Iets) {

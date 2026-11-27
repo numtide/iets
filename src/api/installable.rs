@@ -787,9 +787,7 @@ mod tests {
           a = derivation { name = "same"; system = "test"; builder = "/bin/test"; };
           z = derivation { name = "same"; system = "test"; builder = "/bin/test"; };
         }"#;
-        let ir = ev
-            .compile_source(b"/aliases.nix", src.to_vec(), b"/", None)
-            .unwrap();
+        let ir = ev.compile_source(b"/aliases.nix", src, b"/", None).unwrap();
         let root = ev.eval(ev.root_env, ir).unwrap();
         let args = ev.empty_attrs();
         let mut roots = Vec::new();

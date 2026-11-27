@@ -933,13 +933,14 @@ impl Evaluator {
     pub fn compile_source(
         &mut self,
         path: &[u8],
-        src: Vec<u8>,
+        src: impl AsRef<[u8]>,
         base_dir: &[u8],
         extra_scope: Option<&[Sym]>,
     ) -> EvalResult<IrRef> {
-        let file = self.files.add_text(path, &src);
+        let src = src.as_ref();
+        let file = self.files.add_text(path, src);
         let lints = self.compile_lints(path);
-        self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
+        self.compile_source_inner(file, src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
 
@@ -1100,8 +1101,11 @@ impl Evaluator {
 
     /// Evaluate a string expression (`-E`), in `crate::argv`'s encoding.
     pub fn eval_string(&mut self, src: &str, base_dir: &[u8]) -> EvalResult<Word> {
-        let ir =
-            self.compile_source(b"\xc2\xabstring\xc2\xbb", argv::bytes(src), base_dir, None)?;
+        self.eval_bytes(&argv::bytes(src), base_dir)
+    }
+
+    pub(crate) fn eval_bytes(&mut self, src: &[u8], base_dir: &[u8]) -> EvalResult<Word> {
+        let ir = self.compile_source(b"\xc2\xabstring\xc2\xbb", src, base_dir, None)?;
         let root = self.root_env;
         self.eval(root, ir)
     }

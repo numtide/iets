@@ -168,18 +168,27 @@ in
       before=$(realpath "''${1:?pass the baseline iets executable}")
       after=${lib.getExe' iets "iets"}
       status=0
-      iets-bench-ab "$before" "$after" --threshold 5 --json ab.json || status=$?
-      if IETS_BENCH_BIN="$before" iets-bench-callgrind --save-baseline=base --save-summary=json >&2; then
-        printf '\n| Callgrind workload | Base instructions | Candidate instructions | Change |\n'
-        echo '| --- | ---: | ---: | ---: |'
-        IETS_BENCH_BIN="$after" iets-bench-callgrind --baseline=base --callgrind-limits='Ir=5%' \
-          --output-format=json --save-summary=json | jq -er '
-            . as $bench | .profiles[] | select(.tool == "Callgrind") | .data.total.metrics.Ir |
-            "| \([$bench.group, $bench.function_name, $bench.id] | map(select(. != null)) | join("::")) | \(.values.old) | \(.values.new) | \((.change.diff_pct | tonumber) * 1000 | round / 1000)% |"
-          ' || status=$?
-      else
-        status=1
-      fi
+      case "''${2:-}" in
+        "")
+          filters=('eval::evaluation::*' 'eval::components::*' 'eval::nixpkgs::job::hello')
+          iets-bench-ab "$before" "$after" --threshold 5 --json ab.json || status=$?
+          ;;
+        --ramdisk) filters=('eval::nixpkgs::job::initial_ramdisk') ;;
+        *) echo "unknown comparison: $2" >&2; exit 2 ;;
+      esac
+      printf '\n| Callgrind workload | Base instructions | Candidate instructions | Change |\n'
+      echo '| --- | ---: | ---: | ---: |'
+      for filter in "''${filters[@]}"; do
+        if IETS_BENCH_BIN="$before" iets-bench-callgrind "$filter" --save-baseline=base --save-summary=json >&2; then
+          IETS_BENCH_BIN="$after" iets-bench-callgrind "$filter" --baseline=base --callgrind-limits='Ir=5%' \
+            --output-format=json --save-summary=json | jq -er '
+              . as $bench | .profiles[] | select(.tool == "Callgrind") | .data.total.metrics.Ir |
+              "| \([$bench.group, $bench.function_name, $bench.id] | map(select(. != null)) | join("::")) | \(.values.old) | \(.values.new) | \((.change.diff_pct | tonumber) * 1000 | round / 1000)% |"
+            ' || status=$?
+        else
+          status=1
+        fi
+      done
       exit "$status"
     '';
   };

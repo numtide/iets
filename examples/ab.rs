@@ -106,7 +106,7 @@ mod ab {
             ),
             (
                 "nixos/minimal-w1",
-                false,
+                true,
                 Cache::Cold,
                 "eval --impure --strict --no-cache --workers 1 -I nixpkgs={np} {wl}/nixos-minimal.nix",
             ),
@@ -145,6 +145,18 @@ mod ab {
                 true,
                 Cache::Cold,
                 "eval-jobs --impure --no-instantiate --no-cache --force-recurse --workers 4 -I nixpkgs={np} --arg nixpkgs {rs} {np}/nixos/release-small.nix",
+            ),
+            (
+                "nixpkgs/outpaths-slice-w1",
+                false,
+                Cache::Cold,
+                "eval-jobs --impure --no-instantiate --no-cache --workers 1 --max-memory-size 0 --chunks 4096 --chunk 0 -I nixpkgs={np} {work}/outpaths.nix",
+            ),
+            (
+                "nixpkgs/outpaths-slice-w4",
+                false,
+                Cache::Cold,
+                "eval-jobs --impure --no-instantiate --no-cache --workers 4 --max-memory-size 0 --chunks 4096 --chunk 0 -I nixpkgs={np} {work}/outpaths.nix",
             ),
             (
                 "nixpkgs/outpaths-chunk-w1",
@@ -912,7 +924,7 @@ mod ab {
             .filter(|s| o.only.as_ref().is_none_or(|p| s.id.contains(p.as_str())))
             .collect();
         if todo.is_empty() {
-            eprintln!("ab: no scenario matches (the nixpkgs scenarios need --full)");
+            eprintln!("ab: no scenario matches (try --full for extended scenarios)");
             return ExitCode::from(2);
         }
         if todo.iter().any(|s| s.checkout)

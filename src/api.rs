@@ -125,10 +125,12 @@ impl EvalArgs {
             base.configured_session().set_cache_dir(d);
         }
         let includes = includes_in(base.configured_session(), &self.includes);
-        let c = base
-            .lints(lint_config(self)?)
-            .ir_cache(self.ir_cache())
-            .search_path(includes);
+        let base = base.lints(lint_config(self)?);
+        let ir_cache = {
+            let _entered = base.configured_session().enter();
+            self.ir_cache()
+        };
+        let c = base.ir_cache(ir_cache).search_path(includes);
         let Some(dir) = &self.dump_drvs else {
             return Ok(c);
         };
@@ -482,11 +484,9 @@ pub fn setup_cache_more(
     if a.no_tracing_cache || a.dump_drvs.is_some() {
         return None;
     }
-    Cache::open(
-        a.cache_dir.as_deref(),
-        cache_key(a, subcommand, cfg, more)?,
-        a.timings,
-    )
+    let key = cache_key(a, subcommand, cfg, more)?;
+    let _entered = cfg.configured_session().enter();
+    Cache::open(a.cache_dir.as_deref(), key, a.timings)
 }
 
 fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) -> Option<Key> {

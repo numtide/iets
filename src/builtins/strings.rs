@@ -7,6 +7,7 @@ use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::ops::Range;
 
 pub fn register(r: &mut Registry) {
     r.op("__stringLength", 1, string_length);
@@ -67,18 +68,24 @@ fn substring(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         true,
         true,
     )?;
-    let start = (start as usize).min(s.len());
-    let end = if len < 0 {
-        s.len()
-    } else {
-        (start + len as usize).min(s.len())
-    };
+    let Range { start, end } = substring_range(start, len, s.len());
     let ctx = ctx_to_arena(&mut ev.arena, ctx);
     let i = match s {
         Cow::Borrowed(b) => ev.arena.intern_static(&b[start..end]),
         Cow::Owned(b) => ev.arena.intern_bytes(&b[start..end]),
     };
     Ok(ev.arena.mk_string_over(i, ctx))
+}
+
+/// The bytes `builtins.substring start len` takes of a string of `n` bytes;
+/// a negative `len` reaches the end.
+fn substring_range(start: i64, len: i64, n: usize) -> Range<usize> {
+    let start = usize::try_from(start).unwrap_or(usize::MAX).min(n);
+    let end = match usize::try_from(len) {
+        Ok(len) => start.saturating_add(len).min(n),
+        Err(_) => n,
+    };
+    start..end
 }
 
 fn concat_strings_sep(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

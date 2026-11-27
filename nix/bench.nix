@@ -125,7 +125,8 @@ let
       exec ${nativeHarness}/bin/iets-ab "$@"
     '';
   };
-  callgrind = writeShellApplication {
+  callgrind = writeShellApplication (callgrindArgs profiled);
+  callgrindArgs = package: {
     name = "iets-bench-callgrind";
     runtimeInputs = [
       runner
@@ -142,7 +143,7 @@ let
       export GUNGRAUN_WORKSPACE_ROOT=${sources.bench}/bench
       export GUNGRAUN_SEPARATE_TARGETS="''${GUNGRAUN_SEPARATE_TARGETS:-true}"
       export GUNGRAUN_HOME="''${GUNGRAUN_HOME:-$PWD/target/gungraun}"
-      export IETS_BENCH_BIN="''${IETS_BENCH_BIN:-${lib.getExe' profiled "iets"}}"
+      export IETS_BENCH_BIN="''${IETS_BENCH_BIN:-${lib.getExe' package "iets"}}"
       export IETS_BENCH_WORKLOADS="''${IETS_BENCH_WORKLOADS:-${workloads}}"
       exec ${harness}/bin/iets-callgrind --bench "$@"
     '';
@@ -161,7 +162,7 @@ in
     runtimeInputs = [
       ab
       jq
-      callgrind
+      (writeShellApplication (callgrindArgs iets))
       coreutils
     ];
     text = ''

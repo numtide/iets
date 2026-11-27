@@ -32,9 +32,19 @@ fn collect_attrs(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<Attrs> {
             "'fetchTree' with a URL argument is not supported; pass the locked attribute set"
         );
     };
+    let Some(ty) = a.get(ev.s.type_) else {
+        bail!(
+            ErrorKind::Eval,
+            pos,
+            "argument 'type' is missing in call to 'fetchTree'"
+        );
+    };
+    ev.force_string_no_ctx(
+        ty.cell.get(),
+        ty.pos,
+        "while evaluating the `type` argument passed to 'fetchTree'",
+    )?;
     let out = input_attrs(ev, a, "fetchTree", pos)?;
-    // fetchTree.cc:158 (`allowNameArgument` is false for fetchTree), before the
-    // attrs reach `Input::fromAttrs`, which is where the missing `type` is seen
     if out.contains_key("name") {
         bail!(
             ErrorKind::Eval,
@@ -51,13 +61,6 @@ fn collect_attrs(ev: &mut Evaluator, w: Word, pos: Pos) -> EvalResult<Attrs> {
             pos,
             "input attribute 'narHash' is not a string {}",
             attrs_to_json(&out)
-        );
-    }
-    if !out.contains_key("type") {
-        bail!(
-            ErrorKind::Eval,
-            pos,
-            "argument 'type' is missing in call to 'fetchTree'"
         );
     }
     Ok(out)

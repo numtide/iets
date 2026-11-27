@@ -673,6 +673,23 @@ fn folded_builtin_select_keeps_the_selections_position() {
     assert_eq!(ev.describe_pos(e.pos), "«string»:2:3");
 }
 
+#[rstest]
+#[case::missing("", "argument 'type' is missing in call to 'fetchTree'")]
+#[case::integer("type = 17;", "expected a string but found an integer: 17")]
+#[case::context(
+    r#"type = builtins.toFile "fetch-kind" "path";"#,
+    "is not allowed to refer to a store path"
+)]
+fn fetch_tree_checks_type_before_forcing_other_attributes(
+    #[case] ty: &str,
+    #[case] expected: &str,
+) {
+    let expr =
+        format!(r#"builtins.tryEval (builtins.fetchTree {{ {ty} operand = throw "caught"; }})"#);
+    let error = eval_err(&expr);
+    assert!(error.contains(expected), "{error}");
+}
+
 #[test]
 fn update_forces_the_right_operand_first() {
     assert_eq!(

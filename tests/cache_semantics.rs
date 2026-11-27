@@ -94,6 +94,47 @@ fn run(mut c: Command) -> Run {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
+#[rstest]
+fn eval_cache_hit_checks_the_configured_fiber_reservation(work: Work) {
+    let evaluate = |workers: &str, mb: &str, extra: &[&str]| {
+        work.iets()
+            .env("IETS_FIBER_STACK_MB", mb)
+            .args(["eval", "--workers", workers, "--json", "-E", "42"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let seed = evaluate("8", "2", &[]);
+    assert!(seed.status.success());
+    assert_eq!(seed.stdout, b"42\n");
+    // Legal helper sizes and a sequential run with no helper stack can
+    // still reuse the same result.
+    for (workers, mb) in [("8", "4"), ("1", "32000")] {
+        let hit = evaluate(workers, mb, &["--timings"]);
+        assert!(hit.status.success());
+        assert_eq!(hit.stdout, seed.stdout);
+        assert!(stderr(&hit).contains("cache: hit"));
+    }
+    let overflowing_mb = (usize::MAX / (1 << 20) + 1).to_string();
+    for mb in ["32000", &overflowing_mb] {
+        let cached = evaluate("8", mb, &[]);
+        let fresh = evaluate("8", mb, &["--no-tracing-cache"]);
+        assert!(!fresh.status.success());
+        assert_eq!(cached.status, fresh.status);
+        assert!(cached.stdout.is_empty() && fresh.stdout.is_empty());
+        assert_eq!(cached.stderr, fresh.stderr);
+        assert!(stderr(&fresh).contains("cannot reserve"));
+    }
+    let zero = evaluate("8", "0", &[]);
+    let fresh = evaluate("8", "0", &["--no-tracing-cache"]);
+    assert!(fresh.status.success());
+    assert_eq!(zero.status, fresh.status);
+    assert_eq!(zero.stdout, fresh.stdout);
+    assert_eq!(zero.stderr, fresh.stderr);
+    assert!(stderr(&fresh).contains("continuing without new fibers"));
+}
+
 #[rstest]
 fn explicit_arguments_apply_to_each_final_selection(work: Work) {
     let root = ["--arg", "x", "7", "-E", "{x}: x"];

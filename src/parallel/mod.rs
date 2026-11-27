@@ -76,11 +76,16 @@ pub fn default_workers() -> usize {
     thread::available_parallelism().map_or(1, |n| n.get().min(4))
 }
 
-fn stack_size() -> usize {
-    Session::current()
-        .settings()
-        .fiber_stack_mb
-        .map_or(fiber::DEFAULT_STACK, |mb| mb << 20)
+pub(crate) fn helper_stack_size(workers: usize, session: &Session) -> Option<usize> {
+    if workers <= 1 || cfg!(target_os = "wasi") {
+        return None;
+    }
+    Some(
+        session
+            .settings()
+            .fiber_stack_mb
+            .map_or(fiber::DEFAULT_STACK, |mb| mb.saturating_mul(1 << 20)),
+    )
 }
 
 /// Run `f` with `ev` as the main fiber on `workers` threads. With one
@@ -99,15 +104,15 @@ pub fn try_run<R: Send + 'static>(
     // so their arenas map into its heap
     let _entered = ev.session().clone().enter();
     // WASI has one thread, whatever `--workers` asks for
-    if workers <= 1 || cfg!(target_os = "wasi") {
+    let Some(stack_size) = helper_stack_size(workers, ev.session()) else {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);
-    }
+    };
     // Every fiber, including the main one, borrows its worker's interner cache.
     ev.interner.drop_cache();
     let template = force::SyncEv(ev.clone());
-    let rt = sched::Runtime::start(workers, Box::new(template), stack_size())?;
+    let rt = sched::Runtime::start(workers, Box::new(template), stack_size)?;
     let user = Box::into_raw(Box::new(ev)) as *mut ();
     let out = Arc::new(Mutex::new(None));
     let put = out.clone();

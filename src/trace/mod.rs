@@ -9,13 +9,14 @@ pub mod validate;
 pub mod watch;
 pub mod wire;
 
+use crate::store::path::StorePath;
 use crate::sys::OsStrExt;
 use crate::sys::{
     self,
     fs::{ctime_ns, file_id, is_executable, mtime_ns, mtime_secs},
 };
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env::var_os;
 use std::ffi::OsStr;
 use std::io::ErrorKind::{NotADirectory, NotFound};
@@ -133,6 +134,11 @@ pub enum Obs {
         name: Vec<u8>,
         value: Option<Digest32>,
     },
+    /// Registered store references used by readFile or a path copy.
+    StoreReferences {
+        path: StorePath,
+        hash: Digest32,
+    },
     /// A query of an SCM asked in `dir`; `hash` covers its exit status and
     /// stdout. The entry names the query, never the command line it is.
     Cmd {
@@ -165,6 +171,9 @@ impl Obs {
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
+            Obs::StoreReferences { path, .. } => {
+                (11, Cow::Borrowed(path.base_name().as_bytes()), 0)
+            }
         }
     }
 }
@@ -451,6 +460,15 @@ impl Trace {
         self.record_stat(path, follow, &r)
     }
 
+    pub(crate) fn store_references(&self, path: StorePath, refs: &BTreeSet<StorePath>) {
+        if self.is_on() {
+            self.record(Obs::StoreReferences {
+                path,
+                hash: references_digest(refs),
+            });
+        }
+    }
+
     pub fn env(&self, name: &[u8]) {
         if self.is_on() {
             self.record(Obs::Env {
@@ -571,6 +589,15 @@ impl Trace {
             newest,
         });
     }
+}
+
+fn references_digest(refs: &BTreeSet<StorePath>) -> Digest32 {
+    let mut hash = blake3::Hasher::new();
+    for reference in refs {
+        hash.update(reference.base_name().as_bytes());
+        hash.update(&[0]);
+    }
+    *hash.finalize().as_bytes()
 }
 
 pub fn sha256(bytes: &[u8]) -> Digest32 {

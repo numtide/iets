@@ -34,6 +34,7 @@ pub struct Cache {
     pub store: store::Store,
     pub key: String,
     timings: bool,
+    session: Arc<Session>,
     /// The generation of the entry this run reads, opened once. Everything a
     /// hit replays comes from it, so a sibling that publishes meanwhile
     /// cannot mix its parts into this run.
@@ -54,6 +55,7 @@ impl Cache {
             store,
             key: key.finish(),
             timings,
+            session: Session::current(),
             entry: OnceLock::new(),
         })
     }
@@ -111,6 +113,7 @@ impl Cache {
         };
         let threads = thread::available_parallelism().map_or(1, |n| n.get().min(4));
         let t_load = t0.elapsed();
+        let _entered = self.session.enter();
         match validate::validate(&mut obs, threads) {
             Ok(r) => {
                 if r.refreshed > 0 {

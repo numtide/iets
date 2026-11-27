@@ -13,12 +13,14 @@ use std::{fs, thread};
 
 use super::{
     Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
+    mtime_ns, references_digest, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
+use crate::session::Session;
 use crate::source::scm;
 use crate::store::hash::{HashAlgo, Hasher};
+use crate::store::locate;
 use crate::{session, treestore};
 
 #[derive(Debug, Default)]
@@ -242,6 +244,17 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 lossy(dir)
             )),
         },
+        Obs::StoreReferences { path, hash } => {
+            if locate::references_in(path, &Session::current())
+                .is_some_and(|refs| references_digest(&refs) == *hash)
+            {
+                Outcome::Same
+            } else {
+                Outcome::Changed(format!(
+                    "store references for {path} changed or are unavailable"
+                ))
+            }
+        }
         // One `stat` per entry, no bytes: the name is the content address, so an
         // entry that is still there still holds what the run read.
         Obs::Input { entry, version } => {

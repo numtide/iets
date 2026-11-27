@@ -55,6 +55,9 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
             Obs::Input { entry, version } => {
                 render::line(&format!("input {} v{version}", s(entry)))
             }
+            Obs::StoreReferences { path, hash } => {
+                render::line(&format!("store-references {path} {}", &hex(hash)[..16]))
+            }
         }
     }
     0

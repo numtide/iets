@@ -3100,8 +3100,7 @@ impl Evaluator {
         // Interpolations have few parts and coerce to borrowed slices: keep
         // them on the stack and spill to a Vec only past the buffer.
         let mut buf: [&'static [u8]; 16] = [&[]; 16];
-        let mut nbuf = 0usize;
-        let mut spill: Vec<Cow<'static, [u8]>> = Vec::new();
+        let mut spill = Vec::new();
         let mut ctx: Vec<Ctx> = Vec::new();
         for (k, part) in parts.iter().enumerate() {
             let v = match pre {
@@ -3123,26 +3122,24 @@ impl Evaluator {
                 first_type == ValueType::String,
                 !first,
             )?;
-            match s {
-                Cow::Borrowed(b) if spill.is_empty() && nbuf < buf.len() => {
-                    buf[nbuf] = b;
-                    nbuf += 1;
+            let bytes = match s {
+                Cow::Borrowed(bytes) => bytes,
+                Cow::Owned(bytes) => self.arena.alloc_bytes(&bytes),
+            };
+            if k < buf.len() {
+                buf[k] = bytes;
+            } else {
+                if spill.is_empty() {
+                    spill.extend_from_slice(&buf);
                 }
-                s => {
-                    if spill.is_empty() {
-                        spill.extend(buf[..nbuf].iter().map(|b| Cow::Borrowed(*b)));
-                        nbuf = 0;
-                    }
-                    spill.push(s);
-                }
+                spill.push(bytes);
             }
             first = false;
         }
-        let spilled: Vec<&[u8]> = spill.iter().map(|s| s.as_ref()).collect();
-        let pieces: &[&[u8]] = if spill.is_empty() {
-            &buf[..nbuf]
+        let pieces = if spill.is_empty() {
+            &buf[..parts.len()]
         } else {
-            &spilled
+            &spill
         };
         if first_type == ValueType::Path {
             if ctx.iter().any(Ctx::is_store) {

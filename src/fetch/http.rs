@@ -299,8 +299,7 @@ fn drain(
     }
 }
 
-/// The magic bytes libarchive's `archive_read_support_filter_all` recognises,
-/// for the filters iets implements (tarfile.cc:TarArchive).
+/// The compression methods available to archive and binary cache readers.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Compression {
     None,
@@ -308,6 +307,9 @@ pub enum Compression {
     Xz,
     Zstd,
     Bzip2,
+    Brotli,
+    Lz4,
+    Lzip,
 }
 
 impl Compression {
@@ -324,6 +326,54 @@ impl Compression {
             Compression::Bzip2
         } else {
             Compression::None
+        }
+    }
+
+    /// The single compression method declared in a narinfo.
+    pub(crate) fn nar_method(method: &str) -> io::Result<Self> {
+        match method {
+            "none" => Ok(Self::None),
+            "br" => Ok(Self::Brotli),
+            "bzip2" => Ok(Self::Bzip2),
+            "gzip" => Ok(Self::Gzip),
+            "lz4" => Ok(Self::Lz4),
+            "lzip" => Ok(Self::Lzip),
+            "xz" => Ok(Self::Xz),
+            "zstd" => Ok(Self::Zstd),
+            method => Err(io::Error::other(format!(
+                "unsupported NAR compression '{method}'"
+            ))),
+        }
+    }
+
+    pub(crate) fn reader<'a>(self, input: Box<dyn Read + 'a>) -> io::Result<Box<dyn Read + 'a>> {
+        Ok(match self {
+            Self::None => input,
+            Self::Brotli => Box::new(brotli_decompressor::Decompressor::new(input, 8192)),
+            Self::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(input)),
+            Self::Gzip => Box::new(MultiGz {
+                at: flate2::bufread::GzDecoder::new(BufReader::new(input)),
+            }),
+            Self::Lz4 => Box::new(Lz4Frames(lz4_flex::frame::FrameDecoder::new(
+                BufReader::new(input),
+            ))),
+            Self::Lzip => Box::new(lzma_rust2::LzipReader::new(input)),
+            Self::Xz => Box::new(lzma_rust2::XzReader::new(input, true)),
+            Self::Zstd => Box::new(zstd::stream::read::Decoder::new(input)?),
+        })
+    }
+}
+
+// FrameDecoder returns zero between frames as well as at end of input.
+struct Lz4Frames<R: Read>(lz4_flex::frame::FrameDecoder<R>);
+
+impl<R: BufRead> Read for Lz4Frames<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let n = self.0.read(buf)?;
+            if n != 0 || buf.is_empty() || self.0.get_mut().fill_buf()?.is_empty() {
+                return Ok(n);
+            }
         }
     }
 }
@@ -351,11 +401,11 @@ impl Read for Sniffed {
 /// the last one is not a gzip header. `MultiGzDecoder` makes that an error;
 /// libarchive's filter bids on the bytes and, finding no filter, hands the rest
 /// to the tar reader, which stops at its own end-of-archive marker.
-struct MultiGz {
-    at: flate2::bufread::GzDecoder<BufReader<Box<dyn Read>>>,
+struct MultiGz<'a> {
+    at: flate2::bufread::GzDecoder<BufReader<Box<dyn Read + 'a>>>,
 }
 
-impl Read for MultiGz {
+impl Read for MultiGz<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.at.read(buf)? {
@@ -430,18 +480,12 @@ pub fn decompress_reader(read: Box<dyn Read>, budget: u64) -> Result<Box<dyn Rea
             pos: 0,
             rest: read,
         }) as Box<dyn Read>;
-        read = match kind {
-            Compression::None => return Ok(src),
-            Compression::Gzip => Box::new(MultiGz {
-                at: flate2::bufread::GzDecoder::new(BufReader::new(src)),
-            }),
-            Compression::Xz => Box::new(lzma_rust2::XzReader::new(src, true)),
-            Compression::Zstd => Box::new(
-                zstd::stream::read::Decoder::new(src)
-                    .map_err(|e| Error::io("cannot start the zstd decoder", e))?,
-            ),
-            Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(src)),
-        };
+        if kind == Compression::None {
+            return Ok(src);
+        }
+        read = kind
+            .reader(src)
+            .map_err(|e| Error::io("cannot start the zstd decoder", e))?;
     }
     Err(Error::Usage(format!(
         "the archive has over {MAX_FILTERS} layers of compression"
@@ -469,6 +513,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::thread;
+
+    #[test]
+    fn cached_lz4_nar_spans_frames() {
+        let mut bytes = Vec::new();
+        for part in [b"first".as_slice(), b"", b"last"] {
+            let mut frame = lz4_flex::frame::FrameEncoder::new(&mut bytes);
+            frame.write_all(part).unwrap();
+            frame.finish().unwrap();
+        }
+        let reader = Compression::Lz4.reader(Box::new(bytes.as_slice())).unwrap();
+        assert_eq!(io::read_to_string(reader).unwrap(), "firstlast");
+    }
 
     /// libcurl reads `file:/p`, `file:///p` and `file://localhost/p` alike.
     #[test]

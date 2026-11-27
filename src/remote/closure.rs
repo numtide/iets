@@ -242,13 +242,22 @@ fn streamed(
     limits: Limits,
     use_: impl FnOnce(&mut dyn Read) -> Result<u64>,
 ) -> Result<u64> {
+    let decode_error = |e| Error::io("cannot decode the fetched NAR", e);
+    let method = http::Compression::nar_method(&f.info.compression).map_err(decode_error)?;
     let url = format!("{}/{}", f.store, f.info.url);
-    let (r, mut w) = io::pipe().map_err(|e| Error::io("cannot create a pipe", e))?;
+    let (mut r, mut w) = io::pipe().map_err(|e| Error::io("cannot create a pipe", e))?;
     thread::scope(|scope| {
         let got = scope.spawn(session::bind(move || {
             http::get_or_read(&url, &[], limits, false, &mut w)
         }));
-        let used = http::decompress_reader(Box::new(r), u64::MAX).and_then(|mut r| use_(&mut r));
+        let used = method
+            .reader(Box::new(&mut r))
+            .map_err(decode_error)
+            .and_then(|mut r| use_(&mut r));
+        // A decoder can stop before the download does. Keep the pipe open
+        // until the writer finishes so an error does not raise SIGPIPE.
+        io::copy(&mut r, &mut io::sink())
+            .map_err(|e| Error::io("cannot drain the NAR download", e))?;
         let got = got.join().unwrap_or_else(|p| panic::resume_unwind(p));
         got?;
         used

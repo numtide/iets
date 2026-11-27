@@ -22,13 +22,13 @@ tempfile = "3"
 toml = "1"
 serde_json = "1"
 zstd = "0.14"
-lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["frame", "safe-encode", "safe-decode"] }
 # ed25519 for binary cache signatures (src/store/narinfo.rs)
 ring = "0.17"
 # The archive formats of the flake-input fetcher (src/fetch/unpack.rs).
 tar = { version = "0.4", default-features = false }
 flate2 = "1"
-lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "lzip"] }
 bzip2 = "0.6"
 brotli-decompressor = "6"
 

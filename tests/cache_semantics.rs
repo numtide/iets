@@ -448,9 +448,16 @@ fn ir_statistics_only_report_published_entries(work: Work) {
 
 #[rstest]
 fn uncacheable_runs_write_nothing(work: Work) {
-    let r = work.eval(&["-E", "builtins.currentTime > 0"]);
+    let clock = work.write("clock.nix", "builtins.currentTime > 0");
+    let warm = work.write(
+        "warm.nix",
+        "builtins.seq builtins.currentTime (import ./clock.nix)",
+    );
+    let eval = |file: &str| work.eval_with(&[("IETS_IR_MIN", "0")], &["-f", file]);
+    assert_eq!(eval(&warm).rc, 0);
+    let r = eval(&clock);
     assert!(r.status.contains("not written"), "{}", r.status);
-    let r = work.eval(&["-E", "builtins.currentTime > 0"]);
+    let r = eval(&clock);
     assert!(r.status.contains("miss (no entry)"), "{}", r.status);
 
     let fetch = r#"(builtins.tryEval (builtins.fetchTarball "https://x/y.tar.gz")).success"#;

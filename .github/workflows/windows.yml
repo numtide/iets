@@ -23,6 +23,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --locked --no-fail-fast
       # nextest does not run doctests

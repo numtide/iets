@@ -1,0 +1,41 @@
+name: bench-cache
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "43 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency: bench-cache-warm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - uses: Mic92/hestia@v3
+        with:
+          no-closure: true
+      - run: nix build --no-link .#bench-compare
+
+  gc:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    concurrency: bench-cache-gc
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: cachix/install-nix-action@v31
+      - uses: Mic92/hestia@v3
+        with:
+          read-only: true
+      - run: '"$HESTIA_BIN" gc --push-ttl 3'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

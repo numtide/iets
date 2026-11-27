@@ -22,6 +22,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - uses: cachix/install-nix-action@v31
+      - uses: Mic92/hestia@v3
+        with:
+          read-only: true
       - name: Build the base with the candidate's locked inputs
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
@@ -29,13 +32,14 @@ jobs:
           BASE=${BASE:-$(git rev-list -1 --first-parent --before="1 week ago" HEAD)}
           nix build "git+file://$PWD?rev=$BASE#default" -o result-base --inputs-from . \
             --override-input nixpkgs flake:nixpkgs --override-input crane flake:crane
+      - run: nix build .#bench-compare -o result-compare
       - if: github.event_name == 'pull_request'
         run: sudo sysctl kernel.perf_event_paranoid=2
       - name: Compare native performance and Callgrind instructions
         shell: bash
         env:
           SUITE: ${{ github.event_name == 'schedule' && '--ramdisk' || '' }}
-        run: nix run .#bench-compare -- result-base/bin/iets "$SUITE" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: result-compare/bin/iets-bench-compare result-base/bin/iets "$SUITE" | tee -a "$GITHUB_STEP_SUMMARY"
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:

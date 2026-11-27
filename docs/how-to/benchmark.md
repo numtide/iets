@@ -7,7 +7,10 @@ nix run .#bench-ab -- /absolute/path/to/before /absolute/path/to/after --json ab
 ```
 
 The runner alternates the binaries and checks output parity on NixOS server,
-Plasma, minimal, cache and release-initial-ramdisk evaluations. Use `--only SUBSTR`
+Plasma, cache and release-initial-ramdisk evaluations. It also runs native
+`eval-jobs` with one and four workers on the same hash-selected slice of the
+locked host-system Nixpkgs outpaths jobset (chunk 0 of 4096, no worker memory
+limit). Each comparison checks all output records independent of worker order. Use `--only SUBSTR`
 to select scenarios. For example, compare the full host-system NixOS release
 jobset or the whole host-system Nixpkgs outpaths jobset on a larger machine:
 
@@ -16,19 +19,24 @@ nix run .#bench-ab -- BEFORE AFTER --full --only jobset/release-w4
 nix run .#bench-ab -- BEFORE AFTER --full --only nixpkgs/outpaths-w8
 ```
 
-`--full` also includes release-small and a Nixpkgs chunk. Whole evaluations
+`--full` also includes minimal NixOS, release-small and a larger Nixpkgs chunk. Whole evaluations
 can use more than 20 GiB.
 `NIXPKGS` overrides the locked input. Record system load, peak RSS and swapping
 when interpreting small timing changes. With `--threshold`, the native runner
 checks wall time, peak RSS and, when fully available, retired hardware instructions.
 The GitHub Actions job summary shows the native paired intervals followed by
-a table of base and candidate Callgrind instructions for each workload. Both
+a table of base and candidate Callgrind instructions. Open the **Summary**
+page of the **bench** workflow run and scroll to the **ab** job summary. Both
 binaries run on the same hosted Linux VM. The 5% gates use the lower bound
 of each native interval and the change in total guest instructions. To run the CI comparison locally, use
 `nix run .#bench-compare -- /absolute/path/to/baseline/iets` in a writable
 directory with the candidate flake. The `ab` artifact contains `ab.json`,
 including the Linux one-minute system load sampled before each native run
-(`load1`), and the raw Gungraun profiles.
+(`load1`), and the raw Gungraun profiles. PRs keep the native initial-ramdisk
+case. The instrumented initial ramdisk runs weekly on Monday at 04:27 UTC,
+comparing main to its first-parent history a week earlier with the current
+locked inputs. Its summary and artifact contain just that Callgrind comparison.
+Pass `--ramdisk` after the baseline executable to reproduce it locally.
 
 ## Count instructions and find hotspots
 

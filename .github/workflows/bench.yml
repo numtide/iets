@@ -2,12 +2,14 @@ name: bench
 
 on:
   pull_request:
+  schedule:
+    - cron: "27 4 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: bench-${{ github.event.pull_request.number }}
+  group: bench-${{ github.event.pull_request.number || github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -15,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -23,15 +25,19 @@ jobs:
       - name: Build the base with the candidate's locked inputs
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-        run: >
-          nix build "git+file://$PWD?rev=$BASE#default" -o result-base --inputs-from .
-          --override-input nixpkgs flake:nixpkgs --override-input crane flake:crane
-      - run: sudo sysctl kernel.perf_event_paranoid=2
+        run: |
+          BASE=${BASE:-$(git rev-list -1 --first-parent --before="1 week ago" HEAD)}
+          nix build "git+file://$PWD?rev=$BASE#default" -o result-base --inputs-from . \
+            --override-input nixpkgs flake:nixpkgs --override-input crane flake:crane
+      - if: github.event_name == 'pull_request'
+        run: sudo sysctl kernel.perf_event_paranoid=2
       - name: Compare native performance and Callgrind instructions
         shell: bash
-        run: nix run .#bench-compare -- result-base/bin/iets | tee -a "$GITHUB_STEP_SUMMARY"
+        env:
+          SUITE: ${{ github.event_name == 'schedule' && '--ramdisk' || '' }}
+        run: nix run .#bench-compare -- result-base/bin/iets "$SUITE" | tee -a "$GITHUB_STEP_SUMMARY"
       - if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ab
           path: |

@@ -580,7 +580,13 @@ impl<'a> Compiler<'a> {
         if *sym != self.sym_builtins || self.lexically_bound(*sym) {
             return Ok(None);
         }
-        self.global_ref(self.interner.name(*first), pos)?;
+        let name = self.interner.name(*first);
+        self.global_ref(name, pos)?;
+        // Selecting currentTime can replace its builtin cell with this
+        // process's integer. Keep the selection in the IR across processes.
+        if name == b"currentTime" {
+            return Ok(None);
+        }
         if (!strict && path.len() != 1) || self.scopes.iter().any(|s| matches!(s, Scope::With)) {
             return Ok(None);
         }

@@ -161,7 +161,7 @@ Every primop that looks at the world records one observation.
 
 | observation | recorded by | validated by |
 |---|---|---|
-| a file's size, mtime, ctime, device, inode and sha256 | `import`, `readFile`, `hashFile`, every `.drv` read | `lstat`; on a stat mismatch the file is rehashed and accepted if the hash matches |
+| a file's size, mtime, ctime, device, inode and sha256 | `import`, `readFile`, `hashFile`, every `.drv` read | check the target metadata. A different size invalidates the entry. Other metadata changes trigger a rehash |
 | a directory listing's hash | `readDir` | re-list and rehash |
 | a path's kind | `pathExists`, `readFileType`, the `default.nix` probe, every search-path candidate, every marker the SCM detection probed above a flake directory, a fetched store path that the store has as valid | re-stat |
 | a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | recompute the stat hash with `lstat` only; on a mismatch re-dump the NAR with the recorded filter and compare. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
@@ -256,7 +256,8 @@ about why, and leave an entry for every earlier version of the file until
 the sweep.
 
 Some things make a run uncacheable: `builtins.currentTime` (only if the
-program forces it) and every network fetcher without a hash.
+program forces it), every network fetcher without a hash, and a file read
+that produced a different byte count from its reported size.
 
 An entry is one file in a directory named by the key: a header with a
 checksum, then parts. `readset` holds the observations. `result` holds what a

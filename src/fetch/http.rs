@@ -43,6 +43,10 @@ pub struct Limits {
 }
 
 impl Limits {
+    fn encoded_budget(self) -> u64 {
+        layers_budget(self.max_size.saturating_add(32))
+    }
+
     /// The nix.conf timeouts with filetransfer.hh's defaults, 15 s and 300 s.
     pub fn new(cfg: &config::Config) -> Result<Limits> {
         let secs = |name: &str, default: u64| -> Result<Option<Duration>> {
@@ -148,7 +152,7 @@ fn read(
         // HTTP lists content codings in the order applied. Undo them before
         // interpreting the payload, which can itself be a compressed archive.
         // Even an empty coded body has framing at each layer.
-        let left = Rc::new(Cell::new(layers_budget(limits.max_size.saturating_add(32))));
+        let left = Rc::new(Cell::new(limits.encoded_budget()));
         for coding in codings.iter().rev() {
             raw = Box::new(Charged {
                 inner: raw,
@@ -722,6 +726,75 @@ mod tests {
         let e = get_decompressed(&url, &[], l, &mut Vec::new()).unwrap_err();
         drop(hold);
         e.to_string()
+    }
+
+    #[test]
+    fn check_http_framing_and_budget_after_deflate_finishes() {
+        let limits = Limits {
+            max_size: 7,
+            ..limits()
+        };
+        let budget = limits.encoded_budget() as usize;
+        for (size, missing, error) in [
+            (budget, 0, None),
+            (budget, 1, Some("reading the response failed")),
+            (
+                budget + 1,
+                0,
+                Some("encoded HTTP body exceeds the download limit"),
+            ),
+        ] {
+            let mut deflate =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            deflate.write_all(b"decoded").unwrap();
+            let mut bytes = deflate.finish().unwrap();
+            bytes.push(0);
+            let (decoded, ready) = mpsc::channel();
+            let (port, _) = serve(1, move |_, c| {
+                write!(
+                    c,
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: {}\r\n\r\n",
+                    size + missing
+                )
+                .unwrap();
+                c.write_all(&bytes).unwrap();
+                ready.recv_timeout(Duration::from_secs(10)).unwrap();
+                let _ = c.write_all(&vec![0; size - bytes.len()]);
+            });
+            let url = format!("http://127.0.0.1:{port}/");
+            let mut body = Vec::new();
+            let result = client::fetch(&url, &[], None, limits, |raw, codings| {
+                let n = read(&url, raw, limits, true, codings, &mut body)?;
+                decoded.send(()).unwrap();
+                Ok(n)
+            });
+            assert_eq!(body, b"decoded");
+            if let Some(expected) = error {
+                let e = result.unwrap_err();
+                assert!(e.to_string().contains(expected), "{e}");
+            } else {
+                assert_eq!(result.unwrap(), 7);
+            }
+        }
+    }
+
+    #[test]
+    fn a_decoder_error_cancels_an_idle_body() {
+        let (release, held) = mpsc::channel::<()>();
+        let (port, _) = serve(1, move |_, c| {
+            c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Encoding: unknown\r\nContent-Length: 42\r\n\r\n",
+            )
+            .unwrap();
+            let _ = held.recv_timeout(Duration::from_secs(10));
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let error = get_decompressed(&url, &[], limits(), &mut Vec::new()).unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported Content-Encoding"),
+            "{error}"
+        );
+        release.send(()).unwrap();
     }
 
     #[test]

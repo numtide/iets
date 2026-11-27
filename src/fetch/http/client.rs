@@ -430,6 +430,7 @@ pub(super) fn fetch(
 ) -> Result<u64> {
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
     let (head, codings) = oneshot::channel();
+    let (cancel, cancelled) = oneshot::channel::<()>();
     let target = url.to_string();
     let sent = headers.to_vec();
     let download = thread::spawn(move || -> Result<()> {
@@ -437,7 +438,12 @@ pub(super) fn fetch(
             .enable_all()
             .build()
             .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
-        rt.block_on(stream(&target, &sent, body, limits, head, tx))
+        rt.block_on(async {
+            tokio::select! {
+                result = stream(&target, &sent, body, limits, head, tx) => result,
+                _ = cancelled => Ok(()),
+            }
+        })
     });
     let queued = Queued {
         rx,
@@ -447,9 +453,17 @@ pub(super) fn fetch(
     let got = codings
         .blocking_recv()
         .map(|codings| read(Box::new(queued), &codings));
-    download
+    // A decoder may finish before the HTTP body. Only failure cancels the download.
+    if matches!(got, Ok(Err(_))) {
+        drop(cancel);
+    }
+    let sent = download
         .join()
-        .map_err(|_| Error::Store("the download thread panicked".into()))??;
+        .map_err(|_| Error::Store("the download thread panicked".into()))?;
+    if let Ok(Err(e)) = got {
+        return Err(e);
+    }
+    sent?;
     got.map_err(|_| bad(url, "missing HTTP response headers"))?
 }
 
@@ -502,8 +516,8 @@ async fn stream(
         match status {
             200 => {
                 let _ = head.send(content_codings(&current, res.headers())?);
-                let mut sent = Ok(());
-                loop {
+                let mut remaining = limits.encoded_budget();
+                let sent = loop {
                     let next = res.frame().await.transpose().map_err(|e| {
                         if is_stall(&e) {
                             bad(&current, "the download stalled (stalled-download-timeout)")
@@ -513,18 +527,25 @@ async fn stream(
                     });
                     let frame = match next {
                         Ok(Some(f)) => f,
-                        Ok(None) => break,
-                        Err(e) => {
-                            let _ = tx.send(Err(e.to_string())).await;
-                            sent = Err(e);
-                            break;
-                        }
+                        Ok(None) => break Ok(()),
+                        Err(e) => break Err(e),
                     };
-                    if let Ok(data) = frame.into_data()
-                        && tx.send(Ok(data.to_vec())).await.is_err()
-                    {
-                        break;
+                    if let Ok(data) = frame.into_data() {
+                        let Some(left) = remaining.checked_sub(data.len() as u64) else {
+                            break Err(bad(
+                                &current,
+                                "encoded HTTP body exceeds the download limit",
+                            ));
+                        };
+                        remaining = left;
+                        // A successful decoder may finish before the HTTP body.
+                        if let Ok(slot) = tx.reserve().await {
+                            slot.send(Ok(data.to_vec()));
+                        }
                     }
+                };
+                if let Err(e) = &sent {
+                    let _ = tx.send(Err(e.to_string())).await;
                 }
                 driver.abort();
                 return sent;

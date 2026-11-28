@@ -457,7 +457,7 @@ builder = "/bin/sh"; }; }` as the file of both tools.
 
 iets parses and renders the common schemes like Nix 2.34.8 (flakeref.cc,
 url.cc and the libfetchers schemes): indirect ids,
-`flake:`, `github:`, `gitlab:`, `path:` and absolute paths, `git:` and
+`flake:`, `github:`, `gitlab:`, `sourcehut:`, `path:` and absolute paths, `git:` and
 `git+…`, `tarball+…`, `file+…` and plain `http(s)`/`file` URLs, with the
 query parameters each scheme keeps. For valid input the output is Nix's.
 
@@ -481,7 +481,7 @@ Nix fails:
 Where iets errors, the wording is its own. Classic mode falls back
 to Nix for each of these:
 
-- `sourcehut:`, `hg+…` and any other scheme or type;
+- `hg+…` and any other scheme or type;
 - a URL authority with a character that is not unreserved (an IP literal
   `[::1]`, a `%XX` escape, a sub-delim), and a port that is not 1-65535;
 - a git `url` in `flakeRefToString` that is not a URL (scp-style

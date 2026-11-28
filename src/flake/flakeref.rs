@@ -1,5 +1,5 @@
-//! Flake references (flakeref.cc, the github, gitlab, git, path, tarball,
-//! file and indirect schemes' inputFromURL and toURL) for the builtins, the
+//! Flake references (flakeref.cc, the github, gitlab, sourcehut, git, path,
+//! tarball, file and indirect schemes' inputFromURL and toURL) for the builtins, the
 //! command line and fetchTree's messages. Valid input gives Nix's output;
 //! checks that only refuse invalid input are left out (docs/reference/divergences.md).
 
@@ -254,7 +254,7 @@ fn input_from_url(mut url: Url) -> R<Attrs> {
                 }
             }
         }
-        (_, "github" | "gitlab") => {
+        (_, "github" | "gitlab" | "sourcehut") => {
             // github.cc:GitArchiveInputScheme::inputFromURL
             let p = segments(&url.path);
             if p.len() < 2 {
@@ -312,7 +312,7 @@ fn to_url(a: &Attrs) -> R<Url> {
     let r#ref = str_attr(a, "ref");
     let mut u = match ty {
         "indirect" => url("flake", vec![get("id")?]),
-        "github" | "gitlab" => {
+        "github" | "gitlab" | "sourcehut" => {
             // github.cc:inputFromAttrs; written as a path, the two would
             // read back as one ref
             if let (Some(r), Some(v)) = (r#ref, str_attr(a, "rev")) {
@@ -356,7 +356,7 @@ fn to_url(a: &Attrs) -> R<Url> {
     if ty != "indirect" {
         put(&mut u.query, "narHash", nar_hash(a));
     }
-    if ty.starts_with("git") {
+    if ["github", "gitlab", "sourcehut"].contains(&ty) {
         put(&mut u.query, "host", str_attr(a, "host"));
     }
     Ok(u)
@@ -607,6 +607,7 @@ mod tests {
         "github:a/b/abcdef0123456789012345678901234567890123"
     )]
     #[case("gitlab:a/b?host=x.org&ref=v1", "gitlab:a/b/v1?host=x.org")]
+    #[case("sourcehut:~a/b?ref=v1", "sourcehut:~a/b/v1")]
     #[case("nixpkgs/x", "flake:nixpkgs/x")]
     #[case("/a b/c?rev=x", "path:/a%20b/c?rev=x")]
     #[case(
@@ -685,7 +686,6 @@ mod tests {
 
     #[rstest]
     #[case("foo:bar")]
-    #[case("sourcehut:~a/b")]
     #[case("hg+https://x.org/a")]
     #[case("https://[::1]/a")]
     #[case("https://x%41.org/a")]

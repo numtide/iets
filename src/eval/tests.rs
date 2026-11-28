@@ -454,7 +454,7 @@ fn pure_eval_answers_like_nix() {
     );
     err(
         r#"builtins.fetchTree { type = "sourcehut"; owner = "o"; repo = "r"; }"#,
-        "an unlocked 'sourcehut' input in pure evaluation mode is not supported",
+        "in pure evaluation mode, 'fetchTree' doesn't fetch unlocked input 'sourcehut:o/r'",
     );
     for (src, want) in [
         (

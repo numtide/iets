@@ -463,8 +463,7 @@ A name falls back in these cases:
    - `getFlake` on anything but a local path or local SCM reference.
      Pure evaluation needs a matching `narHash` for a path or a locked SCM revision,
      and local SCM sources outside the native allow list also fall back.
-   - a flake reference iets does not parse (`hg+…`, `sourcehut:`, an
-     IP-literal host; `docs/reference/divergences.md`);
+   - a flake reference iets does not parse (`hg+…`, an IP-literal host; `docs/reference/divergences.md`);
    - `getContext` on the output of a dynamic derivation;
    - import from derivation: `import`, `scopedImport`, `readFile`,
      `readDir`, `pathExists`, `readFileType` or `hashFile` on a derivation

@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
+use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
@@ -231,6 +233,28 @@ fn equality() {
         "true"
     );
     assert_eq!(eval_str("\"a\" < \"b\" && [ 1 2 ] < [ 1 3 ]"), "true");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn short_sysfs_reads_fail_for_import_read_file_and_hash_file() {
+    let path = "/sys/kernel/uevent_seqnum";
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    if bytes.len() as u64 >= fs::metadata(path).unwrap().len() {
+        return;
+    }
+    for expression in [
+        format!("import {path}"),
+        format!("builtins.readFile {path}"),
+        format!("builtins.hashFile \"sha256\" {path}"),
+    ] {
+        assert_eq!(
+            eval_err(&format!("builtins.tryEval ({expression})")),
+            format!("unexpected end-of-file reading from {path:?}")
+        );
+    }
 }
 
 #[test]

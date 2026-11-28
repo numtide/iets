@@ -24,6 +24,8 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 use crate::sys::errno;
 use crate::sys::{self, OsStrExt, OsStringExt};
@@ -382,11 +384,44 @@ pub enum At<'a> {
 /// A failed read: the verb Nix names the failed step with, and the error.
 pub type Failed = (&'static str, io::Error);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    FileBuiltin,
+    Import,
+    Transport,
+}
+
 const STAT: &str = "getting status of";
 const READ: &str = "reading file";
 
 fn os(p: &[u8]) -> PathBuf {
     sys::path_from_internal(p)
+}
+
+fn read_disk(file: impl Read, size: u64, sized: bool) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(if sized { size } else { u64::MAX })
+        .read_to_end(&mut bytes)?;
+    if sized && (bytes.len() as u64) < size {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(bytes)
+}
+
+fn read_failure(error: io::Error, file: &fs::File, name: &[u8]) -> Failed {
+    if error.kind() != io::ErrorKind::UnexpectedEof {
+        return (READ, error);
+    }
+    #[cfg(target_os = "linux")]
+    let path = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    #[cfg(not(target_os = "linux"))]
+    let path = {
+        let _ = file;
+        sys::fs::canonicalize(&os(name))
+    };
+    let path = path.unwrap_or_else(|_| os(name));
+    let message = format!("unexpected end-of-file reading from {path:?}");
+    (READ, io::Error::new(error.kind(), message))
 }
 
 fn enoent() -> io::Error {
@@ -503,11 +538,25 @@ impl SrcPath {
         Ok(self.stat(ev, true)? == Kind::Directory)
     }
 
-    /// A regular file's bytes, recorded in the read set. `sized` is `readFile`'s
-    /// read: a stat first, `EISDIR` for a file that is not regular, then
-    /// `st_size` bytes. Otherwise the file is read to its end (`import`,
-    /// `hashFile`).
+    /// A sized Nix source read requires exactly `st_size` bytes. A raw
+    /// transport read streams to the end.
     pub fn read(&self, ev: &Evaluator, sized: bool) -> Result<Vec<u8>, Failed> {
+        self.read_with(
+            ev,
+            if sized {
+                ReadMode::FileBuiltin
+            } else {
+                ReadMode::Transport
+            },
+        )
+    }
+
+    pub(crate) fn read_import(&self, ev: &Evaluator) -> Result<Vec<u8>, Failed> {
+        self.read_with(ev, ReadMode::Import)
+    }
+
+    fn read_with(&self, ev: &Evaluator, mode: ReadMode) -> Result<Vec<u8>, Failed> {
+        let sized = mode == ReadMode::FileBuiltin;
         match self.at().ok_or((STAT, enoent()))? {
             At::Disk(p) => {
                 let (meta, f) = if sized {
@@ -520,10 +569,10 @@ impl SrcPath {
                     let f = fs::File::open(os(&p)).map_err(|e| (READ, e))?;
                     (f.metadata().map_err(|e| (STAT, e))?, f)
                 };
-                let mut bytes = Vec::with_capacity(meta.len() as usize);
-                f.take(if sized { meta.len() } else { u64::MAX })
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| (READ, e))?;
+                // Imports can also read streams, including completion's FIFO.
+                let sized = sized || mode == ReadMode::Import && meta.is_file();
+                let bytes =
+                    read_disk(&f, meta.len(), sized).map_err(|e| read_failure(e, &f, &p))?;
                 ev.trace().file(&p, &meta, &bytes);
                 Ok(bytes)
             }
@@ -842,5 +891,16 @@ mod tests {
         assert_eq!(rel(b"lib", b""), b"lib");
         assert_eq!(rel(b"", b"lib"), b"lib");
         assert_eq!(rel(b"lib", b"x.nix"), b"lib/x.nix");
+    }
+
+    #[test]
+    fn sized_source_reads_require_the_reported_byte_count() {
+        let src = b"42".as_slice();
+        let read = |size| read_disk(src, size, true);
+        assert_eq!(read(3).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(2).unwrap(), src);
+        assert_eq!(read(1).unwrap(), b"4");
+        assert!(read(0).unwrap().is_empty());
+        assert_eq!(read_disk(src, 0, false).unwrap(), src);
     }
 }

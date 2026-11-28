@@ -380,23 +380,8 @@ impl Census {
             env_unread_bytes,
             by_bucket(&env_unread_by)
         );
-        let _ = writeln!(out, "attrsets by producer and size (counts):");
-        let _ = write!(out, "  {:>12}", "");
-        for b in SIZE_BUCKETS {
-            let _ = write!(out, " {b:>8}");
-        }
-        let _ = writeln!(out, " {:>9}", "total");
-        for (o, row) in self.attrs_hist.iter().enumerate() {
-            let total: u64 = row.iter().sum();
-            if total == 0 {
-                continue;
-            }
-            let _ = write!(out, "  {:>12}", ORIGINS[o]);
-            for c in row {
-                let _ = write!(out, " {c:>8}");
-            }
-            let _ = writeln!(out, " {total:>9}");
-        }
+        // Allocation-time upper bounds stay in `self.attrs_hist`.
+        let mut attrs_hist = [[0u64; 11]; 10];
         let mut never: [u64; 10] = [0; 10];
         let mut never_bytes: [u64; 10] = [0; 10];
         let mut once: [u64; 10] = [0; 10];
@@ -405,7 +390,8 @@ impl Census {
         for a in &self.attrs {
             let a = unsafe { &**a };
             let o = a.origin as usize;
-            let bytes = (8 + 16 * a.len_unmarked()) as u64;
+            attrs_hist[o][size_bucket(a.len_unmarked())] += 1;
+            let bytes = a.initialized_bytes() as u64;
             total_bytes[o] += bytes;
             let flags = a.flags.load(Ordering::Relaxed);
             let sel = flags & 0x7f;
@@ -419,9 +405,26 @@ impl Census {
                 once[o] += 1;
             }
         }
+        let _ = writeln!(out, "attrsets by producer and size (counts):");
+        let _ = write!(out, "  {:>12}", "");
+        for b in SIZE_BUCKETS {
+            let _ = write!(out, " {b:>8}");
+        }
+        let _ = writeln!(out, " {:>9}", "total");
+        for (o, row) in attrs_hist.iter().enumerate() {
+            let total: u64 = row.iter().sum();
+            if total == 0 {
+                continue;
+            }
+            let _ = write!(out, "  {:>12}", ORIGINS[o]);
+            for c in row {
+                let _ = write!(out, " {c:>8}");
+            }
+            let _ = writeln!(out, " {total:>9}");
+        }
         let _ = writeln!(
             out,
-            "attrsets use: producer: total bytes / never selected nor iterated (bytes) / selected once only / iterated"
+            "attrsets use: producer: initialized bytes (unused union tail excluded) / never selected nor iterated (bytes) / selected once only / iterated"
         );
         for o in 0..10 {
             if total_bytes[o] == 0 {

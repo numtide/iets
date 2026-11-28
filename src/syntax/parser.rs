@@ -174,6 +174,14 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    #[inline]
+    fn nested(&mut self, parse: impl FnOnce(&mut Self) -> R<ExprId>) -> R<ExprId> {
+        self.deeper()?;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
     fn overflow(&mut self) -> Box<ParseError> {
         let t = self.peek();
         self.error_at(
@@ -224,13 +232,13 @@ impl<'a> Parser<'a> {
     /// An operand of a chain, one level below the chain, and its height
     /// from the level of the chain.
     #[inline]
-    fn operand(&mut self, parse: impl FnOnce(&mut Self) -> R<ExprId>) -> R<(ExprId, u32)> {
+    fn operand(&mut self, min_bp: u8, recursive: bool) -> R<(ExprId, u32)> {
         let base = self.depth;
         let outer = self.measure();
-        if cfg!(target_os = "wasi") {
+        if cfg!(target_os = "wasi") || recursive {
             self.deeper()?;
         }
-        let e = parse(self)?;
+        let e = self.parse_op(min_bp)?;
         self.depth = base;
         let h = self.height();
         self.peak = outer;
@@ -365,10 +373,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self) -> R<ExprId> {
-        self.deeper()?;
-        let r = self.parse_function_inner();
-        self.depth -= 1;
-        r
+        self.nested(Self::parse_function_inner)
     }
 
     fn parse_function_inner(&mut self) -> R<ExprId> {
@@ -604,7 +609,7 @@ impl<'a> Parser<'a> {
                 let mut acc = lhs;
                 while self.peek().kind == Tok::PipeInto {
                     self.bump();
-                    let (f, hf) = self.operand(|p| p.parse_op(0))?;
+                    let (f, hf) = self.operand(0, false)?;
                     h = (h + 1).max(hf);
                     self.tall(h)?;
                     acc = self.make_call(f, acc);
@@ -618,7 +623,7 @@ impl<'a> Parser<'a> {
                 let mut chain = vec![lhs];
                 while self.peek().kind == Tok::PipeFrom {
                     self.bump();
-                    let (f, hf) = self.operand(|p| p.parse_op(0))?;
+                    let (f, hf) = self.operand(0, false)?;
                     (top, links) = (top.max(hf), links + 1);
                     h = top + links;
                     self.tall(h)?;
@@ -673,9 +678,7 @@ impl<'a> Parser<'a> {
         let mut lhs = match t.kind {
             Tok::Bang => {
                 self.bump();
-                self.deeper()?;
-                let e = self.parse_op(BP_NOT + 1)?;
-                self.depth -= 1;
+                let e = self.nested(|p| p.parse_op(BP_NOT + 1))?;
                 self.add(
                     Expr::Unary {
                         op: UnOp::Not,
@@ -687,9 +690,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Minus => {
                 self.bump();
-                self.deeper()?;
-                let e = self.parse_op(BP_NEG + 1)?;
-                self.depth -= 1;
+                let e = self.nested(|p| p.parse_op(BP_NEG + 1))?;
                 self.add(
                     Expr::Unary {
                         op: UnOp::Neg,
@@ -723,7 +724,7 @@ impl<'a> Parser<'a> {
                 }
                 Some(op) => {
                     let rbp = if assoc == Assoc::Right { bp } else { bp + 1 };
-                    let (rhs, hr) = self.operand(|p| p.parse_op(rbp))?;
+                    let (rhs, hr) = self.operand(rbp, assoc == Assoc::Right)?;
                     h = (h + 1).max(hr);
                     self.add(Expr::Binary { op, lhs, rhs }, start, self.last_end)
                 }
@@ -790,13 +791,7 @@ impl<'a> Parser<'a> {
                 let mut default = None;
                 if self.peek().kind == Tok::Or {
                     self.bump();
-                    // `a.b or c.d or e` recurses with no level of its own
-                    let base = self.depth;
-                    if cfg!(target_os = "wasi") {
-                        self.deeper()?;
-                    }
-                    default = Some(self.parse_select()?);
-                    self.depth = base;
+                    default = Some(self.nested(Self::parse_select)?);
                 }
                 Ok(self.add(
                     Expr::Select {
@@ -828,10 +823,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_simple(&mut self) -> R<ExprId> {
-        self.deeper()?;
-        let r = self.parse_simple_inner();
-        self.depth -= 1;
-        r
+        self.nested(Self::parse_simple_inner)
     }
 
     fn parse_simple_inner(&mut self) -> R<ExprId> {
@@ -1714,4 +1706,18 @@ fn check_dup_attrs(src: &[u8], ast: &Ast, interner: &Interner, binds: Range) -> 
     let mut map = SymMap::default();
     let mut prefix = Vec::new();
     cx.add_binds(&mut map, binds, &mut prefix)
+}
+
+#[test]
+fn recursive_operands_consume_depth() {
+    for op in ["a.b or ", "1 -> ", "1 // ", "1 ++ ", "1 + "] {
+        let src = op.repeat(8) + "1";
+        let mut interner = Interner::new();
+        let mut parser = Parser::new(src.as_bytes(), &mut interner);
+        parser.depth = MAX_PARSE_DEPTH - 2;
+        let err = parser.parse_file(FileId(0)).err().map(|e| e.msg);
+        let overflow = (op != "1 + " || cfg!(target_os = "wasi"))
+            .then_some("stack overflow (possible infinite recursion)");
+        assert_eq!(err.as_deref(), overflow, "{op}");
+    }
 }

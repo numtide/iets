@@ -667,6 +667,18 @@ fn a_second_pseudo_file_keeps_its_own_positions() {
 }
 
 #[rstest]
+#[case("true", true)]
+#[case("y", false)]
+fn only_dynamic_names_capture_with(#[case] name: &str, #[case] closed: bool) {
+    let mut ev = Evaluator::new();
+    let src = format!("with {{ true = false; y = 1; }}; x: {name}");
+    let Value::Lambda(lambda) = ev.eval_string(&src, b"/").unwrap().view() else {
+        panic!("expected a lambda");
+    };
+    assert_eq!(lambda.lam.closed, closed);
+}
+
+#[rstest]
 #[case::discarded("builtins.true or [ outer ~/discarded ]", true, false)]
 #[case::retained(
     "[ outer ~/kept (builtins.true or [ outer ~/discarded ]) ]",

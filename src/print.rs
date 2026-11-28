@@ -130,12 +130,26 @@ pub fn print_ambiguous(
     seen: &mut FxHashSet<u64>,
     depth: usize,
 ) -> EvalResult<()> {
-    print_value::<false>(ev, w, cell, out, seen, depth)
+    print_value::<false, false>(ev, w, cell, out, seen, depth)
 }
 
 /// Modern `nix eval` forces each member as it prints it.
 pub(crate) fn print_eval(ev: &mut Evaluator, w: Word, out: &mut Vec<u8>) -> EvalResult<()> {
-    print_value::<true>(ev, w, 1, out, &mut FxHashSet::default(), 0)
+    print_value::<true, true>(ev, w, 1, out, &mut FxHashSet::default(), 0)
+}
+
+/// `builtins.trace` uses modern notation but only its message root has been forced.
+pub(crate) fn print_trace(ev: &mut Evaluator, w: Word, argument: Word) -> EvalResult<String> {
+    let mut out = Vec::new();
+    print_value::<true, false>(
+        ev,
+        w,
+        argument.bits(),
+        &mut out,
+        &mut FxHashSet::default(),
+        0,
+    )?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 // Keep the attribute iterator's sorting workspace out of recursive printer frames.
@@ -147,8 +161,8 @@ fn printer_attr_order(
     lexicographic_order(ev, attrs)
 }
 
-/// The modern printer forces while walking. The ambiguous printer inspects thunk state.
-fn print_value<const MODERN: bool>(
+/// Modern notation and forcing are separate: trace displays already demanded values.
+fn print_value<const MODERN: bool, const FORCE: bool>(
     ev: &mut Evaluator,
     w: Word,
     cell: u64,
@@ -159,7 +173,14 @@ fn print_value<const MODERN: bool>(
     if depth > eval::MAX_CALL_DEPTH as usize {
         return Err(Error::stack_overflow(Pos::NONE));
     }
-    let w = if MODERN {
+    // A boxed list still carries its original Value slot. A raw list carries
+    // only its list word. At the root trace supplies its original argument.
+    let slot = if MODERN && !FORCE && depth > 0 {
+        w.bits()
+    } else {
+        cell
+    };
+    let w = if FORCE {
         match ev.force(w) {
             Ok(w) => w,
             Err(e) if !matches!(e.kind, ErrorKind::Unsupported | ErrorKind::StackOverflow) => {
@@ -174,20 +195,20 @@ fn print_value<const MODERN: bool>(
         }
     } else if w.is_thunk() {
         let st = w.thunk_state_cell().get();
-        if st.is_blackhole() {
-            // only this fiber's own claim is the program's recursion; a
-            // helper's claim is work the program never asked for
-            if thunk::claimer(st) == ev.par.id {
-                out.extend_from_slice("«potential infinite recursion»".as_bytes());
-            } else {
-                out.extend_from_slice(b"<CODE>");
-            }
-        } else if w.thunk_unforced(st) || w.thunk_speculated(st) {
-            out.extend_from_slice(b"<CODE>");
-        } else {
-            return print_value::<MODERN>(ev, w.thunk_value(), cell, out, seen, depth);
+        // A helper's speculative result or claim is still dormant for this caller.
+        if st.is_blackhole() && thunk::claimer(st) == ev.par.id {
+            out.extend_from_slice("«potential infinite recursion»".as_bytes());
+            return Ok(());
         }
-        return Ok(());
+        if st.is_blackhole() || w.thunk_unforced(st) || w.thunk_speculated(st) {
+            out.extend_from_slice(if MODERN {
+                "«thunk»".as_bytes()
+            } else {
+                b"<CODE>"
+            });
+            return Ok(());
+        }
+        w.thunk_value()
     } else {
         w
     };
@@ -209,14 +230,14 @@ fn print_value<const MODERN: bool>(
                 out.extend_from_slice("«repeated»".as_bytes());
                 return Ok(());
             }
-            if MODERN && ev.is_derivation(w)? {
+            if FORCE && ev.is_derivation(w)? {
                 return print_derivation(ev, a, out);
             }
             out.extend_from_slice(b"{ ");
             for attr in printer_attr_order(ev, a) {
                 print_attr_name(out, ev.interner.name(attr.sym));
                 out.extend_from_slice(b" = ");
-                print_value::<MODERN>(
+                print_value::<MODERN, FORCE>(
                     ev,
                     attr.cell.get(),
                     &attr.cell as *const _ as u64,
@@ -229,14 +250,21 @@ fn print_value<const MODERN: bool>(
             out.push(b'}');
         }
         Value::List(l) => {
-            let key = if MODERN { w.bits() } else { cell };
+            let key = if FORCE { w.bits() } else { slot };
             if l.len > 0 && !seen.insert(key) {
                 out.extend_from_slice("«repeated»".as_bytes());
                 return Ok(());
             }
             out.extend_from_slice(b"[ ");
             for c in l.cells() {
-                print_value::<MODERN>(ev, c.get(), c as *const _ as u64, out, seen, depth + 1)?;
+                print_value::<MODERN, FORCE>(
+                    ev,
+                    c.get(),
+                    c as *const _ as u64,
+                    out,
+                    seen,
+                    depth + 1,
+                )?;
                 out.push(b' ');
             }
             out.push(b']');

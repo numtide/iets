@@ -497,3 +497,83 @@ fn dynamic_selection_preserves_name_and_value_effect_order(
     assert_eq!(stdout(&o), "42");
     assert_eq!(stderr(&o), "trace: NAME\ntrace: VALUE\n");
 }
+
+#[rstest]
+#[case::separate("[ a b ]", "[ { nested = { tag = 3; }; } { nested = { tag = 3; }; } ]")]
+#[case::shared_child(
+    "[ a { nested = a.nested; } ]",
+    "[ { nested = { tag = 3; }; } { nested = «repeated»; } ]"
+)]
+#[case::shared_root("[ a a ]", "[ { nested = { tag = 3; }; } «repeated» ]")]
+fn trace_distinguishes_shared_attribute_sets(
+    bin: Iets,
+    #[case] pair: &str,
+    #[case] expected: &str,
+    #[values("1", "8")] workers: &str,
+) {
+    let expr = format!(
+        r#"let parse = _: builtins.fromJSON ''{{"nested":{{"tag":3}}}}''; a = parse 1; b = parse 2;
+               p = {pair}; in builtins.deepSeq p (builtins.trace p 17)"#
+    );
+    let o = run(
+        &bin,
+        &["eval", "--workers", workers, "--no-cache", "-E", &expr],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "17");
+    assert_eq!(stderr(&o), format!("trace: {expected}\n"));
+}
+
+#[rstest]
+#[case::lazy(
+    r#"builtins.trace { x = throw "never"; nested = builtins.trace "unwanted" 0; } 17"#,
+    "{ nested = «thunk»; x = «thunk»; }"
+)]
+#[case::recursive_message(
+    "let x = builtins.trace [ x ] 17; in x",
+    "[ «potential infinite recursion» ]"
+)]
+#[case::recursive_set(
+    "let x = { self = x; }; in builtins.deepSeq x (builtins.trace x 17)",
+    "{ self = «repeated»; }"
+)]
+#[case::lists(
+    "let a = [1]; p = [a a [] []]; in builtins.deepSeq p (builtins.trace p 17)",
+    "[ [ 1 ] «repeated» [ ] [ ] ]"
+)]
+#[case::distinct_demanded_slots(
+    r#"let a = builtins.fromJSON "[2,3]"; b = builtins.seq null a; in builtins.seq a (builtins.seq b (builtins.trace [a b] 17))"#,
+    "[ [ 2 3 ] [ 2 3 ] ]"
+)]
+#[case::width("builtins.trace [0 1 2 3 4 5 6 7 8 9] 17", "[ 0 1 2 3 4 5 6 7 8 9 ]")]
+fn trace_uses_the_lazy_value_printer(bin: Iets, #[case] expr: &str, #[case] expected: &str) {
+    let o = run(&bin, &["eval", "--workers", "1", "--no-cache", "-E", expr]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "17");
+    assert_eq!(stderr(&o), format!("trace: {expected}\n"));
+}
+
+#[rstest]
+#[case::shared("a // { other = false; }", r#"{ x = "A"; }"#)]
+#[case::independent("{ x = read 1; other = false; }", "{ x = «thunk»; }")]
+fn trace_shows_the_state_of_the_actual_shared_thunk(
+    bin: Iets,
+    #[case] copy: &str,
+    #[case] original: &str,
+    #[values("1", "8")] workers: &str,
+) {
+    let expr = format!(
+        r#"let read = _: builtins.trace "read" "A"; a = {{ x = read 0; }}; b = {copy};
+           in builtins.seq b (builtins.seq b.x (builtins.trace a (builtins.trace b 17)))"#
+    );
+    let o = run(
+        &bin,
+        &["eval", "--workers", workers, "--no-cache", "-E", &expr],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "17");
+    assert_eq!(
+        stderr(&o),
+        format!("trace: read\ntrace: {original}\ntrace: {{ other = false; x = \"A\"; }}\n")
+    );
+}

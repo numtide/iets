@@ -233,6 +233,13 @@ fn read_speculated(ev: &mut Evaluator, cell: &Cell, st: Word) {
 
 #[inline(never)]
 fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult<Word> {
+    // A packed map stores its value in the public attribute cell. Computing it
+    // ahead would expose that cell before demand. Let the demand path also
+    // force the exact inputs the mapper reads.
+    if !ev.par.is_main && w.thunk_kind() == Kind::ThunkMap {
+        ev.par.cancelled = true;
+        return Err(cancelled());
+    }
     let me = ev.par.id;
     let key = cell as *const Cell as u64;
     // SAFETY (every `slot_mut` below): this fiber owns its slot, and each
@@ -303,16 +310,6 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
                 ev.par.fx.0.truncate(mark);
                 thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
                 Err(cancelled())
-            } else if ev.par.fx.0.len() > mark && w.thunk_kind() == Kind::ThunkMap {
-                // the value of a `mapAttrs` entry goes into the set's own
-                // cell, where a read takes it without its effects: the
-                // entry stays unforced, and the thunk that forced it
-                // carries them
-                if ev.par.frames == 0 {
-                    ev.par.fx.0.truncate(mark);
-                }
-                thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
-                Ok(v)
             } else {
                 let mut done = w.thunk_finish(v, ev.par.is_main);
                 if ev.par.fx.0.len() > mark {
@@ -873,6 +870,7 @@ mod tests {
 
     use super::*;
     use crate::parallel;
+    use crate::print::print_ambiguous;
 
     #[test]
     fn coercion_walk_stops_cancelled_helper() {
@@ -912,5 +910,44 @@ mod tests {
         })
         .unwrap()
         .unwrap_or_else(|panic| resume_unwind(panic));
+    }
+
+    #[test]
+    fn a_mapped_entry_and_its_inputs_become_visible_on_demand() {
+        fn render(ev: &mut Evaluator, value: Word) -> String {
+            let mut out = Vec::new();
+            print_ambiguous(ev, value, 1, &mut out, &mut FxHashSet::default(), 0).unwrap();
+            String::from_utf8(out).unwrap()
+        }
+        for (mapper, input_after) in [("v: v", "{ a = 2; }"), ("v: 2", "{ a = <CODE>; }")] {
+            for nested in [false, true] {
+                parallel::try_run(2, Evaluator::new(), move |ev| {
+                    let expr = format!(
+                        "let s = {{ a = builtins.length [ 0 0 ]; }};
+                             m = builtins.mapAttrs (_: {mapper}) s;
+                             in [ m s (builtins.attrValues m) (m.a + 2) ]"
+                    );
+                    let top = ev.eval_string(&expr, b"/").unwrap().as_list().unwrap();
+                    let m = ev.force_cell(&top.cells()[0]).unwrap();
+                    let s = ev.force_cell(&top.cells()[1]).unwrap();
+                    let values = ev.force_cell(&top.cells()[2]).unwrap().as_list().unwrap();
+                    let demand = if nested {
+                        &top.cells()[3]
+                    } else {
+                        &values.cells()[0]
+                    };
+                    // Use the look-ahead scheduler through the exported alias or a
+                    // computation that reads the map. No OS timing assumptions.
+                    ahead(ev, 0..1, |_| demand);
+                    assert_eq!(render(ev, m), "{ a = <CODE>; }");
+                    assert_eq!(render(ev, s), "{ a = <CODE>; }");
+                    let result = ev.force_cell(demand).unwrap().imm_int_value();
+                    assert_eq!(result, if nested { 4 } else { 2 });
+                    assert_eq!(render(ev, m), "{ a = 2; }");
+                    assert_eq!(render(ev, s), input_after);
+                })
+                .unwrap();
+            }
+        }
     }
 }

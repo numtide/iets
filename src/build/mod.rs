@@ -293,7 +293,8 @@ impl Dispatcher {
         // for one derivation, and neither says whether it succeeded.
         self.reporter.owns(by_drv.keys().cloned());
 
-        let built = static_outputs(up, &batch, &roots);
+        let known = known_outputs(up, &batch, &roots);
+        let built = static_outputs(&known, &batch);
         let held = match &built {
             Some(o) => {
                 let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
@@ -313,9 +314,17 @@ impl Dispatcher {
         // A failed preflight never dispatched a build. Once submitted, a transport
         // error can leave the remote outcome unknown.
         self.seen.extend(pending);
-        let status = match held {
-            true => (by_drv.keys())
-                .map(|d| (d.clone(), backend::Status::ok()))
+        let mut status = match held {
+            // nothing was built, so no verdict names the paths: they are the
+            // ones the store was asked about
+            true => (built.iter().flatten())
+                .map(|(d, outs)| {
+                    let mut s = backend::Status::ok();
+                    s.outputs = (outs.iter())
+                        .filter_map(|(n, p)| Some((n.clone(), p.clone()?)))
+                        .collect();
+                    (d.clone(), s)
+                })
                 .collect(),
             false => {
                 let jobs: Vec<backend::Job> = batch.iter().map(backend::Job::from).collect();
@@ -328,6 +337,24 @@ impl Dispatcher {
                 self.backend.submit(&b, &mut on_event)?
             }
         };
+        // The verdict names the paths, as `nix-build` reads them
+        // (NixOS/nix#15517). A daemon may leave out an output whose path the
+        // derivation fixes (input-addressed, fixed-output): that path stands
+        // in. A success still without a wanted one has nothing to print or
+        // link.
+        for t in &batch {
+            let drv = t.drv.to_string();
+            if let Some(s) = status.get_mut(&drv).filter(|s| s.ok) {
+                for (n, p) in known.get(&drv).into_iter().flatten() {
+                    if let Some(p) = p {
+                        s.outputs.entry(n.clone()).or_insert_with(|| p.clone());
+                    }
+                }
+                if let Some(why) = unnamed_output(&t.drv, &t.outputs, &s.outputs) {
+                    *s = backend::Status::failed(why, 1);
+                }
+            }
+        }
 
         let names = Names {
             prov: &self.prov,
@@ -340,17 +367,9 @@ impl Dispatcher {
             let elapsed = self.reporter.duration(&drv);
             match status.get(&drv) {
                 Some(s) if s.ok => {
-                    let map = match built.as_ref().and_then(|b| b.get(&drv)) {
-                        Some(m) => m.clone(),
-                        None => {
-                            let mut on_event = event_sink(&mut self.reporter, &self.prov, &by_drv);
-                            self.backend.outputs(&drv, &mut on_event)?
-                        }
-                    };
-                    let outputs: BTreeMap<String, String> = map
-                        .into_iter()
-                        .filter_map(|(n, p)| p.map(|p| (n, p)))
+                    let outputs: BTreeMap<String, String> = (s.outputs.iter())
                         .filter(|(n, _)| t.outputs.is_empty() || t.outputs.contains(n))
+                        .map(|(n, p)| (n.clone(), p.clone()))
                         .collect();
                     self.reporter.emit(&names.event(
                         &drv,
@@ -510,32 +529,80 @@ impl Dispatcher {
     }
 }
 
-/// The wanted output paths of every target, when each one is known without
-/// building: input-addressed and fixed outputs. `None` when any is not, or a
-/// drv cannot be read; the batch then asks the store as usual.
-fn static_outputs(
+/// The wanted outputs of each target and their paths where the derivation
+/// fixes them (input-addressed, fixed-output); `None` for a floating one. A
+/// target whose derivation is not at hand, or lacks a wanted output, is left
+/// out.
+fn known_outputs(
     up: &dyn Uploader,
     batch: &[Target],
     roots: &[StorePath],
-) -> Option<HashMap<String, BTreeMap<String, Option<String>>>> {
-    let drvs = up.drvs(roots, false).ok()?;
+) -> HashMap<String, BTreeMap<String, Option<String>>> {
+    let Ok(drvs) = up.drvs(roots, false) else {
+        return HashMap::new();
+    };
     let mut all = HashMap::new();
     for t in batch {
-        let d = drvs.iter().find(|d| d.path == t.drv)?;
-        let parsed = Derivation::parse(&d.aterm, Derivation::name_from_path(&t.drv).ok()?).ok()?;
+        let Some(d) = drvs.iter().find(|d| d.path == t.drv) else {
+            continue;
+        };
+        let Some(parsed) = Derivation::name_from_path(&t.drv)
+            .ok()
+            .and_then(|name| Derivation::parse(&d.aterm, name).ok())
+        else {
+            continue;
+        };
         if t.outputs.iter().any(|n| !parsed.outputs.contains_key(n)) {
-            return None;
+            continue;
         }
-        let mut outs = BTreeMap::new();
-        for (n, o) in &parsed.outputs {
-            if t.outputs.is_empty() || t.outputs.contains(n) {
-                let p = o.path(&parsed.name, n).ok()??;
-                outs.insert(n.clone(), Some(p.to_string()));
-            }
-        }
+        let outs = (parsed.outputs.iter())
+            .filter(|(n, _)| t.outputs.is_empty() || t.outputs.contains(*n))
+            .map(|(n, o)| {
+                (
+                    n.clone(),
+                    o.path(&parsed.name, n)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.to_string()),
+                )
+            })
+            .collect();
         all.insert(t.drv.to_string(), outs);
     }
-    Some(all)
+    all
+}
+
+/// `known`, when every target of the batch is in it with every wanted path
+/// fixed: what the store can be asked about before anything is built.
+fn static_outputs(
+    known: &HashMap<String, BTreeMap<String, Option<String>>>,
+    batch: &[Target],
+) -> Option<HashMap<String, BTreeMap<String, Option<String>>>> {
+    (batch.iter())
+        .all(|t| {
+            known
+                .get(&t.drv.to_string())
+                .is_some_and(|m| m.values().all(Option::is_some))
+        })
+        .then(|| known.clone())
+}
+
+/// Why a successful verdict leaves `drv` without a path to print: it lacks a
+/// wanted output, or names none when all are wanted.
+fn unnamed_output(
+    drv: &StorePath,
+    wanted: &[String],
+    named: &BTreeMap<String, String>,
+) -> Option<String> {
+    match wanted.iter().find(|n| !named.contains_key(*n)) {
+        Some(n) => Some(format!(
+            "derivation '{drv}' does not have a known output path for '{n}'"
+        )),
+        None if named.is_empty() => Some(format!(
+            "derivation '{drv}' does not have a known output path"
+        )),
+        None => None,
+    }
 }
 
 /// Whether the store holds every root and every wanted output, so nothing
@@ -810,7 +877,11 @@ mod tests {
             }
             Ok(jobs
                 .iter()
-                .map(|j| (j.drv.to_string(), backend::Status::ok()))
+                .map(|j| {
+                    let mut s = backend::Status::ok();
+                    s.outputs.insert("out".into(), realised(&j.drv, "out"));
+                    (j.drv.to_string(), s)
+                })
                 .collect())
         }
 
@@ -822,7 +893,7 @@ mod tests {
             let p = StorePath::parse(drv)?;
             Ok(BTreeMap::from([(
                 "out".to_string(),
-                Some(format!("/nix/store/{}", p.base_name().replace(".drv", ""))),
+                Some(realised(&p, "out")),
             )]))
         }
 
@@ -1078,6 +1149,226 @@ mod tests {
             out.contains("✔ 1 succeeded · ✘ 2 failed · 1 stopped"),
             "{out}"
         );
+    }
+
+    /// A builder that cannot name a floating content-addressed output before
+    /// it is built: the verdict names the outputs in `built`, and the output
+    /// map names only `out`, at `mapped`.
+    struct Floating {
+        mapped: Option<String>,
+        built: &'static [&'static str],
+    }
+
+    impl Floating {
+        fn new() -> Floating {
+            Floating {
+                mapped: None,
+                built: &["out", "dev"],
+            }
+        }
+    }
+
+    impl Backend for Floating {
+        fn query_valid(
+            &mut self,
+            _paths: &[&StorePath],
+            _on_event: &mut dyn FnMut(Event),
+        ) -> Result<HashSet<String>> {
+            Ok(HashSet::new())
+        }
+
+        fn substitute(
+            &mut self,
+            _paths: &[StorePath],
+            _on_event: &mut dyn FnMut(Event),
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn add_objects(
+            &mut self,
+            _objects: &[&Object],
+            _on_event: &mut dyn FnMut(Event),
+        ) -> Result<u64> {
+            Ok(0)
+        }
+
+        fn submit(
+            &mut self,
+            batch: &backend::Batch<'_>,
+            _on_event: &mut dyn FnMut(Event),
+        ) -> Result<HashMap<String, backend::Status>> {
+            Ok((batch.jobs.iter())
+                .map(|j| {
+                    let mut s = backend::Status::ok();
+                    for n in self.built {
+                        s.outputs.insert(n.to_string(), realised(&j.drv, n));
+                    }
+                    (j.drv.to_string(), s)
+                })
+                .collect())
+        }
+
+        fn outputs(
+            &mut self,
+            _drv: &str,
+            _on_event: &mut dyn FnMut(Event),
+        ) -> Result<BTreeMap<String, Option<String>>> {
+            Ok(BTreeMap::from([("out".to_string(), self.mapped.clone())]))
+        }
+
+        fn fetch(&mut self, _store_path: &str, _dir: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn add_root(&mut self, _store_path: &str, _link: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn out_links(&mut self, _links: &[(String, Option<String>)]) -> Result<()> {
+            Ok(())
+        }
+
+        fn note_connect(&mut self, _d: Duration) {}
+
+        fn note_upload(&mut self, _p: backend::Phase) {}
+
+        fn report(&self, _plan: &Plan, _plan_time: Duration) -> String {
+            String::new()
+        }
+    }
+
+    /// Where a test backend's verdict says a derivation's output landed.
+    fn realised(drv: &StorePath, output: &str) -> String {
+        let base = format!("/nix/store/{}", drv.base_name().replace(".drv", ""));
+        match output {
+            "out" => base,
+            _ => format!("{base}-{output}"),
+        }
+    }
+
+    fn floating(f: Floating) -> Dispatcher {
+        let style = Style {
+            mode: render::Mode::Ci,
+            color: false,
+            fold: false,
+            quiet: false,
+        };
+        Dispatcher::with_backend(
+            Box::new(f),
+            Provenance::off(),
+            Reporter::with_output(style, Box::new(Sink::default())),
+        )
+    }
+
+    /// A floating content-addressed output is named by the build verdict, not
+    /// by the output map: without it the run printed no path.
+    #[test]
+    fn a_floating_output_is_named_by_the_verdict() {
+        let mut d = floating(Floating::new());
+        let target = |n: &str, outs: Vec<String>| vec![Target::new(n, drv(n), outs)];
+        let got = d.submit(&mut NoUpload, target("a", vec![])).unwrap();
+        assert!(got[0].success);
+        assert_eq!(got[0].outputs["out"], realised(&drv("a"), "out"));
+        assert_eq!(got[0].outputs["dev"], realised(&drv("a"), "dev"));
+        // `--out` still picks
+        let got = (d.submit(&mut NoUpload, target("b", vec!["out".into()]))).unwrap();
+        assert_eq!(got[0].outputs.keys().collect::<Vec<_>>(), ["out"]);
+    }
+
+    /// The verdict names the paths of a build, as `nix-build` reads them
+    /// (NixOS/nix#15517). The output map is not asked.
+    #[test]
+    fn the_verdict_names_the_path_over_the_output_map() {
+        let mapped = "/nix/store/0c6ld7f4z8xbwgaz1mqk5c5bkwlhypzb-mapped";
+        let mut d = floating(Floating {
+            mapped: Some(mapped.to_string()),
+            ..Floating::new()
+        });
+        let got = d
+            .submit(&mut NoUpload, vec![Target::new("a", drv("a"), vec![])])
+            .unwrap();
+        assert!(got[0].success);
+        assert_eq!(got[0].outputs["out"], realised(&drv("a"), "out"));
+    }
+
+    /// A success that names no path for a wanted output leaves nothing to
+    /// print or link, so the target fails and names the output.
+    #[test]
+    fn a_verdict_without_a_wanted_output_fails() {
+        let mut d = floating(Floating::new());
+        let got = d
+            .submit(
+                &mut NoUpload,
+                vec![Target::new("a", drv("a"), vec!["bin".into()])],
+            )
+            .unwrap();
+        assert!(!got[0].success);
+        assert!(got[0].outputs.is_empty());
+        assert_eq!(d.exit, 1);
+        let why = got[0].reason.clone().unwrap_or_default();
+        assert!(
+            why.contains(&drv("a").to_string()) && why.contains("'bin'"),
+            "{why}"
+        );
+
+        // all outputs wanted, none named
+        let mut d = floating(Floating {
+            built: &[],
+            ..Floating::new()
+        });
+        let got = d
+            .submit(&mut NoUpload, vec![Target::new("b", drv("b"), vec![])])
+            .unwrap();
+        assert!(!got[0].success);
+        let why = got[0].reason.clone().unwrap_or_default();
+        assert!(why.contains(&drv("b").to_string()), "{why}");
+    }
+
+    /// An uploader holding `aterm` for every root.
+    struct Holds(String);
+
+    impl Uploader for Holds {
+        fn upload(
+            &mut self,
+            _b: &mut dyn Backend,
+            _roots: &[StorePath],
+            _on_event: &mut dyn FnMut(Event),
+        ) -> Result<upload::Stats> {
+            Ok(upload::Stats::default())
+        }
+
+        fn drvs(&self, roots: &[StorePath], _deep: bool) -> Result<Vec<backend::Drv>> {
+            Ok((roots.iter())
+                .map(|p| backend::Drv {
+                    path: p.clone(),
+                    aterm: Arc::new(self.0.as_bytes().to_vec()),
+                })
+                .collect())
+        }
+
+        fn roots_answered(&mut self, _roots: &[StorePath], _valid: &HashSet<String>) {}
+    }
+
+    /// A daemon may report a success with no `builtOutputs`. An input-addressed
+    /// derivation's paths are known without them, so the target succeeds with
+    /// those; only a floating output needs the verdict.
+    #[test]
+    fn an_input_addressed_success_without_named_outputs_takes_its_static_paths() {
+        let out = "/nix/store/0c6ld7f4z8xbwgaz1mqk5c5bkwlhypzb-a";
+        let aterm = format!(
+            r#"Derive([("out","{out}","","")],[],[],"x86_64-linux","/bin/sh",[],[("out","{out}")])"#
+        );
+        let mut d = floating(Floating {
+            built: &[],
+            ..Floating::new()
+        });
+        let got = d
+            .submit(&mut Holds(aterm), vec![Target::new("a", drv("a"), vec![])])
+            .unwrap();
+        assert!(got[0].success, "{:?}", got[0].reason);
+        assert_eq!(got[0].outputs["out"], out);
+        assert_eq!(d.exit, 0);
     }
 
     /// A target the build op came back without leaves no output path, so the

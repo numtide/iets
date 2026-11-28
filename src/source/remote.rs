@@ -4,7 +4,8 @@
 //! `gitlab`, `sourcehut`, `tarball`, and `git`).
 //!
 //! The `narHash` is known before the fetch, so the tree names itself and the
-//! input store refuses anything that does not hash to it.
+//! input store refuses anything that does not hash to it. A forge input with
+//! only a `rev` is hashed after the download instead (`by_rev`).
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -14,11 +15,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::{result, slice};
 
 use super::scm::{Commit, Entry};
-use super::{AttrVal, Attrs, Tree, parse_nar_hash, str_attr, to_url};
+use super::{AttrVal, Attrs, Tree, parse_nar_hash, revs, str_attr, to_url};
 use crate::builtins::{fetch_git, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::fetch::spool;
+use crate::flake::flakeref;
 use crate::log;
 use crate::remote::event;
 use crate::remote::worker::{Connection, Transport};
@@ -35,6 +37,9 @@ use crate::{config, trace};
 /// prefetch-inputs` are the callers, and they must agree on the name.
 pub fn locked(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
     let Some(nar_hash) = str_attr(attrs, "narHash") else {
+        if is_forge_type(attrs) && str_attr(attrs, "rev").is_some_and(flakeref::is_rev) {
+            return by_rev(ev, attrs, pos);
+        }
         let msg = format!(
             "cannot fetch unlocked input '{}' (no narHash); run nix flake lock",
             to_url(attrs)
@@ -60,6 +65,68 @@ pub fn locked(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
         subdir: String::new(),
         counter: None,
     })
+}
+
+/// A forge input with a `rev` and no `narHash`: the archive is downloaded and
+/// its tree named by its own hash. `revs` keeps the hash for the next run.
+fn by_rev(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
+    let name = to_url(attrs);
+    let fail = |e: String| {
+        Error::boxed(
+            ErrorKind::Eval,
+            format!("iets: cannot fetch input '{name}': {e}"),
+            pos,
+        )
+    };
+    let (url, headers) = tarball_url(nix_conf(ev.session()), attrs).map_err(fail)?;
+    let dir = revs::dir(None);
+    let known = |dir: &Option<_>| dir.as_deref().and_then(|d| revs::get(d, &url));
+    let (hash, last_modified) = match known(&dir) {
+        Some(known) => known,
+        None => {
+            let tag = format!("rev-{}", revs::file_name(&url));
+            let _fetching = treestore::fetch_lock(&tag, || {
+                log::line(&format!(
+                    "iets: waiting for another process to fetch input '{name}'"
+                ))
+            });
+            match known(&dir) {
+                Some(known) => known,
+                None => {
+                    log::line(&format!("iets: fetching input '{name}'"));
+                    let got = fetch_unnamed(ev, &url, &headers, &tag).map_err(fail)?;
+                    if let Some(dir) = &dir {
+                        revs::put(dir, &url, &got.0, got.1);
+                    }
+                    got
+                }
+            }
+        }
+    };
+    let mut attrs = attrs.clone();
+    attrs.insert("narHash".into(), AttrVal::Str(hash.to_sri()));
+    attrs
+        .entry("lastModified".into())
+        .or_insert(AttrVal::Int(last_modified));
+    locked(ev, &attrs, pos)
+}
+
+/// Downloads the archive at `url` into the input store. Returns the NAR hash
+/// of its tree and the newest member time. `tag` names the temporary directory.
+fn fetch_unnamed(
+    ev: &mut Evaluator,
+    url: &str,
+    headers: &[(String, String)],
+    tag: &str,
+) -> result::Result<(Hash, u64), String> {
+    let staged = treestore::stage(tag).ok_or("no cache directory to hold it")?;
+    let mut spool = spool::Spool::create_in(staged.dir()).map_err(|e| e.to_string())?;
+    let limits = Limits::new(nix_conf(ev.session())).map_err(|e| e.to_string())?;
+    download(ev, url, None, headers, limits, true, &mut spool)?;
+    let (tree, last_modified) =
+        spool::Tree::index_dated(spool, limits.max_size).map_err(|e| e.to_string())?;
+    let (_, hash) = store_tree(ev, "source", tree)?;
+    Ok((hash, last_modified))
 }
 
 /// The lock file's name for a locked input, else its attrs as a URL.
@@ -357,10 +424,8 @@ impl Building {
     }
 }
 
-/// The tree of a revision as the store path `name` gives it, readable there
-/// when this returns: `/nix/store` when it holds the tree, else the input
-/// store, which takes it in when it does not have it. The tree is hashed
-/// first, since nothing names it before.
+/// The tree of a revision, readable at the store path `name` and its NAR
+/// hash give when this returns (`store_tree`).
 pub fn store_commit(
     ev: &mut Evaluator,
     name: &str,
@@ -395,10 +460,21 @@ pub fn store_commit(
         root.dir(dirs).0.insert(last.to_vec(), Built::Leaf(node));
     }
     let tree = spool::Tree::spooled(file, root.node());
+    store_tree(ev, name, tree).map_err(fail)
+}
+
+/// Makes `tree` readable at the store path its NAR hash and `name` give:
+/// `/nix/store` when it holds the tree, else the input store, which takes it
+/// in when it does not have it.
+fn store_tree(
+    ev: &mut Evaluator,
+    name: &str,
+    tree: spool::Tree,
+) -> result::Result<(StorePath, Hash), String> {
     let mut h = Hasher::new(HashAlgo::Sha256);
-    tree.dump(&mut h).map_err(|e| fail(e.to_string()))?;
+    tree.dump(&mut h).map_err(|e| e.to_string())?;
     let hash = h.finish();
-    let sp = treestore::store_path(name, &hash).map_err(|e| fail(e.to_string()))?;
+    let sp = treestore::store_path(name, &hash).map_err(|e| e.to_string())?;
     ev.known.lock().entry(sp.clone()).or_default();
     if valid_in_store(ev, &sp, IngestionMethod::Recursive, &hash) {
         return Ok((sp, hash));
@@ -407,11 +483,11 @@ pub fn store_commit(
         Some(entry) => entry,
         None => {
             let staged = treestore::stage(sp.base_name())
-                .ok_or_else(|| fail("iets has no cache directory to hold a Git tree".into()))?;
+                .ok_or("iets has no cache directory to hold the tree")?;
             treestore::put(name, IngestionMethod::Recursive, &hash, staged, tree).map_err(|e| {
                 match e {
-                    Rejected::Io(e) => fail(e.to_string()),
-                    _ => fail("iets cannot keep a Git tree in the input store".into()),
+                    Rejected::Io(e) => e.to_string(),
+                    _ => "iets cannot keep the tree in the input store".into(),
                 }
             })?
         }
@@ -571,6 +647,14 @@ fn is_tarball_type(attrs: &Attrs) -> bool {
     matches!(
         str_attr(attrs, "type").unwrap_or(""),
         "github" | "gitlab" | "sourcehut" | "tarball"
+    )
+}
+
+/// The types that name a commit of a repository on a forge.
+fn is_forge_type(attrs: &Attrs) -> bool {
+    matches!(
+        str_attr(attrs, "type").unwrap_or(""),
+        "github" | "gitlab" | "sourcehut"
     )
 }
 
@@ -775,6 +859,8 @@ fn fetch_git_input(
 mod tests {
     use super::*;
     use crate::env::Env;
+    use crate::eval::EvalConfig;
+    use crate::sys;
     use rstest::rstest;
     use tempfile::tempdir;
 
@@ -795,6 +881,30 @@ mod tests {
         );
         assert_eq!(nix_conf(&owner).str("cores"), Some("3"));
         assert!(Arc::ptr_eq(&Session::current(), &ambient));
+    }
+
+    #[test]
+    fn an_archive_is_stored_under_the_hash_of_its_tree() {
+        let dir = tempdir().unwrap();
+        let session = Session::with_env(Env::isolated());
+        let _entered = session.enter();
+        session.set_cache_dir(dir.path().join("cache").to_str().unwrap());
+        let archive = dir.path().join("a.tar.gz");
+        let members = [
+            ("top/", tar::EntryType::Directory, 0o755, &b""[..]),
+            ("top/f", tar::EntryType::Regular, 0o644, b"x"),
+        ];
+        fs::write(&archive, spool::tests::tar_gz(&members)).unwrap();
+        let mut ev = EvalConfig::new().session(session.clone()).build();
+        let internal = sys::path_to_internal(&archive);
+        let url = format!("file://{}", String::from_utf8(internal).unwrap());
+
+        let (hash, _) = fetch_unnamed(&mut ev, &url, &[], "r").unwrap();
+        let sp = treestore::store_path("source", &hash).unwrap();
+        let entry = treestore::get(sp.base_name()).expect("the tree is stored");
+        assert_eq!(entry.nar_hash(), hash);
+        assert_eq!(entry.read(b"f").unwrap(), b"x");
+        assert_eq!(fetch_unnamed(&mut ev, &url, &[], "r").unwrap().0, hash);
     }
 
     fn attrs(pairs: &[(&str, &str)]) -> Attrs {
@@ -912,6 +1022,25 @@ mod tests {
             Some("host")
         );
         assert_eq!(access_token(&c, "gitlab.com", "gitlab.com/z/y"), None);
+    }
+
+    /// A `rev` that is no commit hash names no fixed tree.
+    #[test]
+    fn a_branch_name_as_rev_is_an_unlocked_input() {
+        let session = Session::with_env(Env::isolated());
+        let _entered = session.enter();
+        let mut ev = EvalConfig::new().session(session.clone()).build();
+        let input = attrs(&[
+            ("type", "github"),
+            ("owner", "o"),
+            ("repo", "r"),
+            ("rev", "main"),
+        ]);
+        let Err(e) = locked(&mut ev, &input, Pos::NONE) else {
+            panic!("a branch name was fetched");
+        };
+        assert_eq!(e.kind, ErrorKind::Unsupported);
+        assert!(e.msg.contains("cannot fetch unlocked input"), "{}", e.msg);
     }
 
     #[rstest]

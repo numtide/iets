@@ -845,6 +845,7 @@ pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
     if let Some(r) = root(cache_dir) {
         v.push((r.join("git"), Shape::Clones));
         v.push((r.join("lfs"), Shape::Objects));
+        v.push((r.join("revs"), Shape::Objects));
     }
     v
 }

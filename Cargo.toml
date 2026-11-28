@@ -38,7 +38,7 @@ brotli-decompressor = "6"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "transport", "tls-ring"] }
 tonic-prost = "0.14"
 prost = "0.14"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1"
 # The HTTP client (src/fetch/http/client.rs): the HTTP and TLS halves are the
 # ones tonic already brings.

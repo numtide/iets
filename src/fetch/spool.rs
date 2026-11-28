@@ -860,7 +860,7 @@ impl Idx<'_> {
         let mut shift = 0;
         loop {
             let b = self.u8()?;
-            if shift >= 64 {
+            if shift == 63 && b > 1 {
                 return None;
             }
             n |= u64::from(b & 0x7f) << shift;
@@ -872,7 +872,7 @@ impl Idx<'_> {
     }
 
     fn bytes(&mut self) -> Option<Vec<u8>> {
-        let n = self.u64()? as usize;
+        let n = usize::try_from(self.u64()?).ok()?;
         let s = self.b.get(self.i..self.i.checked_add(n)?)?;
         self.i += n;
         Some(s.to_vec())
@@ -885,7 +885,7 @@ fn get_node(d: &mut Idx<'_>, depth: usize) -> Option<Node> {
     }
     Some(match d.u8()? {
         0 => {
-            let n = d.u64()? as usize;
+            let n = usize::try_from(d.u64()?).ok()?;
             if n > d.b.len().saturating_sub(d.i) {
                 return None;
             }
@@ -1405,6 +1405,22 @@ pub(crate) mod tests {
             3,
             "\"same\" twice, the long file and the empty one"
         );
+    }
+
+    #[test]
+    fn index_sizes_must_fit_u64() {
+        let mut body = vec![INDEX_VERSION, 6];
+        body.extend_from_slice(b"sha256");
+        body.push(32);
+        body.extend_from_slice(&[0; 32]);
+        body.extend_from_slice(&[0xff; 9]);
+        let last = body.len();
+        body.extend_from_slice(&[1, 0, 0]); // size u64::MAX, empty directory
+        for (byte, expected) in [(1, Some(u64::MAX)), (2, None), (0x80, None)] {
+            body[last] = byte;
+            let bytes = [body.as_slice(), &checksum(&body)].concat();
+            assert_eq!(decode_index(&bytes).map(|(_, _, size)| size), expected);
+        }
     }
 
     /// No byte of a stored index is believed on its own: one flipped byte is a

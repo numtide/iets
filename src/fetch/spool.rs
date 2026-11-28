@@ -300,6 +300,14 @@ impl Tree {
     /// kept for `dump`. `max_size` is `fetch-max-size`: the spool and everything
     /// a sparse member expands to must fit in it together.
     pub fn index(spool: Spool, max_size: u64) -> Result<Tree> {
+        Self::index_with_mtime(spool, max_size, None)
+    }
+
+    pub(crate) fn index_with_mtime(
+        spool: Spool,
+        max_size: u64,
+        mut last_modified: Option<&mut u64>,
+    ) -> Result<Tree> {
         let Spool(spool) = spool;
         let mut root = DraftDir::new();
         let mut links: BTreeMap<Parts, Parts> = Default::default();
@@ -333,6 +341,25 @@ impl Tree {
                 // not as a member; GitHub's tarballs start with one.
                 if kind.is_pax_global_extensions() {
                     continue;
+                }
+                if let Some(latest) = last_modified.as_deref_mut() {
+                    let mut mtime = entry.header().mtime().unwrap_or_default();
+                    if let Some(records) = entry
+                        .pax_extensions()
+                        .map_err(|e| Error::io("cannot read tarball metadata", e))?
+                    {
+                        for record in records {
+                            let record =
+                                record.map_err(|e| Error::io("cannot read tarball metadata", e))?;
+                            if record.key_bytes() == b"mtime"
+                                && let Ok(value) = record.value()
+                            {
+                                let seconds = value.split('.').next().unwrap_or("");
+                                mtime = seconds.parse().unwrap_or_default();
+                            }
+                        }
+                    }
+                    *latest = (*latest).max(mtime);
                 }
                 let pax = pax_sparse(&mut entry)?;
                 let name = member_name(pax.as_ref(), &entry)?;

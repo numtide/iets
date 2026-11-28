@@ -181,7 +181,7 @@ fn attr(k: String, v: &str) -> Option<(String, AttrVal)> {
 }
 
 /// fetchers.cc:Input::getRev, as 40 hex digits.
-fn rev(a: &Attrs) -> R<Option<String>> {
+pub(crate) fn rev(a: &Attrs) -> R<Option<String>> {
     let parse = |s| Hash::parse_any(s, None).or_else(|_| Hash::parse_any(s, Some(HashAlgo::Sha1)));
     Ok(str_attr(a, "rev")
         .map(parse)
@@ -224,6 +224,15 @@ fn indirect(p: &[&str], shown: &str) -> R<Attrs> {
 
 const CURL: &str = "url narHash name unpack rev revCount lastModified";
 const GIT_FLAGS: &str = "shallow submodules lfs exportIgnore allRefs verifyCommit";
+
+/// Input::fromURL for a tarball's immutable Link.
+pub(crate) fn tarball_link(link: &str) -> R<Attrs> {
+    let attrs = input_from_url(parse_url(link)?)?;
+    if str_attr(&attrs, "type") != Some("tarball") {
+        return fail("tarball 'Link' headers that redirect to non-tarball URLs are not supported");
+    }
+    Ok(attrs)
+}
 
 /// fetchers.cc:Input::fromURL with requireTree.
 fn input_from_url(mut url: Url) -> R<Attrs> {

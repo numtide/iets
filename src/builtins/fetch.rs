@@ -187,6 +187,19 @@ pub(crate) fn path_nar_hash(
 }
 
 pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fetch_tree_impl(ev, args, pos, false)
+}
+
+pub(crate) fn fetch_tree_final(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fetch_tree_impl(ev, args, pos, true)
+}
+
+fn fetch_tree_impl(
+    ev: &mut Evaluator,
+    args: &[Word],
+    pos: Pos,
+    final_input: bool,
+) -> EvalResult<Word> {
     purity::unhashed_fetch(ev, "fetchTree", args[0], pos)?;
     let mut attrs = collect_attrs(ev, args[0], pos)?;
     if ev.pure() {
@@ -248,6 +261,14 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 subdir: String::new(),
                 counter: None,
             }
+        }
+        "tarball"
+            if !final_input
+                && attrs.contains_key("narHash")
+                && str_attr(&attrs, "url")
+                    .is_some_and(|u| u.starts_with("https://") || u.starts_with("http://")) =>
+        {
+            source::public_tarball(ev, attrs, pos)?
         }
         "github" | "gitlab" | "sourcehut" | "git" | "tarball" => {
             source::tree(ev, &SourceRef::Locked(attrs), pos)?

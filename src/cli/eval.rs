@@ -19,9 +19,7 @@ pub fn run_eval(a: EvalArgs) -> i32 {
         render::bytes(&out);
         return 0;
     }
-    // only the cache and --dump-drvs read the ATerm text after evaluation
-    let keep = run.cache.is_some() || a.dump_drvs.is_some();
-    run.cfg = run.cfg.keep_aterm(keep).keep_site(false);
+    run.cfg = run.cfg.keep_site(false);
     // parallel: the rest runs as the main fiber
     cli::run_parallel(run, move |ev, cache| eval_and_print(ev, a, cache))
 }

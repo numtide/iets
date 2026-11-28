@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use crate::cli::{self, EvalArgs, render, report, run_for};
 use crate::eval::{Evaluator, Pos};
-use crate::trace::run::Cache;
 use crate::trace::store::Part;
 use crate::{print, treestore};
 
@@ -22,11 +21,20 @@ pub fn run_eval(a: EvalArgs) -> i32 {
     // only the cache and --dump-drvs read the ATerm text after evaluation
     let keep = run.cache.is_some() || a.dump_drvs.is_some();
     run.cfg = run.cfg.keep_aterm(keep).keep_site(false);
-    // parallel: the rest runs as the main fiber
-    cli::run_parallel(run, move |ev, cache| eval_and_print(ev, a, cache))
+    let before = run.cfg.configured_session().log.diagnostic_lines();
+    match cli::run_parallel(run, move |ev, cache| {
+        let finish = cache.map(|c| c.finish_eval(ev, before));
+        let out = eval_and_print(ev, a, finish.is_some())?;
+        Ok((finish, out))
+    }) {
+        Ok((Some(write), out)) => write(&out),
+        Ok((None, _)) => {}
+        Err(code) => return code,
+    }
+    0
 }
 
-fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 {
+fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: bool) -> Result<Vec<u8>, i32> {
     let strict = a.strict;
     let json = a.json;
     let raw = a.raw;
@@ -67,7 +75,7 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         }
         // each value goes out as it is made, as in nix-instantiate --eval
         render::bytes(&out[start..]);
-        if cache.is_none() {
+        if !cache {
             out.clear();
         }
         Ok(())
@@ -77,14 +85,11 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         ev.print_stats();
     }
     if let Err(e) = r {
-        return report(ev, &e);
+        return Err(report(ev, &e));
     }
     if timings {
         eprintln!("eval: {:.3}s", t0.elapsed().as_secs_f64());
         treestore::report_timings();
     }
-    if let Some(c) = &cache {
-        c.write(ev, &out, false);
-    }
-    0
+    Ok(out)
 }

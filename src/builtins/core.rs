@@ -195,7 +195,7 @@ fn say(ev: &mut Evaluator, line: String) {
     // parallel: helpers journal, the demand path prints
     if !parallel::journal(ev) {
         ev.lints.flush();
-        log::line(&line);
+        log::evaluation_message(&line);
     }
 }
 

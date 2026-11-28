@@ -11,6 +11,7 @@ use crate::builtins::derivation::DrvInfo;
 use crate::cachefs::{self, Shape};
 use crate::eval::Evaluator;
 use crate::ignored;
+use crate::lint::Lints;
 use crate::log;
 use crate::session::Session;
 use crate::store::narinfo::Fetched;
@@ -19,7 +20,7 @@ use crate::store::source::SourceOrigin;
 use crate::syntax::symbol::FxHashMap;
 use crate::trace::key::Key;
 use crate::trace::store::{self, Entry, Opened, Part};
-use crate::trace::{validate, wire};
+use crate::trace::{Trace, validate, wire};
 
 /// What a `build` entry holds besides its read set.
 pub struct BuildTables {
@@ -164,25 +165,56 @@ impl Cache {
         let _ = self.store.publish(&self.key, &parts);
     }
 
+    /// Stdout streams from the demand fiber. Its speculative workers can still
+    /// observe a file or emit a diagnostic until the evaluation has joined.
+    pub(crate) fn finish_eval(
+        self,
+        ev: &Evaluator,
+        before: u64,
+    ) -> impl FnOnce(&[u8]) + Send + 'static + use<> {
+        let trace = ev.trace().clone();
+        // The worker has not evaluated yet, so its local lint caches are empty.
+        let lints = ev.lints.clone();
+        let session = ev.session().clone();
+        move |result| {
+            let _entered = session.enter();
+            if session.log.diagnostic_lines() == before {
+                self.write_result(&trace, &lints, result, None);
+            } else if self.timings {
+                errln!("cache: not written (unrecorded evaluation diagnostic)");
+            }
+        }
+    }
+
     /// Writes the entry after a successful run; a run that observed
     /// `currentTime` or called a fetcher writes nothing. `tables` adds the
     /// drv and source tables, which only a `build` hit reads back.
     pub fn write(&self, ev: &Evaluator, result: &[u8], tables: bool) {
-        if !ev.trace().is_cacheable() {
+        self.write_result(ev.trace(), &ev.lints, result, tables.then_some(ev));
+    }
+
+    fn write_result(
+        &self,
+        trace: &Trace,
+        lints: &Lints,
+        result: &[u8],
+        tables: Option<&Evaluator>,
+    ) {
+        if !trace.is_cacheable() {
             if self.timings {
                 errln!("cache: not written (uncacheable run)");
             }
             return;
         }
         let t0 = Instant::now();
-        let obs = ev.trace().take();
+        let obs = trace.take();
         let mut warnings = Vec::new();
-        for w in ev.lints.records() {
+        for w in lints.records() {
             warnings.extend_from_slice(w.as_bytes());
             warnings.push(b'\n');
         }
         let readset = wire::encode_readset(&obs);
-        let (drvs, sources) = if tables {
+        let (drvs, sources) = if let Some(ev) = tables {
             (
                 wire::encode_drvs(&ev.drv.drvs.lock()),
                 wire::encode_sources(&ev.known.origins()),
@@ -190,8 +222,10 @@ impl Cache {
         } else {
             (Vec::new(), Vec::new())
         };
-        let fetched = ev.known.all_fetched();
-        let fetched = (tables && !fetched.is_empty()).then(|| wire::encode_fetched(&fetched));
+        let fetched = tables.and_then(|ev| {
+            let rows = ev.known.all_fetched();
+            (!rows.is_empty()).then(|| wire::encode_fetched(&rows))
+        });
         let mut parts: Vec<(Part, &[u8])> = Vec::with_capacity(5);
         if !warnings.is_empty() {
             parts.push((Part::Warnings, &warnings));
@@ -199,7 +233,7 @@ impl Cache {
         if ignored::nix_config_was_seen() {
             parts.push((Part::NixConfig, &[]));
         }
-        if tables {
+        if tables.is_some() {
             parts.push((Part::Drvs, &drvs));
             parts.push((Part::Sources, &sources));
         }
@@ -283,7 +317,33 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{eval::EvalConfig, session};
     use tempfile::tempdir;
+
+    #[test]
+    fn eval_publication_observes_helpers_after_rendering() {
+        let dir = tempdir().unwrap();
+        let session = Session::new();
+        let _entered = session.enter();
+        let ev = EvalConfig::new()
+            .session(session.clone())
+            .trace(true)
+            .build();
+        let open = |key| Cache::open(dir.path().to_str(), Key::new(key), false).unwrap();
+        let finish = |key| open(key).finish_eval(&ev, session.log.diagnostic_lines());
+        let write = finish("quiet");
+        ev.trace().env(b"LATE_HELPER_INPUT");
+        write(b"result");
+        let readset = open("quiet").part(Part::Readset).unwrap();
+        assert_eq!(wire::decode_readset(&readset).unwrap().len(), 1);
+
+        let write = finish("diagnostic");
+        thread::spawn(session::bind(|| log::line("late diagnostic")))
+            .join()
+            .unwrap();
+        write(b"result");
+        assert!(open("diagnostic").part(Part::Result).is_none());
+    }
 
     #[test]
     fn refreshing_the_readset_preserves_fetched_closures() {

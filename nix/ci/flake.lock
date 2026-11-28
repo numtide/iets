@@ -59,6 +59,22 @@
         "type": "github"
       }
     },
+    "nix-pbt": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1795862024,
+        "narHash": "sha256-PveCXtbomd99869Wj04jpTPgxqlsGA2lmQiGTBTZFz8=",
+        "owner": "yorickvP",
+        "repo": "nix-pbt",
+        "rev": "537d5fd412f7100cb3ce1e488c3dbf2c34f522a5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "yorickvP",
+        "repo": "nix-pbt",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1789286504,
@@ -95,6 +111,7 @@
       "inputs": {
         "hercules-ci-effects": "hercules-ci-effects",
         "nix-conformance": "nix-conformance",
+        "nix-pbt": "nix-pbt",
         "nixpkgs": "nixpkgs_2"
       }
     }

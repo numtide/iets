@@ -11,7 +11,7 @@ pub mod flakeref;
 use std::path::{Component, Path, PathBuf};
 use std::{fs, io, mem};
 
-use crate::builtins::fetch::{self, fetch_tree};
+use crate::builtins::fetch;
 use crate::builtins::fetch_git;
 use crate::builtins::store_hooks::{self, locate};
 use crate::compile;
@@ -460,7 +460,9 @@ fn load_flake_tree(
     // one is there only with `fetch-tree` or `flakes` (`builtins::exposed`),
     // and `call-flake.nix` needs it either way
     let fetch_sym = ev.sym(b"fetchTree");
-    let fetch_tree = ev.arena.mk_primop("fetchTree", 1, fetch_tree, fetch_sym);
+    let fetch_tree = ev
+        .arena
+        .mk_primop("fetchTree", 1, fetch::fetch_tree_final, fetch_sym);
     ev.apply(call_flake, &[lock_str, overrides, fetch_tree], pos)
 }
 

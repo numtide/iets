@@ -256,6 +256,144 @@ impl F {
     }
 }
 
+#[test]
+fn pinned_tarballs_read_the_immutable_links_metadata() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    let Some(f) = F::new() else { return };
+    write(&f.work().join("source/payload"), "same tree");
+    let hash = f.nar_hash(&f.w("source"));
+    tar(&f.work(), &f.w("source.tar.gz"), "source");
+    let archive = fs::read(f.w("source.tar.gz")).unwrap();
+    write(&f.work().join("source/payload"), "changed tree");
+    tar(&f.work(), &f.w("changed.tar.gz"), "source");
+    let changed = fs::read(f.w("changed.tar.gz")).unwrap();
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = server.local_addr().unwrap();
+    let revision = Arc::new(AtomicUsize::new(1));
+    let selected = revision.clone();
+    let worker = std::thread::spawn(move || {
+        for stream in server.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = String::new();
+            let mut reader = BufReader::new(&stream);
+            if reader.read_line(&mut request).unwrap() == 0 {
+                break;
+            }
+            let conditional = reader
+                .lines()
+                .map(Result::unwrap)
+                .take_while(|line| !line.is_empty())
+                .any(|line| line.to_ascii_lowercase().starts_with("if-none-match:"));
+            let path = request.split_whitespace().nth(1).unwrap();
+            if path == "/etag-body.tar.gz" && conditional {
+                stream
+                    .write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+            } else if path.ends_with("body.tar.gz") {
+                let archive = if selected.load(SeqCst) == 9 {
+                    &changed
+                } else {
+                    &archive
+                };
+                let etag = if path.starts_with("/etag") {
+                    "ETag: \"same-body\"\r\n"
+                } else {
+                    ""
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{etag}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    archive.len()
+                )
+                .unwrap();
+                stream.write_all(archive).unwrap();
+            } else {
+                let n = if path.starts_with("/per-call") {
+                    selected.fetch_add(1, SeqCst)
+                } else if path.starts_with("/other") {
+                    3
+                } else {
+                    selected.load(SeqCst)
+                };
+                let prefix = if path.starts_with("/etag") {
+                    "etag-"
+                } else {
+                    ""
+                };
+                let body = format!("http://{addr}/{prefix}body.tar.gz");
+                write!(stream, "HTTP/1.1 302 Found\r\nLocation: {body}\r\nLink: <{body}?rev={n:040x}&revCount={n}&lastModified={n}>; rel=\"immutable\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+        }
+    });
+    let check = |path: &str, ttl: &str, n: usize| {
+        let expr = format!(
+            r#"let t = builtins.fetchTree {{ type = "tarball"; url = "http://{addr}/{path}.tar.gz"; narHash = "{hash}"; }}; in [ t.rev t.revCount t.lastModified (builtins.readFile (t.outPath + "/payload")) ]"#
+        );
+        let args = ["--json", "--option", "tarball-ttl", ttl, "--expr", &expr];
+        let ours = f.iets_eval(&[], &args);
+        let stock = f.s.nix("nix").arg("eval").args(args).output().unwrap();
+        for out in [ours, stock] {
+            assert!(out.status.success(), "{}", stderr(&out));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+                json!([format!("{n:040x}"), n, n, "same tree"])
+            );
+        }
+    };
+    check("moving", "3600", 1);
+    revision.store(2, SeqCst);
+    check("moving", "3600", 1);
+    check("other", "3600", 3);
+    check("body", "3600", 3);
+    check("moving", "0", 2);
+    check("etag", "0", 2);
+    revision.store(8, SeqCst);
+    check("etag", "0", 2);
+    let expr = format!(
+        r#"let f = u: (builtins.fetchTree {{ type="tarball"; url=u; narHash="{hash}"; }}).revCount; u="http://{addr}/per-call.tar.gz"; in [ (f u) (f (u + "")) ]"#
+    );
+    let args = ["--json", "--option", "tarball-ttl", "0", "--expr", &expr];
+    for stock in [false, true] {
+        revision.store(4, SeqCst);
+        let out = if stock {
+            f.s.nix("nix").arg("eval").args(args).output().unwrap()
+        } else {
+            f.iets_eval(&[], &args)
+        };
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+            json!([4, 4])
+        );
+        assert_eq!(revision.load(SeqCst), 5);
+    }
+    revision.store(9, SeqCst);
+    let expr = format!(
+        r#"(builtins.fetchTree {{ type="tarball"; url="http://{addr}/moving.tar.gz"; narHash="{hash}"; }}).revCount"#
+    );
+    // Switching back to a long TTL cannot revive a URL's superseded tree.
+    for ttl in ["0", "3600"] {
+        let args = ["--json", "--option", "tarball-ttl", ttl, "--expr", &expr];
+        for out in [
+            f.iets_eval(&[], &args),
+            f.s.nix("nix").arg("eval").args(args).output().unwrap(),
+        ] {
+            assert!(!out.status.success());
+            assert!(
+                stderr(&out).contains("NAR hash mismatch"),
+                "{}",
+                stderr(&out)
+            );
+        }
+    }
+    drop(TcpStream::connect(addr).unwrap());
+    worker.join().unwrap();
+}
+
 /// `lib`: a git flake with a greeting.
 fn lib_repo(f: &F) -> String {
     let lib = f.work().join("lib");

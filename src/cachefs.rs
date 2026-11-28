@@ -202,7 +202,7 @@ fn is_tmp(name: &OsStr) -> bool {
     b.starts_with(b".") && b.ends_with(b".tmp")
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -845,6 +845,7 @@ pub fn stores(cache_dir: Option<&str>) -> Vec<(PathBuf, Shape)> {
     if let Some(r) = root(cache_dir) {
         v.push((r.join("git"), Shape::Clones));
         v.push((r.join("lfs"), Shape::Objects));
+        v.push((r.join("tarballs"), Shape::Objects));
     }
     v
 }

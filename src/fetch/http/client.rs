@@ -426,22 +426,23 @@ pub(super) fn fetch(
     headers: &[(String, String)],
     body: Option<Vec<u8>>,
     limits: Limits,
+    tarball: bool,
     read: impl FnOnce(Box<dyn Read>, &[String]) -> Result<u64>,
-) -> Result<u64> {
+) -> Result<(u64, super::Transfer)> {
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
     let (head, codings) = oneshot::channel();
     let (cancel, cancelled) = oneshot::channel::<()>();
     let target = url.to_string();
     let sent = headers.to_vec();
-    let download = thread::spawn(move || -> Result<()> {
+    let download = thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
         rt.block_on(async {
             tokio::select! {
-                result = stream(&target, &sent, body, limits, head, tx) => result,
-                _ = cancelled => Ok(()),
+                result = stream(&target, &sent, body, limits, head, tx, tarball) => result,
+                _ = cancelled => Ok(super::Transfer::default()),
             }
         })
     });
@@ -463,8 +464,14 @@ pub(super) fn fetch(
     if let Ok(Err(e)) = got {
         return Err(e);
     }
-    sent?;
-    got.map_err(|_| bad(url, "missing HTTP response headers"))?
+    let transfer = sent?;
+    if transfer.unchanged {
+        return Ok((0, transfer));
+    }
+    Ok((
+        got.map_err(|_| bad(url, "missing HTTP response headers"))??,
+        transfer,
+    ))
 }
 
 /// The reading half of the queue: hyper's frames, one after the other.
@@ -501,18 +508,55 @@ async fn stream(
     limits: Limits,
     head: oneshot::Sender<Vec<String>>,
     tx: tokio::sync::mpsc::Sender<result::Result<Vec<u8>, String>>,
-) -> Result<()> {
+    tarball: bool,
+) -> Result<super::Transfer> {
     let first = Url::parse(url)?;
+    let condition = headers.iter().find(|(name, _)| name == "If-None-Match");
     let mut sent = headers.to_vec();
     sent.extend(first.basic());
     let headers = &sent[..];
     let mut current = url.to_string();
     let mut credentials = true;
+    let mut transfer = super::Transfer::default();
     let (mut redirects, mut attempt) = (0usize, 0u32);
     loop {
-        let creds = if credentials { headers } else { &[] };
+        let creds = if credentials {
+            headers
+        } else {
+            condition.map(std::slice::from_ref).unwrap_or_default()
+        };
         let (mut res, driver) = once(&current, creds, body.as_deref(), limits).await?;
         let status = res.status().as_u16();
+        if tarball && matches!(status, 200 | 301 | 302 | 303 | 304 | 307 | 308) {
+            transfer.urls.push(current.clone());
+            if status == 200 || status == 304 {
+                transfer.etag = res
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned);
+                if let Some((_, expected)) = condition
+                    && (status == 304 || transfer.etag.as_ref() == Some(expected))
+                {
+                    transfer.unchanged = true;
+                    driver.abort();
+                    return Ok(transfer);
+                }
+            }
+            for (name, value) in res.headers() {
+                if (name == "link" || name == "x-amz-meta-link")
+                    && let Ok(value) = value.to_str()
+                    && let Some((url, rel)) = value
+                        .trim()
+                        .strip_prefix('<')
+                        .and_then(|v| v.split_once('>'))
+                    && rel.eq_ignore_ascii_case("; rel=\"immutable\"")
+                {
+                    transfer.immutable = Some(url.to_string());
+                }
+            }
+        }
         match status {
             200 => {
                 let _ = head.send(content_codings(&current, res.headers())?);
@@ -548,7 +592,7 @@ async fn stream(
                     let _ = tx.send(Err(e.to_string())).await;
                 }
                 driver.abort();
-                return sent;
+                return sent.map(|()| transfer);
             }
             301 | 302 | 303 | 307 | 308 => {
                 driver.abort();

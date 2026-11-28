@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::{result, slice};
@@ -20,14 +20,16 @@ use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::fetch::http::{self, Limits};
 use crate::fetch::spool;
 use crate::log;
+use crate::parallel::shared::SharedMap;
 use crate::remote::event;
 use crate::remote::worker::{Connection, Transport};
 use crate::session::Session;
-use crate::store::hash::{Hash, HashAlgo, HashFormat, Hasher};
+use crate::store::hash::{Hash, HashAlgo, HashFormat, Hasher, hash_bytes};
 use crate::store::nar;
 use crate::store::path::{IngestionMethod, StorePath};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::treestore::{self, Rejected, StoredTree};
+use crate::{cachefs, flake::flakeref};
 use crate::{config, trace};
 
 /// A locked input's tree, named by the lock's `narHash` and readable at that
@@ -80,6 +82,8 @@ pub struct LazyStore {
     conn: Option<Connection>,
     tried: bool,
     validity: Arc<Mutex<Validity>>,
+    /// InputCache::getAccessor keeps a successful input through this evaluation.
+    tarballs: SharedMap<Attrs, Attrs>,
 }
 
 impl Clone for LazyStore {
@@ -90,7 +94,9 @@ impl Clone for LazyStore {
     fn clone(&self) -> LazyStore {
         LazyStore {
             validity: self.validity.clone(),
-            ..LazyStore::default()
+            tarballs: self.tarballs.clone(),
+            conn: None,
+            tried: false,
         }
     }
 }
@@ -666,13 +672,6 @@ fn fetch_tarball(
     pos: Pos,
 ) -> EvalResult<Arc<StoredTree>> {
     let name = input_name(ev, attrs);
-    let fail = |e: String| Error::boxed(ErrorKind::Eval, e, pos);
-    let (url, headers) = tarball_url(nix_conf(ev.session()), attrs)
-        .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    let expected = str_attr(attrs, "narHash")
-        .and_then(|h| parse_nar_hash(h).ok())
-        .ok_or_else(|| fail(format!("iets: input '{name}' has no usable 'narHash'")))?;
-
     let _fetching = treestore::fetch_lock(sp.base_name(), || {
         log::line(&format!(
             "iets: waiting for another process to fetch input '{name}'"
@@ -681,6 +680,183 @@ fn fetch_tarball(
     if let Some(entry) = treestore::reopen(sp.base_name()) {
         return Ok(entry);
     }
+    download_archive(ev, sp, attrs, None, pos)
+}
+
+/// Public fetchTree inputs can acquire attributes from the response. A final
+/// flake.lock input already specifies all the attributes its caller sees.
+pub(crate) fn public_tarball(ev: &mut Evaluator, attrs: Attrs, pos: Pos) -> EvalResult<Tree> {
+    let fail = |msg: String| Error::boxed(ErrorKind::Eval, msg, pos);
+    let expected =
+        parse_nar_hash(str_attr(&attrs, "narHash").unwrap()).map_err(|e| fail(e.to_string()))?;
+    let path = treestore::store_path("source", &expected).map_err(|e| fail(e.to_string()))?;
+    // The primary tracing cache does not validate HTTP metadata or its expiry.
+    ev.trace().mark_uncacheable();
+    let _lock = treestore::fetch_lock(path.base_name(), || {});
+    let effective = if let Some(found) = ev.store.tarballs.get(&attrs) {
+        found
+    } else {
+        let found = resolve_tarball(ev, &attrs, &path, &expected, pos)?;
+        ev.store.tarballs.insert(attrs, found.clone());
+        found
+    };
+    Ok(Tree {
+        path,
+        attrs: effective,
+        subdir: String::new(),
+        counter: None,
+    })
+}
+
+#[derive(Default)]
+struct TarballMetadata {
+    transfer: http::Transfer,
+    mtime: u64,
+    previous: Option<Arc<StoredTree>>,
+}
+
+fn resolve_tarball(
+    ev: &mut Evaluator,
+    attrs: &Attrs,
+    path: &StorePath,
+    expected: &Hash,
+    pos: Pos,
+) -> EvalResult<Attrs> {
+    let fail = |msg: String| Error::boxed(ErrorKind::Eval, msg, pos);
+    let url = str_attr(attrs, "url").unwrap();
+    let dir = cachefs::root(None)
+        .map(|d| d.join("tarballs"))
+        .filter(|dir| cachefs::prepare(dir, cachefs::Shape::Objects, false));
+    let key_for = |url: &str| hash_bytes(HashAlgo::Sha256, url.as_bytes()).to_base16();
+    let receipt = dir.as_ref().and_then(|dir| {
+        let key = key_for(url);
+        let (file, meta) = cachefs::open_entry(&dir.join(&key)).file()?;
+        let ttl = nix_conf(ev.session())
+            .int("tarball-ttl")
+            .ok()
+            .flatten()
+            .unwrap_or(3600);
+        let written = u64::try_from(crate::sys::fs::mtime_secs(&meta)).ok()?;
+        let fresh = ev.session().settings().offline
+            || (ttl != 0 && written.saturating_add(ttl) >= cachefs::now_secs());
+        let mut bytes = Vec::new();
+        file.take(1 << 20).read_to_end(&mut bytes).ok()?;
+        let (sum, data) = bytes.split_at_checked(cachefs::SUM)?;
+        if cachefs::checksum(&key, &[data]) != sum {
+            return None;
+        }
+        let (hash, immutable, mtime, etag): (String, Option<String>, u64, Option<String>) =
+            serde_json::from_slice(data).ok()?;
+        let hash = parse_nar_hash(&hash).ok()?;
+        let stored = treestore::store_path("source", &hash).ok()?;
+        let entry = treestore::reopen(stored.base_name())?;
+        (entry.nar_hash() == hash).then_some((
+            TarballMetadata {
+                transfer: http::Transfer {
+                    immutable,
+                    etag,
+                    ..Default::default()
+                },
+                mtime,
+                previous: Some(entry),
+            },
+            fresh,
+        ))
+    });
+    let (mut info, fresh) = receipt.unwrap_or_default();
+    let entry = if fresh {
+        info.previous.take().expect("fresh URL has a stored tree")
+    } else {
+        let entry =
+            download_archive(ev, path, attrs, Some(&mut info), pos).inspect_err(|error| {
+                // A changed tree invalidates this URL even when the caller pinned
+                // the previous hash. A later longer TTL cannot revive the old one.
+                if error.kind == ErrorKind::HashMismatch
+                    && let Some(dir) = &dir
+                {
+                    for u in &info.transfer.urls {
+                        let _ = fs::remove_file(dir.join(key_for(u)));
+                    }
+                }
+            })?;
+        if let Some(dir) = &dir {
+            let data = serde_json::to_vec(&(
+                entry.nar_hash().to_sri(),
+                &info.transfer.immutable,
+                info.mtime,
+                &info.transfer.etag,
+            ))
+            .unwrap();
+            for url in info.transfer.urls {
+                let key = key_for(&url);
+                let _ =
+                    cachefs::write_atomic(dir, &key, &[&cachefs::checksum(&key, &[&data]), &data]);
+            }
+            cachefs::maybe_sweep(dir, cachefs::Shape::Objects, false);
+        }
+        entry
+    };
+    let got = entry.nar_hash();
+    if &got != expected {
+        return Err(Error::hash_mismatch(
+            format!(
+                "NAR hash mismatch in tarball input: expected '{}' but got '{}'",
+                expected.to_sri(),
+                got.to_sri()
+            ),
+            &got,
+            None,
+            pos,
+        ));
+    }
+    let mut effective = match &info.transfer.immutable {
+        Some(url) => flakeref::tarball_link(url).map_err(|e| fail(e.to_string()))?,
+        None => attrs.clone(),
+    };
+    if info.mtime != 0 {
+        effective
+            .entry("lastModified".into())
+            .or_insert(AttrVal::Int(info.mtime));
+    }
+    let rev = flakeref::rev(&effective).map_err(|e| fail(e.to_string()))?;
+    if info.transfer.immutable.is_some() {
+        if let Some(original) = flakeref::rev(attrs).map_err(|e| fail(e.to_string()))?
+            && rev.as_ref() != Some(&original)
+        {
+            return Err(fail("'rev' attribute mismatch in tarball input".into()));
+        }
+        for field in ["lastModified", "revCount"] {
+            if let Some(original) = attrs.get(field)
+                && effective.get(field) != Some(original)
+            {
+                return Err(fail(format!(
+                    "'{field}' attribute mismatch in tarball input"
+                )));
+            }
+        }
+    }
+    if let Some(rev) = rev {
+        effective.insert("rev".into(), AttrVal::Str(rev));
+    }
+    effective.insert("narHash".into(), AttrVal::Str(expected.to_sri()));
+    adopt(ev, path, &entry);
+    Ok(effective)
+}
+
+fn download_archive(
+    ev: &mut Evaluator,
+    sp: &StorePath,
+    attrs: &Attrs,
+    mut info: Option<&mut TarballMetadata>,
+    pos: Pos,
+) -> EvalResult<Arc<StoredTree>> {
+    let name = input_name(ev, attrs);
+    let fail = |e: String| Error::boxed(ErrorKind::Eval, e, pos);
+    let (url, headers) = tarball_url(nix_conf(ev.session()), attrs)
+        .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
+    let expected = str_attr(attrs, "narHash")
+        .and_then(|h| parse_nar_hash(h).ok())
+        .ok_or_else(|| fail(format!("iets: input '{name}' has no usable 'narHash'")))?;
     let staged = treestore::stage(sp.base_name()).ok_or_else(|| {
         fail(format!(
             "iets: cannot fetch input '{name}': no cache directory to hold it"
@@ -690,10 +866,21 @@ fn fetch_tarball(
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
     let limits = Limits::new(nix_conf(ev.session()))
         .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    let local = local_file(ev, &url, pos)?;
-    download(ev, &url, local, &headers, limits, true, &mut spool)
-        .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
-    let tree = spool::Tree::index(spool, limits.max_size)
+    if let Some(info) = info.as_deref_mut() {
+        let fetched = http::tarball(&url, info.transfer.etag.as_deref(), limits, &mut spool)
+            .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
+        if fetched.unchanged {
+            info.transfer.urls = fetched.urls;
+            return Ok(info.previous.take().expect("an ETag has a stored tree"));
+        }
+        info.transfer = fetched;
+        info.mtime = 0;
+    } else {
+        let local = local_file(ev, &url, pos)?;
+        download(ev, &url, local, &headers, limits, true, &mut spool)
+            .map_err(|e| fail(format!("iets: cannot fetch input '{name}': {e}")))?;
+    }
+    let tree = spool::Tree::index_with_mtime(spool, limits.max_size, info.map(|i| &mut i.mtime))
         .map_err(|e| fail(format!("iets: cannot unpack input '{name}': {e}")))?;
 
     // the store verifies the tree against the lock's hash and names it by

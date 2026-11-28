@@ -242,6 +242,15 @@ lock's `narHash`. Reading `revCount` also fetches the commit history.
 hash of the bytes under the input's name, and the lock's `narHash` does not
 give that, so iets cannot say where the file belongs before it has it.
 
+A direct `builtins.fetchTree` of a hash-pinned HTTP tarball also returns
+metadata. The NAR hash identifies the tree's contents. Its revision,
+revision count and timestamp can come from the server's immutable
+`Link` header. Two URLs can therefore serve the same tree with different
+metadata. The input store shares the tree between them. The fetcher
+keeps the HTTP metadata separately by URL for `tarball-ttl`, including
+URLs followed through redirects. These direct calls evaluate with the
+command tracing cache off because that cache cannot check HTTP expiry.
+
 ## Remote root flakes
 
 The command line parses `github:NixOS/nixpkgs/<rev>#hello` and refuses it.

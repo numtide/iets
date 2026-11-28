@@ -25,6 +25,14 @@ mod client;
 
 pub use client::Kept;
 
+#[derive(Default)]
+pub(crate) struct Transfer {
+    pub urls: Vec<String>,
+    pub immutable: Option<String>,
+    pub etag: Option<String>,
+    pub unchanged: bool,
+}
+
 /// The zip-bomb guard: past `RATIO_AFTER` bytes out, a stream that gives more
 /// than `MAX_RATIO` bytes out per byte in is refused. The narHash is checked
 /// only at the end, so it bounds nothing on the way.
@@ -196,7 +204,18 @@ pub fn get(
     decompress: bool,
     sink: &mut dyn Write,
 ) -> Result<u64> {
-    request(url, headers, None, limits, decompress, sink)
+    request(url, headers, None, limits, decompress, sink, false).map(|(n, _)| n)
+}
+
+/// The immutable Link from the successful transfer and its redirects.
+pub(crate) fn tarball(
+    url: &str,
+    etag: Option<&str>,
+    limits: Limits,
+    sink: &mut dyn Write,
+) -> Result<Transfer> {
+    let condition = etag.map(|v| ("If-None-Match".into(), v.to_owned()));
+    request(url, condition.as_slice(), None, limits, true, sink, true).map(|(_, transfer)| transfer)
 }
 
 /// [`get`] of a URL the user named, which may be a `file:` URL that libcurl
@@ -226,7 +245,7 @@ pub fn post(
     limits: Limits,
     sink: &mut dyn Write,
 ) -> Result<u64> {
-    request(url, headers, Some(body), limits, false, sink)
+    request(url, headers, Some(body), limits, false, sink, false).map(|(n, _)| n)
 }
 
 fn request(
@@ -236,9 +255,10 @@ fn request(
     limits: Limits,
     decompress: bool,
     sink: &mut dyn Write,
-) -> Result<u64> {
+    tarball: bool,
+) -> Result<(u64, Transfer)> {
     offline(url)?;
-    client::fetch(url, headers, body, limits, |queued, codings| {
+    client::fetch(url, headers, body, limits, tarball, |queued, codings| {
         read(url, queued, limits, decompress, codings, sink)
     })
 }

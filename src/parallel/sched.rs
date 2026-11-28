@@ -213,6 +213,9 @@ pub struct Runtime {
     pub stat_main_parks: AtomicUsize,
     /// Nanoseconds the main fiber spent parked.
     pub stat_main_wait_ns: AtomicUsize,
+    pub(super) timeline_start: Option<Instant>,
+    pub(super) main_pos: AtomicU32,
+    pub(super) effect_bails: AtomicUsize,
     pub stat_fiber_parks: AtomicUsize,
 }
 
@@ -268,6 +271,9 @@ impl Runtime {
             stat_parks: AtomicUsize::new(0),
             stat_main_parks: AtomicUsize::new(0),
             stat_main_wait_ns: AtomicUsize::new(0),
+            timeline_start: (Session::current().settings().par_stats >= 2).then(Instant::now),
+            main_pos: AtomicU32::new(0),
+            effect_bails: AtomicUsize::new(0),
             stat_fiber_parks: AtomicUsize::new(0),
         }));
         let mut threads = rt.threads.lock().unwrap();
@@ -292,10 +298,8 @@ impl Runtime {
     /// other work while it is parked. Returns when `entry` has returned.
     /// Fails only when the main fiber's own stack cannot be reserved.
     fn run_main(&'static self, user: *mut (), entry: MainEntry) -> Result<(), fiber::StackError> {
-        if Session::current().settings().par_stats >= 2 {
-            force::SAMPLE_POS.store(true, Ordering::Relaxed);
-            let _ = force::START.set(Instant::now());
-            self.spawn_timeline();
+        if let Some(start) = self.timeline_start {
+            self.spawn_timeline(start);
         }
         fiber::install_overflow_handler();
         let mut w = Worker::new(0);
@@ -838,9 +842,8 @@ impl Runtime {
 
     /// Print, every 20 ms, how many workers are inside fibers, how much
     /// work is queued and whether main is parked.
-    fn spawn_timeline(&'static self) {
+    fn spawn_timeline(&'static self, start: Instant) {
         let t = thread::spawn(session::bind(move || {
-            let t0 = Instant::now();
             let mut last_busy = 0;
             let mut last_tasks = 0;
             loop {
@@ -850,10 +853,10 @@ impl Runtime {
                 }
                 let busy = self.stat_busy_ns();
                 let tasks = self.stat_tasks();
-                let pos = force::MAIN_POS.load(Ordering::Relaxed);
+                let pos = self.main_pos.load(Ordering::Relaxed);
                 errln!(
                     "t={:4}ms running={:2} busy-workers={:.1} tasks/20ms={:5} queued={:5} sleepers={:2} main-at=pos{}",
-                    t0.elapsed().as_millis(),
+                    start.elapsed().as_millis(),
                     self.stat_running(),
                     (busy - last_busy) as f64 / 20e6,
                     tasks - last_tasks,

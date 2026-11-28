@@ -4,8 +4,7 @@
 
 use std::mem;
 use std::ops::Range;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::sched::{self, Driver, Runtime, Slot, Task, Worker};
@@ -112,14 +111,14 @@ pub unsafe fn ev_of(slot: *mut Slot) -> &'static mut Evaluator {
 pub unsafe fn init_ctx(ev: &mut Evaluator, slot: *mut Slot) {
     // SAFETY: per the contract; only the slot's own fields are read, and
     // the pointer is stored for `slot_mut` to derive borrows from.
-    let (id, is_main, stack_lo) =
-        unsafe { ((*slot).id, (*slot).is_main, (*slot).fiber.stack.limit()) };
+    let s = unsafe { &*slot };
     ev.par = Ctx {
         on: true,
-        id,
-        is_main,
+        id: s.id,
+        is_main: s.is_main,
+        timeline_start: s.runtime().timeline_start,
         cancelled: false,
-        stack_lo,
+        stack_lo: s.fiber.stack.limit(),
         frames: 0,
         fx: Log::default(),
         slot,
@@ -195,15 +194,6 @@ pub fn bail_requested(ev: &Evaluator) -> bool {
     }
     slot_ref(ev).cancel.load(Ordering::Relaxed)
 }
-
-/// Position of the thunk the main fiber forced last (diagnostics: the
-/// `IETS_PAR_STATS=2` timeline samples it). These three and `EFFECT_BAILS`
-/// stay process-wide: they are sampled on the force path, where a session
-/// lookup would cost more than the diagnostic is worth, and two sessions
-/// would only blur one debug line.
-pub static MAIN_POS: AtomicU64 = AtomicU64::new(0);
-pub static SAMPLE_POS: AtomicBool = AtomicBool::new(false);
-pub static START: OnceLock<Instant> = OnceLock::new();
 
 /// Parallel `Evaluator::force_thunk`: claim, evaluate, publish. A thunk
 /// another fiber already forced is answered here and not in the claim
@@ -282,9 +272,12 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
             }
         }
     };
-    if SAMPLE_POS.load(Ordering::Relaxed) && ev.par.is_main && w.thunk_kind() == Kind::Thunk {
+    if ev.par.timeline_start.is_some() && ev.par.is_main && w.thunk_kind() == Kind::Thunk {
         let p = eval::ir_pos(w.as_thunk().ir());
-        MAIN_POS.store(p.0 as u64, Ordering::Relaxed);
+        slot_ref(ev)
+            .runtime()
+            .main_pos
+            .store(p.0, Ordering::Relaxed);
     }
     if bail_requested(ev) {
         ev.par.cancelled = true;
@@ -370,14 +363,15 @@ fn park(ev: &mut Evaluator, key: u64, mark: usize) {
 pub fn journal(ev: &mut Evaluator) -> bool {
     if ev.par.on && !ev.par.is_main {
         ev.par.cancelled = true;
-        EFFECT_BAILS.fetch_add(1, Ordering::Relaxed);
+        slot_ref(ev)
+            .runtime()
+            .effect_bails
+            .fetch_add(1, Ordering::Relaxed);
         true
     } else {
         false
     }
 }
-
-pub static EFFECT_BAILS: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
 
@@ -851,17 +845,17 @@ pub fn import_thunk(ev: &mut Evaluator, resolved: &[u8], pos: Pos) -> Word {
 fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
     let resolved = args[0].as_string().expect("path string").bytes;
     let pos = Pos(args[1].imm_int_value() as u32);
-    let t0 = SAMPLE_POS.load(Ordering::Relaxed).then(Instant::now);
+    let timing = ev.par.timeline_start.map(|start| (start, Instant::now()));
     let src = ev.read_source(resolved, pos)?;
     let dir = eval::dir_of(resolved).to_vec();
     let ir = ev.compile_file(resolved, src, &dir)?;
-    if let Some(t0) = t0 {
+    if let Some((start, t0)) = timing {
         // SAFETY: this fiber owns its slot; the borrow ends with the
         // statement and nothing else borrows the slot here.
         let w = unsafe { slot_mut(ev) }.worker().idx;
         errln!(
             "import t={}ms {}us main={} w{} {}",
-            START.get().map_or(0, |s| s.elapsed().as_millis()),
+            start.elapsed().as_millis(),
             t0.elapsed().as_micros(),
             ev.par.is_main,
             w,

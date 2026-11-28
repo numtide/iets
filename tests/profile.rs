@@ -4,6 +4,11 @@
 mod hermetic;
 
 use hermetic::{Iets, bin, stderr};
+use iets::eval::{EvalConfig, Pos};
+use iets::parallel;
+use iets::session::Session;
+use iets::settings::Settings;
+use iets::sys::path_to_internal;
 use rstest::rstest;
 
 use std::fs;
@@ -167,4 +172,37 @@ fn a_profile_refuses_more_than_one_worker(bin: Iets) {
     assert_ne!(o.status.code(), Some(0));
     let err = stderr(&o);
     assert!(err.contains("workers must be 1, not 4"), "{err}");
+}
+
+#[test]
+fn a_sequential_import_after_a_parallel_timeline_has_no_worker_slot() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("value.nix");
+    fs::write(&file, "42").unwrap();
+    for (workers, par_stats) in [(2, 2), (1, 2), (2, 0)] {
+        let session = Session::new();
+        let log = dir.path().join("timeline.log");
+        session
+            .log
+            .write_to(Box::new(fs::File::create(&log).unwrap()));
+        session.use_settings(Settings {
+            par_stats,
+            ..Settings::default()
+        });
+        let ev = EvalConfig::new().pure(false).session(session).build();
+        let path = path_to_internal(&file);
+        let value = parallel::try_run(workers, ev, move |ev| {
+            let value = ev.eval_file(&path, Pos::NONE).unwrap();
+            ev.force_int(value, Pos::NONE, "import").unwrap()
+        })
+        .unwrap();
+        assert_eq!(value, 42);
+        let log = fs::read_to_string(log).unwrap();
+        let imports = log.lines().filter(|l| l.starts_with("import t=")).count();
+        assert_eq!(
+            imports,
+            usize::from(workers == 2 && par_stats == 2),
+            "{log}"
+        );
+    }
 }

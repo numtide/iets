@@ -20,6 +20,7 @@
 //! The readers below record what they saw in the read set of the tracing
 //! cache.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
@@ -415,18 +416,17 @@ impl SrcPath {
         Some(below(root, &self.rel))
     }
 
+    fn filter(&self) -> Option<&HashSet<PathBuf>> {
+        match &self.src {
+            Src::Fs { accepted, .. } | Src::Spool { accepted, .. } => accepted.as_deref(),
+            Src::Mem(_) => None,
+        }
+    }
+
     /// Whether the tree's filter kept `p`: a path on disk, or a member's
     /// path in its spool.
     pub fn accepts(&self, p: &Path) -> bool {
-        match &self.src {
-            Src::Fs {
-                accepted: Some(a), ..
-            }
-            | Src::Spool {
-                accepted: Some(a), ..
-            } => a.contains(p),
-            _ => true,
-        }
+        self.filter().is_none_or(|accepted| accepted.contains(p))
     }
 
     /// Where a spool dump names this path: `/` plus its path in the entry.
@@ -443,8 +443,8 @@ impl SrcPath {
                 (self.rel.is_empty() || self.accepts(&p))
                     .then(|| At::Disk(sys::path_to_internal(&p)))
             }
-            Src::Spool { name, .. } => {
-                if !self.accepts(&self.in_spool()) {
+            Src::Spool { name, accepted, .. } => {
+                if matches!(accepted, Some(paths) if !paths.contains(&self.in_spool())) {
                     return None;
                 }
                 Some(At::Spool(treestore::get(name)?, name))
@@ -546,6 +546,7 @@ impl SrcPath {
     /// (untracked files of a git tree); the `Dir` observation keeps the full
     /// listing, the one validation can re-read.
     pub fn read_dir(&self, ev: &Evaluator) -> Result<Vec<(Vec<u8>, FileType)>, Failed> {
+        let filter = self.filter();
         let notdir = || (STAT, errno::not_a_directory());
         match self.at().ok_or((STAT, enoent()))? {
             At::Disk(p) => {
@@ -559,7 +560,7 @@ impl SrcPath {
                     if ev.trace().is_on() {
                         listing.push((name.clone(), trace::nar_kind(t)));
                     }
-                    if self.accepts(&e.path()) {
+                    if filter.is_none_or(|accepted| accepted.contains(&e.path())) {
                         out.push((name, t));
                     }
                 }
@@ -574,10 +575,13 @@ impl SrcPath {
             At::Spool(tree, name) => {
                 let entries = tree.list(&self.rel).map_err(|e| (STAT, e))?;
                 treestore::record(ev, &tree, name);
+                let Some(accepted) = filter else {
+                    return Ok(entries);
+                };
                 let here = self.in_spool();
                 Ok(entries
                     .into_iter()
-                    .filter(|(n, _)| self.accepts(&here.join(OsStr::from_bytes(n))))
+                    .filter(|(n, _)| accepted.contains(&here.join(OsStr::from_bytes(n))))
                     .collect())
             }
             At::Mem(_) => Err(notdir()),
@@ -726,10 +730,33 @@ pub fn is_git_entry(root: &Path, p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
+    use crate::eval::EvalConfig;
     use crate::store::hash::Hash;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn filtered_directory_observes_the_full_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("keep"), b"a").unwrap();
+        fs::write(dir.path().join("hide"), b"b").unwrap();
+        let ev = EvalConfig::new().trace(true).build();
+        let source = SrcPath::fs(
+            dir.path(),
+            Some(Arc::new(HashSet::from([dir.path().join("keep")]))),
+        );
+        assert_eq!(
+            source.read_dir(&ev).unwrap(),
+            vec![(b"keep".to_vec(), FileType::Regular)]
+        );
+        assert_eq!(
+            ev.trace().take(),
+            vec![Obs::Dir {
+                path: sys::path_to_internal(dir.path()),
+                hash: trace::dir_hash(dir.path(), &mut trace::DirBuf::default()).unwrap(),
+            }]
+        );
+    }
 
     #[test]
     fn virtual_tree_reads_go_to_the_local_files() {

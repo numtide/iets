@@ -373,6 +373,16 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
+/// Retry a helper on demand before observing or publishing order-dependent state.
+#[inline]
+pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
+    if journal(ev) {
+        Err(cancelled())
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
 
 /// One step of a thunk's effects, in the order its evaluation made it. A
@@ -872,6 +882,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
     use super::*;
+    use crate::eval::EvalConfig;
     use crate::parallel;
 
     #[test]
@@ -912,5 +923,29 @@ mod tests {
         })
         .unwrap()
         .unwrap_or_else(|panic| resume_unwind(panic));
+    }
+
+    #[test]
+    fn dumping_a_derivation_follows_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let ev = EvalConfig::new().dump_dir(dir.path().to_owned()).build();
+        let states = parallel::try_run(2, ev, move |ev| {
+            let v = ev
+                .eval_string(
+                    r#"[ (builtins.derivationStrict {
+                  name = "test-demand"; builder = "/bin/sh"; system = "test";
+                }).drvPath ]"#,
+                    b"/",
+                )
+                .unwrap();
+            let cells = v.as_list().unwrap().cells();
+            ahead(ev, 0..1, |i| &cells[i]);
+            let files = || dir.path().read_dir().unwrap().count();
+            let before = files();
+            ev.force_cell(&cells[0]).unwrap();
+            (before, files())
+        })
+        .unwrap();
+        assert_eq!(states, (0, 1));
     }
 }

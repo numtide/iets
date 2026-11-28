@@ -57,6 +57,7 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
                 query.argv().join(" "),
                 &hex(hash)[..16]
             )),
+            Obs::RevMapping { key, .. } => render::line(&format!("rev {}", hex(key))),
             Obs::Input { entry, version } => {
                 render::line(&format!("input {} v{version}", s(entry)))
             }

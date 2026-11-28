@@ -43,6 +43,45 @@ pub fn which(prog: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Wait for the daemon to open its store and complete a client handshake.
+fn wait_for_daemon(env: &Path, root: &Path, daemon: &mut Child) {
+    let socket = root.join("socket");
+    let nix = resolved("nix-daemon").with_file_name("nix");
+    let mut info = Command::new(if nix.is_file() { nix } else { resolved("nix") });
+    Store::env(env, &mut info);
+    info.args(["store", "info", "--store"])
+        .arg(format!("unix://{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut client: Option<Child> = None;
+    loop {
+        if let Some(child) = &mut client
+            && let Some(status) = child.try_wait().unwrap()
+        {
+            if status.success() {
+                return;
+            }
+            client = None;
+        }
+        if daemon.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            if let Some(mut child) = client {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            panic!(
+                "daemon at {} did not answer: {}",
+                socket.display(),
+                fs::read_to_string(root.join("daemon.log")).unwrap_or_default()
+            );
+        }
+        if client.is_none() && socket.exists() {
+            client = Some(info.spawn().expect("spawn nix store info"));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// `prog` on `PATH` in the real store, out of any profile.
 pub fn resolved(prog: &str) -> PathBuf {
     let p = which(prog).unwrap_or_else(|| panic!("{prog} on PATH"));
@@ -105,16 +144,8 @@ impl Store {
             bin: hermetic::bin(),
         };
         store.write_pkgs();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !store.socket().exists() {
-            let exited = store.daemon.try_wait().unwrap().is_some();
-            assert!(
-                !exited && Instant::now() < deadline,
-                "no daemon socket: {}",
-                store.daemon_log()
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        let root = store.dir.path();
+        wait_for_daemon(root, root, &mut store.daemon);
         Some(store)
     }
 
@@ -204,10 +235,6 @@ impl Store {
 
     pub fn daemon_pid(&self) -> u32 {
         self.daemon.id()
-    }
-
-    pub fn daemon_log(&self) -> String {
-        fs::read_to_string(self.dir().join("daemon.log")).unwrap_or_default()
     }
 
     /// iets, talking to this daemon only.
@@ -307,16 +334,7 @@ impl Store {
             store: builder_store(&root, &self.store_dir()),
             root,
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !b.socket().exists() {
-            let exited = b.daemon.try_wait().unwrap().is_some();
-            assert!(
-                !exited && Instant::now() < deadline,
-                "no builder socket: {}",
-                fs::read_to_string(b.root.join("daemon.log")).unwrap_or_default()
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_daemon(self.dir(), &b.root, &mut b.daemon);
         b
     }
 }

@@ -373,6 +373,16 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
+/// Retry a helper on demand before observing or publishing order-dependent state.
+#[inline]
+pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
+    if journal(ev) {
+        Err(cancelled())
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
 
 /// One step of a thunk's effects, in the order its evaluation made it. A
@@ -912,5 +922,68 @@ mod tests {
         })
         .unwrap()
         .unwrap_or_else(|panic| resume_unwind(panic));
+    }
+}
+
+#[cfg(test)]
+mod source_copy_tests {
+    use super::ahead;
+    use crate::eval::{EvalConfig, EvalResult, Pos};
+    use crate::lint::{Config, Level, Scope};
+    use crate::parallel::try_run;
+    use crate::sys::path_to_internal;
+    use rstest::rstest;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[rstest]
+    fn shared_source_copy_reports_at_first_demand(
+        #[values("dir-copy-unfiltered", "git-in-source", "large-source-copy")] lint: &'static str,
+    ) {
+        let dir = tempdir().unwrap();
+        for tree in ["a/tree/.git", "b/tree/.git"] {
+            fs::create_dir_all(dir.path().join(tree)).unwrap();
+        }
+        let file = dir.path().join("copies.nix");
+        for level in [Level::Warn, Level::Error] {
+            let allow = if level == Level::Error {
+                format!("# iets: allow {lint}\n")
+            } else {
+                String::new()
+            };
+            let a = r#"  "${./a/tree}""#;
+            let b = r#"  "${./b/tree}""#;
+            fs::write(&file, format!("[\n{allow}{a}\n{allow}{b}\n{a}\n{b}\n]")).unwrap();
+            let mut cfg = Config {
+                scope: Scope::All,
+                max_bytes: 1,
+                ..Config::default()
+            };
+            cfg.set("all", Level::Off).unwrap();
+            cfg.set(lint, level).unwrap();
+            let ev = EvalConfig::new().pure(false).lints(cfg).build();
+            let file = path_to_internal(&file);
+            let records = try_run(2, ev, move |ev| -> EvalResult<_> {
+                let v = ev.eval_file(&file, Pos::NONE)?;
+                let cells = v.as_list().unwrap().cells();
+                // Speculate on each later occurrence before demanding either first use.
+                for i in 2..4 {
+                    ahead(ev, i..i + 1, |i| &cells[i]);
+                }
+                for cell in cells {
+                    ev.force_cell(cell)?;
+                }
+                Ok(ev.lints.records())
+            })
+            .unwrap()
+            .unwrap();
+            if level == Level::Warn {
+                assert_eq!(records.len(), 2, "{records:?}");
+                assert!(records[0].contains("copies.nix:2:3"), "{records:?}");
+                assert!(records[1].contains("copies.nix:3:3"), "{records:?}");
+            } else {
+                assert!(records.is_empty(), "{records:?}");
+            }
+        }
     }
 }

@@ -196,11 +196,10 @@ impl<'a> Compiler<'a> {
             }
             self.scopes.push(Scope::frame(m));
         }
-        self.parser_notes()?;
-        let root = self.ast.root;
-        let ir = self.expr(root)?;
+        let ir = self.parser_notes().and_then(|()| self.expr(self.ast.root));
         self.scopes.clear();
-        Ok(ir)
+        self.lambdas.clear();
+        ir
     }
 
     #[inline]
@@ -1377,4 +1376,32 @@ pub fn canon_path(p: &[u8]) -> Vec<u8> {
         out.extend_from_slice(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Compiler;
+    use crate::eval::Evaluator;
+    use crate::syntax::{ast::FileId, parse};
+
+    #[test]
+    fn a_failed_compile_does_not_supply_the_next_roots_bindings() {
+        let mut ev = Evaluator::new();
+        let ast = parse(b"a: [ x y ]", FileId(0), &mut ev.interner).unwrap();
+        let x = ev.interner.intern(b"x");
+        let y = ev.interner.intern(b"y");
+        let mut c = Compiler::new(
+            &ast,
+            &mut ev.arena,
+            &mut ev.interner,
+            &ev.globals,
+            0,
+            b"/",
+            None,
+        );
+        assert!(c.compile_root(Some(&[x])).is_err());
+        assert!(c.lambdas.is_empty());
+        assert!(c.compile_root(Some(&[y])).is_err());
+        assert!(c.compile_root(Some(&[x, y])).is_ok());
+    }
 }

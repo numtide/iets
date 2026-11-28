@@ -905,9 +905,9 @@ impl Evaluator {
         self.lint_site(id, pos, None, None, msg)
     }
 
-    /// Any fiber reports: the site set keeps a warning to one line, and bailing
-    /// like `trace` (docs/explanation/evaluation.md, "Speculation can't change the result")
-    /// cost 15 % of the wall on nixos-server at 4 workers. A site the scope
+    /// A helper can park a site-based warning until demand. Source-copy lints
+    /// check demand before a shared cache can select a different site.
+    /// The site set keeps a warning to one line. A site the scope
     /// silences enters the set too; an `error` site never does, so every fiber
     /// that reaches it fails. A `level` is that of the tree a value comes from,
     /// not of the site. A finding of `tree` is one for the tree, so the site set

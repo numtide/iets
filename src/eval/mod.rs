@@ -44,7 +44,7 @@ use crate::session::Session;
 use crate::source::LazyStore;
 use crate::store::locate;
 use crate::store::narinfo::Fetched;
-use crate::store::path::{StorePath, split_store_path, store_dir};
+use crate::store::path::{StorePath, split_store_path, store_dir, strip_store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
@@ -1253,6 +1253,11 @@ impl Evaluator {
             let kind = store_hooks::stat(self, &cp, true);
             if kind != trace::Kind::Missing {
                 return Ok(cp);
+            }
+            // A previous demand can publish this entry. Caching a later
+            // match now would change which member of the search path wins.
+            if self.par.on && strip_store_dir(&cp).is_some() {
+                parallel::force::require_demand(self)?;
             }
         }
         if let Some(rest) = name.strip_prefix(b"nix/".as_slice())

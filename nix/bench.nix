@@ -169,14 +169,19 @@ in
       before=$(realpath "''${1:?pass the baseline iets executable}")
       after=${lib.getExe' iets "iets"}
       status=0
+      subset=()
       case "''${2:-}" in
-        "")
-          filters=('eval::evaluation::*' 'eval::components::*' 'eval::nixpkgs::job::hello')
-          iets-bench-ab "$before" "$after" --threshold 5 --json ab.json || status=$?
-          ;;
-        --ramdisk) filters=('eval::nixpkgs::job::initial_ramdisk') ;;
+        --eval) exec iets-bench-ab "$before" "$after" --threshold 5 --json ab.json --skip nixpkgs/outpaths ;;
+        --outpaths) subset=(--only nixpkgs/outpaths) ;;
+        ""|--ramdisk) ;;
         *) echo "unknown comparison: $2" >&2; exit 2 ;;
       esac
+      if [[ "''${2:-}" == --ramdisk ]]; then
+        filters=('eval::nixpkgs::job::initial_ramdisk')
+      else
+        iets-bench-ab "$before" "$after" --threshold 5 --json ab.json "''${subset[@]}" || status=$?
+        filters=('eval::evaluation::*' 'eval::components::*' 'eval::nixpkgs::job::hello')
+      fi
       printf '\n| Callgrind workload | Base instructions | Candidate instructions | Change |\n'
       echo '| --- | ---: | ---: | ---: |'
       for filter in "''${filters[@]}"; do

@@ -159,20 +159,30 @@ pub fn mtime_ns(m: &Metadata) -> i64 {
 
 /// The last change of the file's metadata, or zero when it cannot be read.
 pub fn ctime_ns(path: &Path, _m: &Metadata) -> i64 {
-    let Ok(f) = open_for_attributes(path) else {
-        return 0;
-    };
+    open_for_attributes(path)
+        .and_then(|f| open_ctime(&f))
+        .unwrap_or(0)
+}
+
+pub fn opened_stamp(f: &File, _m: &Metadata) -> io::Result<((u64, u64), i64)> {
+    Ok((
+        open_id(f).ok_or_else(io::Error::last_os_error)?,
+        open_ctime(f)?,
+    ))
+}
+
+fn open_ctime(f: &File) -> io::Result<i64> {
     // SAFETY: the handle is open and the struct is the size the call expects.
     let ticks = unsafe {
         let mut info: FILE_BASIC_INFO = mem::zeroed();
         let size = size_of::<FILE_BASIC_INFO>() as u32;
         let p = (&raw mut info).cast();
         if GetFileInformationByHandleEx(f.as_raw_handle(), FileBasicInfo, p, size) == 0 {
-            return 0;
+            return Err(io::Error::last_os_error());
         }
         info.ChangeTime
     };
-    ticks_to_ns(ticks as u64)
+    Ok(ticks_to_ns(ticks as u64))
 }
 
 fn ticks_to_ns(ticks: u64) -> i64 {

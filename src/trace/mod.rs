@@ -623,7 +623,16 @@ const UNTRUSTED_MTIME: i64 = i64::MIN;
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
     let at = sys::native_path(path);
-    let (dev, ino) = file_id(&at, meta);
+    stamped_file_obs(path, meta, hash, file_id(&at, meta), ctime_ns(&at, meta))
+}
+
+fn stamped_file_obs(
+    path: &[u8],
+    meta: &fs::Metadata,
+    hash: Digest32,
+    (dev, ino): (u64, u64),
+    ctime: i64,
+) -> Obs {
     let mtime = mtime_ns(meta);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -633,7 +642,7 @@ pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
         path: path.to_vec(),
         size: meta.len(),
         mtime_ns: if racy { UNTRUSTED_MTIME } else { mtime },
-        ctime_ns: ctime_ns(&at, meta),
+        ctime_ns: ctime,
         dev,
         ino,
         hash,

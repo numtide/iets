@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{fs, thread};
 
 use super::{
-    Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
+    Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, hash_to_digest, mtime_ns,
+    run_query, stamped_file_obs, stat_metadata, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -70,12 +70,24 @@ fn kind_name(k: Kind) -> &'static str {
     }
 }
 
-/// sha256 of a file's bytes without holding them: a rehash pass over a big `nixpkgs` file
-/// would otherwise allocate the whole file to read it once.
-fn file_sha256(p: &Path) -> io::Result<Digest32> {
+/// Refresh only from the open file that furnished the digest. Its name can
+/// be replaced between the initial stat and open.
+fn rehash_file(
+    path: &[u8],
+    mut file: &fs::File,
+    size: u64,
+    expected: Digest32,
+) -> io::Result<Option<Obs>> {
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() != size {
+        return Ok(None);
+    }
+    let (id, ctime) = sys::fs::opened_stamp(file, &meta)?;
     let mut h = Hasher::new(HashAlgo::Sha256);
-    io::copy(&mut fs::File::open(p)?, &mut h)?;
-    Ok(hash_to_digest(&h.finish()))
+    if io::copy(&mut file, &mut h)? != size || hash_to_digest(&h.finish()) != expected {
+        return Ok(None);
+    }
+    Ok(Some(stamped_file_obs(path, &meta, expected, id, ctime)))
 }
 
 /// On Unix an exact wire spelling proves membership. A wire-order miss
@@ -139,14 +151,11 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 return Outcome::Same;
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let now = match file_sha256(&at) {
-                Ok(h) => h,
-                Err(e) => return unreadable(path, &e),
-            };
-            if now != *hash {
-                return Outcome::Changed(format!("{} changed", lossy(path)));
+            match sys::fs::open_nonblocking(&at).and_then(|f| rehash_file(path, &f, *size, *hash)) {
+                Ok(Some(o)) => Outcome::Refresh(o),
+                Ok(None) => Outcome::Changed(format!("{} changed", lossy(path))),
+                Err(e) => unreadable(path, &e),
             }
-            Outcome::Refresh(file_obs(path, &m, *hash))
         }
         Obs::Dir { path, hash } => match dir_hash(&sys::native_path(path), dirs) {
             Ok(now) => {
@@ -443,6 +452,24 @@ mod tests {
 
         fs::write(&f, b"2").unwrap();
         assert!(validate(&mut obs, 2).is_err());
+    }
+
+    #[test]
+    fn a_rehash_keeps_the_open_files_identity_after_a_replacement() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("value");
+        let mtime = SystemTime::now() - Duration::from_secs(60);
+        fs::write(&p, b"A").unwrap();
+        open_rw(&p).set_modified(mtime).unwrap();
+        let opened = fs::File::open(&p).unwrap();
+        fs::rename(&p, d.path().join("saved")).unwrap();
+        fs::write(&p, b"B").unwrap();
+        open_rw(&p).set_modified(mtime).unwrap();
+        let path = p.as_os_str().as_bytes();
+        let refreshed = rehash_file(path, &opened, 1, sha256(b"A"))
+            .unwrap()
+            .unwrap();
+        assert!(validate(&mut [refreshed], 1).is_err());
     }
 
     /// `flake::read_traced` hands the recorder the bytes of a native path.

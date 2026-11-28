@@ -120,6 +120,11 @@ pub fn file_id(path: &Path, _m: &Metadata) -> (u64, u64) {
     rustix::fs::stat(path).map_or((0, 0), |s| (s.st_dev, s.st_ino))
 }
 
+pub fn opened_stamp(f: &File, _m: &Metadata) -> io::Result<((u64, u64), i64)> {
+    let s = rustix::fs::fstat(f)?;
+    Ok(((s.st_dev, s.st_ino), change_time(&s)))
+}
+
 /// Whether `path` still names the open file `f`: false once it was unlinked,
 /// or replaced by another file.
 pub fn same_file(f: &File, path: &Path) -> bool {
@@ -145,11 +150,13 @@ pub fn mtime_ns(m: &Metadata) -> i64 {
 
 /// The last change of the inode, which a copy or a rename cannot hide.
 pub fn ctime_ns(path: &Path, _m: &Metadata) -> i64 {
-    rustix::fs::stat(path).map_or(0, |s| {
-        (s.st_ctim.tv_sec as i64)
-            .wrapping_mul(1_000_000_000)
-            .wrapping_add(s.st_ctim.tv_nsec as i64)
-    })
+    rustix::fs::stat(path).map_or(0, |s| change_time(&s))
+}
+
+fn change_time(s: &rustix::fs::Stat) -> i64 {
+    (s.st_ctim.tv_sec as i64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(s.st_ctim.tv_nsec as i64)
 }
 
 pub fn create_mode(o: &mut OpenOptions, _mode: u32) -> &mut OpenOptions {

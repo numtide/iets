@@ -188,13 +188,14 @@ setting fixed, and `build()` makes the evaluator.
 
 ### Claiming thunks
 
-The thunk's *state* cell is the synchronisation word. Its three states are
-disjoint: a payload, a blackhole, or empty.
+The thunk's *state* cell is the synchronisation word. It holds the
+payload, a blackhole, a completed-value marker or a saved error index.
 
 ```
 payload ──CAS──> BLACKHOLE(claimer, waiters bit) ──store──> EMPTY
    ^                          │
-   └────────── reset ─────────┘   (error, cancel, or traced-in-helper)
+   └────────── reset ─────────┤   (retryable error or abandoned helper)
+                              └──store──> saved exception (demand path)
 ```
 
 A force loads the word first, and tries the compare-exchange only on a
@@ -288,13 +289,16 @@ returned.
 
 ### Failed thunks
 
-Nix evaluates a failed thunk again at every force, and so does iets: a
-failure resets the thunk. Under fan-out that turned one failing thunk into
-one failing evaluation per task, which was measured at 20 s and 11 GB
-against 0.01 s and 38 MB at one worker. The runtime notes the thunk that
-failed in a small direct-mapped table. A helper that meets it drops its
-task, so only the demand path evaluates it once more and reports. A run that
-fails nothing never reads the table.
+Since Nix 2.34 a caught exception from a shared thunk preserves the trace
+of its first demand. iets saves throws and failed assertions in the
+session. A later demand gets a copy of that exception, so it can add its
+own caller frames without changing the trace another demand will see.
+Effects such as `builtins.trace` run only on the first demand.
+
+Helpers reset a failing thunk and note it in a small direct-mapped table.
+A helper that meets it abandons its task so the demand path supplies the
+observable effects and caller frames. Cancellation and other engine
+errors leave the payload available for another force.
 
 ### Stack limits
 

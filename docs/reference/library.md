@@ -33,7 +33,7 @@ because a word made up from bits would let a safe call read any address.
 | Force a value | `Evaluator::force`, `force_deep`, `force_attrs` |
 | Print a value | `print::print_json`, `print::print_ambiguous`; `Evaluator::coerce_to_string` for `--raw` |
 | Report an error | `api::report_of(&Evaluator, &Error) -> log::Report` to render yourself; `api::report` sends it to the session log and gives the exit code (docs/reference/errors.md) |
-| Error types | `eval::{Error, ErrorKind, EvalResult}`; `error::Error` for store and io |
+| Error types | `eval::{Error, ErrorKind, EvalResult}`; construct an evaluation error with `Error::new(kind, message, position)`. `error::Error` handles store and io failures. |
 | Derivations this run created | `Evaluator::drv.drvs` (`StorePath -> builtins::derivation::DrvInfo`) |
 | Derivation roots of a value | `api::installable::drv_roots`; `get_drvs`/`get_drvs_at` for the `recurseForDerivations` walk; `to_install` for `meta.outputsToInstall`; `to_derivation` for the drv path alone |
 | Derivations as Nix's JSON | `api::drvshow::show(ev, roots, recursive)`, the `nix derivation show` document; `recursive` walks the input-drv closure |

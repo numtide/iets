@@ -338,8 +338,8 @@ unsafe impl Obj for PrimOpAppObj {}
 /// Every layout has one `state` cell and one `code` word
 /// (docs/explanation/evaluation.md). `state` holds the payload while
 /// unforced (never EMPTY, never a BLACKHOLE), a BLACKHOLE during the
-/// force, and EMPTY after it. `code` holds the IR or the function until
-/// the force, and the forced value after it.
+/// force, then either EMPTY for a value or a failed-exception index.
+/// `code` holds the IR or function until a value replaces it.
 #[repr(C)]
 pub struct ThunkObj {
     /// `&Ir`, then the value.
@@ -968,8 +968,7 @@ impl Word {
         }
     }
 
-    /// True when `state` (read from `thunk_state_cell`) still holds the
-    /// payload: the thunk was not forced and is not being forced.
+    /// True when a force must examine the payload or rethrow a failure.
     #[inline]
     pub(crate) fn thunk_unforced(self, state: Word) -> bool {
         state.bits() & !FORCED_BITS != 0 && !state.is_blackhole()

@@ -83,6 +83,7 @@ const IMM_NULL: u64 = TAG_IMM;
 const IMM_TRUE: u64 = TAG_IMM | (1 << 3);
 const IMM_FALSE: u64 = TAG_IMM | (2 << 3);
 const IMM_BLACKHOLE: u64 = TAG_IMM | (3 << 3);
+const IMM_FAILED: u64 = TAG_IMM | (4 << 3);
 /// Forced state written by a helper fiber. Distinct from `EMPTY` so that a
 /// printer can tell a thunk the demand path forced from one only a helper
 /// forced (docs/explanation/evaluation.md, "Why the answer is identical").
@@ -185,6 +186,15 @@ impl Word {
     #[inline]
     pub(crate) fn is_blackhole(self) -> bool {
         self.0 & 0x7F == IMM_BLACKHOLE
+    }
+
+    pub(crate) fn failed(index: usize) -> Word {
+        Word(((index as u64) << 6) | IMM_FAILED)
+    }
+
+    #[inline]
+    pub(crate) fn failed_index(self) -> Option<usize> {
+        (self.0 & 63 == IMM_FAILED).then_some((self.0 >> 6) as usize)
     }
 
     /// The BLACKHOLE a fiber writes while it forces a thunk.

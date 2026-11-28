@@ -41,6 +41,8 @@ pub enum Part {
     NixConfig,
     /// The paths `builtins.fetchClosure` checked, there when it ran.
     Fetched,
+    /// Byte lengths of all but the last stdout write of a multi-attr `eval`.
+    OutputSizes,
 }
 
 impl Part {
@@ -53,6 +55,7 @@ impl Part {
             Part::Warnings => 4,
             Part::NixConfig => 5,
             Part::Fetched => 6,
+            Part::OutputSizes => 7,
         }
     }
 }

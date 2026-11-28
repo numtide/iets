@@ -264,9 +264,11 @@ checksum, then parts. `readset` holds the observations. `result` holds what a
 hit replays: the stdout bytes for `eval`, the root derivation paths for
 `build`, a store path or two for `nix develop` and `nix fmt`. A `build` entry
 adds `drvs` and `sources`, so a hit can still upload the closure, and
-`warnings` holds the lint warnings a hit replays. An `eval` entry leaves out
-`drvs` and `sources`, because nothing would read them back and writing the
-16 MB `drvs` of nixos-server cost 40 ms on every miss.
+`warnings` holds the lint warnings a hit replays. An `eval` with multiple
+`-A` selections also records each stdout write boundary, including empty
+raw values, so a failed write is reported for the same selection. An `eval`
+entry leaves out `drvs` and `sources`, because nothing would read them back
+and writing the 16 MB `drvs` of nixos-server cost 40 ms on every miss.
 
 One file makes the entry atomic. A killed writer leaves the previous entry
 untouched, and two writers of one key each publish a whole entry. The cost

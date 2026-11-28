@@ -848,3 +848,28 @@ fn search_uses_the_cache(work: Work) {
     assert_eq!(o.status.code(), Some(2));
     assert!(stderr(&o).contains("--workers wants a number >= 1"));
 }
+
+#[cfg(target_os = "linux")]
+#[rstest]
+fn eval_cache_retains_each_stdout_write(work: Work) {
+    let eval = || {
+        let mut cmd = work.iets();
+        cmd.args(["eval", "--raw", "--timings", "--workers", "1"])
+            .args([
+                "-E",
+                r#"{ a = ""; b = builtins.trace "evaluated b" "x\ny"; c = "z"; }"#,
+            ])
+            .args(["-A", "a", "-A", "b", "-A", "c"]);
+        cmd
+    };
+    let seed = eval().output().unwrap();
+    assert!(seed.status.success());
+    assert_eq!(seed.stdout, b"x\nyz");
+    assert!(stderr(&seed).contains("evaluated b"));
+    let full = fs::File::options().write(true).open("/dev/full").unwrap();
+    let hit = eval().stdout(full).output().unwrap();
+    assert!(!hit.status.success());
+    let err = stderr(&hit);
+    assert!(!err.contains("evaluated b"), "{err}");
+    assert!(err.contains("write of 3 bytes"), "{err}");
+}

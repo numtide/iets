@@ -55,6 +55,13 @@ the tree store, the nix.conf it read, the eval-jobs walk, and the hash
 mismatches a build reported. Two sessions in one process share none of it,
 so you can run two evaluators side by side.
 
+`Run::cached` opens the command cache once the session has a `nix.conf`
+snapshot. The CLI establishes one during argument processing. A library
+host can call `Config::load_native(&[])` with its session entered, or set
+`session.nix_conf` to a parsed `Config`. Until then, runs evaluate with
+the command cache off and the first operation that needs the settings
+reads them.
+
 The library never writes to stdout or stderr by itself, and never exits. A
 session's log starts with nowhere to go, `iets` calls
 `Session::log.write_to_stderr()`, and a host that renders its own errors

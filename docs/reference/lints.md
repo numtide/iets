@@ -423,7 +423,8 @@ and `short-path-literal` keep Nix's default, `off`. An `off` lint is one byte co
   is another entry. A lint at `error` fails the run, and a failed run is
   never cached.
 - A file loaded from the compiled-file cache reports its compile-time
-  warnings again, and its `# iets: allow` comments apply.
+  warnings again, and its `# iets: allow` comments apply. A file with
+  multiple compile-time warnings is recompiled to preserve their order.
 - A warning comes out before any `builtins.trace` or `builtins.warn` line
   and any error that follows it, and at the latest when the command ends.
 - With more than one worker, iets can force list elements that a

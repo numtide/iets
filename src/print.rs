@@ -520,7 +520,7 @@ fn print_json_inner(
                     out.push(b',');
                 }
                 print_json(ev, c.get(), out, ctx, strict, pos).map_err(|mut e| {
-                    e.add_trace(pos, format!("while evaluating list element at index {i}"));
+                    e.add_list_trace(pos, i);
                     e
                 })?;
             }

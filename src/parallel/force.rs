@@ -675,7 +675,17 @@ fn deep_inner(
                 fanout(ev, T_LIST_DEEP, w, l.len as usize);
             }
             let cells = l.cells();
-            walk(ev, cells.len(), seen, demand, |i| &cells[i], |_, _, e| e)
+            walk(
+                ev,
+                cells.len(),
+                seen,
+                demand,
+                |i| &cells[i],
+                |_, i, mut e| {
+                    e.add_list_trace(Pos::NONE, i);
+                    e
+                },
+            )
         }
         _ => Ok(()),
     }

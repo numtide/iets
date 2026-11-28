@@ -1589,9 +1589,13 @@ impl Evaluator {
                 if !seen.insert(w.bits()) {
                     return Ok(());
                 }
-                for c in l.cells() {
-                    let v = self.force_cell(c)?;
-                    self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen))?;
+                for (i, c) in l.cells().iter().enumerate() {
+                    self.force_cell(c)
+                        .and_then(|v| self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen)))
+                        .map_err(|mut e| {
+                            e.add_list_trace(Pos::NONE, i);
+                            e
+                        })?;
                 }
             }
             _ => {}

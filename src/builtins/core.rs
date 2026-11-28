@@ -203,7 +203,7 @@ fn trace(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
     let w = ev.force(args[0])?;
     let msg = match w.view() {
         Value::String(s) => String::from_utf8_lossy(s.bytes).into_owned(),
-        _ => print::show_value_short(ev, w),
+        _ => print::print_trace(ev, w, args[0])?,
     };
     say(ev, format!("trace: {msg}"));
     ev.force(args[1])

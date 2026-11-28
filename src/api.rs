@@ -28,7 +28,6 @@ use crate::lint::{self, Level, Scope};
 use crate::provenance::{describe_pos, rewrite_msg};
 use crate::runtime::Word;
 use crate::session::Session;
-use crate::source::nix_conf;
 use crate::store::path::{StorePath, store_dir};
 use crate::sys::{self, OsStringExt};
 use crate::trace::key::{Key, has_relative_path};
@@ -490,6 +489,9 @@ pub fn setup_cache_more(
 }
 
 fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) -> Option<Key> {
+    // A manually constructed session may defer reading nix.conf until a
+    // builtin needs it. Looking for a cache entry must preserve that choice.
+    let conf = cfg.configured_session().nix_conf.get()?;
     let cwd = cwd();
     let mut k = Key::new(subcommand);
     if cfg.is_pure() {
@@ -568,7 +570,6 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.field("system", cfg.current_system().as_bytes());
     k.field("store-dir", store_dir().as_bytes());
     // what builtins.fetchClosure trusts
-    let conf = nix_conf(cfg.configured_session());
     k.field(
         "trusted-public-keys",
         conf.trusted_public_keys().join(" ").as_bytes(),
@@ -589,6 +590,12 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn configured_session() -> Arc<Session> {
+        let s = Session::new();
+        s.nix_conf.set(config::Config::empty()).unwrap();
+        s
+    }
 
     #[test]
     fn the_search_path_uses_the_configured_session() {
@@ -618,6 +625,7 @@ mod tests {
 
     #[test]
     fn the_cache_key_holds_the_enforced_project_root() {
+        let _entered = configured_session().enter();
         let mut a = EvalArgs::new();
         a.input = Some(Input::Expr("1".into()));
         let key = |root: Option<&[u8]>| {
@@ -633,6 +641,7 @@ mod tests {
 
     #[test]
     fn the_cache_key_uses_the_configured_search_path_and_lints() {
+        let _entered = configured_session().enter();
         let mut a = EvalArgs::new();
         a.input = Some(Input::Expr("1".into()));
         let key = |cfg| cache_key(&a, "eval", &cfg, &[]).unwrap().finish();

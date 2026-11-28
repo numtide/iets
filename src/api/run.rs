@@ -71,7 +71,8 @@ impl Run {
         }
     }
 
-    /// Opens the tracing cache of `subcommand`, keyed on `a`.
+    /// Opens the tracing cache of `subcommand`, keyed on `a`. A session that
+    /// has yet to load nix.conf evaluates normally with the command cache off.
     pub fn cached(mut self, a: &EvalArgs, subcommand: &str) -> Run {
         self.cache = setup_cache(a, subcommand, &self.cfg);
         self
@@ -171,6 +172,7 @@ impl Run {
 mod tests {
     use super::*;
     use crate::api::{self, EvalArgs, Input};
+    use crate::config::Config;
     use crate::env::Env;
     use crate::settings::Settings;
     use crate::{sys, treestore};
@@ -321,11 +323,20 @@ mod tests {
                 workers: 1,
                 ..EvalArgs::new()
             };
-            Run::over(EvalConfig::new().session(owner.clone()), &args)
-                .unwrap()
-                .cached(&args, "eval")
-                .go(|_, _| treestore::root().unwrap())
+            let open = || {
+                Run::over(EvalConfig::new().session(owner.clone()), &args)
+                    .unwrap()
+                    .cached(&args, "eval")
+            };
+            assert!(open().cache.is_none());
+            owner.nix_conf.set(Config::empty()).unwrap();
+            open()
+                .go(|ev, c| {
+                    treestore::root().unwrap();
+                    c.unwrap().write(ev, b"1", false);
+                })
                 .unwrap();
+            assert_eq!(open().hit_result().as_deref(), Some(&b"1"[..]));
             for store in ["ir", "trace", "inputs"] {
                 assert!(root.join(store).join("version").is_file(), "{store}");
             }

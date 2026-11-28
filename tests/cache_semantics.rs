@@ -9,6 +9,7 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -221,6 +222,23 @@ fn main_nix(w: &Work) -> Vec<String> {
 
 fn strs(v: &[String]) -> Vec<&str> {
     v.iter().map(String::as_str).collect()
+}
+
+#[rstest]
+fn absence_does_not_replay_through_a_symlink_loop(work: Work) {
+    let parent = work.path("ancestor");
+    let expr = format!(r#"builtins.pathExists "{}/child""#, parent.display());
+    let check = || work.eval(&["-E", &expr]);
+    assert_eq!(check().out.trim(), "false");
+    // ENOTDIR and ENOENT give pathExists the same answer.
+    fs::write(&parent, "").unwrap();
+    assert!(check().status.contains("cache: hit"));
+
+    fs::remove_file(&parent).unwrap();
+    symlink("ancestor", &parent).unwrap();
+    let r = check();
+    assert_ne!(r.rc, 0);
+    assert!(r.status.contains("miss ("), "{}", r.status);
 }
 
 #[rstest]

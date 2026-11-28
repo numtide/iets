@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::str;
 
+use crate::json_string::unicode_escape;
 use crate::print::{json_escape_str, json_float};
 
 use super::drv::DrvError;
@@ -209,18 +210,6 @@ impl Parser<'_> {
         }
     }
 
-    fn hex4(&mut self) -> Result<u32, DrvError> {
-        let mut value = 0;
-        for _ in 0..4 {
-            let Some(digit) = self.peek().and_then(|b| char::from(b).to_digit(16)) else {
-                return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-            };
-            value = value * 16 + digit;
-            self.i += 1;
-        }
-        Ok(value)
-    }
-
     fn string(&mut self) -> Result<String, DrvError> {
         self.i += 1;
         let mut out = String::new();
@@ -246,21 +235,14 @@ impl Parser<'_> {
                         Some(b'r') => out.push('\r'),
                         Some(b't') => out.push('\t'),
                         Some(b'u') => {
-                            let mut cp = self.hex4()?;
-                            if (0xD800..0xDC00).contains(&cp) {
-                                if !self.s[self.i..].starts_with(b"\\u") {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF");
-                                }
-                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                            } else if (0xDC00..0xE000).contains(&cp) {
-                                return self.err("syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF");
-                            }
-                            out.push(char::from_u32(cp).expect("a scalar value"));
+                            let ch = match unicode_escape(self.s, &mut self.i,
+                                "surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF",
+                                "surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF",
+                            ) {
+                                Ok(ch) => ch,
+                                Err(reason) => return self.err(&format!("syntax error while parsing value - invalid string: {reason}")),
+                            };
+                            out.push(ch);
                         }
                         _ => return self.err("syntax error while parsing value - invalid string: forbidden character after backslash"),
                     }

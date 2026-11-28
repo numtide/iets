@@ -21,6 +21,7 @@ use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::flake::{self, flakeref};
 use crate::lint::{LintId, coerce, purity};
+use crate::parallel::force::require_demand;
 use crate::runtime::{self, Ctx, Value, Word, ctx_to_arena};
 use crate::source;
 use crate::store::drv::load_derivation_from_store;
@@ -29,7 +30,7 @@ use crate::store::locate;
 use crate::store::nar::FileType;
 use crate::store::path::{
     HASH_PART_LEN, IngestionMethod, StorePath, StorePathError, make_fixed_output_path,
-    make_text_path, split_store_path,
+    make_text_path, split_store_path, strip_store_dir,
 };
 use crate::store::source::{SourceOrigin, Src, SrcPath};
 use crate::trace::{self, Kind};
@@ -434,16 +435,23 @@ fn path_exists(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> 
         Follow::Ancestors
     };
     let (p, at) = store_hooks::located(ev, p, follow, pos)?;
+    let unresolved = at.is_none();
+    let absent = |ev: &mut Evaluator| {
+        // An earlier demand can still register this origin. A helper must
+        // not memoize its absence and return it after that publication.
+        if ev.par.on && unresolved && strip_store_dir(&p).is_some() {
+            require_demand(ev)?;
+        }
+        Ok(Word::FALSE)
+    };
     if !store_hooks::admits(ev, at.as_ref(), &p, follow, pos)? {
-        return Ok(Word::FALSE);
+        return absent(ev);
     }
     coerce::read_through_copy(ev, &p, pos)?;
     let at = at.unwrap_or_else(|| store_hooks::fs_path(&p));
     match at.stat(ev, must_be_dir) {
         Ok(k) => Ok(Word::from_bool(k == Kind::Directory || !must_be_dir)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound || errno::is_not_directory(&e) => {
-            Ok(Word::FALSE)
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound || errno::is_not_directory(&e) => absent(ev),
         Err(e) => {
             let shown = at.local().map_or(p, |l| sys::path_to_internal(&l));
             Err(io_error(e, "getting status of", &shown, pos))
@@ -611,6 +619,9 @@ fn add_path_inner(
     expected: Option<Hash>,
     in_store: Option<StorePath>,
 ) -> EvalResult<StorePath> {
+    // A new copy can make a context-free path visible to the evaluator.
+    // Stop before hashing or running the user's filter twice.
+    require_demand(ev)?;
     let name = utf8(name, pos)?;
     let refs = references(ev, in_store);
     coerce::store_path_recopy(ev, path, pos)?;
@@ -954,6 +965,8 @@ fn to_file(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             ),
         }
     }
+    // Registering this file changes what a later context-free pathExists sees.
+    require_demand(ev)?;
     let h = hash_bytes(HashAlgo::Sha256, contents.bytes);
     let sp = make_text_path(utf8(name, pos)?, &h, &refs)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))?;

@@ -373,6 +373,16 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
+/// Retry a helper on demand before observing or publishing order-dependent state.
+#[inline]
+pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
+    if journal(ev) {
+        Err(cancelled())
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
 
 /// One step of a thunk's effects, in the order its evaluation made it. A
@@ -872,7 +882,112 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
     use super::*;
+    use crate::eval::EvalConfig;
     use crate::parallel;
+    use crate::store::hash::{HashAlgo, hash_bytes};
+    use crate::store::nar;
+    use crate::store::path::make_text_path;
+    use crate::{sys, treestore};
+    use std::{fs, process};
+
+    fn to_file_and_probe(ev: &mut Evaluator, probe: &str) -> &'static [Cell] {
+        // Embed a context-free name. Obtaining it from toFile inside this
+        // evaluation would demand the very publication we want to observe.
+        let unique = tempfile::tempdir().unwrap();
+        let name = unique.path().file_name().unwrap().to_str().unwrap();
+        let path = make_text_path(
+            name,
+            &hash_bytes(HashAlgo::Sha256, b"contents"),
+            &Default::default(),
+        )
+        .unwrap();
+        let base = path.base_name();
+        let expr = format!(
+            r#"let target = builtins.storeDir + "/{base}"; in [ (builtins.toFile "{name}" "contents") ({probe}) ]"#
+        );
+        ev.eval_string(&expr, b"/")
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .cells()
+    }
+
+    #[test]
+    fn context_free_probe_observes_to_file_in_demand_order() {
+        for pure in [true, false] {
+            for producer_first in [false, true] {
+                let ev = EvalConfig::new().pure(pure).build();
+                let exists = parallel::try_run(2, ev, move |ev| {
+                    let cells = to_file_and_probe(ev, "builtins.pathExists target");
+                    if producer_first {
+                        ahead(ev, 1..2, |i| &cells[i]);
+                        ev.force_cell(&cells[0]).unwrap();
+                    } else {
+                        ahead(ev, 0..1, |i| &cells[i]);
+                    }
+                    ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+                })
+                .unwrap();
+                assert_eq!(exists, producer_first, "pure = {pure}");
+            }
+        }
+    }
+
+    #[test]
+    fn speculative_find_file_observes_the_first_demanded_match() {
+        let ev = EvalConfig::new().pure(false).build();
+        let chose_first = parallel::try_run(2, ev, |ev| {
+            let cells = to_file_and_probe(
+                ev,
+                r#"toString (builtins.findFile [
+                { prefix = "x"; path = target; }
+                { prefix = "x"; path = "/"; }
+            ] "x") == target"#,
+            );
+            ahead(ev, 1..2, |i| &cells[i]);
+            ev.force_cell(&cells[0]).unwrap();
+            ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+        })
+        .unwrap();
+        assert!(chose_first);
+    }
+
+    #[test]
+    fn speculative_source_copy_does_not_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("speculative-input");
+        fs::write(&file, process::id().to_string()).unwrap();
+        let hash = nar::nar_hash(&file).unwrap();
+        let sp = treestore::store_path("speculative-input", &hash).unwrap();
+        for producer in [
+            "builtins.path { path = ./speculative-input; }",
+            "builtins.filterSource (_: _: true) ./speculative-input",
+            r#""${./speculative-input}""#,
+        ] {
+            let base = sys::path_to_internal(dir.path());
+            let probe = format!(
+                r#"builtins.pathExists (builtins.storeDir + "/{}")"#,
+                sp.base_name()
+            );
+            let expr = format!("[ ({producer}) ({probe}) ({probe}) ]");
+            let ev = EvalConfig::new().pure(false).build();
+            let observed = parallel::try_run(2, ev, move |ev| {
+                let cells = ev
+                    .eval_string(&expr, &base)
+                    .unwrap()
+                    .as_list()
+                    .unwrap()
+                    .cells();
+                ahead(ev, 0..1, |i| &cells[i]);
+                let before = ev.force_cell(&cells[1]).unwrap() == Word::TRUE;
+                ev.force_cell(&cells[0]).unwrap();
+                let after = ev.force_cell(&cells[2]).unwrap() == Word::TRUE;
+                (before, after)
+            })
+            .unwrap();
+            assert_eq!(observed, (false, true), "{producer}");
+        }
+    }
 
     #[test]
     fn coercion_walk_stops_cancelled_helper() {

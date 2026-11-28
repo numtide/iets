@@ -87,7 +87,7 @@ pub fn install(ev: &mut Evaluator) {
         let mut e = vec![(ev.s.path, Pos::NONE, p), (ev.s.prefix, Pos::NONE, pre)];
         items.push(ev.arena.mk_attrs(&mut e).unwrap());
     }
-    let np = ev.mk_list(&items);
+    let np = ev.arena.mk_global_list(&items);
     r.constant("__nixPath", np);
     if !ev.pure() {
         let s = ev.sym(b"currentTimeRaw");

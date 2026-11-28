@@ -497,3 +497,38 @@ fn dynamic_selection_preserves_name_and_value_effect_order(
     assert_eq!(stdout(&o), "42");
     assert_eq!(stderr(&o), "trace: NAME\ntrace: VALUE\n");
 }
+
+#[rstest]
+fn json_lambda_errors_point_to_the_definition(bin: Iets) {
+    let d = tempdir().unwrap();
+    let def = d.path().join("function.nix");
+    let caller = d.path().join("caller.nix");
+    fs::write(&def, "# definition\n  x: x\n").unwrap();
+    fs::write(
+        &caller,
+        "let f = import ./function.nix; in {\n  top = f;\n  nested = { member = [ (builtins.seq null f) ]; };\n}",
+    )
+    .unwrap();
+    let primary = format!("at {}:2:3", def.display());
+    for attr in ["top", "nested"] {
+        let o = bin
+            .cmd()
+            .args(["eval", "--no-cache", "--json", "--show-trace", "-f"])
+            .arg(&caller)
+            .args(["-A", attr])
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(1));
+        assert!(o.stdout.is_empty());
+        let err = stderr(&o);
+        assert!(err.starts_with("error: cannot convert a function to JSON\n"));
+        assert_eq!(err.lines().nth(1).map(str::trim), Some(primary.as_str()));
+        if attr == "nested" {
+            assert!(err.contains("while evaluating list element at index 0"));
+            assert!(err.contains(&format!(
+                "while evaluating attribute 'member' at {}:3:14",
+                caller.display()
+            )));
+        }
+    }
+}

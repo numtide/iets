@@ -526,7 +526,12 @@ fn print_json_inner(
             }
             out.push(b']');
         }
-        Value::Lambda(_) | Value::PrimOp(_) | Value::PrimOpApp(_) => {
+        function @ (Value::Lambda(_) | Value::PrimOp(_) | Value::PrimOpApp(_)) => {
+            // Value::determinePos in Nix uses the definition for a lambda.
+            let pos = match function {
+                Value::Lambda(f) => f.lam.pos,
+                _ => pos,
+            };
             return Err(Error::boxed(
                 ErrorKind::Type,
                 "cannot convert a function to JSON",

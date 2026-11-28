@@ -155,6 +155,12 @@ pub enum Obs {
         entry: Vec<u8>,
         version: u8,
     },
+    /// The checked archive-revision record that supplied a NAR hash and date.
+    RevMapping {
+        key: Digest32,
+        size: u64,
+        hash: Digest32,
+    },
 }
 
 impl Obs {
@@ -172,6 +178,7 @@ impl Obs {
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
+            Obs::RevMapping { key, .. } => (9, Cow::Borrowed(key), 0),
         }
     }
 }

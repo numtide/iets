@@ -80,7 +80,7 @@ fn by_rev(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
     };
     let (url, headers) = tarball_url(nix_conf(ev.session()), attrs).map_err(fail)?;
     let dir = revs::dir(None);
-    let known = |dir: &Option<_>| dir.as_deref().and_then(|d| revs::get(d, &url));
+    let known = |dir: &Option<_>| dir.as_deref().and_then(|d| revs::get(d, &url, ev.trace()));
     let (hash, last_modified) = match known(&dir) {
         Some(known) => known,
         None => {
@@ -93,6 +93,8 @@ fn by_rev(ev: &mut Evaluator, attrs: &Attrs, pos: Pos) -> EvalResult<Tree> {
             match known(&dir) {
                 Some(known) => known,
                 None => {
+                    // This run had to acquire the mapping and publish the fetched tree.
+                    ev.trace().mark_uncacheable();
                     log::line(&format!("iets: fetching input '{name}'"));
                     let got = fetch_unnamed(ev, &url, &headers, &tag).map_err(fail)?;
                     if let Some(dir) = &dir {

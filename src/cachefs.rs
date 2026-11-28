@@ -631,13 +631,15 @@ pub fn touch(path: &Path) {
 
 /// `touch` for a file already open, with `modified` from its own `fstat`.
 pub fn touch_open(f: &fs::File, modified: Option<SystemTime>) {
-    if modified
-        .and_then(|m| m.elapsed().ok())
-        .is_some_and(|a| a < TOUCH_INTERVAL)
-    {
-        return;
+    if touch_due(modified) {
+        sysfs::touch_open(f);
     }
-    sysfs::touch_open(f);
+}
+
+pub(crate) fn touch_due(modified: Option<SystemTime>) -> bool {
+    modified
+        .and_then(|m| m.elapsed().ok())
+        .is_none_or(|a| a >= TOUCH_INTERVAL)
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]

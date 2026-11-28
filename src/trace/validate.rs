@@ -17,7 +17,8 @@ use super::{
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
-use crate::source::scm;
+use crate::cachefs;
+use crate::source::{revs, scm};
 use crate::store::hash::{HashAlgo, Hasher};
 use crate::{session, treestore};
 
@@ -38,6 +39,8 @@ pub struct Mismatch(pub String);
 
 enum Outcome {
     Same,
+    // Renew this mapping only when the rest of the command read set also matches.
+    Touch(fs::File),
     /// Content still matches; the entry's stat fields are stale.
     Refresh(Obs),
     Changed(String),
@@ -243,6 +246,13 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 lossy(dir)
             )),
         },
+        Obs::RevMapping { key, size, hash } => {
+            match revs::dir(None).and_then(|d| revs::matching(&d, key, *size, hash)) {
+                Some((f, md)) if cachefs::touch_due(md.modified().ok()) => Outcome::Touch(f),
+                Some(_) => Outcome::Same,
+                None => Outcome::Changed("archive revision mapping changed".into()),
+            }
+        }
         // One `stat` per entry, no bytes: the name is the content address, so an
         // entry that is still there still holds what the run read.
         Obs::Input { entry, version } => {
@@ -288,6 +298,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
     let failed = AtomicBool::new(false);
     let rehashed = AtomicUsize::new(0);
     let first: Mutex<Option<(usize, String)>> = Mutex::new(None);
+    let touches = Mutex::new(Vec::new());
     let refreshes: Mutex<Vec<(usize, Obs)>> = Mutex::new(Vec::new());
     let threads = threads.clamp(1, obs.len().max(1));
     thread::scope(|s| {
@@ -305,6 +316,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
                     }
                     match check(&obs[i], &rehashed, &mut dirs) {
                         Outcome::Same => {}
+                        Outcome::Touch(f) => touches.lock().unwrap().push(f),
                         Outcome::Refresh(o) => mine.push((i, o)),
                         Outcome::Changed(why) => {
                             let why = scm::changed(&obs[i]).unwrap_or(why);
@@ -325,6 +337,9 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
     if failed.load(Ordering::Relaxed) {
         let why = first.into_inner().unwrap().map(|(_, w)| w);
         return Err(Mismatch(why.unwrap_or_default()));
+    }
+    for f in touches.into_inner().unwrap() {
+        cachefs::touch_open(&f, None);
     }
     let refreshes = refreshes.into_inner().unwrap();
     let refreshed = refreshes.len();

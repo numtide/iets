@@ -256,6 +256,12 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             e.bytes(entry);
             e.u8(*version);
         }
+        Obs::RevMapping { key, size, hash } => {
+            e.u8(9);
+            e.digest(key);
+            e.u64(*size);
+            e.digest(hash);
+        }
     }
 }
 
@@ -332,6 +338,11 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
         7 => Obs::Input {
             entry: d.vec()?,
             version: d.u8()?,
+        },
+        9 => Obs::RevMapping {
+            key: d.digest()?,
+            size: d.u64()?,
+            hash: d.digest()?,
         },
         _ => return Err(()),
     })
@@ -793,7 +804,7 @@ mod tests {
     }
 
     fn obs(tc: &TestCase) -> Obs {
-        match tc.draw(gs::integers::<u8>().max_value(7)) {
+        match tc.draw(gs::integers::<u8>().max_value(8)) {
             0 => Obs::File {
                 path: bytes(tc),
                 size: int(tc) as u64,
@@ -835,9 +846,14 @@ mod tests {
                 query: tc.draw(gs::sampled_from(&Query::ALL[..])),
                 hash: digest(tc),
             },
-            _ => Obs::Input {
+            7 => Obs::Input {
                 entry: bytes(tc),
                 version: tc.draw(gs::integers()),
+            },
+            _ => Obs::RevMapping {
+                key: digest(tc),
+                size: tc.draw(gs::integers::<u64>()),
+                hash: digest(tc),
             },
         }
     }

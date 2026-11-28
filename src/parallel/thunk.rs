@@ -193,7 +193,7 @@ impl WaiterTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parallel::sched::{Driver, Task, Worker};
+    use crate::parallel::sched::{Driver, Task};
     use std::sync::atomic::AtomicUsize;
     use std::{ptr, thread};
 
@@ -205,7 +205,8 @@ mod tests {
 
     struct Graph {
         nodes: Vec<Node>,
-        done: AtomicUsize,
+        remaining: AtomicUsize,
+        completed: Cell,
         parks: AtomicUsize,
         deadlocks: AtomicUsize,
         fibers: AtomicUsize,
@@ -252,9 +253,10 @@ mod tests {
             for i in t.start..t.start + t.len {
                 force(self.0, slot, i as usize);
             }
-            self.0.done.fetch_add(1, Ordering::Release);
+            if self.0.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                publish(slot, &self.0.completed, Word::imm_int(1));
+            }
         }
-        fn on_switch(&self, _slot: &mut Slot, _w: &mut Worker) {}
     }
 
     /// Two cells; task A claims cell 0 then waits on cell 1, task B the
@@ -308,7 +310,6 @@ mod tests {
             }
             p.done.fetch_add(1, Ordering::Release);
         }
-        fn on_switch(&self, _slot: &mut Slot, _w: &mut Worker) {}
     }
 
     /// a hang guard, not a speed bound: it turns a deadlock into a failure
@@ -401,6 +402,7 @@ mod tests {
 
     fn shared_graph_round() {
         const N: usize = 4000;
+        const RANGE: usize = 16;
         let mut nodes = Vec::with_capacity(N);
         let mut seed = 12345u64;
         for i in 0..N {
@@ -427,7 +429,8 @@ mod tests {
         }
         let g: &'static Graph = Box::leak(Box::new(Graph {
             nodes,
-            done: AtomicUsize::new(0),
+            remaining: AtomicUsize::new(N.div_ceil(RANGE)),
+            completed: Cell::new(blackhole(1)),
             parks: AtomicUsize::new(0),
             deadlocks: AtomicUsize::new(0),
             fibers: AtomicUsize::new(0),
@@ -438,25 +441,22 @@ mod tests {
             ptr::null_mut(),
             Box::new(move |slot: &mut Slot| {
                 let rt = slot.runtime();
-                let mut ntasks = 0;
                 // Every fiber forces a range of roots, from the top down so
                 // the deep shared nodes are contended.
-                for start in (0..N as u32).rev().step_by(16) {
+                for start in (0..N as u32).rev().step_by(RANGE) {
+                    let first = start.saturating_sub(RANGE as u32 - 1);
                     let t = Task {
                         kind: 1,
                         obj: Word::EMPTY,
-                        start: start.saturating_sub(15),
-                        len: start - start.saturating_sub(15) + 1,
+                        start: first,
+                        len: start - first + 1,
                     };
                     assert!(rt.submit_urgent(slot.worker(), t));
-                    ntasks += 1;
                 }
-                let t0 = Instant::now();
-                while g.done.load(Ordering::Acquire) < ntasks {
-                    assert!(t0.elapsed().as_secs() < 30, "timeout");
-                    // Main also forces roots, so it parks and migrates.
-                    force(g, slot, N - 1);
-                    thread::yield_now();
+                force(g, slot, N - 1);
+                // Park so helpers owned by the main worker can finish their ranges.
+                while g.completed.get().is_blackhole() {
+                    wait(slot, &g.completed, blackhole(1)).unwrap();
                 }
                 g.deadlocks
                     .store(rt.deadlocks.load(Ordering::Relaxed), Ordering::Relaxed);

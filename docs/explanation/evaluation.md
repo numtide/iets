@@ -162,10 +162,9 @@ You don't ask for parallel evaluation. It happens on its own: worker threads
 force thunks ahead of the demand path and beside it. The parts are:
 
 - A **fiber** is a stackful coroutine with its own stack and its own
-  evaluator. It is the unit of blocking, and it moves: a fiber that parks
-  on worker A can resume on worker B.
+  evaluator. It is the unit of blocking and resumes on the worker that started it.
 - A **worker** is an OS thread running a drain loop. It owns a bump arena,
-  a fiber pool and work-stealing deques.
+  a fiber pool, a queue of its own ready fibers and a deque of stealable tasks.
 - A **task** is work not yet started, such as forcing a range of list or
   attribute cells. It runs in a pooled fiber.
 - The **main fiber** runs the command's own closure. When it returns,
@@ -205,9 +204,8 @@ lines shared.
 
 The winner gets the payload back and evaluates. A loser reads the current
 word. If it is done, it returns the value. If it is a blackhole holding its
-*own* claimer id, that is infinite recursion. The id is per fiber, not per
-thread, so it follows a computation that moved. If another fiber holds
-it, the loser parks on a side table sharded by thunk address, so thunk
+*own* claimer id, that is infinite recursion. Each fiber has its own id,
+even when several fibers run on one worker. If another fiber holds it, the loser parks on a side table sharded by thunk address, so thunk
 objects never grow.
 
 ### Scaling limits

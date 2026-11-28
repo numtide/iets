@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::num::NonZeroU32;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -13,6 +14,16 @@ use rustix::thread::futex;
 /// signal arrived. The caller looks again.
 pub fn futex_wait(word: &AtomicU32, expected: u32) {
     let _ = futex::wait(word, futex::Flags::PRIVATE, expected, None);
+}
+
+/// Waits for wakes whose bitset intersects `mask`.
+pub(crate) fn futex_wait_mask(word: &AtomicU32, expected: u32, mask: NonZeroU32) {
+    let _ = futex::wait_bitset(word, futex::Flags::PRIVATE, expected, None, mask);
+}
+
+/// Wakes every worker sharing this bit, including the intended owner.
+pub(crate) fn futex_wake_mask(word: &AtomicU32, mask: NonZeroU32) {
+    let _ = futex::wake_bitset(word, futex::Flags::PRIVATE, i32::MAX as u32, mask);
 }
 
 /// Starts writing `len` bytes of `f` from `from` to disk without waiting

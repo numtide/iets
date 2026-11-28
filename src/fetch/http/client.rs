@@ -20,7 +20,7 @@ use std::{result, thread};
 use http_body_util::BodyExt;
 use tokio::sync::oneshot;
 
-use super::{Limits, MAX_FILTERS, bad, get_or_read, local_path, read, shown};
+use super::{Limits, MAX_FILTERS, bad, get_or_read, local_path, read, resolve, shown};
 use crate::error::{Error, Result};
 use crate::fetch::roots;
 use crate::log;
@@ -175,12 +175,15 @@ impl Url {
         if host.is_empty() {
             return Err(bad(url, "no host"));
         }
+        let path = path.split_once('#').map_or(path, |(path, _)| path);
         Ok(Url {
             https,
             host: host.to_string(),
             port,
             target: if path.is_empty() {
                 "/".to_string()
+            } else if path.starts_with('?') {
+                format!("/{path}")
             } else {
                 path.to_string()
             },
@@ -221,56 +224,6 @@ fn redirect(first: &Url, from: &Url, to: &Url) -> result::Result<bool, &'static 
     Ok(first.https == to.https
         && first.host.eq_ignore_ascii_case(&to.host)
         && first.port == to.port)
-}
-
-/// Whether `location` starts with a scheme, and so is absolute. What comes
-/// before `://` must be a scheme (RFC 3986): a `://` in a query is not one.
-fn has_scheme(location: &str) -> bool {
-    let Some((s, _)) = location.split_once("://") else {
-        return false;
-    };
-    s.starts_with(|c: char| c.is_ascii_alphabetic())
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
-}
-
-/// `.` and `..` segments removed, as a URL path has them removed
-/// (RFC 3986:5.2.4). A `..` at the top removes nothing.
-fn normalise(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            s => out.push(s),
-        }
-    }
-    let slash = path.ends_with(['/', '.']) && !out.is_empty();
-    format!("/{}{}", out.join("/"), if slash { "/" } else { "" })
-}
-
-/// `Location` against the URL it came from: absolute, host-relative or
-/// path-relative (libcurl resolves all three).
-fn resolve(base: &str, location: &str) -> String {
-    if has_scheme(location) {
-        return location.to_string();
-    }
-    let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let joined = if location.starts_with('/') {
-        location.to_string()
-    } else {
-        let path = &rest[authority.len()..];
-        let path = path.split(['?', '#']).next().unwrap_or(path);
-        format!(
-            "{}/{location}",
-            path.rsplit_once('/').map_or("", |(d, _)| d)
-        )
-    };
-    let (path, tail) = joined.split_at(joined.find(['?', '#']).unwrap_or(joined.len()));
-    format!("{scheme}://{authority}{}{tail}", normalise(path))
 }
 
 /// Process-wide on purpose: it is immutable, costly to build, and holds no

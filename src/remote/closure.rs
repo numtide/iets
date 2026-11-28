@@ -3,7 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -236,6 +236,17 @@ pub fn send<C>(
     }
 }
 
+/// Resolve the narinfo URL against the cache directory. Only a local cache
+/// may name a local file.
+fn get_nar(store: &str, reference: &str, limits: Limits, sink: &mut dyn Write) -> Result<u64> {
+    let url = http::resolve(&format!("{store}/"), reference);
+    if http::local_path(store).is_some() {
+        http::get_or_read(&url, &[], limits, false, sink)
+    } else {
+        http::get(&url, &[], limits, false, sink)
+    }
+}
+
 /// `f`'s NAR as the cache sends it, decompressed, into `use_`.
 fn streamed(
     f: &Fetched,
@@ -244,11 +255,10 @@ fn streamed(
 ) -> Result<u64> {
     let decode_error = |e| Error::io("cannot decode the fetched NAR", e);
     let method = http::Compression::nar_method(&f.info.compression).map_err(decode_error)?;
-    let url = format!("{}/{}", f.store, f.info.url);
     let (mut r, mut w) = io::pipe().map_err(|e| Error::io("cannot create a pipe", e))?;
     thread::scope(|scope| {
         let got = scope.spawn(session::bind(move || {
-            http::get_or_read(&url, &[], limits, false, &mut w)
+            get_nar(&f.store, &f.info.url, limits, &mut w)
         }));
         let used = method
             .reader(Box::new(&mut r))
@@ -336,9 +346,29 @@ fn download(paths: &[Arc<Fetched>]) -> Result<Vec<TempPath>> {
 }
 
 fn one(f: &Fetched, limits: Limits) -> Result<TempPath> {
-    let url = format!("{}/{}", f.store, f.info.url);
     let mut file =
         NamedTempFile::new().map_err(|e| Error::io("cannot create a temporary file", e))?;
-    http::get_or_read(&url, &[], limits, false, file.as_file_mut())?;
+    get_nar(&f.store, &f.info.url, limits, file.as_file_mut())?;
     Ok(file.into_temp_path())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_local_cache_can_name_a_local_nar() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"nar bytes").unwrap();
+        let url = format!("file:{}", file.path().display());
+        let limits = Limits {
+            connect: None,
+            stall: None,
+            max_size: 100,
+        };
+        let mut bytes = Vec::new();
+        get_nar("file:///cache", &url, limits, &mut bytes).unwrap();
+        assert_eq!(bytes, b"nar bytes");
+        assert!(get_nar("https://cache.example", &url, limits, &mut bytes).is_err());
+    }
 }

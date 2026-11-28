@@ -416,6 +416,9 @@ ways:
   build, where Nix fails evaluation.
 - For a cached NAR, iets supports `none`, `br`, `bzip2`, `gzip`, `lz4`,
   `lzip`, `xz` and `zstd` in the narinfo's `Compression` field.
+- When an HTTP or HTTPS cache's narinfo names a `file://` NAR URL, Nix
+  reads the local file. iets refuses the URL. A local file cache can still
+  name a local NAR.
 - A path that is not in the store yet cannot be read during evaluation.
 - `toPath` is not supported. In classic mode the call falls back to the
   real nix.

@@ -209,7 +209,7 @@ pub fn force_thunk(ev: &mut Evaluator, w: Word) -> EvalResult<Word> {
         if w.thunk_speculated(st) {
             read_speculated(ev, cell, st);
         }
-        return Ok(w.thunk_value());
+        return Ok(w.thunk_value(st));
     }
     claim_and_run(ev, w, cell)
 }
@@ -255,7 +255,7 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
                 if w.thunk_speculated(st) {
                     read_speculated(ev, cell, st);
                 }
-                return Ok(w.thunk_value());
+                return Ok(w.thunk_value(st));
             }
             Claim::Mine => {
                 return Err(Error::boxed(
@@ -298,16 +298,18 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
     match r {
         Ok(v) => {
             debug_assert!(!v.is_thunk());
+            // A packed map entry cannot hold both a speculative mark and
+            // its function result. Retry on demand so enclosing thunks never
+            // publish a comparison using a fresh function on each force.
+            if spec && w.thunk_kind() == Kind::ThunkMap && v.is_function() {
+                ev.par.cancelled = true;
+            }
             if ev.par.cancelled {
-                // Bailed (or hit an effect) somewhere below: transient.
                 ev.par.fx.0.truncate(mark);
                 thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
                 Err(cancelled())
-            } else if ev.par.fx.0.len() > mark && w.thunk_kind() == Kind::ThunkMap {
-                // the value of a `mapAttrs` entry goes into the set's own
-                // cell, where a read takes it without its effects: the
-                // entry stays unforced, and the thunk that forced it
-                // carries them
+            } else if w.thunk_kind() == Kind::ThunkMap && ev.par.fx.0.len() > mark {
+                // Publishing into the map entry would expose pending effects.
                 if ev.par.frames == 0 {
                     ev.par.fx.0.truncate(mark);
                 }
@@ -459,11 +461,11 @@ pub fn take_cell(ev: &mut Evaluator, c: &Cell) -> CellState {
     if w.thunk_unforced(s) {
         return CellState::Unclaimed;
     }
-    let v = w.thunk_value();
+    let v = w.thunk_value(s);
     if w.thunk_speculated(s) {
         read_speculated(ev, st, s);
     }
-    if ev.par.is_main {
+    if ev.par.is_main && !v.is_function() {
         c.set(v);
     }
     CellState::Ready(v)
@@ -481,7 +483,7 @@ fn cell_state(cell: &Cell) -> CellState {
     } else if w.thunk_unforced(st) {
         CellState::Unclaimed
     } else {
-        CellState::Ready(w.thunk_value())
+        CellState::Ready(w.thunk_value(st))
     }
 }
 

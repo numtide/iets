@@ -1319,7 +1319,9 @@ impl Evaluator {
             return Ok(w);
         }
         let v = self.force_thunk(w)?;
-        if self.par.is_main {
+        // Nested equality observes the identity of the slot that produced a
+        // function. Its thunk already memoizes the result of forcing it.
+        if self.par.is_main && !v.is_function() {
             cell.set(v);
         }
         Ok(v)
@@ -1339,7 +1341,7 @@ impl Evaluator {
             );
         }
         if !w.thunk_unforced(st) {
-            return Ok(w.thunk_value());
+            return Ok(w.thunk_value(st));
         }
         state.set(Word::BLACKHOLE);
         #[cfg(feature = "stats2")]

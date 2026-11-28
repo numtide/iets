@@ -368,12 +368,11 @@ pub struct ThunkApp2Obj {
     pub state: Cell,
 }
 
-/// One per `mapAttrs` call. Entry `i` of `out` starts as the map word
-/// `(desc, i)`: a thunk with no object of its own. Its `code` word is the
-/// cell of that entry (the map word, then the value). Its state is
-/// `states[i]` (NULL, BLACKHOLE, EMPTY). A force applies `f` to the name
-/// and to entry `i` of `src`. Attr cells never hold a BLACKHOLE, so
-/// readers of `attr.cell` need no special case.
+/// One descriptor per `mapAttrs` call. Each output entry starts as a map
+/// word identifying its descriptor and index. Its separate state cell
+/// holds the claim, so readers never see a BLACKHOLE in the set. For a
+/// demanded function the state cell holds the result, leaving the entry's
+/// identity available to aliases. Other results overwrite the map word.
 #[repr(C)]
 pub struct MapDesc {
     pub f: Word,
@@ -893,6 +892,14 @@ impl Word {
     }
 
     #[inline]
+    pub(crate) fn is_function(self) -> bool {
+        matches!(
+            self.heap_kind(),
+            Some(Kind::Lambda | Kind::PrimOp | Kind::PrimOpApp)
+        )
+    }
+
+    #[inline]
     pub(crate) fn as_attrs(self) -> Option<&'static AttrsObj> {
         match self.view() {
             Value::Attrs(a) => Some(a),
@@ -937,7 +944,8 @@ impl Word {
     }
 
     /// The cell whose word is this thunk's state: the payload while
-    /// unforced, a BLACKHOLE while claimed, then EMPTY (value in `code`).
+    /// unforced, a BLACKHOLE while claimed, then a forced-state marker or
+    /// the function result of a packed map entry.
     #[inline]
     pub(crate) fn thunk_state_cell(self) -> &'static Cell {
         // SAFETY: the tag names the layout; every layout keeps its state
@@ -955,8 +963,8 @@ impl Word {
         }
     }
 
-    /// The cell that holds the IR or function until forced and the value
-    /// after: the object's first word, or the map entry's own cell.
+    /// The object's first word or the map entry's own cell. A packed map
+    /// entry keeps this word when it returns a function.
     #[inline]
     fn thunk_code_cell(self) -> &'static Cell {
         if self.tag() == TAG_THUNK_MAP {
@@ -972,7 +980,11 @@ impl Word {
     /// payload: the thunk was not forced and is not being forced.
     #[inline]
     pub(crate) fn thunk_unforced(self, state: Word) -> bool {
-        state.bits() & !FORCED_BITS != 0 && !state.is_blackhole()
+        if self.tag() == TAG_THUNK_MAP {
+            state.tag() == TAG_IMM && !state.is_blackhole()
+        } else {
+            state.bits() & !FORCED_BITS != 0 && !state.is_blackhole()
+        }
     }
 
     /// True when the forced state came from a helper fiber and the demand
@@ -982,16 +994,39 @@ impl Word {
         state == Word::SPECULATED || state == Word::SPECULATED_FX
     }
 
-    /// The forced value once the state is EMPTY.
+    /// A demanded map entry can keep its function in its state word. The
+    /// entry itself then still holds the unique map word used by equality.
     #[inline]
-    pub(crate) fn thunk_value(self) -> Word {
-        self.thunk_code_cell().get()
+    pub(crate) fn thunk_value(self, state: Word) -> Word {
+        if self.tag() == TAG_THUNK_MAP && state.bits() & !FORCED_BITS != 0 {
+            state
+        } else {
+            self.thunk_code_cell().get()
+        }
+    }
+
+    /// Inspect an already demanded result without forcing a thunk or
+    /// exposing speculative work to an API caller or non-strict printer.
+    #[inline]
+    pub(crate) fn peek_demanded(self) -> Word {
+        if self.is_thunk() {
+            let state = self.thunk_state_cell().get();
+            if !state.is_blackhole() && !self.thunk_unforced(state) && !self.thunk_speculated(state)
+            {
+                return self.thunk_value(state);
+            }
+        }
+        self
     }
 
     /// Store the forced value; returns the state word to publish. A helper
     /// publishes `SPECULATED` so its work stays invisible until demanded.
     #[inline]
     pub(crate) fn thunk_finish(self, v: Word, demanded: bool) -> Word {
+        if self.tag() == TAG_THUNK_MAP && v.is_function() {
+            debug_assert!(demanded);
+            return v;
+        }
         self.thunk_code_cell().set(v);
         if demanded {
             Word::EMPTY
@@ -1954,7 +1989,7 @@ mod alloc_tests {
         let done = t.thunk_finish(Word::imm_int(7), false);
         assert!(!t.thunk_unforced(done));
         assert!(t.thunk_speculated(done));
-        assert_eq!(t.thunk_value().imm_int_value(), 7);
+        assert_eq!(t.thunk_value(done).imm_int_value(), 7);
         let done = t.thunk_finish(Word::imm_int(7), true);
         assert!(!t.thunk_unforced(done));
         assert!(!t.thunk_speculated(done));

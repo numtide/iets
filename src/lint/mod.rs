@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::env::Env;
-use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, FileInfo, Pos};
+use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::log::{self, Site};
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, FxHasher};
@@ -924,9 +924,9 @@ impl Evaluator {
         if tree.is_none() && self.lints.seen(id, pos) {
             return Ok(());
         }
-        let file = self.file_of(pos);
-        if let Some((f, off)) = file
-            && f.allows().covers(off, id)
+        let file = self.files.index_of(pos);
+        if let Some(f) = file.map(|i| &self.files[i])
+            && f.allows().covers(pos.0 - f.base, id)
         {
             self.lints.silence(id, pos);
             return Ok(());
@@ -954,12 +954,11 @@ impl Evaluator {
 
     /// Where the file of `pos` lies, classified once per file and fiber.
     pub fn where_of(&mut self, pos: Pos) -> Where {
-        let file = self.file_of(pos);
-        self.where_of_file(file)
+        self.where_of_file(self.files.index_of(pos))
     }
 
-    fn where_of_file(&mut self, file: Option<(&'static FileInfo, u32)>) -> Where {
-        let Some((f, _)) = file else {
+    fn where_of_file(&mut self, file: Option<usize>) -> Where {
+        let Some(f) = file.map(|i| &self.files[i]) else {
             return Where::Elsewhere;
         };
         if let Some(w) = self.lints.where_cache.get(&f.base) {

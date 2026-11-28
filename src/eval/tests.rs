@@ -736,6 +736,19 @@ fn fetch_tree_checks_type_before_forcing_other_attributes(
     assert!(error.contains(expected), "{error}");
 }
 
+#[cfg(feature = "stats2")]
+#[test]
+fn replacing_files_keeps_distinct_update_census_entries() {
+    let mut ev = Evaluator::new();
+    for _ in 0..16 {
+        ev.files = Default::default();
+        ev.eval_string("{ a = 1; } // { b = 2; }", b"/").unwrap();
+    }
+    let entries = &ev.arena.stats.census.upd.by_file;
+    assert_eq!(entries.len(), 16);
+    assert!(entries.values().all(|(_, count, _)| *count == 1));
+}
+
 #[test]
 fn update_forces_the_right_operand_first() {
     assert_eq!(

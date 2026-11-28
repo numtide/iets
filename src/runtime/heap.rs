@@ -24,8 +24,6 @@ pub struct Heap {
 #[derive(Default)]
 struct Inner {
     chunks: Vec<(usize, usize)>,
-    /// Rust values handed out as `&'static`, dropped before the chunks go.
-    kept: Vec<Box<dyn Send>>,
     /// Bump state of the current name block.
     next: usize,
     end: usize,
@@ -62,15 +60,6 @@ impl Heap {
         p as *mut u8
     }
 
-    /// `v`, owned by the session and dropped when it is released.
-    pub(crate) fn keep<T: Send + Sync + 'static>(&self, v: T) -> &'static T {
-        let b = Box::new(v);
-        let r: *const T = &*b;
-        self.inner.lock().unwrap().kept.push(b);
-        // SAFETY: the box does not move its contents and lives until release.
-        unsafe { &*r }
-    }
-
     /// `b` copied into this session's memory.
     pub(crate) fn alloc_bytes(&self, b: &[u8]) -> &'static [u8] {
         let p = self.alloc(b.len());
@@ -93,9 +82,7 @@ fn map(len: usize) -> usize {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        let inner = self.inner.get_mut().unwrap();
-        drop(mem::take(&mut inner.kept));
-        let chunks = mem::take(&mut inner.chunks);
+        let chunks = mem::take(&mut self.inner.get_mut().unwrap().chunks);
         if chunks.is_empty() {
             return;
         }

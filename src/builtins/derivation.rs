@@ -11,7 +11,6 @@ use std::{io, mem, str};
 
 use crate::sys::tmp;
 
-use super::text::json;
 use super::{Registry, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::{LintId, coerce, purity};
@@ -23,6 +22,7 @@ use crate::store::drv::{
     hash_derivation_modulo, hash_derivation_modulo_with, load_derivation_from_store,
 };
 use crate::store::hash::{Hash, HashAlgo, hash_bytes};
+use crate::store::json::normalise_structured_attrs;
 use crate::store::path::{
     DRV_EXTENSION, IngestionMethod, StorePath, check_name, hash_placeholder, output_path_name,
     render_placeholder,
@@ -459,16 +459,16 @@ fn process_attr(
         b.drv.env.push((key.to_string(), raw.into_owned()));
         return Ok(());
     }
-    let st = utf8(&raw, pos)?;
     if sym == s.json {
         log::line(&format!(
             "warning: In derivation '{}': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead.",
             b.drv.name
         ));
-        let text = ev.arena.alloc_bytes(st.as_bytes());
-        b.drv.structured_attrs = Some(json::canonical_structured_attrs(ev, text, pos)?);
+        b.drv.structured_attrs =
+            Some(normalise_structured_attrs(&raw).map_err(|e| drv_err(e, Pos::NONE))?);
         return Ok(());
     }
+    let st = utf8(&raw, pos)?;
     if sym == s.builder {
         b.drv.builder = st.to_owned();
     } else if sym == s.system {

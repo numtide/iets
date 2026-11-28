@@ -210,18 +210,15 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, DrvError> {
-        let Some(h) = self.s.get(self.i..self.i + 4) else {
-            return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-        };
-        let Some(v) = str::from_utf8(h)
-            .ok()
-            .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
-            .and_then(|h| u32::from_str_radix(h, 16).ok())
-        else {
-            return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-        };
-        self.i += 4;
-        Ok(v)
+        let mut value = 0;
+        for _ in 0..4 {
+            let Some(digit) = self.peek().and_then(|b| char::from(b).to_digit(16)) else {
+                return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
+            };
+            value = value * 16 + digit;
+            self.i += 1;
+        }
+        Ok(value)
     }
 
     fn string(&mut self) -> Result<String, DrvError> {
@@ -470,6 +467,7 @@ mod tests {
             (b"{\"a\":\"\xf0\x9f\x99", "line 1, column 10:"),
             (b"{\"a\":\"\xe2\n", "line 2, column 0:"),
             (br#"{"a":1} x"#, "expected end of input"),
+            (br#"{"n":"\u1z00"}"#, "line 1, column 10:"),
             (b"", "unexpected end of input"),
             (br#"{"a":01}"#, "expected ',' or '}'"),
             (br#"{"a":1.}"#, "expected digit after '.'"),

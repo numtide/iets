@@ -192,7 +192,7 @@ fn convert(ev: &mut Evaluator, v: ::toml::Value, pos: Pos) -> EvalResult<Word> {
             let mut entries: Vec<(Sym, Pos, Word)> = Vec::with_capacity(t.len());
             for (k, v) in t {
                 no_nul(k.as_bytes(), pos)?;
-                let sym = ev.sym(k.as_bytes());
+                let sym = ev.dynamic_sym(k.as_bytes())?;
                 let w = convert(ev, v, pos)?;
                 entries.push((sym, Pos::NONE, w));
             }

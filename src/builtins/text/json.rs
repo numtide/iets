@@ -148,7 +148,7 @@ impl Parser<'_> {
                 return self.err("syntax error while parsing object key - invalid literal");
             }
             let key = self.string()?;
-            let sym = self.ev.sym(&key);
+            let sym = self.ev.dynamic_sym(&key)?;
             self.ws();
             if self.peek() != Some(b':') {
                 return self.err("syntax error while parsing object separator - expected ':'");

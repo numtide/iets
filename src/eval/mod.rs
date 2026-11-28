@@ -1766,6 +1766,18 @@ impl Evaluator {
         self.interner.intern(name)
     }
 
+    /// Attribute equality forces fields in symbol-ID order. A helper can use
+    /// a known name, but only demand may allocate a new ID for a dynamic key.
+    pub(crate) fn dynamic_sym(&mut self, name: &[u8]) -> EvalResult<Sym> {
+        if self.par.on && !self.par.is_main {
+            return self
+                .interner
+                .get(name)
+                .ok_or_else(|| parallel::force::retry_on_demand(self));
+        }
+        Ok(self.interner.intern(name))
+    }
+
     /// `force_string_no_ctx` as a symbol. The symbol is kept in the string
     /// object: names passed again and again, such as the literals of a
     /// `removeAttrs` call, are hashed once.
@@ -1774,7 +1786,7 @@ impl Evaluator {
         if let Some(sym) = s.cached_sym() {
             return Ok(sym);
         }
-        let sym = self.interner.intern(s.bytes);
+        let sym = self.dynamic_sym(s.bytes)?;
         s.cache_sym(sym);
         Ok(sym)
     }
@@ -2933,7 +2945,7 @@ impl Evaluator {
                 d.pos,
                 "while evaluating the name of a dynamic attribute",
             )?;
-            let sym = self.interner.intern(name);
+            let sym = self.dynamic_sym(name)?;
             if entries.iter().any(|e| e.0 == sym) {
                 bail!(
                     ErrorKind::Eval,

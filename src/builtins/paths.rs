@@ -106,7 +106,9 @@ fn kind_name(k: Kind) -> &'static str {
 
 /// A failed [`SrcPath::read`] of a file, `readFile`'s way.
 fn read_error((verb, e): (&str, io::Error), p: &[u8], pos: Pos) -> Box<Error> {
-    if errno::is_directory(&e) {
+    if e.kind() == io::ErrorKind::UnexpectedEof {
+        Error::boxed(ErrorKind::Io, e.to_string(), pos)
+    } else if errno::is_directory(&e) {
         Error::boxed(
             ErrorKind::Io,
             format!("file '{}' is not a regular file", lossy(p)),

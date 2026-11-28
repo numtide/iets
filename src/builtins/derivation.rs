@@ -844,6 +844,9 @@ fn derivation_strict_internal(
     );
 
     let (dp, drv_path_bytes) = drv_path_string(ev, drv_path.to_full_string().as_bytes());
+    if ev.drv.keep_site {
+        ev.session().jobs.record_drv_site(dp, site);
+    }
     let mut entries = Vec::with_capacity(1 + drv.outputs.len());
     entries.push((ev.s.drv_path, Pos::NONE, dp));
     for (name, out) in &drv.outputs {

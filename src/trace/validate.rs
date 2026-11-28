@@ -13,7 +13,7 @@ use std::{fs, thread};
 
 use super::{
     Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
+    link_target, mtime_ns, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -224,6 +224,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 Outcome::Changed(format!("{} resolves to a different path", lossy(path)))
             }
         }
+        Obs::ReadLink { .. } => Outcome::Same, // checked before following any path below
         Obs::Env { name, value } => {
             let now = env_hash(name);
             let what = match (&now, value) {
@@ -254,13 +255,35 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
     }
 }
 
+/// Check the pure resolver's route before a content reader can follow a
+/// changed path outside the project. A link's own target needs no following.
+fn validate_links(obs: &[Obs]) -> Result<(), Mismatch> {
+    for o in obs {
+        if let Obs::ReadLink { path, target } = o {
+            match link_target(path) {
+                Ok(now) if now == *target => {}
+                Ok(_) => {
+                    return Err(Mismatch(format!(
+                        "{} has a different symlink target",
+                        lossy(path)
+                    )));
+                }
+                Err(e) => return Err(Mismatch(format!("{} cannot be read: {e}", lossy(path)))),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validates every observation on `threads` threads. On success the
 /// refreshed entries are written back into `obs`.
-/// The [`Mismatch`] names the lowest-indexed observation that failed, so one
+/// Path authority is checked first. Within each pass the [`Mismatch`] names
+/// the lowest-indexed observation that failed, so one
 /// change always names the same thing. The threads still stop at the first
 /// failure: every index below it was already handed out, and a thread finishes
 /// the check it started, so the lowest failing index is among the ones seen.
 pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
+    validate_links(obs)?;
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let rehashed = AtomicUsize::new(0);

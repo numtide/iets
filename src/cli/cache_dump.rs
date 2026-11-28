@@ -40,6 +40,11 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
                 s(path),
                 target.as_deref().map_or("(none)".to_string(), s)
             )),
+            Obs::ReadLink { path, target } => render::line(&format!(
+                "readlink {} -> {}",
+                s(path),
+                target.as_deref().map_or("(none)".to_string(), s)
+            )),
             // the value is a keyed hash; the entry never holds it
             Obs::Env { name, value } => render::line(&format!(
                 "env {} {}",

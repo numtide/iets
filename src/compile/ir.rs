@@ -17,7 +17,8 @@ pub enum Ir {
         depth: u32,
         idx: u32,
     },
-    /// Variable bound by `with`. `withs` lists, innermost first, the depth of
+    /// Variable lookup, with the global table as its fallback. A lazy global
+    /// has an empty scope list. `withs` lists, innermost first, the depth of
     /// each enclosing with-env relative to the current env.
     WithVar {
         sym: Sym,

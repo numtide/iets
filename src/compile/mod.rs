@@ -300,7 +300,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn resolve(&mut self, sym: Sym) -> Option<Ir> {
+    fn resolve(&mut self, sym: Sym, pos: Pos) -> CResult<Ir> {
+        // parser.y makes every __curPos an ExprPos, even when shadowed.
+        if sym == self.sym_cur_pos {
+            return Ok(Ir::CurPos(pos));
+        }
         let mut withs: Vec<u32> = Vec::new();
         let mut outermost_with = None;
         let mut depth = 0;
@@ -310,7 +314,7 @@ impl<'a> Compiler<'a> {
                 Scope::Lexical { names, shares } => {
                     if let Some(&idx) = names.get(&sym) {
                         self.note_capture(n - 1 - d);
-                        return Some(Ir::Local { depth, idx });
+                        return Ok(Ir::Local { depth, idx });
                     }
                     if !shares {
                         depth += 1;
@@ -325,17 +329,30 @@ impl<'a> Compiler<'a> {
         }
         // Globals live in Nix's static base env, a lexical scope, so they
         // beat any enclosing `with` (`with { true = 1; }; true` is `true`).
-        if let Some(w) = self.globals.table.get(&sym) {
-            return Some(Ir::Const(*w));
-        }
-        self.note_capture(outermost_with?);
-        Some(
-            Ir::WithVar {
+        if let Some(&w) = self.globals.table.get(&sym) {
+            self.global_ref(self.interner.name(sym), pos)?;
+            if !w.is_thunk() {
+                return Ok(Ir::Const(w));
+            }
+            // A lazy global such as __currentTime is forced only on demand.
+            return Ok(Ir::WithVar {
                 sym,
                 withs: &[],
-                pos: Pos::NONE,
-            }
-            .with_withs(self.arena.alloc_slice(&withs)),
+                pos,
+            });
+        }
+        if let Some(scope) = outermost_with {
+            self.note_capture(scope);
+            return Ok(Ir::WithVar {
+                sym,
+                withs: self.arena.alloc_slice(&withs),
+                pos,
+            });
+        }
+        err(
+            ErrorKind::UndefinedVar,
+            format!("undefined variable '{}'", self.interner.name_str(sym)),
+            pos,
         )
     }
 
@@ -352,30 +369,7 @@ impl<'a> Compiler<'a> {
             Expr::Float(f) => Ir::Const(self.arena.mk_float(*f)),
             Expr::Str(parts) => self.string(ast.parts(*parts), pos)?,
             Expr::Path(p) => self.path(p.kind, ast.parts(p.parts), pos)?,
-            Expr::Var(sym) => {
-                let sym = *sym;
-                // parser.y makes every `__curPos` an ExprPos, so a binding
-                // of that name has no effect
-                if sym == self.sym_cur_pos {
-                    return Ok(Ir::CurPos(pos));
-                }
-                match self.resolve(sym) {
-                    Some(Ir::WithVar { sym, withs, .. }) => Ir::WithVar { sym, withs, pos },
-                    Some(ir) => {
-                        if matches!(ir, Ir::Const(_)) {
-                            self.global_ref(self.interner.name(sym), pos)?;
-                        }
-                        ir
-                    }
-                    None => {
-                        return err(
-                            ErrorKind::UndefinedVar,
-                            format!("undefined variable '{}'", self.interner.name_str(sym)),
-                            pos,
-                        );
-                    }
-                }
-            }
+            Expr::Var(sym) => self.resolve(*sym, pos)?,
             Expr::Select {
                 subject,
                 path,
@@ -1124,24 +1118,9 @@ impl<'a> Compiler<'a> {
         Ok((self.arena.alloc_vec(binds), self.alloc_refs(from)))
     }
 
-    fn var_ir(&mut self, var: Sym, pos: Pos) -> CResult<IrRef> {
-        if var == self.sym_cur_pos {
-            return Ok(self.alloc(Ir::CurPos(pos)));
-        }
-        match self.resolve(var) {
-            Some(Ir::WithVar { sym, withs, .. }) => Ok(self.alloc(Ir::WithVar { sym, withs, pos })),
-            Some(ir) => {
-                if matches!(ir, Ir::Const(_)) {
-                    self.global_ref(self.interner.name(var), pos)?;
-                }
-                Ok(self.alloc(ir))
-            }
-            None => err(
-                ErrorKind::UndefinedVar,
-                format!("undefined variable '{}'", self.interner.name_str(var)),
-                pos,
-            ),
-        }
+    fn var_ir(&mut self, sym: Sym, pos: Pos) -> CResult<IrRef> {
+        let ir = self.resolve(sym, pos)?;
+        Ok(self.alloc(ir))
     }
 
     /// A binding's value; names lambdas after their binding.
@@ -1322,15 +1301,6 @@ fn frame_end(body: IrRef, end: u32) -> u32 {
     match body {
         Ir::Let(l) if l.base != LetIr::OWN_ENV => l.base + (l.binds.len() + l.from.len()) as u32,
         _ => end,
-    }
-}
-
-impl Ir {
-    fn with_withs(self, withs: &'static [u32]) -> Ir {
-        match self {
-            Ir::WithVar { sym, pos, .. } => Ir::WithVar { sym, withs, pos },
-            other => other,
-        }
     }
 }
 

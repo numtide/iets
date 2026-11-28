@@ -2672,7 +2672,7 @@ impl Evaluator {
             }
         }
         if let Some(w) = self.globals.table.get(&sym) {
-            return Ok(*w);
+            return self.force(*w);
         }
         bail!(
             ErrorKind::UndefinedVar,

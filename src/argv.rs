@@ -2,10 +2,11 @@
 //! bytes, so a path may hold bytes that are not UTF-8. [`encode`] maps each such
 //! byte `b` to the character U+10FF00 + `b`, and [`bytes`] maps it back where
 //! the bytes matter: paths, expressions, `--arg`/`--argstr` values and the argv
-//! of a fallback. A U+10FF80..U+10FFFF typed on the command line also comes back
-//! as one byte: those are the last private-use code points and noncharacters.
+//! of a fallback. A U+10FF80..U+10FFFF typed on the command line is encoded
+//! byte by byte as well, so it comes back as its own four bytes.
 
 use crate::sys::OsStringExt;
+use std::borrow::Cow;
 use std::ffi::OsString;
 
 const BASE: u32 = 0x10FF00;
@@ -14,15 +15,20 @@ pub fn encode(arg: OsString) -> String {
     let raw = arg.into_vec();
     let mut s = String::with_capacity(raw.len());
     for chunk in raw.utf8_chunks() {
-        s.push_str(chunk.valid());
-        s.extend(
-            chunk
-                .invalid()
-                .iter()
-                .filter_map(|&b| char::from_u32(BASE + u32::from(b))),
-        );
+        for c in chunk.valid().chars() {
+            if matches!(u32::from(c).checked_sub(BASE), Some(0x80..=0xff)) {
+                s.extend(c.encode_utf8(&mut [0; 4]).bytes().filter_map(carrier));
+            } else {
+                s.push(c);
+            }
+        }
+        s.extend(chunk.invalid().iter().copied().filter_map(carrier));
     }
     s
+}
+
+fn carrier(b: u8) -> Option<char> {
+    char::from_u32(BASE + u32::from(b))
 }
 
 pub fn bytes(s: &str) -> Vec<u8> {
@@ -34,6 +40,15 @@ pub fn bytes(s: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The argument as text, for a consumer that takes no arbitrary bytes.
+pub fn text(s: &str) -> Cow<'_, str> {
+    if s.chars().any(|c| u32::from(c) >= BASE + 0x80) {
+        Cow::Owned(String::from_utf8_lossy(&bytes(s)).into_owned())
+    } else {
+        Cow::Borrowed(s)
+    }
 }
 
 pub fn os(s: &str) -> OsString {
@@ -53,5 +68,13 @@ mod tests {
         assert_eq!(bytes(&s), raw);
         assert_eq!(os(&s).into_vec(), raw);
         assert_eq!(encode(OsString::from("-E")), "-E");
+    }
+
+    #[test]
+    fn a_typed_carrier_character_keeps_its_four_bytes() {
+        for c in ['\u{10FF80}', '\u{10FFFF}'] {
+            let raw = format!("a{c}b").into_bytes();
+            assert_eq!(bytes(&encode(OsString::from_vec(raw.clone()))), raw);
+        }
     }
 }

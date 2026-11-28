@@ -23,7 +23,7 @@ use crate::runtime::{AttrsObj, Value, Word};
 use crate::source::lock::Declared;
 use crate::source::{self, AttrVal, SourceRef, lock};
 use crate::trace::Kind;
-use crate::{sys, treestore};
+use crate::{argv, sys, treestore};
 
 pub const CALL_FLAKE: &str = include_str!("call-flake.nix");
 pub const LOCK_ERROR: &str = "flake.lock missing or incomplete, run nix flake lock";
@@ -283,6 +283,7 @@ fn local_flake(full: &[u8], explicit_path: bool, attr: Vec<String>) -> Result<Fl
 
 /// attr-path.cc:parseAttrPath: `.` separates, `"..."` quotes.
 pub fn parse_attr_path(s: &str) -> Result<Vec<String>> {
+    let s = &*argv::text(s);
     let mut res = Vec::new();
     let mut cur = String::new();
     let mut it = s.chars();
@@ -896,6 +897,8 @@ mod tests {
         );
         assert_eq!(parse_attr_path("").unwrap(), Vec::<String>::new());
         assert!(parse_attr_path("a.\"b").is_err());
+        let typed = argv::encode("a.\u{10FF80}".into());
+        assert_eq!(parse_attr_path(&typed).unwrap(), ["a", "\u{10FF80}"]);
     }
 
     #[rstest]

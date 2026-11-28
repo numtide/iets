@@ -156,6 +156,7 @@ impl Cache {
             Part::Sources,
             Part::Fetched,
             Part::Result,
+            Part::OutputSizes,
         ]
         .into_iter()
         .filter_map(|p| Some((p, entry.part(p)?)))
@@ -171,15 +172,15 @@ impl Cache {
         self,
         ev: &Evaluator,
         before: u64,
-    ) -> impl FnOnce(&[u8]) + Send + 'static + use<> {
+    ) -> impl FnOnce(&[u8], &[u8]) + Send + 'static + use<> {
         let trace = ev.trace().clone();
         // The worker has not evaluated yet, so its local lint caches are empty.
         let lints = ev.lints.clone();
         let session = ev.session().clone();
-        move |result| {
+        move |result, sizes| {
             let _entered = session.enter();
             if session.log.diagnostic_lines() == before {
-                self.write_result(&trace, &lints, result, None);
+                self.write_result(&trace, &lints, result, None, sizes);
             } else if self.timings {
                 errln!("cache: not written (unrecorded evaluation diagnostic)");
             }
@@ -190,7 +191,7 @@ impl Cache {
     /// `currentTime` or called a fetcher writes nothing. `tables` adds the
     /// drv and source tables, which only a `build` hit reads back.
     pub fn write(&self, ev: &Evaluator, result: &[u8], tables: bool) {
-        self.write_result(ev.trace(), &ev.lints, result, tables.then_some(ev));
+        self.write_result(ev.trace(), &ev.lints, result, tables.then_some(ev), &[]);
     }
 
     fn write_result(
@@ -199,6 +200,7 @@ impl Cache {
         lints: &Lints,
         result: &[u8],
         tables: Option<&Evaluator>,
+        output_sizes: &[u8],
     ) {
         if !trace.is_cacheable() {
             if self.timings {
@@ -239,6 +241,9 @@ impl Cache {
         }
         if let Some(f) = &fetched {
             parts.push((Part::Fetched, f));
+        }
+        if !output_sizes.is_empty() {
+            parts.push((Part::OutputSizes, output_sizes));
         }
         parts.push((Part::Result, result));
         parts.push((Part::Readset, &readset));
@@ -333,7 +338,7 @@ mod tests {
         let finish = |key| open(key).finish_eval(&ev, session.log.diagnostic_lines());
         let write = finish("quiet");
         ev.trace().env(b"LATE_HELPER_INPUT");
-        write(b"result");
+        write(b"result", &[]);
         let readset = open("quiet").part(Part::Readset).unwrap();
         assert_eq!(wire::decode_readset(&readset).unwrap().len(), 1);
 
@@ -341,7 +346,7 @@ mod tests {
         thread::spawn(session::bind(|| log::line("late diagnostic")))
             .join()
             .unwrap();
-        write(b"result");
+        write(b"result", &[]);
         assert!(open("diagnostic").part(Part::Result).is_none());
     }
 

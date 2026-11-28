@@ -104,10 +104,10 @@ impl Cache {
             Opened::Bad => return bad(),
             Opened::Entry(e) => e,
         };
-        let Some(bytes) = entry.part(Part::Readset) else {
+        let Some(bytes) = entry.part_bytes(Part::Readset) else {
             return bad();
         };
-        let Some(mut obs) = wire::decode_readset(&bytes) else {
+        let Some(mut obs) = wire::decode_readset(bytes) else {
             return bad();
         };
         let threads = thread::available_parallelism().map_or(1, |n| n.get().min(4));
@@ -149,7 +149,7 @@ impl Cache {
     /// the parts it validated and the new read set. The other parts come from
     /// the open generation, so a sibling's publish in between is not mixed in.
     fn republish(&self, entry: &Entry, readset: &[u8]) {
-        let kept: Vec<(Part, Vec<u8>)> = [
+        let mut parts: Vec<_> = [
             Part::Warnings,
             Part::NixConfig,
             Part::Drvs,
@@ -158,9 +158,8 @@ impl Cache {
             Part::Result,
         ]
         .into_iter()
-        .filter_map(|p| Some((p, entry.part(p)?)))
+        .filter_map(|p| Some((p, entry.part_bytes(p)?)))
         .collect();
-        let mut parts: Vec<(Part, &[u8])> = kept.iter().map(|(p, b)| (*p, b.as_slice())).collect();
         parts.push((Part::Readset, readset));
         let _ = self.store.publish(&self.key, &parts);
     }

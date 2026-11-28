@@ -106,10 +106,14 @@ impl Entry {
 
     /// The bytes of one part, from this generation of the entry.
     pub fn part(&self, part: Part) -> Option<Vec<u8>> {
+        self.part_bytes(part).map(<[u8]>::to_vec)
+    }
+
+    pub(crate) fn part_bytes(&self, part: Part) -> Option<&[u8]> {
         let (_, at, n) = *self.slots.iter().find(|(t, ..)| *t == part.tag())?;
         let at = usize::try_from(at).ok()?;
         let n = usize::try_from(n).ok()?;
-        Some(self.data.get(at..at.checked_add(n)?)?.to_vec())
+        self.data.get(at..at.checked_add(n)?)
     }
 }
 

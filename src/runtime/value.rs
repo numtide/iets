@@ -620,7 +620,7 @@ impl AttrsObj {
     #[inline]
     pub(crate) fn iter_raw(&self) -> AttrIter {
         let mut it = AttrIter {
-            leaves: [&[]; SENTINEL + 1],
+            leaves: [&[]; MAX_LEAVES as usize],
             keys: [u64::MAX; SENTINEL + 1],
             tree: [0; MAX_LEAVES as usize],
             n: 1,
@@ -641,7 +641,7 @@ impl AttrsObj {
     }
 }
 
-/// The leaf slot that stands for an exhausted stream while the tree is built.
+/// The extra key slot used while the tree is built.
 const SENTINEL: usize = MAX_LEAVES as usize;
 
 /// Merging iterator over the flat leaves of a set, lowest priority first; on
@@ -652,7 +652,7 @@ const SENTINEL: usize = MAX_LEAVES as usize;
 /// `(sym + 1) << 3 | (7 - i)`, which puts the last leaf first on equal syms. Key
 /// 0 is the sentinel and `u64::MAX` an exhausted leaf, so neither ties with a head.
 pub struct AttrIter {
-    leaves: [&'static [Attr]; SENTINEL + 1],
+    leaves: [&'static [Attr]; MAX_LEAVES as usize],
     keys: [u64; SENTINEL + 1],
     tree: [u8; MAX_LEAVES as usize],
     n: usize,
@@ -696,7 +696,6 @@ impl AttrIter {
         for s in (0..self.n).rev() {
             self.adjust(s);
         }
-        self.keys[SENTINEL] = u64::MAX;
     }
 }
 
@@ -718,10 +717,11 @@ impl Iterator for AttrIter {
         let sym = (item.sym.0 as u64 + 1) << 3;
         loop {
             let v = self.tree[0] as usize;
+            let leaf = &mut self.leaves[v];
             if self.keys[v] & !7 != sym {
                 break;
             }
-            self.leaves[v] = &self.leaves[v][1..];
+            *leaf = &leaf[1..];
             self.set_key(v);
             self.adjust(v);
         }
@@ -1844,7 +1844,7 @@ mod tests {
                 let mut arena = Arena::new();
                 let mut sets: Vec<Vec<(u32, i64)>> = Vec::new();
                 for leaf in 0..n {
-                    let len = 1 + (rng() % 12) as usize;
+                    let len = if round == 0 { 0 } else { (rng() % 13) as usize };
                     let mut syms: Vec<u32> = (0..len).map(|_| (rng() % 20) as u32).collect();
                     syms.sort_unstable();
                     syms.dedup();

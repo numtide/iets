@@ -106,6 +106,36 @@ fn a_hashed_fetch_has_the_store_path_nix_gives(scratch: Scratch) {
 }
 
 #[rstest]
+fn a_live_empty_input_reads_after_collection(scratch: Scratch) {
+    use hermetic::ok;
+
+    let empty = scratch.root.join("empty");
+    fs::write(&empty, b"").unwrap();
+    let expr = format!(
+        r#"builtins.hashFile "sha256" (builtins.fetchurl {{ url = "{}"; name = "iets-empty-gc-test"; sha256 = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="; }})"#,
+        file_url(&empty)
+    );
+    let eval = |flags: &[&str]| {
+        ok(scratch
+            .bin
+            .cmd()
+            .current_dir(&scratch.root)
+            .args(["eval", "--raw", "--impure", "--timings"])
+            .args(flags)
+            .args(["--expr", &expr]))
+    };
+    let expected = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert_eq!(eval(&[]).stdout, expected);
+    // A first download may decline caching when it emitted diagnostics.
+    assert_eq!(eval(&[]).stdout, expected);
+    let hit = eval(&[]);
+    assert!(stderr(&hit).contains("cache: hit"), "{}", stderr(&hit));
+    ok(scratch.bin.cmd().args(["cache", "gc", "--ttl", "30"]));
+    assert_eq!(eval(&[]).stdout, expected);
+    assert_eq!(eval(&["--no-tracing-cache"]).stdout, expected);
+}
+
+#[rstest]
 fn a_wrong_hash_is_refused_with_the_hash_the_file_has(scratch: Scratch) {
     let url = &scratch.url;
     let zero = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

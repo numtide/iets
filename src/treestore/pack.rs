@@ -724,9 +724,24 @@ fn remove(path: &Path, dry_run: bool) -> bool {
 /// a reader that has a pack open keeps reading it after the unlink.
 pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Collected> {
     let mut out = Collected::default();
+    let mut complete = true;
     let set = PackSet::list(dir, |path, e| {
+        complete = false;
         errln!("cache: skipping input pack {}: {e}", path.display());
     });
+    // Older collectors could mistake a pack's zero live payload bytes for
+    // zero live objects. The empty object's bytes follow from its ID alone.
+    let empty = id_of(b"");
+    if !dry_run
+        && complete
+        && set.broken.is_empty()
+        && live.contains(&empty)
+        && set.find(&empty).is_none()
+    {
+        let mut writer = PackWriter::new(dir)?;
+        writer.add(empty, b"")?;
+        writer.finish()?;
+    }
     // a pack that does not parse is a cache file whose objects come back
     // with the inputs that need them
     for (path, len) in &set.broken {
@@ -737,14 +752,16 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
     }
     for pack in set.packs() {
         let (mut keep, mut dead) = (0u64, 0u64);
+        let mut has_live = false;
         for (id, loc) in pack.ids() {
             if live.contains(&id) {
+                has_live = true;
                 keep += loc.stored;
             } else {
                 dead += loc.stored;
             }
         }
-        if keep == 0 {
+        if !has_live {
             if remove(pack.path(), dry_run) {
                 out.removed += 1;
                 out.freed += pack.file_len();
@@ -902,8 +919,10 @@ mod tests {
         assert_eq!(packs.read(&id_of(b"late")).unwrap(), b"late");
     }
 
-    #[test]
-    fn collect_removes_dead_packs_and_compacts_mostly_dead_ones() {
+    #[rstest::rstest]
+    #[case(b"keep, small")]
+    #[case(b"")]
+    fn collect_removes_dead_packs_and_compacts_mostly_dead_ones(#[case] keep: &[u8]) {
         let d = tempdir().unwrap();
         let big = |c: u8| {
             vec![c; 10_000]
@@ -911,15 +930,15 @@ mod tests {
                 .chain([c ^ 0x55; 3])
                 .collect::<Vec<u8>>()
         };
-        let (keep, drop, gone) = (b"keep, small".to_vec(), big(1), big(2));
+        let (drop, gone) = (big(1), big(2));
         let mut w = PackWriter::new(d.path()).unwrap();
-        w.add(id_of(&keep), &keep).unwrap();
+        w.add(id_of(keep), keep).unwrap();
         w.add(id_of(&drop), &drop).unwrap();
         let mixed = w.finish().unwrap().unwrap();
         let mut w = PackWriter::new(d.path()).unwrap();
         w.add(id_of(&gone), &gone).unwrap();
         let dead = w.finish().unwrap().unwrap();
-        let live: HashSet<Id> = [id_of(&keep)].into();
+        let live: HashSet<Id> = [id_of(keep)].into();
 
         let dry = collect(d.path(), &live, true).unwrap();
         assert_eq!((dry.removed, dry.rewritten), (1, 1));
@@ -929,17 +948,43 @@ mod tests {
         collect(d.path(), &live, false).unwrap();
         assert!(!dead.exists() && !mixed.exists());
         assert_eq!(
-            reader.read(&id_of(&keep)).unwrap(),
+            reader.read(&id_of(keep)).unwrap(),
             keep,
             "from the unlinked pack"
         );
         assert_eq!(reader.refresh().packs().len(), 1);
         assert_eq!(
-            reader.read(&id_of(&keep)).unwrap(),
+            reader.read(&id_of(keep)).unwrap(),
             keep,
             "from the new pack"
         );
         assert!(reader.read(&id_of(&drop)).is_err());
+        assert_eq!(
+            collect(d.path(), &live, false).unwrap(),
+            Collected::default()
+        );
+    }
+
+    #[test]
+    fn collection_recovers_only_a_missing_empty_object() {
+        let dir = tempdir().unwrap();
+        let empty = id_of(b"");
+        let other = id_of(b"other");
+        let live = HashSet::from([empty, other]);
+        collect(dir.path(), &live, true).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        // An invalid pack is removed under the existing corruption policy.
+        // Only a complete subsequent listing can establish a missing object.
+        fs::write(dir.path().join("broken.pack"), b"bad index").unwrap();
+        collect(dir.path(), &live, false).unwrap();
+        assert!(PackSet::load(dir.path()).packs().is_empty());
+        collect(dir.path(), &live, false).unwrap();
+        let packs = Packs::open(dir.path());
+        assert_eq!(packs.read(&empty).unwrap(), b"");
+        assert_eq!(
+            packs.read(&other).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     fn one_pack(dir: &Path, bytes: &[u8]) -> PathBuf {

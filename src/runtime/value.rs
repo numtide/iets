@@ -730,6 +730,23 @@ impl Iterator for AttrIter {
 }
 
 impl EnvObj {
+    /// The slot of a lexical local, if the environment chain reaches its binder.
+    #[inline]
+    pub(crate) fn try_local_slot(&self, depth: u32, idx: u32) -> Option<&Cell> {
+        let mut env = self;
+        for _ in 0..depth {
+            env = env.up()?;
+        }
+        env.mark_read();
+        Some(env.slot(idx as usize))
+    }
+
+    #[inline]
+    pub(crate) fn local_slot(&self, depth: u32, idx: u32) -> &Cell {
+        self.try_local_slot(depth, idx)
+            .expect("compile-time depth is valid")
+    }
+
     /// Slot `i`. The compiler resolved `i` against this env's binder, so it
     /// is in range by construction.
     #[inline]

@@ -552,3 +552,28 @@ fn trace_uses_the_lazy_value_printer(bin: Iets, #[case] expr: &str, #[case] expe
     assert_eq!(stdout(&o), "17");
     assert_eq!(stderr(&o), format!("trace: {expected}\n"));
 }
+
+#[rstest]
+#[case::shared("a // { other = false; }", r#"{ x = "A"; }"#)]
+#[case::independent("{ x = read 1; other = false; }", "{ x = «thunk»; }")]
+fn trace_shows_the_state_of_the_actual_shared_thunk(
+    bin: Iets,
+    #[case] copy: &str,
+    #[case] original: &str,
+    #[values("1", "8")] workers: &str,
+) {
+    let expr = format!(
+        r#"let read = _: builtins.trace "read" "A"; a = {{ x = read 0; }}; b = {copy};
+           in builtins.seq b (builtins.seq b.x (builtins.trace a (builtins.trace b 17)))"#
+    );
+    let o = run(
+        &bin,
+        &["eval", "--workers", workers, "--no-cache", "-E", &expr],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "17");
+    assert_eq!(
+        stderr(&o),
+        format!("trace: read\ntrace: {original}\ntrace: {{ other = false; x = \"A\"; }}\n")
+    );
+}

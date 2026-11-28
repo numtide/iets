@@ -178,7 +178,7 @@ fn read(
     drain(url, read, &read_in, limits, sink)
 }
 
-fn offline(url: &str) -> Result<()> {
+pub(super) fn offline(url: &str) -> Result<()> {
     if Session::current().settings().offline {
         return Err(Error::Usage(format!(
             "cannot fetch '{url}': IETS_OFFLINE is set"

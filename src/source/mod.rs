@@ -25,7 +25,7 @@ use crate::eval::{EvalResult, Evaluator, Pos};
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::path::StorePath;
 
-pub(crate) use local::{commit_tree, path_tree, workdir};
+pub(crate) use local::{commit_tree, path_tree, tracked_source, workdir};
 pub use lock::Lock;
 pub use remote::LazyStore;
 pub(crate) use remote::{
@@ -139,6 +139,7 @@ pub enum SourceRef {
         scm: &'static dyn scm::Scm,
         root: PathBuf,
         rev: String,
+        r#ref: Option<String>,
         subdir: String,
         shallow: bool,
     },
@@ -194,6 +195,7 @@ pub fn tree(ev: &mut Evaluator, r: &SourceRef, pos: Pos) -> EvalResult<Tree> {
             rev,
             subdir,
             shallow,
+            ..
         } => local::commit_source(ev, *scm, root, rev, subdir, *shallow, pos),
         SourceRef::Locked(attrs) => remote::locked(ev, attrs, pos),
     }

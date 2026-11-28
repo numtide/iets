@@ -7,6 +7,7 @@ use rstest::rstest;
 
 use crate::compile::Compiler;
 use crate::lint::{Config, Level};
+use crate::parallel::try_run;
 use crate::print;
 use crate::runtime::Value;
 use crate::syntax::{self, ast::FileId};
@@ -36,6 +37,31 @@ fn float_plus_starts_at_positive_zero() {
             r#"let x = builtins.fromJSON "-0.0"; in [ (toString (x + x)) (toString (builtins.add x x)) ]"#
         ),
         r#"[ "0.000000" "-0.000000" ]"#
+    );
+}
+
+#[rstest]
+#[case(1)]
+#[case(4)]
+fn deep_force_traces_list_indices(#[case] workers: usize) {
+    let error = try_run(workers, Evaluator::new(), |ev| {
+        let v = ev.eval_string(r#"[ 0 [ (throw "sentinel") ] ]"#, b"/")?;
+        ev.force_deep(v).map(|_| ())
+    })
+    .unwrap()
+    .unwrap_err();
+    let indices: Vec<_> = error
+        .trace
+        .iter()
+        .filter(|(_, m)| m.starts_with("while evaluating list element"))
+        .map(|(pos, m)| (*pos, m.as_str()))
+        .collect();
+    assert_eq!(
+        indices,
+        [
+            (Pos::NONE, "while evaluating list element at index 0"),
+            (Pos::NONE, "while evaluating list element at index 1")
+        ]
     );
 }
 

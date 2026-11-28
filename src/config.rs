@@ -1078,8 +1078,12 @@ mod tests {
 
     #[test]
     fn user_conf_files_are_in_precedence_order() {
-        let files = user_conf_files();
-        assert!(!files.is_empty());
-        assert!(files[0].ends_with("nix/nix.conf"), "{files:?}");
+        let env = Env::from_pairs([
+            ("XDG_CONFIG_HOME", "/user"),
+            ("XDG_CONFIG_DIRS", "/first:/second"),
+        ]);
+        let expected =
+            ["/user", "/first", "/second"].map(|dir| Path::new(dir).join("nix/nix.conf"));
+        assert_eq!(user_conf_files_in(&env), expected);
     }
 }

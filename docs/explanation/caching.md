@@ -327,6 +327,11 @@ leaves its observations in it, which at worst costs an extra miss.
 and a hit does not evaluate, so a hit prints none of them. Lint warnings
 are different: the entry records them, and a hit replays them.
 
+`iets eval` waits for its helper workers before it saves the read set and
+lint records. A run that prints a builtin deprecation warning, such as the
+old `base32` spelling in `convertHash`, skips the cache write so the next
+evaluation can print that warning too.
+
 ## The input store: why it needs no trust
 
 A locked flake input that is not in `/nix/store` is downloaded into

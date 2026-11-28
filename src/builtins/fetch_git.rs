@@ -273,7 +273,7 @@ fn from_workdir(ev: &mut Evaluator, args: &Attrs, root: &Path, pos: Pos) -> Eval
         tree.counter = Some((git, root.to_path_buf()));
     }
     if dirty {
-        log::line(&format!("warning: Git tree '{}' is dirty", root.display()));
+        log::evaluation_message(&format!("warning: Git tree '{}' is dirty", root.display()));
     }
     if shallow {
         tree.counter = None;

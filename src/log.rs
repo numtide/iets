@@ -38,6 +38,8 @@ pub struct Log {
     sink: OnceLock<Option<Mutex<Box<dyn Write + Send>>>>,
     sid: OnceLock<String>,
     next_activity: AtomicU64,
+    // Evaluator diagnostics for which a command entry has no replay record.
+    diagnostic_lines: AtomicU64,
     mismatches: Mutex<Vec<(String, String)>>,
     /// Mismatches a build reported, before `resolve_mismatches` says which of
     /// them are about a fixed-output derivation the client planned.
@@ -175,6 +177,10 @@ impl Out {
 }
 
 impl Log {
+    pub(crate) fn diagnostic_lines(&self) -> u64 {
+        self.diagnostic_lines.load(Ordering::Relaxed)
+    }
+
     /// Sends every message to `w`.
     pub fn write_to(&self, w: Box<dyn Write + Send>) {
         self.writer().w = Some(w);
@@ -582,6 +588,12 @@ pub fn msg(level: u8, text: &str) {
 
 /// A line that is not an error record.
 pub fn line(text: &str) {
+    cur().log.diagnostic_lines.fetch_add(1, Ordering::Relaxed);
+    evaluation_message(text);
+}
+
+/// Trace, warn, and dirty-tree messages are intentionally silent on cache hits.
+pub(crate) fn evaluation_message(text: &str) {
     cur().log.errln(&on_stderr(&format(text)));
 }
 

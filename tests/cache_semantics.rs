@@ -647,6 +647,31 @@ fn a_lint_warning_is_replayed_on_a_hit(work: Work) {
     assert!(err.contains("cache: hit"));
 }
 
+#[rstest]
+fn eval_cache_preserves_builtin_deprecations(work: Work) {
+    let eval = |expr| {
+        work.iets()
+            .args(["eval", "--workers", "1", "--timings", "-E", expr])
+            .output()
+            .unwrap()
+    };
+    let deprecated = r#"builtins.convertHash {
+        hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        hashAlgo = "sha256"; toHashFormat = "base32";
+    }"#;
+    for _ in 0..2 {
+        let o = eval(deprecated);
+        assert!(o.status.success());
+        assert!(stderr(&o).contains("deprecated alias"));
+    }
+    let explicit = r#"builtins.trace "during eval" 42"#;
+    assert!(stderr(&eval(explicit)).contains("during eval"));
+    let hit = eval(explicit);
+    assert!(hit.status.success());
+    assert!(stderr(&hit).contains("cache: hit"));
+    assert!(!stderr(&hit).contains("during eval"));
+}
+
 /// The file on the command line is in the read set, not in the key.
 #[rstest]
 fn the_file_argument_keeps_one_entry(work: Work) {

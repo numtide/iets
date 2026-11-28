@@ -102,14 +102,24 @@ pub fn admits(
     if !allowed(ev, path) {
         return Ok(false);
     }
-    if at.is_some()
-        || !ev.pure()
-        || !ev.in_project(path)
-        || ev.beneath_project(path, mode == Follow::Full)
-    {
+    if at.is_some() || !ev.pure() || !ev.in_project(path) {
         return Ok(true);
     }
-    Ok(allowed(ev, &resolve_links(ev, path, mode, pos)?))
+    let beneath = ev.beneath_project(path, mode == Follow::Full);
+    if beneath && !ev.trace().is_on() {
+        return Ok(true);
+    }
+    // A successful kernel shortcut supplies no persistent proof. Under a
+    // recorder, require an independently sufficient, repeatable lexical
+    // grant before publishing a result that used that shortcut.
+    let resolved = resolve_links(ev, path, mode, pos);
+    if beneath {
+        if !resolved.is_ok_and(|p| allowed(ev, &p)) {
+            ev.trace().mark_uncacheable();
+        }
+        return Ok(true);
+    }
+    Ok(allowed(ev, &resolved?))
 }
 
 /// Which components a resolution follows (source-accessor.hh:SymlinkResolution).
@@ -153,12 +163,27 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
         if mode == Follow::Ancestors && todo.is_empty() {
             break;
         }
-        let Some(target) = resolve(ev, &res).read_link() else {
-            continue;
-        };
         if !allowed(ev, &res) {
             continue;
         }
+        let target = match locate(ev, &res) {
+            Some(at) => at.read_link(),
+            None if ev.pure() => ev.trace().read_link(&res).map_err(|e| {
+                Error::boxed(
+                    ErrorKind::Io,
+                    format!(
+                        "resolving '{}': {}",
+                        String::from_utf8_lossy(&res),
+                        crate::error::io_text(&e)
+                    ),
+                    pos,
+                )
+            })?,
+            None => fs_path(&res).read_link(),
+        };
+        let Some(target) = target else {
+            continue;
+        };
         hops += 1;
         if hops > 1024 {
             bail!(
@@ -204,11 +229,6 @@ pub fn located(
     let res = resolve_links(ev, &path, mode, pos)?;
     if res == path {
         return Ok((path, at));
-    }
-    if at.is_none() {
-        // no tree observation covers a link of the project
-        let full = sys::fs::canonicalize(&os(&path));
-        ev.trace().canon(&path, full.ok().as_deref());
     }
     let at = locate(ev, &res);
     Ok((res, at))

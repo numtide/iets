@@ -126,6 +126,12 @@ pub enum Obs {
         path: Vec<u8>,
         target: Option<Vec<u8>>,
     },
+    /// A host component examined by a path resolver. A miss records
+    /// that it did not redirect the walk, including when it did not exist.
+    ReadLink {
+        path: Vec<u8>,
+        target: Option<Vec<u8>>,
+    },
     /// `value` is a keyed hash, not the value: the observation needs only to
     /// know whether the value changed, and an entry that held the answer of
     /// every `getEnv` in clear would be a file of the user's secrets.
@@ -162,6 +168,7 @@ impl Obs {
                 (3, Cow::Borrowed(root), u8::from(filtered.is_some()))
             }
             Obs::Canon { path, .. } => (4, Cow::Borrowed(path), 0),
+            Obs::ReadLink { path, .. } => (8, Cow::Borrowed(path), 0),
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
@@ -364,6 +371,17 @@ impl Trace {
         if let Some(i) = &self.0 {
             i.obs.lock().unwrap().push(o);
         }
+    }
+
+    pub(crate) fn read_link(&self, path: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let target = link_target(path)?;
+        if self.is_on() {
+            self.record(Obs::ReadLink {
+                path: path.to_vec(),
+                target: target.clone(),
+            });
+        }
+        Ok(target)
     }
 
     pub fn mark_uncacheable(&self) {
@@ -602,6 +620,16 @@ const RACY_NS: i64 = 2_000_000_000;
 
 /// Never an mtime a file has, so the next validation rehashes.
 const UNTRUSTED_MTIME: i64 = i64::MIN;
+
+fn link_target(path: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let at = sys::native_path(path);
+    match fs::symlink_metadata(&at) {
+        Ok(m) if m.is_symlink() => fs::read_link(&at).map(|p| Some(sys::path_to_internal(&p))),
+        Ok(_) => Ok(None),
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
     let at = sys::native_path(path);

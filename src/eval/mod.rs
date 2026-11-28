@@ -535,6 +535,7 @@ macro_rules! bail {
     };
 }
 use crate::sys;
+use crate::trace::Kind as FileKind;
 pub(crate) use bail;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::{
@@ -1177,35 +1178,52 @@ impl Evaluator {
         store_hooks::confine(self, &p, store_hooks::Follow::Full, pos)?;
         let mut at = store_hooks::open(self, &p, pos)?;
         read_through_copy(self, &p, pos)?;
-        // eval.cc:resolveExprPath follows a symlink on the last component,
-        // so a relative path in the file resolves against the directory of
-        // the target. The `lstat` is what it costs; a path inside a copied
-        // tree keeps `store_hooks`' own resolution.
-        if let Some(local) = at.local()
-            && fs::symlink_metadata(&local).is_ok_and(|m| m.is_symlink())
-            && store_hooks::locate(self, &p).is_none()
-        {
-            for _ in 0..1024 {
-                let Ok(target) = fs::read_link(sys::path_from_internal(&p)) else {
-                    break;
-                };
-                let t = sys::path_to_internal(&target);
-                let joined = if t.starts_with(b"/") {
-                    t
-                } else {
-                    let mut d = dir_of(&p).to_vec();
-                    d.push(b'/');
-                    d.extend_from_slice(&t);
-                    d
-                };
-                p = compile::canon_path(&joined);
+        // Only a final host link changes the base of relative imports
+        // (eval.cc:resolveExprPath). Ancestors keep their lexical spelling.
+        let mut hops = 0;
+        let is_dir = loop {
+            if store_hooks::locate(self, &p).is_some() {
+                break at.is_dir(self);
             }
-            let full = sys::fs::canonicalize(&local);
-            self.trace()
-                .canon(&sys::path_to_internal(&local), full.ok().as_deref());
+            match at.stat(self, false) {
+                Ok(FileKind::Symlink) => {}
+                kind => break kind.map(|k| k == FileKind::Directory),
+            }
+            let Some(target) = self.trace().read_link(&p).map_err(|e| {
+                Error::boxed(
+                    ErrorKind::Io,
+                    format!(
+                        "resolving import '{}': {}",
+                        String::from_utf8_lossy(&p),
+                        crate::error::io_text(&e)
+                    ),
+                    pos,
+                )
+            })?
+            else {
+                break at.is_dir(self);
+            };
+            if hops == 1024 {
+                bail!(
+                    ErrorKind::Eval,
+                    pos,
+                    "infinite symlink recursion in path '{}'",
+                    String::from_utf8_lossy(path)
+                );
+            }
+            hops += 1;
+            let joined = if target.starts_with(b"/") {
+                target
+            } else {
+                let mut dir = dir_of(&p).to_vec();
+                dir.push(b'/');
+                dir.extend_from_slice(&target);
+                dir
+            };
+            p = compile::canon_path(&joined);
             at = store_hooks::open(self, &p, pos)?;
-        }
-        match at.is_dir(self) {
+        };
+        match is_dir {
             Ok(true) => p.extend_from_slice(b"/default.nix"),
             Ok(false) => {}
             Err(e) => bail!(

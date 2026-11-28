@@ -488,7 +488,10 @@ impl Ser {
                     return;
                 }
                 // the compiler's `[ ]` and `{ }`
-                Some(Kind::List) if w.as_list().is_some_and(|l| l.len == 0) => {
+                Some(Kind::List)
+                    if w.as_list().is_some_and(|l| l.len == 0)
+                        && !self.rev.contains_key(&w.bits()) =>
+                {
                     self.tag(ConstTag::EmptyList);
                     return;
                 }
@@ -1585,6 +1588,27 @@ mod tests {
             Ok(s) => s,
             Err(e) => format!("error: {}", e.msg),
         }
+    }
+
+    #[test]
+    fn last_runs_empty_search_path_and_literal_empty_lists_are_distinct() {
+        let dir = tempdir().unwrap();
+        let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        cache.min_size = 0;
+        let cache = Arc::new(cache);
+        let src = b"[ (builtins.length __nixPath) (builtins.length builtins.nixPath) (builtins.length []) ]";
+        let eval = |search_path| {
+            let mut ev = EvalConfig::new()
+                .search_path(search_path)
+                .ir_cache(Some(cache.clone()))
+                .build();
+            let ir = ev.compile_file(PATH, src.to_vec(), b"/t").unwrap();
+            strict_print(&mut ev, ir)
+        };
+        assert_eq!(eval(vec![]), "[ 0 0 0 ]");
+        assert_eq!(eval(vec![(vec![], b"/a".to_vec())]), "[ 1 1 0 ]");
+        assert_eq!(eval(vec![]), "[ 0 0 0 ]");
+        assert_eq!(cache.hits(), 2);
     }
 
     #[test]

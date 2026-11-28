@@ -1243,6 +1243,18 @@ impl Arena {
         }
     }
 
+    /// The IR cache identifies a named global by its address, including
+    /// when its value is an empty list.
+    pub(crate) fn mk_global_list(&mut self, items: &[Word]) -> Word {
+        if !items.is_empty() {
+            return self.mk_list(items);
+        }
+        let literal = self.empty_list.take();
+        let global = self.mk_list(items);
+        self.empty_list = literal;
+        global
+    }
+
     pub(crate) fn mk_list(&mut self, items: &[Word]) -> Word {
         self.mk_list_as(items, Stat::List)
     }

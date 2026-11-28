@@ -23,6 +23,53 @@ fn run_complete(mut c: Command, words: &[&str]) -> String {
 }
 
 #[rstest]
+#[case("1")]
+#[case("8")]
+fn eval_jobs_reports_each_derivation_definition(bin: Iets, #[case] workers: &str) {
+    let d = tempdir().unwrap();
+    let file = d.path().join("jobs.nix");
+    fs::write(
+        &file,
+        concat!(
+            "let\n",
+            "  left = derivation { name = \"same\"; system = \"x\"; builder = \"/bin/sh\"; };\n",
+            "  right = derivation { name = \"same\"; system = \"x\"; builder = \"/bin/sh\"; };\n",
+            "in { a = left; b = right; c = left; }\n",
+        ),
+    )
+    .unwrap();
+    let o = bin
+        .cmd()
+        .args([
+            "eval-jobs",
+            "--quiet",
+            "--no-tracing-cache",
+            "--max-memory-size",
+            "0",
+            "--impure",
+            "--no-instantiate",
+            "--provenance",
+            "--workers",
+            workers,
+        ])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    let mut rows: Vec<serde_json::Value> = stdout(&o)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.sort_by(|a, b| a["attr"].as_str().cmp(&b["attr"].as_str()));
+    assert_eq!(rows.len(), 3);
+    for (row, (attr, line, col)) in rows.iter().zip([("a", 2, 23), ("b", 3, 24), ("c", 2, 23)]) {
+        assert_eq!(row["attr"], attr);
+        assert_eq!(row["drvPath"], rows[0]["drvPath"]);
+        assert_eq!(row["pos"], format!("{}:{line}:{col}", file.display()));
+    }
+}
+
+#[rstest]
 fn help_and_version_go_to_stdout(bin: Iets) {
     for args in [
         &["--help"][..],

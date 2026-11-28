@@ -273,6 +273,10 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
 /// worker.cc:initializeRootValue: the root, auto-called with the
 /// `--arg`s, then `--select`ed; `jobs::configure` done on the way.
 fn jobs_root(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs) -> Result<Word, Box<Error>> {
+    // CLI arguments can force a derivation before the walker is configured.
+    if j.opts.provenance {
+        ev.session().jobs.enable_provenance();
+    }
     let cwd = cwd();
     let args = auto_args(ev, &a.args, &cwd)?;
     let apply = match &j.apply {

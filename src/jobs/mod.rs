@@ -82,6 +82,8 @@ struct Config {
 #[derive(Default)]
 pub struct Run {
     config: OnceLock<Config>,
+    // Each derivationStrict call creates its own drvPath string, even for equal recipes.
+    sites: OnceLock<Mutex<HashMap<Word, Option<Pos>>>>,
     /// Path hash and depth of every set the walk fanned out, by address, so
     /// a helper handed a range of its cells can apply the chunk rule.
     sets: Mutex<Option<HashMap<u64, (u64, u32)>>>,
@@ -90,6 +92,16 @@ pub struct Run {
 }
 
 impl Run {
+    pub(crate) fn enable_provenance(&self) {
+        self.sites.get_or_init(Mutex::default);
+    }
+
+    pub(crate) fn record_drv_site(&self, path: Word, pos: Option<Pos>) {
+        if let Some(sites) = self.sites.get() {
+            sites.lock().unwrap().insert(path, pos);
+        }
+    }
+
     fn remember_set(&self, a: &'static AttrsObj, hash: u64, depth: u32) {
         self.sets
             .lock()
@@ -129,6 +141,9 @@ pub struct Stats {
 /// set applied to every function met on the way; `apply` the `--apply`
 /// function.
 pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<Word>) {
+    if opts.provenance {
+        ev.session().jobs.enable_provenance();
+    }
     let syms = Syms {
         meta: ev.sym(b"meta"),
         outputs: ev.sym(b"outputs"),
@@ -697,11 +712,12 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
             ));
         }
     };
-    let drv_path = match a.get(ev.s.drv_path) {
+    let (drv_path, path_word) = match a.get(ev.s.drv_path) {
         Some(d) => {
+            let word = d.cell.get();
             let p = coerce_store_path(
                 ev,
-                d.cell.get(),
+                word,
                 d.pos,
                 "while evaluating the 'drvPath' attribute of a derivation",
             )?;
@@ -712,7 +728,7 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
                     d.pos,
                 ));
             }
-            p
+            (p, word)
         }
         None => {
             return Err(Error::boxed(
@@ -782,8 +798,16 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
     }
     if cfg.opts.provenance
         && let Some(pos) = {
-            let drvs = ev.drv.drvs.lock();
-            drvs.get(&drv_path).and_then(|i| i.pos)
+            // Successful coercion above already forced this word. Aliases return the
+            // same string; an independently constructed equal drv returns its own.
+            let word = if path_word.is_thunk() {
+                path_word.thunk_value()
+            } else {
+                path_word
+            };
+            let sites = ev.session().jobs.sites.get().unwrap();
+            let site = sites.lock().unwrap().get(&word).copied();
+            site.unwrap_or_else(|| ev.drv.drvs.lock().get(&drv_path).and_then(|i| i.pos))
         }
         && let Some(s) = provenance::describe_pos(ev, pos)
     {

@@ -155,6 +155,21 @@ impl Taint {
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<Ctx>() == 40);
 
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<StringObj>() == 40);
+
+const _: () = assert!(size_of::<ListObj>() == 8);
+const _: () = assert!(size_of::<AttrsObj>() == 8);
+const _: () = assert!(size_of::<EnvObj>() == 8);
+const _: () = assert!(size_of::<Attr>() == 16);
+const _: () = assert!(size_of::<ThunkObj>() == 16);
+const _: () = assert!(size_of::<ThunkAppObj>() == 16);
+const _: () = assert!(size_of::<ThunkApp2Obj>() == 24);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<MapDesc>() == 24);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<LambdaObj>() == 16);
+
 impl Ctx {
     /// A store reference, as Nix's context holds: not an `Impure` marker.
     #[inline]
@@ -177,9 +192,6 @@ pub struct StringObj {
     pub bytes: &'static [u8],
     pub ctx: &'static [Ctx],
 }
-
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<StringObj>() == 40);
 
 impl StringObj {
     #[inline]
@@ -391,18 +403,6 @@ impl MapDesc {
         unsafe { &*((self as *const MapDesc).add(1) as *const Cell).add(i) }
     }
 }
-
-const _: () = assert!(size_of::<ListObj>() == 8);
-const _: () = assert!(size_of::<AttrsObj>() == 8);
-const _: () = assert!(size_of::<EnvObj>() == 8);
-const _: () = assert!(size_of::<Attr>() == 16);
-const _: () = assert!(size_of::<ThunkObj>() == 16);
-const _: () = assert!(size_of::<ThunkAppObj>() == 16);
-const _: () = assert!(size_of::<ThunkApp2Obj>() == 24);
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<MapDesc>() == 24);
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<LambdaObj>() == 16);
 
 impl ThunkObj {
     /// The IR, valid while `state` is not EMPTY.
@@ -1651,6 +1651,7 @@ impl AttrsObj {
 mod tests {
     use super::*;
 
+    use hegel::generators as gs;
     use std::collections::BTreeMap;
     #[cfg(feature = "stats2")]
     use std::{sync::Barrier, thread};
@@ -1845,61 +1846,34 @@ mod tests {
         }
     }
 
-    /// Every leaf count the budget allows, over syms that overlap between
-    /// leaves, against a fold of the same sets.
-    #[test]
-    fn union_iteration_merges_like_a_fold() {
-        let mut seed = 0x2545f4914f6cdd1du64;
-        let mut rng = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        for n in 1..=MAX_LEAVES as usize {
-            for round in 0..40 {
-                let mut arena = Arena::new();
-                let mut sets: Vec<Vec<(u32, i64)>> = Vec::new();
-                for leaf in 0..n {
-                    let len = if round == 0 { 0 } else { (rng() % 13) as usize };
-                    let mut syms: Vec<u32> = (0..len).map(|_| (rng() % 20) as u32).collect();
-                    syms.sort_unstable();
-                    syms.dedup();
-                    sets.push(
-                        syms.into_iter()
-                            .map(|s| (s, (leaf * 1000 + s as usize) as i64))
-                            .collect(),
-                    );
-                }
-                let a = build(&mut arena, &sets);
-                let want = reference(&sets);
-                assert_eq!(observed(a), want, "n={n} round={round} sets={sets:?}");
-                assert_eq!(a.len(), want.len(), "len n={n} round={round}");
-                let flat = arena.flat(a);
-                assert_eq!(observed(flat), want, "flat n={n} round={round}");
-                assert_eq!(flat.len_raw() as usize, want.len());
-            }
-        }
-    }
-
-    /// A lookup must see the same winner an iteration emits.
-    #[test]
-    fn union_lookup_agrees_with_iteration() {
-        let mut arena = Arena::new();
-        let sets: Vec<Vec<(u32, i64)>> = (0..MAX_LEAVES as usize)
-            .map(|leaf| {
-                (0u32..10)
-                    .filter(|s| !(s + leaf as u32).is_multiple_of(3))
-                    .map(|s| (s, (leaf * 100 + s as usize) as i64))
+    /// A union of up to `MAX_LEAVES` sets with any overlap, against a fold of
+    /// the same sets: iteration, the flat copy and lookup all give the fold.
+    #[hegel::test(test_cases = 500)]
+    fn a_union_reads_like_a_fold(tc: hegel::TestCase) {
+        let syms = || gs::btree_sets(gs::integers::<u32>().max_value(19)).max_size(12);
+        let leaves = tc.draw(gs::vecs(syms()).min_size(1).max_size(MAX_LEAVES as usize));
+        let sets: Vec<Vec<(u32, i64)>> = leaves
+            .iter()
+            .enumerate()
+            .map(|(leaf, syms)| {
+                syms.iter()
+                    .map(|s| (*s, (leaf * 1000 + *s as usize) as i64))
                     .collect()
             })
             .collect();
+        let mut arena = Arena::new();
         let a = build(&mut arena, &sets);
-        for (sym, want) in reference(&sets) {
-            let got = a.get(Sym(sym)).expect("present");
-            assert_eq!(got.cell.get().imm_int_value(), want);
+        let want = reference(&sets);
+        assert_eq!(observed(a), want);
+        assert_eq!(a.len(), want.len());
+        for sym in 0..21 {
+            let got = a.get(Sym(sym)).map(|e| e.cell.get().imm_int_value());
+            let want = want.iter().find(|(s, _)| *s == sym).map(|(_, v)| *v);
+            assert_eq!(got, want, "lookup of {sym}");
         }
-        assert!(a.get(Sym(999)).is_none());
+        let flat = arena.flat(a);
+        assert_eq!(observed(flat), want);
+        assert_eq!(flat.len_raw() as usize, want.len());
     }
 }
 

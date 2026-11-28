@@ -622,6 +622,8 @@ pub fn decode_roots(b: &[u8]) -> Option<Vec<(StorePath, Option<String>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
     use std::path::Path;
 
     use crate::store::nar;
@@ -772,5 +774,158 @@ mod tests {
 
         let roots = vec![(p.clone(), Some("out".to_string())), (p, None)];
         assert_eq!(decode_roots(&encode_roots(&roots)).unwrap(), roots);
+    }
+
+    fn bytes(tc: &TestCase) -> Vec<u8> {
+        tc.draw(gs::binary().max_size(4))
+    }
+
+    fn digest(tc: &TestCase) -> Digest32 {
+        tc.draw(gs::arrays(gs::integers::<u8>()))
+    }
+
+    fn opt<T>(tc: &TestCase, f: impl FnOnce(&TestCase) -> T) -> Option<T> {
+        tc.draw(gs::booleans()).then(|| f(tc))
+    }
+
+    fn int(tc: &TestCase) -> i64 {
+        tc.draw(gs::integers::<i64>())
+    }
+
+    fn obs(tc: &TestCase) -> Obs {
+        match tc.draw(gs::integers::<u8>().max_value(7)) {
+            0 => Obs::File {
+                path: bytes(tc),
+                size: int(tc) as u64,
+                mtime_ns: int(tc),
+                ctime_ns: int(tc),
+                dev: int(tc) as u64,
+                ino: int(tc) as u64,
+                hash: digest(tc),
+            },
+            1 => Obs::Dir {
+                path: bytes(tc),
+                hash: digest(tc),
+            },
+            2 => Obs::Stat {
+                path: bytes(tc),
+                follow: tc.draw(gs::booleans()),
+                kind: Kind::from_u8(tc.draw(gs::integers::<u8>().max_value(4))).unwrap(),
+            },
+            3 => Obs::Tree {
+                root: bytes(tc),
+                nar_hash: digest(tc),
+                stat_hash: digest(tc),
+                filtered: opt(tc, |tc| Filtered {
+                    seen_hash: opt(tc, digest),
+                    accepted: tc.draw(gs::vecs(gs::binary().max_size(4)).max_size(2)),
+                }),
+                newest: opt(tc, int),
+            },
+            4 => Obs::Canon {
+                path: bytes(tc),
+                target: opt(tc, bytes),
+            },
+            5 => Obs::Env {
+                name: bytes(tc),
+                value: opt(tc, digest),
+            },
+            6 => Obs::Cmd {
+                dir: bytes(tc),
+                query: tc.draw(gs::sampled_from(&Query::ALL[..])),
+                hash: digest(tc),
+            },
+            _ => Obs::Input {
+                entry: bytes(tc),
+                version: tc.draw(gs::integers()),
+            },
+        }
+    }
+
+    fn readset(tc: &TestCase) -> Vec<Obs> {
+        let n = tc.draw(gs::integers::<usize>().max_value(3));
+        (0..n).map(|_| obs(tc)).collect()
+    }
+
+    /// `good` with a few bytes changed, cut short, or with bytes added.
+    fn damage(tc: &TestCase, good: &[u8]) -> Vec<u8> {
+        let mut b = good.to_vec();
+        for _ in 0..tc.draw(gs::integers::<u8>().min_value(1).max_value(3)) {
+            let at = tc.draw(gs::integers::<usize>().max_value(b.len()));
+            let byte = tc.draw(gs::integers::<u8>());
+            match tc.draw(gs::integers::<u8>().max_value(2)) {
+                0 => b.truncate(at),
+                1 => b.insert(at, byte),
+                _ if at < b.len() => b[at] = byte,
+                _ => {}
+            }
+        }
+        b
+    }
+
+    /// `Trace::take` drops an observation whose encoding it has seen, so two
+    /// observations must not share one: each decodes to itself.
+    #[hegel::test(test_cases = 1000)]
+    fn any_observation_round_trips(tc: TestCase) {
+        let obs = readset(&tc);
+        assert_eq!(decode_readset(&encode_readset(&obs)).as_ref(), Some(&obs));
+        for o in &obs {
+            let b = encode_obs(o);
+            let mut d = Dec { b: &b, i: 0 };
+            assert!(get_obs(&mut d).as_ref() == Ok(o) && d.done());
+        }
+    }
+
+    /// A cache file is read back from a disk that may have damaged it, so no
+    /// bytes may panic a decoder.
+    #[hegel::test(test_cases = 1000)]
+    fn a_damaged_readset_does_not_panic(tc: TestCase) {
+        let good = encode_readset(&readset(&tc));
+        let _ = decode_readset(&damage(&tc, &good));
+    }
+
+    /// The same for the other files of a cache entry.
+    #[hegel::test(test_cases = 1000)]
+    fn a_damaged_cache_file_does_not_panic(tc: TestCase) {
+        let p = StorePath::from_base_name("a3ck4d9zzk4l1r76rz5zv2wgycmpsy1y-x.drv").unwrap();
+        let s = StorePath::from_base_name("a3ck4d9zzk4l1r76rz5zv2wgycmpsy1y-src").unwrap();
+        let hash = nar::nar_hash_of_string(b"x");
+        let drvs = [(
+            p.clone(),
+            DrvInfo {
+                outputs: ["out".to_string()].into(),
+                references: [s.clone()].into(),
+                aterm: Some(Arc::new(b"Derive(...)".to_vec())),
+                pos: None,
+                attr: Some("x".to_string()),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let accepted = Some(Arc::new([PathBuf::from("/tmp/x/a")].into()));
+        let sources = [
+            (
+                s.clone(),
+                SourceOrigin::tree(SrcPath::fs("/tmp/x", accepted), hash, 152),
+            ),
+            (
+                p.clone(),
+                SourceOrigin::text(b"hi".to_vec(), [s.clone()].into()),
+            ),
+            (
+                StorePath::from_base_name("a3ck4d9zzk4l1r76rz5zv2wgycmpsy1y-f").unwrap(),
+                SourceOrigin::flat(SrcPath::spool(s.base_name(), b"lib"), hash, hash, 9),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let roots = encode_roots(&[(p.clone(), Some("out".to_string())), (p, None)]);
+        let (drvs, sources) = (encode_drvs(&drvs), encode_sources(&sources));
+        assert!(decode_drvs(&drvs).is_some() && decode_sources(&sources).is_some());
+
+        let _ = decode_drvs(&damage(&tc, &drvs));
+        let _ = decode_sources(&damage(&tc, &sources));
+        let _ = decode_roots(&damage(&tc, &roots));
+        let _ = decode_fetched(&damage(&tc, &roots));
     }
 }

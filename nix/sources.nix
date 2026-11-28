@@ -27,6 +27,7 @@ in
       ../tests
       ../examples
       ../.config/nextest.toml
+      ../hegel.toml
     ]
   );
   ab = sourceOf [

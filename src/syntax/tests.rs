@@ -4,6 +4,7 @@ use super::symbol::Interner;
 use super::{ParseError, line_col, parse};
 use crate::lint::LintId;
 use crate::lint::allow::bit;
+use hegel::generators as gs;
 use rstest::rstest;
 use serde_json::Value;
 
@@ -413,61 +414,55 @@ fn nix_eval_raw(expr: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Random string literals, compared byte for byte with the reference Nix.
-/// Run with `cargo test -- --ignored`.
-#[test]
-#[ignore = "needs nix on PATH and takes a few seconds"]
-fn differential_strings_against_nix() {
-    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-    let mut rng = move |n: usize| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed % n as u64) as usize
-    };
-    let ind_alpha = [
+/// String literals of either kind, built from the pieces that interact.
+#[hegel::composite]
+fn string_literal(tc: &hegel::TestCase) -> String {
+    const INDENTED: &[&str] = &[
         " ", "\n", "a", "$", "'", "\\", "{", "}", "n", "\r", "${\"X\"}", "  ", "''$", "'''",
         "''\\n", "\n  ", "\n ",
     ];
-    let dq_alpha = [
+    const QUOTED: &[&str] = &[
         " ", "\n", "a", "$", "\\", "\"", "{", "}", "n", "\r", "${\"X\"}", "\\$", "\\n", "$$",
         "\\\\", "\r\n",
     ];
-    let mut samples = Vec::new();
-    for _ in 0..3000 {
-        let len = 1 + rng(10);
-        let mut s = String::from("''");
-        for _ in 0..len {
-            s.push_str(ind_alpha[rng(ind_alpha.len())]);
-        }
-        s.push_str("''");
-        samples.push(s);
-    }
-    for _ in 0..3000 {
-        let len = 1 + rng(10);
-        let mut s = String::from("\"");
-        for _ in 0..len {
-            s.push_str(dq_alpha[rng(dq_alpha.len())]);
-        }
-        s.push('"');
-        samples.push(s);
-    }
+    let (quote, alphabet) = if tc.draw(gs::booleans()) {
+        ("''", INDENTED)
+    } else {
+        ("\"", QUOTED)
+    };
+    let body = tc.draw(
+        gs::vecs(gs::sampled_from(alphabet))
+            .min_size(1)
+            .max_size(10),
+    );
+    format!("{quote}{}{quote}", body.concat())
+}
 
+/// Random string literals, compared byte for byte with the reference Nix.
+/// A case is a batch, because starting Nix costs more than a literal.
+/// Run with `cargo test -- --ignored`.
+#[hegel::test(test_cases = 100)]
+#[ignore = "needs nix on PATH and takes about 20 seconds"]
+fn differential_strings_against_nix(tc: hegel::TestCase) {
+    let samples = tc.draw(gs::vecs(string_literal()).min_size(1).max_size(60));
     let mut accepted: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut rejected: Vec<String> = Vec::new();
     for s in samples {
         let mut interner = Interner::new();
         match parse(s.as_bytes(), FileId(0), &mut interner) {
             Ok(ast) => {
-                let Some(v) = literal_value(&ast, ast.root) else {
-                    continue;
-                };
-                accepted.push((s, v));
+                if let Some(v) = literal_value(&ast, ast.root) {
+                    accepted.push((s, v));
+                }
             }
-            Err(_) => rejected.push(s),
+            Err(_) => assert!(
+                nix_eval_raw(&s).is_none(),
+                "{s:?}: iets rejects, nix accepts"
+            ),
         }
     }
-
+    if accepted.is_empty() {
+        return;
+    }
     let expr = format!(
         "builtins.concatStringsSep \"\\t\" [ {} ]",
         accepted
@@ -476,41 +471,25 @@ fn differential_strings_against_nix() {
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let mut mismatches = Vec::new();
-    match nix_eval_raw(&expr) {
-        Some(out) => {
-            let got: Vec<&[u8]> = out.split(|&b| b == b'\t').collect();
-            assert_eq!(got.len(), accepted.len(), "separator count differs");
-            for ((s, mine), theirs) in accepted.iter().zip(got) {
-                if mine.as_slice() != theirs {
-                    mismatches.push(format!(
-                        "{s:?}: iets {:?} nix {:?}",
-                        String::from_utf8_lossy(mine),
-                        String::from_utf8_lossy(theirs)
-                    ));
-                }
-            }
+    let Some(out) = nix_eval_raw(&expr) else {
+        for (s, _) in &accepted {
+            assert!(
+                nix_eval_raw(s).is_some(),
+                "{s:?}: iets accepts, nix rejects"
+            );
         }
-        None => {
-            for (s, _) in &accepted {
-                if nix_eval_raw(s).is_none() {
-                    mismatches.push(format!("{s:?}: iets accepts, nix rejects"));
-                }
-            }
-        }
+        panic!("nix rejects the batch and none of its literals");
+    };
+    let got: Vec<&[u8]> = out.split(|&b| b == b'\t').collect();
+    assert_eq!(got.len(), accepted.len(), "separator count differs");
+    for ((s, mine), theirs) in accepted.iter().zip(got) {
+        assert!(
+            mine.as_slice() == theirs,
+            "{s:?}: iets {:?} nix {:?}",
+            String::from_utf8_lossy(mine),
+            String::from_utf8_lossy(theirs)
+        );
     }
-    for s in rejected.iter().take(150) {
-        if nix_eval_raw(s).is_some() {
-            mismatches.push(format!("{s:?}: iets rejects, nix accepts"));
-        }
-    }
-    assert!(
-        mismatches.is_empty(),
-        "{} accepted, {} rejected, mismatches:\n{}",
-        accepted.len(),
-        rejected.len(),
-        mismatches.join("\n")
-    );
 }
 
 #[test]

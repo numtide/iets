@@ -183,6 +183,8 @@ pub struct Runtime {
     /// never one per push).
     spinners: Padded<AtomicUsize>,
     sleepers: Padded<AtomicUsize>,
+    /// Counts the times a worker has left `park`.
+    departures: Padded<AtomicUsize>,
     /// Wake a sleeper for every queued task. For drivers whose fibers
     /// busy-wait on a queued peer instead of parking (tests).
     eager_wakes: AtomicBool,
@@ -252,6 +254,7 @@ impl Runtime {
             wstat: (0..n).map(|_| WorkerStat::default()).collect(),
             spinners: Padded(AtomicUsize::new(0)),
             sleepers: Padded(AtomicUsize::new(0)),
+            departures: Padded(AtomicUsize::new(0)),
             eager_wakes: AtomicBool::new(false),
             epoch: Padded(AtomicU32::new(0)),
             shutdown: AtomicBool::new(false),
@@ -744,21 +747,30 @@ impl Runtime {
         w.parks += 1;
         self.stat_parks.fetch_add(1, Ordering::Relaxed);
         self.trim_pool(w);
-        let s = self.sleepers.0.fetch_add(1, Ordering::SeqCst) + 1;
+        self.sleepers.0.fetch_add(1, Ordering::SeqCst);
         let e = self.epoch.0.load(Ordering::Acquire);
-        if done() || self.has_work() {
-            self.sleepers.0.fetch_sub(1, Ordering::SeqCst);
-            return;
+        if !done() && !self.has_work() {
+            if self.all_idle() {
+                // Everyone is asleep and main is not finished: every fiber is
+                // parked on another parked fiber. Break the cycle.
+                self.resolve_deadlock(w);
+            } else {
+                sys::futex_wait(&self.epoch.0, e);
+            }
         }
-        if s == self.n && !self.main_done.load(Ordering::Acquire) {
-            // Everyone is asleep and main is not finished: every fiber is
-            // parked on another parked fiber. Break the cycle.
-            self.resolve_deadlock(w);
-            self.sleepers.0.fetch_sub(1, Ordering::SeqCst);
-            return;
-        }
-        sys::futex_wait(&self.epoch.0, e);
+        // in this order: see `all_idle`
         self.sleepers.0.fetch_sub(1, Ordering::SeqCst);
+        self.departures.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Every worker is in `park` and nothing is queued. A worker that left
+    /// to take work moved `departures` first.
+    fn all_idle(&self) -> bool {
+        let left = self.departures.0.load(Ordering::SeqCst);
+        self.sleepers.0.load(Ordering::SeqCst) == self.n
+            && !self.has_work()
+            && !self.main_done.load(Ordering::Acquire)
+            && self.departures.0.load(Ordering::SeqCst) == left
     }
 
     fn resolve_deadlock(&self, w: &mut Worker) {
@@ -779,7 +791,7 @@ impl Runtime {
         }
         drop(all);
         if woken == 0 {
-            if self.has_work() {
+            if !self.all_idle() {
                 return;
             }
             errln!("iets: internal error: all workers idle with the main fiber parked");

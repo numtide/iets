@@ -122,6 +122,7 @@ impl Escapes {
 #[cfg(test)]
 mod tests {
     use super::Escapes;
+    use hegel::generators as gs;
     use rstest::rstest;
 
     fn positions(set: Escapes, s: &[u8]) -> Vec<usize> {
@@ -147,18 +148,15 @@ mod tests {
             }
             s[at] = 0xff;
         }
-        let mut x = 1u64;
-        for _ in 0..10_000 {
-            let s: Vec<u8> = (0..x % 70)
-                .map(|_| {
-                    x = x
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    // mostly bytes around the escaped ones
-                    (x >> 59) as u8 * 5 + b'\t'
-                })
-                .collect();
-            assert_eq!(positions(set, &s), slow(set, &s));
-        }
+    }
+
+    /// Strings of any length up to several blocks, mostly of the bytes
+    /// next to the escaped ones.
+    #[hegel::test(test_cases = 2000)]
+    fn finds_what_a_scalar_scan_finds(tc: hegel::TestCase) {
+        const NEAR: &[u8] = b"\t\n\r\"\\\x00\x08\x0b\x1f\x20\x21\x5b\x5d\x7f\x80\xffa";
+        let set = tc.draw(gs::sampled_from(&[Escapes::Aterm, Escapes::Json][..]));
+        let s = tc.draw(gs::vecs(gs::sampled_from(NEAR)).max_size(70));
+        assert_eq!(positions(set, &s), slow(set, &s));
     }
 }

@@ -96,7 +96,7 @@ fn elem_at(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         pos,
         "while evaluating the second argument passed to builtins.elemAt",
     )?;
-    if n < 0 || n as usize >= l.len as usize {
+    let Some(c) = usize::try_from(n).ok().and_then(|i| l.cells().get(i)) else {
         bail!(
             ErrorKind::Eval,
             pos,
@@ -104,8 +104,8 @@ fn elem_at(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             n,
             l.len
         );
-    }
-    ev.force_cell(&l.cells()[n as usize])
+    };
+    ev.force_cell(c)
 }
 
 fn map(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -205,7 +205,7 @@ fn concat_lists(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
             "while evaluating a value of the list passed to builtins.concatLists",
         )?);
     }
-    Ok(ev.concat_lists(&lists))
+    ev.concat_lists(&lists, pos)
 }
 
 fn concat_map(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -229,7 +229,7 @@ fn concat_map(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             "while evaluating the return value of the function passed to builtins.concatMap",
         )?);
     }
-    Ok(ev.concat_lists(&lists))
+    ev.concat_lists(&lists, pos)
 }
 
 fn gen_list(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
@@ -241,15 +241,18 @@ fn gen_list(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     if n < 0 {
         bail!(ErrorKind::Eval, pos, "cannot create list of size {}", n);
     }
-    if Arena::list_bytes(n as usize).is_none() {
+    let Some(n) = usize::try_from(n)
+        .ok()
+        .filter(|&n| Arena::list_bytes(n).is_some())
+    else {
         bail!(ErrorKind::Eval, pos, "out of memory");
-    }
+    };
     let f = ev.force_function(
         args[0],
         Pos::NONE,
         "while evaluating the first argument passed to builtins.genList",
     )?;
-    let out = ev.arena.alloc_list_as(n as usize, Stat::ListGen);
+    let out = ev.arena.alloc_list_as(n, Stat::ListGen);
     for (i, c) in out.cells().iter().enumerate() {
         let t = ev.arena.mk_thunk_app(f, Word::imm_int(i as i64));
         c.set(t);

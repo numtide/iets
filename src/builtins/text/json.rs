@@ -2,6 +2,7 @@
 //! parser with nlohmann::json's acceptance rules (`json-to-value.cc`).
 
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use crate::json_string::unicode_escape;
 use crate::print;
 use crate::runtime::{Ctx, Word, ctx_to_arena};
 use crate::syntax::lexer;
@@ -208,24 +209,6 @@ impl Parser<'_> {
         Ok(self.ev.mk_list(&items))
     }
 
-    fn hex4(&mut self) -> EvalResult<u32> {
-        let mut v = 0u32;
-        for _ in 0..4 {
-            let Some(c) = self.peek() else {
-                return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits");
-            };
-            let d = match c {
-                b'0'..=b'9' => c - b'0',
-                b'a'..=b'f' => c - b'a' + 10,
-                b'A'..=b'F' => c - b'A' + 10,
-                _ => return self.err("syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits"),
-            };
-            v = v * 16 + d as u32;
-            self.i += 1;
-        }
-        Ok(v)
-    }
-
     fn string(&mut self) -> EvalResult<Vec<u8>> {
         self.i += 1;
         let mut out: Vec<u8> = Vec::new();
@@ -253,23 +236,14 @@ impl Parser<'_> {
                         b'r' => out.push(b'\r'),
                         b't' => out.push(b'\t'),
                         b'u' => {
-                            let mut cp = self.hex4()?;
-                            if (0xD800..0xDC00).contains(&cp) {
-                                if !self.s[self.i..].starts_with(b"\\u") {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate must be followed by a low surrogate");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    return self.err("syntax error while parsing value - invalid string: surrogate must be followed by a low surrogate");
-                                }
-                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                            } else if (0xDC00..0xE000).contains(&cp) {
-                                return self.err("syntax error while parsing value - invalid string: low surrogate must follow a high surrogate");
-                            }
-                            let ch = char::from_u32(cp).expect("valid scalar");
-                            let mut buf = [0u8; 4];
-                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                            let ch = match unicode_escape(self.s, &mut self.i,
+                                "surrogate must be followed by a low surrogate",
+                                "low surrogate must follow a high surrogate",
+                            ) {
+                                Ok(ch) => ch,
+                                Err(reason) => return self.err(&format!("syntax error while parsing value - invalid string: {reason}")),
+                            };
+                            out.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
                         }
                         _ => return self.err("syntax error while parsing value - invalid string: forbidden character after backslash"),
                     }

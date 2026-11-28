@@ -96,8 +96,8 @@ pub enum Obs {
         path: Vec<u8>,
         size: u64,
         mtime_ns: i64,
-        /// Changes on every write, and no user program can set it: without
-        /// it a `cp -p` in place over a file of the same length is a hit.
+        /// A copy can preserve the mtime. Writes in the same filesystem
+        /// timestamp tick can also share this kernel-supplied change time.
         ctime_ns: i64,
         dev: u64,
         ino: u64,
@@ -320,6 +320,8 @@ pub fn cmd_hash(status: i32, stdout: &[u8]) -> Digest32 {
 }
 
 struct Inner {
+    /// Sampled before the reads whose bytes this trace records.
+    stable_before: i64,
     obs: Mutex<Vec<Obs>>,
     uncacheable: AtomicBool,
     /// Where the run keeps its entry, and what follows from a revision.
@@ -337,6 +339,7 @@ impl Trace {
 
     pub fn enabled_in(store: Option<store::Store>) -> Trace {
         Trace(Some(Arc::new(Inner {
+            stable_before: stable_before(),
             obs: Mutex::new(Vec::new()),
             uncacheable: AtomicBool::new(false),
             store,
@@ -403,15 +406,20 @@ impl Trace {
             .collect()
     }
 
-    /// A regular file whose bytes are in memory.
+    /// A regular file whose metadata and bytes were read during this trace.
     pub fn file(&self, path: &[u8], meta: &fs::Metadata, bytes: &[u8]) {
-        if self.is_on() {
+        if let Some(inner) = &self.0 {
             // A stream such as procfs can change without updating its size or times.
             if bytes.len() as u64 != meta.len() {
                 self.mark_uncacheable();
                 return;
             }
-            self.record(file_obs(&sys::from_native(path), meta, sha256(bytes)));
+            self.record(file_obs_with_cutoff(
+                &sys::from_native(path),
+                meta,
+                sha256(bytes),
+                inner.stable_before,
+            ));
         }
     }
 
@@ -595,27 +603,44 @@ fn exec_bit(st: &fs::Metadata) -> u32 {
     if is_executable(st) { 0o100 } else { 0 }
 }
 
-/// An mtime this close to the present may share its timestamp with a write
-/// still to come: FAT counts in 2 s, and Windows may set it late. A future
-/// one comes from a clock ahead of ours, such as an NFS server's.
+/// Filesystems may timestamp distinct writes within two seconds identically.
 const RACY_NS: i64 = 2_000_000_000;
 
-/// Never an mtime a file has, so the next validation rehashes.
+/// A recorded mtime that requires validation by content.
 const UNTRUSTED_MTIME: i64 = i64::MIN;
 
+fn stable_before() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .map_or(i64::MIN, |now| now.saturating_sub(RACY_NS))
+}
+
+/// A file observation made from previously acquired bytes. Without a time
+/// bound on their acquisition, the first validation must check the content.
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
+    file_obs_with_cutoff(path, meta, hash, i64::MIN)
+}
+
+fn file_obs_with_cutoff(
+    path: &[u8],
+    meta: &fs::Metadata,
+    hash: Digest32,
+    stable_before: i64,
+) -> Obs {
     let at = sys::native_path(path);
     let (dev, ino) = file_id(&at, meta);
     let mtime = mtime_ns(meta);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as i64);
-    let racy = mtime > now.saturating_sub(RACY_NS);
+    let ctime = ctime_ns(&at, meta);
+    // A writer can restore mtime. A recent ctime can still match another
+    // write in the same tick, even if a slow read has since finished.
+    let trusted = ctime != 0 && mtime.max(ctime) < stable_before;
     Obs::File {
         path: path.to_vec(),
         size: meta.len(),
-        mtime_ns: if racy { UNTRUSTED_MTIME } else { mtime },
-        ctime_ns: ctime_ns(&at, meta),
+        mtime_ns: if trusted { mtime } else { UNTRUSTED_MTIME },
+        ctime_ns: ctime,
         dev,
         ino,
         hash,

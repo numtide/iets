@@ -51,9 +51,12 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn err<T>(&self, what: &str) -> Result<T, DrvError> {
-        let before = &self.s[..self.i.min(self.s.len())];
+        Self::parse_error(what, &self.s[..self.i.min(self.s.len())], 1)
+    }
+
+    fn parse_error<T>(what: &str, before: &[u8], column_offset: usize) -> Result<T, DrvError> {
         let line = 1 + before.iter().filter(|&&b| b == b'\n').count();
-        let col = 1 + before.iter().rev().take_while(|&&b| b != b'\n').count();
+        let col = column_offset + before.iter().rev().take_while(|&&b| b != b'\n').count();
         Err(DrvError(format!(
             "cannot process __json attribute: [json.exception.parse_error.101] parse error at line {line}, column {col}: {what}"
         )))
@@ -274,12 +277,23 @@ impl Parser<'_> {
                         0xf0..=0xf4 => 4,
                         _ => 1,
                     };
-                    let Some(ch) = self
-                        .s
-                        .get(start..start + len)
-                        .and_then(|b| str::from_utf8(b).ok())
-                    else {
-                        return self.err("syntax error while parsing value - invalid string: ill-formed UTF-8 byte");
+                    let bytes = &self.s[start..(start + len).min(self.s.len())];
+                    let ch = match str::from_utf8(bytes) {
+                        Ok(ch) => ch,
+                        Err(e) => {
+                            // Count the offending byte, or the read past EOF.
+                            let bad = match (len, e.error_len()) {
+                                (1, _) => start,
+                                (_, Some(n)) => start + n,
+                                (_, None) => self.s.len(),
+                            };
+                            let end = (bad + 1).min(self.s.len());
+                            return Self::parse_error(
+                                "syntax error while parsing value - invalid string: ill-formed UTF-8 byte",
+                                &self.s[..end],
+                                usize::from(bad == self.s.len()),
+                            );
+                        }
                     };
                     out.push_str(ch);
                     self.i = start + len;
@@ -442,19 +456,25 @@ mod tests {
 
     #[test]
     fn what_nix_refuses() {
-        let cases: [(&[u8], &str); 10] = [
+        let cases: &[(&[u8], &str)] = &[
             (b"[1]", "type must be object, but is array"),
             (b"null", "type must be object, but is null"),
             (br#"{"a":1e400}"#, "number overflow parsing '1e400'"),
             (b"{\"a\":\"x\0y\"}", "control character must be escaped"),
             (br#"{"a":"\ud800"}"#, "invalid string"),
-            (b"{\"a\":\"\xff\"}", "ill-formed UTF-8"),
+            (
+                b"{\"a\":\"\xff\"}",
+                "column 7: syntax error while parsing value - invalid string: ill-formed UTF-8",
+            ),
+            (b"{\"a\":\"\xe1\x80Z", "line 1, column 9:"),
+            (b"{\"a\":\"\xf0\x9f\x99", "line 1, column 10:"),
+            (b"{\"a\":\"\xe2\n", "line 2, column 0:"),
             (br#"{"a":1} x"#, "expected end of input"),
             (b"", "unexpected end of input"),
             (br#"{"a":01}"#, "expected ',' or '}'"),
             (br#"{"a":1.}"#, "expected digit after '.'"),
         ];
-        for (text, err) in cases {
+        for &(text, err) in cases {
             let got = norm(text).unwrap_err().0;
             assert!(
                 got.starts_with("cannot process __json attribute: "),

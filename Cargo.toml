@@ -87,6 +87,10 @@ inherits = "release"
 [dev-dependencies]
 rstest = { version = "0.28.0", default-features = false }
 
+# hegeltest's engine does not build for WASI
+[target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
+hegeltest = "0.54.2"
+
 [lints.rust]
 # cargo fuzz builds with `--cfg fuzzing` (src/sys/mod.rs, `elapsed`)
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

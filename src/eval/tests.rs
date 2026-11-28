@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
+use hegel::generators as gs;
 use rstest::rstest;
 
 use crate::compile::Compiler;
@@ -900,18 +901,13 @@ fn masks64_matches_the_scalar_masks() {
         b[i] = b'\r';
         assert_eq!(super::masks64(&b), super::masks64_scalar(&b));
     }
-    // every lane of a block once `\n`, `\r`, a high byte and a plain one
-    let mut x = 0x9e37_79b9_7f4a_7c15u64;
-    for _ in 0..20_000 {
-        let mut b = [0u8; 64];
-        for c in &mut b {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            *c = [b'\n', b'\r', 0xff, b'x'][(x % 4) as usize];
-        }
-        assert_eq!(super::masks64(&b), super::masks64_scalar(&b), "{b:?}");
-    }
+}
+
+/// Every lane of a block `\n`, `\r`, a high byte or a plain one.
+#[hegel::test(test_cases = 2000)]
+fn masks64_matches_the_scalar_masks_on_any_block(tc: hegel::TestCase) {
+    let b: [u8; 64] = tc.draw(gs::arrays(gs::sampled_from(&b"\n\r\xffx"[..])));
+    assert_eq!(super::masks64(&b), super::masks64_scalar(&b));
 }
 
 #[test]

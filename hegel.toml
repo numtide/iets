@@ -1,0 +1,3 @@
+# Every run draws the same cases and keeps no database of failures, so a
+# failure is from the code under test and not from the run.
+default = "ci"

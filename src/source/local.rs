@@ -18,13 +18,13 @@ use std::{fs, io, mem, thread};
 use super::scm::{self, Commit, Entry, Scm, Snapshot, git};
 use super::{AttrVal, Attrs, Tree, store_commit};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
-use crate::fetch;
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar;
 use crate::store::path::StorePath;
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::trace::{self, Kind, Trace, TreeFp};
 use crate::treestore;
+use crate::{fetch, session};
 
 /// A directory copied whole, as a `path:` input.
 pub fn path_source(ev: &mut Evaluator, dir: &Path, pos: Pos) -> EvalResult<Tree> {
@@ -180,11 +180,15 @@ pub fn commit_tree(
     let commit = scm
         .tree_at(ev.trace(), root, rev, export)
         .and_then(|c| match c {
-            Some(mut c) if lfs => fetch::lfs::smudge(root, rev, &mut c.entries).map(|_| Some(c)),
+            Some(mut c) if lfs => {
+                fetch::lfs::smudge(ev.trace(), root, rev, &mut c.entries).map(|_| Some(c))
+            }
             c => Ok(c),
         })
         .and_then(|c| match (c, submodules) {
-            (Some(c), Some(r#ref)) => mount_submodules(root, c, r#ref, local_ok, lfs).map(Some),
+            (Some(c), Some(r#ref)) => {
+                mount_submodules(ev.trace(), root, c, r#ref, local_ok, lfs).map(Some)
+            }
             (c, _) => Ok(c),
         })
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
@@ -218,6 +222,7 @@ pub fn commit_tree(
 /// parallel and with its own submodules. `branch = .` in `.gitmodules`
 /// stands for `r#ref`.
 fn mount_submodules(
+    trace: &Trace,
     root: &Path,
     mut commit: Commit,
     r#ref: &str,
@@ -234,7 +239,7 @@ fn mount_submodules(
             .iter()
             .map(|sub| {
                 let origin = &origin;
-                s.spawn(move || {
+                s.spawn(session::bind(move || {
                     let url = git::resolve_submodule_url(origin, &sub.url);
                     let branch = match sub.branch.as_str() {
                         "" => None,
@@ -255,11 +260,11 @@ fn mount_submodules(
                         format!("iets: cannot read revision {} of '{url}'", got.rev)
                     })?;
                     if lfs {
-                        fetch::lfs::smudge(&got.repo, &got.rev, &mut commit.entries)?;
+                        fetch::lfs::smudge(trace, &got.repo, &got.rev, &mut commit.entries)?;
                     }
                     let local_ok = local_ok && fetch::git::is_local(&url);
-                    mount_submodules(&got.repo, commit, &got.r#ref, local_ok, lfs)
-                })
+                    mount_submodules(trace, &got.repo, commit, &got.r#ref, local_ok, lfs)
+                }))
             })
             .collect();
         jobs.into_iter()

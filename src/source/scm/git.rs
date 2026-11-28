@@ -126,29 +126,22 @@ fn attr_files(trace: &Trace, root: &Path) -> Result<String, String> {
     Ok(format!("core.attributesFile={global}"))
 }
 
-/// The paths of `paths`, relative to the root, that `export-ignore` drops.
+/// Paths with a given attribute value, relative to the repository root.
 /// `source` is `--cached` for the index or `--source=REV` for a revision.
-fn check_export(
+pub(crate) fn attribute_paths(
     trace: &Trace,
     root: &Path,
     source: &str,
-    paths: impl Iterator<Item = Vec<u8>>,
+    attr: (&str, &[u8]),
+    paths: impl Iterator<Item = impl AsRef<[u8]>>,
 ) -> Result<Option<HashSet<Vec<u8>>>, String> {
     let config = attr_files(trace, root)?;
     let mut stdin = Vec::new();
     for p in paths {
-        stdin.extend_from_slice(&p);
+        stdin.extend_from_slice(p.as_ref());
         stdin.push(0);
     }
-    let args = [
-        "-c",
-        &config,
-        "check-attr",
-        source,
-        "-z",
-        "--stdin",
-        "export-ignore",
-    ];
+    let args = ["-c", &config, "check-attr", source, "-z", "--stdin", attr.0];
     let (status, out) = piped(root, &args, stdin)?;
     if status != 0 {
         return Ok(None);
@@ -159,7 +152,7 @@ fn check_export(
             .as_chunks::<3>()
             .0
             .iter()
-            .filter(|[_, _, info]| *info == b"set")
+            .filter(|[_, _, info]| *info == attr.1)
             .map(|[path, _, _]| path.to_vec())
             .collect(),
     ))
@@ -178,7 +171,7 @@ fn export_ignored(
         .iter()
         .filter_map(|p| p.strip_prefix(root).ok())
         .map(|p| p.as_os_str().as_bytes().to_vec());
-    let dropped = check_export(trace, root, "--cached", rel)?
+    let dropped = attribute_paths(trace, root, "--cached", ("export-ignore", b"set"), rel)?
         .ok_or_else(|| format!("iets: `git check-attr` failed in '{}'", root.display()))?;
     Ok(dropped
         .iter()
@@ -454,7 +447,14 @@ fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool) -> Result<Option
         }
         let asked = entries.iter().map(|(p, _)| p.clone());
         let asked = asked.chain(dirs.iter().filter(|d| !d.is_empty()).cloned());
-        let Some(dropped) = check_export(trace, root, &format!("--source={rev}"), asked)? else {
+        let Some(dropped) = attribute_paths(
+            trace,
+            root,
+            &format!("--source={rev}"),
+            ("export-ignore", b"set"),
+            asked,
+        )?
+        else {
             return Ok(None);
         };
         let kept = |p: &[u8]| !dropped.contains(p) && !parents(p).any(|d| dropped.contains(d));

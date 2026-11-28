@@ -35,6 +35,10 @@ prints.
   so a depth-1 clone works. `shallow` without a `rev` is an error, like
   `ref`. Other query parameters, including `submodules` on a `git+file:`
   root, are errors.
+- A Git flake can set `inputs.self.lfs = true` or `inputs.self.submodules = true`
+  to include LFS objects or submodules in its own revision. Dirty flake roots
+  use the files in the checkout. Fetching a committed submodule from a local
+  filesystem URL requires impure evaluation.
 - **Submodules of a local Git working tree**: `.?submodules=1#attr`
   includes the checked-out submodules, nested ones too.
 - iets does not take these, so classic mode falls back to Nix on them:
@@ -58,7 +62,7 @@ prints.
 - `flake.lock` must be complete: every node reachable from the root has a
   `narHash` or is a relative `path:` input, and every declared input has a
   lock entry. The declared inputs are the names in `inputs` and the
-  arguments of `outputs` other than `self`. If not, you get
+  arguments of `outputs`, in both cases excluding `self`. If not, you get
   `flake.lock missing or incomplete, run nix flake lock`.
   `--reference-lock-file PATH` reads the root flake's lock from `PATH`
   instead, under the same rules, and `PATH` must exist.

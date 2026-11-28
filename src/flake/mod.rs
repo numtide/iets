@@ -12,11 +12,12 @@ use std::path::{Component, Path, PathBuf};
 use std::{fs, io, mem};
 
 use crate::builtins::fetch::{self, fetch_tree};
+use crate::builtins::fetch_git;
 use crate::builtins::store_hooks::{self, locate};
 use crate::compile;
 use crate::compile::ir::ParamIr;
 use crate::error::{Error, Result};
-use crate::eval::{Error as EvalError, ErrorKind, EvalResult, Evaluator, Pos};
+use crate::eval::{Error as EvalError, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::ignored;
 use crate::runtime::{AttrsObj, Value, Word};
 use crate::source::lock::Declared;
@@ -202,6 +203,7 @@ fn scm_flake(
             scm,
             root,
             rev: rev.to_string(),
+            r#ref: source::str_attr(&p.input, "ref").map(str::to_owned),
             subdir: p.dir.clone(),
             shallow: source::bool_attr(&p.input, "shallow").unwrap_or(false),
         }
@@ -339,7 +341,7 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
         source::scm::record_detect(ev.trace(), &fr.dir, found);
     }
     let root = source::tree(ev, &fr.source, pos)?;
-    load_flake_tree(ev, fr, root, top)
+    load_flake_tree(ev, fr, root, top, true)
 }
 
 fn load_flake_tree(
@@ -347,6 +349,7 @@ fn load_flake_tree(
     fr: &FlakeRef,
     root: source::Tree,
     top: bool,
+    apply_self: bool,
 ) -> EvalResult<Word> {
     let pos = Pos::NONE;
     let store = root.path.to_full_string();
@@ -373,6 +376,22 @@ fn load_flake_tree(
         };
         (resolved.as_slice(), rest.strip_prefix(b"/").unwrap_or(rest))
     };
+    let v = ev.eval_file(&[flake_dir, b"/flake.nix"].concat(), pos)?;
+    let attrs = ev.force_attrs(v, pos, "while evaluating flake.nix")?;
+    let inputs = match attrs.get(ev.sym(b"inputs")) {
+        Some(a) => Some(ev.force_attrs(
+            a.cell.get(),
+            pos,
+            "while evaluating the 'inputs' attribute of flake.nix",
+        )?),
+        None => None,
+    };
+    if apply_self
+        && let Some(a) = inputs.and_then(|a| a.get(ev.sym(b"self")))
+        && let Some(tree) = refetch_self(ev, fr, &root, a.cell.get(), pos)?
+    {
+        return load_flake_tree(ev, fr, tree, top, false);
+    }
     let tree_lock = [flake_dir, b"/flake.lock"].concat();
     if fr.lock.is_none() && store_hooks::stat(ev, &tree_lock, false) == Kind::Symlink {
         return Err(EvalError::boxed(
@@ -420,8 +439,8 @@ fn load_flake_tree(
     if top {
         ev.known.mark_root(&root.path);
     }
-    let has_nix_config = check_declared_inputs(ev, flake_dir, &lock, pos)?;
-    if top && has_nix_config {
+    check_declared_inputs(ev, attrs, inputs, &lock, pos)?;
+    if top && attrs.get(ev.sym(b"nixConfig")).is_some() {
         ignored::nix_config_seen();
     }
 
@@ -545,7 +564,7 @@ pub fn get_flake(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
         subdir: String::new(),
         counter: None,
     };
-    load_flake_tree(ev, &fr, root, false)
+    load_flake_tree(ev, &fr, root, false, true)
 }
 
 /// An error outside the evaluator as an evaluation error at `pos`.
@@ -637,37 +656,102 @@ pub fn select(ev: &mut Evaluator, mut v: Word, path: &[String]) -> EvalResult<Op
     Ok(Some(v))
 }
 
-/// Every input `flake.nix` declares must have a lock entry; Nix would
-/// otherwise fetch and lock it. flake.cc:getFlake declares one for each
-/// name in `inputs`, and one for each formal of `outputs` but `self`.
-/// True when `flake.nix` has a `nixConfig`.
+/// flake.cc:getFlake applies self attributes to the *locked* reference: a
+/// clean checkout already has a revision; a dirty checkout keeps its files.
+fn refetch_self(
+    ev: &mut Evaluator,
+    fr: &FlakeRef,
+    root: &source::Tree,
+    decl: Word,
+    pos: Pos,
+) -> EvalResult<Option<source::Tree>> {
+    let decl = ev.force_attrs(decl, pos, "while evaluating 'inputs.self'")?;
+    let git = source::str_attr(&root.attrs, "type") == Some("git");
+    let mut attrs = root.attrs.clone();
+    for a in decl.iter() {
+        let name = match ev.interner.name(a.sym) {
+            b"lfs" => "lfs",
+            b"submodules" => "submodules",
+            name => bail!(
+                ErrorKind::Eval,
+                a.pos,
+                "flake 'self' attribute '{}' is not supported",
+                String::from_utf8_lossy(name)
+            ),
+        };
+        let value = a.cell.get();
+        if !git
+            && !value.is_thunk()
+            && (value.as_string().is_some() || value.as_int().is_some_and(|n| n >= 0))
+        {
+            continue;
+        }
+        let flag = match value {
+            Word::TRUE => true,
+            Word::FALSE => false,
+            _ => bail!(
+                ErrorKind::Eval,
+                a.pos,
+                "input attribute '{name}' is not a Boolean"
+            ),
+        };
+        attrs.insert(name.into(), AttrVal::Bool(flag));
+    }
+    if !git || attrs == root.attrs {
+        return Ok(None);
+    }
+    let (repo, shallow) = match &fr.source {
+        SourceRef::Tracked { root, .. } | SourceRef::Submodules { root, .. } => (root, false),
+        SourceRef::Commit {
+            root,
+            shallow,
+            r#ref,
+            ..
+        } => {
+            if let Some(name) = r#ref {
+                attrs.insert("ref".into(), AttrVal::Str(name.clone()));
+            }
+            (root, *shallow)
+        }
+        _ => return Ok(None),
+    };
+    if root.rev().is_none() {
+        let submodules = source::bool_attr(&attrs, "submodules").unwrap_or(false);
+        if submodules == source::bool_attr(&root.attrs, "submodules").unwrap_or(false) {
+            return Ok(None);
+        }
+        let scm = source::scm::named("git").expect("Git source");
+        return source::tracked_source(ev, scm, repo, &root.subdir, submodules, pos).map(Some);
+    }
+    let url = source::str_attr(&attrs, "url").expect("Git source URL");
+    let _entered = ev.session().enter();
+    let mut tree = fetch_git::from_commit(ev, &attrs, url, Some(repo), pos)?;
+    if shallow {
+        tree.counter = None;
+    }
+    tree.subdir.clone_from(&root.subdir);
+    Ok(Some(tree))
+}
+
+/// Every input flake.nix declares, except the root tree options in
+/// `inputs.self`, must have a lock entry.
 fn check_declared_inputs(
     ev: &mut Evaluator,
-    flake_dir: &[u8],
+    attrs: &'static AttrsObj,
+    inputs: Option<&'static AttrsObj>,
     lock: &lock::Lock,
     pos: Pos,
-) -> EvalResult<bool> {
-    let mut p = flake_dir.to_vec();
-    p.extend_from_slice(b"/flake.nix");
-    let v = ev.eval_file(&p, pos)?;
-    let attrs = ev.force_attrs(v, pos, "while evaluating flake.nix")?;
+) -> EvalResult<()> {
+    let self_sym = ev.sym(b"self");
     let mut declared = Vec::new();
-    let mut inputs = None;
-    if let Some(a) = attrs.get(ev.sym(b"inputs")) {
-        let a = ev.force_attrs(
-            a.cell.get(),
-            pos,
-            "while evaluating the 'inputs' attribute of flake.nix",
-        )?;
-        declared.extend(a.iter().map(|a| (a.sym, "")));
-        inputs = Some(a);
+    if let Some(a) = inputs {
+        declared.extend(a.iter().filter(|a| a.sym != self_sym).map(|a| (a.sym, "")));
     }
     if let Some(outputs) = attrs.get(ev.sym(b"outputs")) {
         let outputs = ev.force(outputs.cell.get())?;
         if let Value::Lambda(l) = outputs.view()
             && let ParamIr::Formals { formals, .. } = &l.lam.param
         {
-            let self_sym = ev.sym(b"self");
             let implicit = ", an argument of 'outputs' that Nix looks up in the flake registry,";
             declared.extend(
                 formals
@@ -693,7 +777,7 @@ fn check_declared_inputs(
     if let Some(inputs) = inputs {
         check_inputs(ev, lock, &lock.root, "", inputs, pos)?;
     }
-    Ok(attrs.get(ev.sym(b"nixConfig")).is_some())
+    Ok(())
 }
 
 /// flake.cc:computeLocks keeps a lock entry only while `flake.nix`, with
@@ -709,6 +793,16 @@ fn check_inputs(
 ) -> EvalResult<()> {
     for a in inputs.iter() {
         let name = String::from_utf8_lossy(ev.interner.name(a.sym)).into_owned();
+        if name == "self" {
+            if path.is_empty() {
+                continue;
+            }
+            return Err(EvalError::boxed(
+                ErrorKind::Eval,
+                "'self' input attribute not allowed",
+                a.pos,
+            ));
+        }
         let at = if path.is_empty() {
             name.clone()
         } else {
@@ -878,6 +972,7 @@ mod tests {
                 scm: git,
                 root: d.clone(),
                 rev: rev.clone(),
+                r#ref: Some("HEAD".into()),
                 subdir: String::new(),
                 shallow: false,
             }
@@ -892,6 +987,7 @@ mod tests {
                 scm: git,
                 root: d.clone(),
                 rev,
+                r#ref: None,
                 subdir: "sub".to_string(),
                 shallow: false,
             }

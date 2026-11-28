@@ -1148,6 +1148,13 @@ fn fetch_git_lfs() {
         format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n");
     fs::write(work.join("big.bin"), pointer).unwrap();
     fs::write(work.join("small"), "small\n").unwrap();
+    fs::write(
+        work.join("flake.nix"),
+        r#"{
+          inputs.self.lfs = true;
+          outputs = { self }: { result = [ self.outPath (builtins.readFile (self + "/big.bin")) ]; };
+        }"#,
+    ).unwrap();
     git(&work, &["add", "-A"]);
     e2e::git_commit(&work, "lfs", "1700000000 +0000");
     let rev_was = git(&work, &["rev-parse", "HEAD"]);
@@ -1158,6 +1165,15 @@ fn fetch_git_lfs() {
     );
     let args = ["eval", "--impure", "--raw", "--expr", &expr];
     c.same("fetchGit lfs", &native(&f, &s, &args));
+    let flake = format!("git+file://{}?rev={rev}#result", work.display());
+    let result = native(&f, &s, &["eval", "--json", &flake]);
+    c.check(
+        "pinned root flake LFS tree and contents",
+        result.real.status.success()
+            && result.ours.status.success()
+            && result.ours.stdout == result.real.stdout,
+        show(&result),
+    );
     // git-lfs takes an `lfs.url` as it is, also from a committed `.lfsconfig`
     git(&work, &["remote", "remove", "origin"]);
     let lfsconfig = format!("[lfs]\n\turl = {base}/custom\n");

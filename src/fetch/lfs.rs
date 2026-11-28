@@ -2,10 +2,9 @@
 //! holds a pointer, and the batch API names where its contents are. Each
 //! object is cached under `<cache root>/lfs/` by its sha256.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, str, thread};
@@ -18,11 +17,12 @@ use crate::fetch::http::{self, Limits};
 use crate::flake::flakeref;
 use crate::log;
 use crate::remote::worker::shell_split;
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::source::nix_conf;
-use crate::source::scm::Entry;
+use crate::source::scm::{self, Entry};
 use crate::store::hash::{HashAlgo, hash_bytes};
 use crate::sys;
+use crate::trace::Trace;
 
 #[derive(Clone, PartialEq, Debug)]
 struct Pointer {
@@ -62,38 +62,6 @@ fn parse_pointer(content: &[u8]) -> Option<Pointer> {
     }
 }
 
-/// The paths among `paths` that `rev`'s attributes give `filter=lfs`.
-fn lfs_paths(repo: &Path, rev: &str, paths: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
-    let source = format!("--source={rev}");
-    let mut child = Command::new(sys::program(OsStr::new("git")))
-        .arg("-C")
-        .arg(repo)
-        .args(["check-attr", "-z", "--stdin", &source, "filter"])
-        .env("GIT_ATTR_NOSYSTEM", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("iets: cannot run git: {e}"))?;
-    let mut stdin = child.stdin.take().expect("piped");
-    let input: Vec<u8> = paths.iter().flat_map(|p| [*p, b"\0"].concat()).collect();
-    let writer = thread::spawn(move || stdin.write_all(&input));
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let _ = writer.join();
-    if !out.status.success() {
-        return Err(format!(
-            "cannot get git-lfs attribute: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let fields: Vec<&[u8]> = out.stdout.split(|&b| b == 0).collect();
-    Ok(fields
-        .chunks(3)
-        .filter(|f| f.len() == 3 && f[2] == b"lfs")
-        .map(|f| f[0].to_vec())
-        .collect())
-}
-
 /// The batch API's base and the `Authorization` header it wants, as git-lfs
 /// finds them: `lfs.url` from git's config, then from the commit's
 /// `.lfsconfig`, then the origin URL with `.git/info/lfs`.
@@ -111,6 +79,7 @@ fn api(repo: &Path, rev: &str) -> Result<(String, Option<String>), String> {
     let url = explicit.clone().unwrap_or_else(|| git::origin_url(repo));
     let url = flakeref::fix_git_url(&scp_to_ssh(&url)).map_err(|e| e.to_string())?;
     if let Some(rest) = url.strip_prefix("ssh://") {
+        http::offline(&url).map_err(|e| e.to_string())?;
         return authenticate(rest);
     }
     if explicit.is_some() {
@@ -282,13 +251,24 @@ fn download(cache: &Path, d: &Download, limits: Limits) -> Result<(), String> {
 
 /// Replaces the pointer in each LFS file of `rev`'s `entries` by the
 /// object it names.
-pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Result<(), String> {
-    let files: Vec<&[u8]> = entries
+pub fn smudge(
+    trace: &Trace,
+    repo: &Path,
+    rev: &str,
+    entries: &mut [(Vec<u8>, Entry)],
+) -> Result<(), String> {
+    let files = entries
         .iter()
         .filter(|(_, e)| matches!(e, Entry::File { .. }))
-        .map(|(p, _)| &p[..])
-        .collect();
-    let marked: HashSet<Vec<u8>> = lfs_paths(repo, rev, &files)?.into_iter().collect();
+        .map(|(p, _)| p);
+    let marked = scm::git::attribute_paths(
+        trace,
+        repo,
+        &format!("--source={rev}"),
+        ("filter", b"lfs"),
+        files,
+    )?
+    .ok_or_else(|| format!("cannot get git-lfs attributes in '{}'", repo.display()))?;
     if marked.is_empty() {
         return Ok(());
     }
@@ -341,7 +321,9 @@ pub fn smudge(repo: &Path, rev: &str, entries: &mut [(Vec<u8>, Entry)]) -> Resul
                 .chunks(found.len().div_ceil(jobs))
                 .map(|chunk| {
                     let cache = &cache;
-                    s.spawn(move || chunk.iter().try_for_each(|o| download(cache, o, limits)))
+                    s.spawn(session::bind(move || {
+                        chunk.iter().try_for_each(|o| download(cache, o, limits))
+                    }))
                 })
                 .collect();
             chunks

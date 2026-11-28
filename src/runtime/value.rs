@@ -435,6 +435,24 @@ impl ListObj {
 }
 
 impl AttrsObj {
+    fn flat_bytes(entries: usize) -> usize {
+        size_of::<Self>() + entries * size_of::<Attr>()
+    }
+
+    fn union_bytes(leaves: usize) -> usize {
+        size_of::<Self>() + size_of::<UnionTail>() + leaves * size_of::<&Self>()
+    }
+
+    /// Initialized header and payload bytes, excluding a union's unused allocation tail.
+    #[cfg(feature = "stats2")]
+    pub(crate) fn initialized_bytes(&self) -> usize {
+        if self.is_union() {
+            Self::union_bytes(self.leaves as usize)
+        } else {
+            Self::flat_bytes(self.len_raw() as usize)
+        }
+    }
+
     /// The entries as one sorted slice. A union must have been flattened
     /// (`Arena::flat`) by the caller; iteration without a copy is `iter()`.
     #[inline]
@@ -1254,9 +1272,9 @@ impl Arena {
 
     /// `alloc_attrs` with a stats bucket naming the producer.
     pub(crate) fn alloc_attrs_as(&mut self, n: usize, bucket: Stat) -> &'static mut AttrsObj {
-        self.stats
-            .note(bucket, size_of::<AttrsObj>() + n * size_of::<Attr>());
-        let p = self.alloc_raw(size_of::<AttrsObj>() + n * size_of::<Attr>(), 8) as *mut AttrsObj;
+        let size = AttrsObj::flat_bytes(n);
+        self.stats.note(bucket, size);
+        let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header plus n attrs.
         unsafe {
             p.write(AttrsObj {
@@ -1290,7 +1308,7 @@ impl Arena {
         let n = leaf_count(a) + leaf_count(b);
         debug_assert!(n <= MAX_LEAVES as usize);
         hook();
-        let size = size_of::<AttrsObj>() + size_of::<UnionTail>() + n * size_of::<&AttrsObj>();
+        let size = AttrsObj::union_bytes(n);
         self.stats.note(Stat::AttrsUpd, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header, tail and n pointers. An
@@ -1676,10 +1694,23 @@ mod tests {
     #[test]
     fn reporting_unknown_union_does_not_mark_it_used() {
         let mut arena = Arena::new();
-        let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)]]);
+        let a = build(&mut arena, &[vec![(1, 1)], vec![(1, 2)]]);
         assert_eq!(a.len_raw(), u32::MAX);
         let mut first = String::new();
         arena.stats.census.report(&mut first);
+        let mut row = first
+            .lines()
+            .map(str::split_whitespace)
+            .find(|r| r.clone().next() == Some("upd"))
+            .unwrap();
+        // The overlapping leaves contribute one distinct key.
+        assert_eq!(row.nth(2), Some("1"));
+        let bytes = arena.stats.bytes[Stat::AttrsUpd as usize].to_string();
+        let usage = first
+            .lines()
+            .find(|line| line.trim_start().starts_with("upd:"))
+            .unwrap();
+        assert_eq!(usage.split_whitespace().nth(1), Some(bytes.as_str()));
         assert_eq!(a.flags.load(Ordering::Relaxed), 0);
         let mut second = String::new();
         arena.stats.census.report(&mut second);
@@ -1766,6 +1797,8 @@ mod tests {
         assert_eq!(capacity, 4);
         // a second arena stands for the other worker
         let mut worker = Arena::new();
+        #[cfg(feature = "stats2")]
+        let bytes_before = arena.stats.bytes[Stat::AttrsUpd as usize];
         let w = arena.alloc_union_with_hook(a, b, || {
             worker.flat(a);
         });
@@ -1773,6 +1806,14 @@ mod tests {
         // before any traversal, which would read uninitialized slots
         assert_eq!(out.leaves, 2);
         assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);
+        #[cfg(feature = "stats2")]
+        {
+            assert_eq!(
+                arena.stats.bytes[Stat::AttrsUpd as usize] - bytes_before,
+                AttrsObj::union_bytes(capacity) as u64
+            );
+            assert_eq!(out.initialized_bytes(), AttrsObj::union_bytes(2));
+        }
     }
 
     /// Every leaf count the budget allows, over syms that overlap between

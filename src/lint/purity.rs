@@ -206,6 +206,7 @@ pub fn count_read(ev: &mut Evaluator, cell: &Cell, pos: Pos) -> EvalResult<Word>
         // value in `code` after, so an unforced state proves the function
         let (f, of) = (t.code.get(), t.state.get());
         if w.thunk_unforced(of)
+            && of.failed_index().is_none()
             && fetch::is_count(f)
             && let Some(tree) = t.arg1.as_string()
         {

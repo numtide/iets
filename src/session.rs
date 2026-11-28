@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::env::Env;
+use crate::eval::error::FailedThunks;
 use crate::events::Events;
 use crate::ignored::Ignored;
 use crate::jobs::Run;
@@ -62,6 +63,7 @@ pub struct Session {
     /// Released when the last of the session, its evaluators and its
     /// worker threads lets go (docs/reference/library.md).
     pub heap: Arc<Heap>,
+    pub(crate) failed_thunks: FailedThunks,
 }
 
 thread_local! {

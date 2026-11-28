@@ -169,6 +169,11 @@ Every primop that looks at the world records one observation.
 | an environment variable, as a keyed hash | `getEnv`; `HOME` when a `~/` literal is compiled | read it again and hash it again |
 | which query of which SCM was asked in which directory, and its exit status and output | the queries of the SCM that read a flake working tree or a repository; for git, `ls-files`, `status`, `rev-parse HEAD`, `show-ref --head` for a `ref`, and `config core.attributesFile` for `export-ignore` | ask the same query again, rehash |
 
+An in-place copy can preserve an old mtime while two writes share one ctime.
+The cache trusts file metadata when both timestamps were already over two
+seconds old at the start of the trace or validation that hashed the bytes.
+An earlier observation needs a fresh content check before it can use this shortcut.
+
 On Linux, a later write through an already dirty shared memory mapping can
 change file contents without changing the size, mtime or ctime. A tracing
 cache hit can then replay an old file value or the old store path of a tree

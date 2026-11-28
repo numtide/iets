@@ -8,12 +8,12 @@ mod hermetic;
 use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
-use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
+use std::{fs, thread};
 
 use tempfile::TempDir;
 
@@ -48,8 +48,7 @@ impl Work {
         self.path(rel).to_str().unwrap().to_string()
     }
 
-    /// Each write gets an mtime of its own, long past, so the cache trusts
-    /// the stat of every file and counts only the rehashes a test causes.
+    /// Give each write a distinct, old mtime. Its ctime still records the update.
     fn write(&self, rel: &str, text: &str) -> String {
         static CLOCK: AtomicU64 = AtomicU64::new(1_000_000_000);
         let p = self.path(rel);
@@ -282,9 +281,13 @@ fn hits_and_misses(work: Work) {
     }
 
     touch(946_684_800, &[&lib]);
+    // Touch preserves an old mtime but updates ctime. Let the new stamp
+    // age before the validation that promotes it. Other files created by
+    // the fixture may still need their first content check as well.
+    thread::sleep(Duration::from_secs(3));
     let r = work.eval(&main);
     assert!(
-        r.status.contains("cache: hit") && r.status.contains(" 1 rehashed"),
+        r.status.contains("cache: hit") && !r.status.contains(" 0 rehashed"),
         "{}",
         r.status
     );

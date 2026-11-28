@@ -39,7 +39,16 @@ in
     ../bench/Cargo.lock
     ../bench/eval.rs
   ];
-  fuzz = sourceOf (bin ++ [ ../fuzz ]);
+  fuzz = sourceOf (
+    bin
+    ++ [
+      ../fuzz/Cargo.toml
+      ../fuzz/Cargo.lock
+      ../fuzz/divergences.toml
+      ../fuzz/src
+      ../fuzz/fuzz_targets
+    ]
+  );
   astGrep = sourceOf [
     ../sgconfig.yml
     ./ast-grep

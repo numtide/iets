@@ -21,7 +21,7 @@ use std::ffi::OsStr;
 use std::io::ErrorKind::{NotADirectory, NotFound};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io, mem};
@@ -319,8 +319,17 @@ pub fn cmd_hash(status: i32, stdout: &[u8]) -> Digest32 {
     h.finalize().into()
 }
 
+/// Zero denotes a tree that no recorder has observed. A new read set never
+/// takes an old one's identity, even when their recorder allocations are reused.
+fn next_readset() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .expect("read set ids exhausted")
+}
+
 struct Inner {
     obs: Mutex<Vec<Obs>>,
+    readset: AtomicU64,
     uncacheable: AtomicBool,
     /// Where the run keeps its entry, and what follows from a revision.
     store: Option<store::Store>,
@@ -338,6 +347,7 @@ impl Trace {
     pub fn enabled_in(store: Option<store::Store>) -> Trace {
         Trace(Some(Arc::new(Inner {
             obs: Mutex::new(Vec::new()),
+            readset: AtomicU64::new(next_readset()),
             uncacheable: AtomicBool::new(false),
             store,
         })))
@@ -358,6 +368,10 @@ impl Trace {
     #[inline]
     pub fn is_on(&self) -> bool {
         self.0.is_some()
+    }
+
+    pub(crate) fn readset_id(&self) -> Option<u64> {
+        Some(self.0.as_ref()?.readset.load(Ordering::Relaxed))
     }
 
     pub fn record(&self, o: Obs) {
@@ -384,7 +398,11 @@ impl Trace {
         let Some(i) = &self.0 else {
             return Vec::new();
         };
-        let all = mem::take(&mut *i.obs.lock().unwrap());
+        let all = {
+            let mut obs = i.obs.lock().unwrap();
+            i.readset.store(next_readset(), Ordering::Relaxed);
+            mem::take(&mut *obs)
+        };
         // one pass to find the subjects that repeat, and a second that encodes
         // only those: comparing each repeat with every earlier observation was
         // quadratic, and 80,000 of one subject took 12 s

@@ -770,6 +770,7 @@ pub fn collect(dir: &Path, live: &HashSet<Id>, dry_run: bool) -> io::Result<Coll
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::generators as gs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
@@ -847,6 +848,38 @@ mod tests {
         }
         fs::write(&path, &good[..good.len() - 1]).unwrap();
         assert!(Pack::open(&path).unwrap().is_none(), "a truncated pack");
+    }
+
+    /// The checksum covers damage, not a writer that wrote a wrong index:
+    /// whatever index it seals, a reader refuses it or can follow all of it.
+    #[hegel::test(test_cases = 1000)]
+    fn a_sealed_index_is_refused_or_holds_for_every_entry(tc: hegel::TestCase) {
+        let d = tempdir().unwrap();
+        let mut w = PackWriter::new(d.path()).unwrap();
+        for o in objects() {
+            w.add(id_of(&o), &o).unwrap();
+        }
+        let path = w.finish().unwrap().unwrap();
+        let mut bad = fs::read(&path).unwrap();
+        let tail = bad.len() - TAIL;
+        let index = tail - objects().len() * ENTRY;
+        for _ in 0..tc.draw(gs::integers::<u8>().min_value(1).max_value(3)) {
+            // an index entry, the fanout, the count or the index offset
+            let at = tc.draw(gs::integers().min_value(index).max_value(tail + 1039));
+            bad[at] = tc.draw(gs::integers());
+        }
+        let mut h = blake3::Hasher::new();
+        h.update(&bad[index..tail]);
+        h.update(&bad[tail..tail + 1040]);
+        bad[tail + 1040..tail + 1056].copy_from_slice(&h.finalize().as_bytes()[..16]);
+        fs::write(&path, &bad).unwrap();
+        let Ok(Some(p)) = Pack::open(&path) else {
+            return;
+        };
+        for (id, loc) in p.ids() {
+            assert_eq!(p.find(&id), Some(loc));
+            let _ = p.read(loc);
+        }
     }
 
     #[test]

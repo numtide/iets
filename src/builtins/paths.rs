@@ -15,6 +15,7 @@ use std::str::from_utf8;
 use std::sync::Arc;
 
 use super::Registry;
+use super::derivation::load_drv;
 use super::store_hooks::{self, At, Follow};
 use super::{fetch, fetch_closure, fetch_git};
 use crate::compile::canon_path;
@@ -23,7 +24,6 @@ use crate::flake::{self, flakeref};
 use crate::lint::{LintId, coerce, purity};
 use crate::runtime::{self, Ctx, Value, Word, ctx_to_arena};
 use crate::source;
-use crate::store::drv::load_derivation_from_store;
 use crate::store::hash::{Hash, HashAlgo, Hasher, hash_bytes};
 use crate::store::locate;
 use crate::store::nar::FileType;
@@ -229,10 +229,7 @@ fn built_output_present(ev: &Evaluator, drv: &[u8], output: &[u8]) -> Option<Sto
         return None;
     }
     let path = StorePath::parse(drv).ok()?;
-    let parsed = ev
-        .drv
-        .read_derivation(&path, load_derivation_from_store)
-        .ok()?;
+    let parsed = load_drv(ev, &path).ok()?;
     let output = from_utf8(output).ok()?;
     let out = parsed
         .outputs

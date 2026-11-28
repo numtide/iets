@@ -101,3 +101,55 @@ fn an_output_in_the_store_is_read_with_a_warning(bin: Iets) {
     fs::remove_file(&file).unwrap();
     fails_unbuilt(&iets(&bin, dir, &["eval", "read.nix"]));
 }
+
+#[rstest]
+fn cached_external_output_requires_its_derivation(bin: Iets) {
+    let d = tempdir().unwrap();
+    let dir = d.path();
+    let store = dir.join("store");
+    fs::create_dir(&store).unwrap();
+    let setup = iets(
+        &bin,
+        dir,
+        &[
+            "eval",
+            "--json",
+            "--dump-drvs",
+            store.to_str().unwrap(),
+            "-E",
+            r#"let p = derivation { name = "external"; system = "s"; builder = "b"; };
+               in [p.drvPath p.outPath]"#,
+        ],
+    );
+    assert!(setup.status.success(), "{}", text(&setup.stderr));
+    let [drv, out]: [String; 2] = serde_json::from_slice(&setup.stdout).unwrap();
+    let on_disk = |p: &str| store.join(p.rsplit('/').next().unwrap());
+    fs::write(on_disk(&out), "value").unwrap();
+    fs::write(
+        dir.join("read.nix"),
+        format!(r#"builtins.readFile (builtins.appendContext "{out}" {{ "{drv}" = {{ outputs = ["out"]; }}; }})"#),
+    )
+    .unwrap();
+
+    let read = || iets(&bin, dir, &["eval", "--raw", "--timings", "read.nix"]);
+    let cold = iets(&bin, dir, &["eval", "--raw", "--no-cache", "read.nix"]);
+    assert_eq!(cold.stdout, b"value", "{}", text(&cold.stderr));
+    let cold = read();
+    assert_eq!(cold.stdout, b"value", "{}", text(&cold.stderr));
+    let warm = read();
+    assert_eq!(warm.stdout, b"value");
+    assert!(
+        text(&warm.stderr).contains("cache: hit"),
+        "{}",
+        text(&warm.stderr)
+    );
+
+    let recipe = on_disk(&drv);
+    let original = fs::read(&recipe).unwrap();
+    fs::write(&recipe, "not an ATerm").unwrap();
+    fails_unbuilt(&read());
+    fs::write(&recipe, original).unwrap();
+    assert_eq!(read().stdout, b"value");
+    fs::remove_file(recipe).unwrap();
+    fails_unbuilt(&read());
+}

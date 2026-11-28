@@ -596,7 +596,18 @@ fn references(ev: &Evaluator, sp: Option<StorePath>) -> BTreeSet<StorePath> {
             .and_then(|o| o.text_refs().cloned())
             .unwrap_or_default(),
         Some(k) if k.flake.is_some() => BTreeSet::new(),
-        _ => locate::references_in(&sp, ev.session()),
+        _ => match locate::references_in(&sp, ev.session()) {
+            Some(refs) => {
+                ev.trace().store_references(sp, &refs);
+                refs
+            }
+            None => {
+                // The native fallback is empty. The store may answer on the
+                // next evaluation even when the file still has the same bytes.
+                ev.trace().mark_uncacheable();
+                BTreeSet::new()
+            }
+        },
     }
 }
 

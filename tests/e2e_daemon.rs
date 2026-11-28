@@ -57,6 +57,36 @@ fn build(s: &Store, args: &[&str]) -> Output {
     o
 }
 
+#[test]
+fn a_cached_file_context_checks_registered_store_references() {
+    let Some(s) = Store::start_with(&[]) else {
+        return;
+    };
+    let case = make_case(&s, "context", "read-file-refs");
+    let drv = stdout(&ok(s.nix("nix-instantiate").arg(case)));
+    let referenced = s.nix_store(&["-q", "--references", &drv]);
+    let expr = format!("builtins.attrNames (builtins.getContext (builtins.readFile {drv}))");
+    let socket = s.dir().join("eval-socket");
+    let eval = || {
+        ok(s.iets()
+            .env("NIX_DAEMON_SOCKET_PATH", &socket)
+            .env("NIX_REMOTE", "daemon")
+            .env("IETS_CACHE", "1")
+            .args(["eval", "--impure", "--json", "--timings", "-E", &expr]))
+    };
+
+    assert_eq!(stdout(&eval()), "[]");
+    symlink(s.socket(), &socket).unwrap();
+    let live = eval();
+    let names: Vec<String> = serde_json::from_slice(&live.stdout).unwrap();
+    assert!(names.iter().any(|s| referenced.lines().any(|r| r == s)));
+    let hit = eval();
+    assert_eq!(live.stdout, hit.stdout);
+    assert!(stderr(&hit).contains("cache: hit"), "{}", stderr(&hit));
+    fs::remove_file(&socket).unwrap();
+    assert_eq!(stdout(&eval()), "[]");
+}
+
 /// Instantiates `case`, records what Nix made, deletes it, builds through
 /// `url` and checks that iets registered the same bytes.
 fn run_custom(s: &Store, case: &str, url: &str, env: &[(&str, &str)]) {

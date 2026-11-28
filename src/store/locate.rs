@@ -54,15 +54,16 @@ impl References {
 /// answer. primops.cc:addPath needs them for a store path it is given with a
 /// context, and swallows `queryPathInfo`'s error the same way.
 pub fn references_of(path: &StorePath) -> BTreeSet<StorePath> {
-    references_in(path, &Session::current())
+    references_in(path, &Session::current()).unwrap_or_default()
 }
 
-pub(crate) fn references_in(path: &StorePath, session: &Arc<Session>) -> BTreeSet<StorePath> {
+pub(crate) fn references_in(
+    path: &StorePath,
+    session: &Arc<Session>,
+) -> Option<BTreeSet<StorePath>> {
     let full = path.to_string();
     let (s, _) = session.references.slot(&full);
-    s.get_or_query(|| query_references(&full, session))
-        .cloned()
-        .unwrap_or_default()
+    s.get_or_query(|| query_references(&full, session)).cloned()
 }
 
 const MAX_PREFETCH: usize = 8;

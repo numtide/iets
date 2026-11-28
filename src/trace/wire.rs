@@ -251,6 +251,11 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             e.bytes(entry);
             e.u8(*version);
         }
+        Obs::StoreReferences { path, hash } => {
+            e.u8(11);
+            e.bytes(path.base_name().as_bytes());
+            e.digest(hash);
+        }
     }
 }
 
@@ -323,6 +328,10 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
         7 => Obs::Input {
             entry: d.vec()?,
             version: d.u8()?,
+        },
+        11 => Obs::StoreReferences {
+            path: store_path(d.bytes()?)?,
+            hash: d.digest()?,
         },
         _ => return Err(()),
     })

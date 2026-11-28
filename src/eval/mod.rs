@@ -10,7 +10,8 @@ mod tests;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::ErrorKind::{NotADirectory, NotFound};
+use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "wasi"))]
 use std::ptr;
 use std::str::from_utf8;
@@ -48,7 +49,7 @@ use crate::store::path::{StorePath, split_store_path, store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
-use crate::trace::{self, Trace, store};
+use crate::trace::{Trace, store};
 use crate::{argv, config, parallel, syntax};
 
 #[cfg(not(target_os = "wasi"))]
@@ -1243,16 +1244,38 @@ impl Evaluator {
                     String::from_utf8_lossy(path)
                 );
             }
-            store_hooks::open(self, path, pos)?;
-            let mut candidate = path.clone();
+            let mut base = if path.starts_with(b"/") {
+                compile::canon_path(path)
+            } else {
+                let cwd = sys::fs::canonicalize(Path::new(".")).map_err(|e| {
+                    Error::boxed(
+                        ErrorKind::Io,
+                        format!("resolving current directory: {e}"),
+                        pos,
+                    )
+                })?;
+                self.trace().canon(b".", Some(&cwd));
+                compile::canon_path(&sys::path_to_internal(
+                    &cwd.join(sys::path_from_internal(path)),
+                ))
+            };
+            store_hooks::open(self, &base, pos)?;
+            // Nix normalizes the suffix before appending it to the search entry.
             if !suffix.is_empty() {
-                candidate.push(b'/');
-                candidate.extend_from_slice(suffix);
+                base.extend_from_slice(&compile::canon_path(suffix));
             }
-            let cp = compile::canon_path(&candidate);
-            let kind = store_hooks::stat(self, &cp, true);
-            if kind != trace::Kind::Missing {
-                return Ok(cp);
+            let target = store_hooks::lookup_target(self, &base, pos)?;
+            let at = store_hooks::open(self, &target, pos)?;
+            match at.stat(self, true) {
+                Ok(_) => return Ok(target),
+                Err(e) if matches!(e.kind(), NotFound | NotADirectory) => {}
+                Err(e) => bail!(
+                    ErrorKind::Io,
+                    pos,
+                    "getting status of '{}': {}",
+                    String::from_utf8_lossy(&target),
+                    crate::error::io_text(&e)
+                ),
             }
         }
         if let Some(rest) = name.strip_prefix(b"nix/".as_slice())

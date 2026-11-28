@@ -915,6 +915,14 @@ fn symlinks_below_a_copied_path() {
             r#"builtins.pathExists "${@SL@}/link-dir/inner""#,
         ),
         (
+            "findFile returns the resolved store path of a link in a copied tree",
+            r#"toString (builtins.findFile [{ path = "${@SL@}"; }] "link-dir/inner")"#,
+        ),
+        (
+            "findFile ignores a link whose target the copy excluded",
+            r#"toString (builtins.findFile [{ path = "${builtins.filterSource (p: _: baseNameOf p != "a.txt") @SL@}"; } { path = @SL@; }] "link-file")"#,
+        ),
+        (
             "path of a link in a copied tree",
             r#"builtins.path { path = "${@SL@}/link-dir"; }"#,
         ),

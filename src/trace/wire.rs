@@ -229,6 +229,11 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             e.bytes(path);
             e.opt_bytes(target.as_deref());
         }
+        Obs::ReadLink { path, target } => {
+            e.u8(8);
+            e.bytes(path);
+            e.opt_bytes(target.as_deref());
+        }
         Obs::Env { name, value } => {
             e.u8(5);
             e.bytes(name);
@@ -304,6 +309,10 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
             }
         }
         4 => Obs::Canon {
+            path: d.vec()?,
+            target: d.opt_vec()?,
+        },
+        8 => Obs::ReadLink {
             path: d.vec()?,
             target: d.opt_vec()?,
         },

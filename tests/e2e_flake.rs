@@ -1025,7 +1025,7 @@ fn iets_fetches_a_tarball_input() {
             r#"{{
   inputs.tb.url = "file://{work}/tb2.tar.gz";
   inputs.tb.flake = false;
-  outputs = {{ self, tb }}: {{ v = toString (builtins.attrNames (builtins.readDir tb)) + " " + builtins.readFile (tb + "/a"); }};
+  outputs = {{ self, tb }}: {{ v = toString (builtins.attrNames (builtins.readDir tb)) + " " + builtins.readFile (tb + "/a") + " " + toString (builtins.findFile [{{ path = tb.outPath; }}] "link"); }};
 }}
 "#
         ),

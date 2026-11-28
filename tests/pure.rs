@@ -240,6 +240,7 @@ fn linked() -> TempDir {
 #[case::read_dir("builtins.readDir ./up")]
 #[case::file_type("builtins.readFileType ./up/outside.txt")]
 #[case::hash_file(r#"builtins.hashFile "sha256" ./out.txt"#)]
+#[case::find_file(r#"toString (builtins.findFile [{ path = ./.; }] "up/outside.txt")"#)]
 #[case::import("import ./two.nix")]
 #[case::import_below_a_link("import ./up/two.nix")]
 #[case::copy_below_a_link(r#"builtins.readFile "${./up/outside.txt}""#)]
@@ -266,6 +267,10 @@ fn a_link_out_of_the_project_is_not_followed(bin: Iets, #[case] expr: &str) {
 #[case::below_a_link("builtins.readFile ./sub-link/in.txt", r#""in""#)]
 #[case::import("import ./sub-link/one.nix", "1")]
 #[case::exists_inside("builtins.pathExists ./sub-link/in.txt", "true")]
+#[case::find_file(
+    r#"builtins.findFile [{ path = ./.; }] "sub-link/in.txt" == ./sub/in.txt"#,
+    "true"
+)]
 #[case::exists_outside("builtins.pathExists ./up/outside.txt", "false")]
 #[case::a_link_is_copied_as_a_link(r#"builtins.readFileType "${./up}""#, r#""symlink""#)]
 fn a_link_inside_the_project_is_followed(bin: Iets, #[case] expr: &str, #[case] want: &str) {
@@ -434,4 +439,124 @@ fn a_local_fetch_under_a_flake_stays_in_its_tree(bin: Iets) {
         assert!(e.contains(FORBIDDEN), "{attr}: {e}");
         assert!(!e.contains("got"), "{attr}: {e}");
     }
+}
+
+#[cfg(unix)]
+#[rstest]
+#[case::read_file(
+    "builtins.fromJSON (builtins.readFile ./sub/value)",
+    "sub/value",
+    false
+)]
+#[case::ancestor("builtins.fromJSON (builtins.readFile ./sub/value)", "sub", false)]
+#[case::import("import ./sub/value", "sub/value", false)]
+#[case::import_ancestor("import ./sub/value", "sub", false)]
+#[case::read_dir("builtins.readDir ./sub ? value", "sub", false)]
+#[case::path_exists("builtins.pathExists ./sub/value", "sub", true)]
+#[case::find_file(
+    r#"(toString (builtins.findFile [{ prefix = "p"; path = ./sub; }] "p/value")) != """#,
+    "sub",
+    false
+)]
+fn a_cached_pure_read_still_checks_confinement(
+    bin: Iets,
+    #[case] expr: &str,
+    #[case] component: &str,
+    #[case] exists: bool,
+) {
+    let d = tempdir().unwrap();
+    let root = resolved(d.path());
+    let repo = root.join("project");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir(repo.join("sub")).unwrap();
+    fs::write(repo.join("sub/value"), "true").unwrap();
+    fs::write(repo.join("query.nix"), expr).unwrap();
+    let eval = |extra: &[&str]| {
+        bin.cmd()
+            .current_dir(&repo)
+            .args(["eval", "--workers", "1", "--json", "query.nix"])
+            .args(extra)
+            .env("IETS_CACHE_DIR", root.join("cache"))
+            .output()
+            .unwrap()
+    };
+    let inside = || {
+        let first = eval(&[]);
+        assert!(first.status.success(), "{}", stderr(&first));
+        assert_eq!(stdout(&first), "true");
+        let warm = eval(&["--timings"]);
+        assert_eq!(warm.stdout, first.stdout);
+        assert!(stderr(&warm).contains("cache: hit"), "{}", stderr(&warm));
+    };
+    let outside = || {
+        let managed = eval(&[]);
+        let native = eval(&["--no-cache"]);
+        assert_eq!(managed.status, native.status);
+        assert_eq!(managed.stdout, native.stdout);
+        let err = stderr(&managed);
+        let (_, diagnostic) = err
+            .split_once('\n')
+            .filter(|(line, _)| line.starts_with("re-evaluating: "))
+            .unwrap_or(("", &err));
+        assert_eq!(diagnostic, stderr(&native));
+        if exists {
+            assert!(managed.status.success(), "{}", stderr(&managed));
+            assert_eq!(stdout(&managed), "false");
+        } else {
+            assert_eq!(managed.status.code(), Some(1));
+            assert!(stderr(&managed).contains(FORBIDDEN), "{}", stderr(&managed));
+        }
+    };
+    inside();
+    let source = repo.join(component);
+    let external = root.join("outside");
+    fs::rename(&source, &external).unwrap();
+    symlink(&external, &source).unwrap();
+    outside();
+    let permitted = repo.join("inside");
+    fs::remove_file(&source).unwrap();
+    fs::rename(&external, &permitted).unwrap();
+    symlink(&permitted, &source).unwrap();
+    inside();
+    // Both routes have the same canonical target. The second names a link
+    // outside the allow list before getting back to that target.
+    symlink(&permitted, &external).unwrap();
+    fs::remove_file(&source).unwrap();
+    symlink(&external, &source).unwrap();
+    assert_eq!(resolved(&source), permitted);
+    outside();
+}
+
+#[cfg(unix)]
+#[rstest]
+fn a_pure_cache_hit_follows_only_the_components_its_reader_followed(bin: Iets) {
+    let d = checkout();
+    let repo = resolved(d.path()).join("repo");
+    fs::create_dir(repo.join("dir")).unwrap();
+    symlink("dir", repo.join("alias")).unwrap();
+    symlink("missing", repo.join("dir/end")).unwrap();
+    let eval = || {
+        bin.cmd()
+            .current_dir(&repo)
+            .args([
+                "eval",
+                "--workers",
+                "1",
+                "--json",
+                "--timings",
+                "-E",
+                r#"[ (builtins.pathExists ./alias/end) (builtins.readFileType ./alias/end)
+                     (builtins.readFile (builtins.toFile "virtual" "ok")) ]"#,
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = eval();
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert_eq!(stdout(&first), r#"[true,"symlink","ok"]"#);
+    fs::remove_file(repo.join("dir/end")).unwrap();
+    symlink("../../outside.txt", repo.join("dir/end")).unwrap();
+    let warm = eval();
+    assert_eq!(first.stdout, warm.stdout);
+    assert!(stderr(&warm).contains("cache: hit"), "{}", stderr(&warm));
 }

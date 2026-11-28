@@ -20,6 +20,7 @@
 //! The readers below record what they saw in the read set of the tracing
 //! cache.
 
+use std::array;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -102,14 +103,24 @@ pub fn admits(
     if !allowed(ev, path) {
         return Ok(false);
     }
-    if at.is_some()
-        || !ev.pure()
-        || !ev.in_project(path)
-        || ev.beneath_project(path, mode == Follow::Full)
-    {
+    if at.is_some() || !ev.pure() || !ev.in_project(path) {
         return Ok(true);
     }
-    Ok(allowed(ev, &resolve_links(ev, path, mode, pos)?))
+    let beneath = ev.beneath_project(path, mode == Follow::Full);
+    if beneath && !ev.trace().is_on() {
+        return Ok(true);
+    }
+    // A successful kernel shortcut supplies no persistent proof. Under a
+    // recorder, require an independently sufficient, repeatable lexical
+    // grant before publishing a result that used that shortcut.
+    let resolved = resolve_links(ev, path, mode, pos);
+    if beneath {
+        if !resolved.is_ok_and(|p| allowed(ev, &p)) {
+            ev.trace().mark_uncacheable();
+        }
+        return Ok(true);
+    }
+    Ok(allowed(ev, &resolved?))
 }
 
 /// Which components a resolution follows (source-accessor.hh:SymlinkResolution).
@@ -128,24 +139,48 @@ pub enum Follow {
 /// judge the result. A link the filter hides, or one a pure evaluation may not
 /// read, is left alone, as `maybeLstat` leaves it (filtering-source-accessor.cc).
 pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> EvalResult<Vec<u8>> {
-    let split = |p: &[u8], out: &mut Vec<Vec<u8>>| {
-        out.extend(
-            p.split(|&b| b == b'/')
-                .filter(|c| !c.is_empty())
-                .rev()
-                .map(<[u8]>::to_vec),
-        );
+    walk_links(ev, path, mode, pos, false)
+}
+
+/// A search returns the resolved spelling itself, even if the resulting
+/// file is never read. Record the link decisions which determined it.
+pub fn lookup_target(ev: &Evaluator, path: &[u8], pos: Pos) -> EvalResult<Vec<u8>> {
+    walk_links(ev, path, Follow::Full, pos, true)
+}
+
+fn walk_links(
+    ev: &Evaluator,
+    path: &[u8],
+    mode: Follow,
+    pos: Pos,
+    lookup: bool,
+) -> EvalResult<Vec<u8>> {
+    let split = |p: &[u8], todo: &mut Vec<Vec<u8>>, res: &mut Vec<u8>, root: &mut usize| {
+        let mut parts = p.split(|&b| b == b'/').filter(|c| !c.is_empty());
+        if p.starts_with(b"/") {
+            res.clear();
+            // A Windows drive or UNC share is a root, not a sequence of links.
+            let mut prefix = parts.clone();
+            let first: [&[u8]; 3] = array::from_fn(|_| prefix.next().unwrap_or_default());
+            for c in parts.by_ref().take(sys::anchor_len(&first)) {
+                res.push(b'/');
+                res.extend_from_slice(c);
+            }
+            *root = res.len();
+        }
+        todo.extend(parts.rev().map(<[u8]>::to_vec));
     };
     let mut todo = Vec::new();
-    split(path, &mut todo);
     let mut res: Vec<u8> = Vec::with_capacity(path.len());
+    let mut root = 0;
+    split(path, &mut todo, &mut res, &mut root);
     let mut hops = 0u32;
     while let Some(c) = todo.pop() {
         if c == b"." {
             continue;
         }
         if c == b".." {
-            res.truncate(res.iter().rposition(|&b| b == b'/').unwrap_or(0));
+            res.truncate(res.iter().rposition(|&b| b == b'/').unwrap_or(0).max(root));
             continue;
         }
         res.push(b'/');
@@ -153,12 +188,27 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
         if mode == Follow::Ancestors && todo.is_empty() {
             break;
         }
-        let Some(target) = resolve(ev, &res).read_link() else {
-            continue;
-        };
         if !allowed(ev, &res) {
             continue;
         }
+        let target = match locate(ev, &res) {
+            Some(at) if lookup => at.lookup_link(ev),
+            Some(at) => Ok(at.read_link()),
+            None if ev.pure() || lookup => ev.trace().read_link(&res),
+            None => Ok(fs_path(&res).read_link()),
+        }
+        .map_err(|e| {
+            Error::boxed(
+                ErrorKind::Io,
+                format!(
+                    "resolving '{}': {}",
+                    String::from_utf8_lossy(&res),
+                    crate::error::io_text(&e)
+                ),
+                pos,
+            )
+        })?;
+        let Some(target) = target else { continue };
         hops += 1;
         if hops > 1024 {
             bail!(
@@ -168,12 +218,10 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
                 String::from_utf8_lossy(path)
             );
         }
-        if target.starts_with(b"/") {
-            res.clear();
-        } else {
+        if !target.starts_with(b"/") {
             res.truncate(res.iter().rposition(|&b| b == b'/').unwrap_or(0));
         }
-        split(&target, &mut todo);
+        split(&target, &mut todo, &mut res, &mut root);
     }
     if res.is_empty() {
         res.push(b'/');
@@ -204,11 +252,6 @@ pub fn located(
     let res = resolve_links(ev, &path, mode, pos)?;
     if res == path {
         return Ok((path, at));
-    }
-    if at.is_none() {
-        // no tree observation covers a link of the project
-        let full = sys::fs::canonicalize(&os(&path));
-        ev.trace().canon(&path, full.ok().as_deref());
     }
     let at = locate(ev, &res);
     Ok((res, at))
@@ -492,14 +535,23 @@ impl SrcPath {
         self.at().is_none()
     }
 
-    /// A symlink's target, `None` for anything else and for an entry the
-    /// tree's filter hides. The tree's own observation covers every target in
-    /// it, so nothing is recorded. A spool member is never one: the entry
-    /// resolves its own links ([`crate::fetch::spool`]).
+    /// A local symlink's target, unless the tree's filter hides it. The
+    /// spool handles its own links on ordinary reads.
     pub fn read_link(&self) -> Option<Vec<u8>> {
         match self.at()? {
             At::Disk(p) => Some(sys::path_to_internal(&fs::read_link(os(&p)).ok()?)),
             At::Spool(..) | At::Mem(_) => None,
+        }
+    }
+
+    fn lookup_link(&self, ev: &Evaluator) -> io::Result<Option<Vec<u8>>> {
+        match self.at() {
+            Some(At::Disk(p)) => ev.trace().read_link(&p),
+            Some(At::Spool(tree, name)) => {
+                treestore::record(ev, &tree, name);
+                Ok(tree.read_link(&self.rel).map(<[u8]>::to_vec))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -778,6 +830,16 @@ mod tests {
     use crate::eval::EvalConfig;
     use crate::store::hash::Hash;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[cfg(windows)]
+    #[test]
+    fn search_path_links_keep_the_drive_or_share_root() {
+        let ev = Evaluator::new();
+        for root in [b"/Q:".as_slice(), b"/UNC/host/share"] {
+            let target = [root, b"/../.."].concat();
+            assert_eq!(lookup_target(&ev, &target, Pos::NONE).unwrap(), root);
+        }
+    }
 
     #[test]
     fn filtered_directory_observes_the_full_listing() {

@@ -83,6 +83,9 @@ pub enum Ir {
         cond: IrRef,
         body: IrRef,
         pos: Pos,
+        /// The condition as `Expr::show` prints it (`compile::show`),
+        /// behind a thin pointer: a node is 32 bytes.
+        text: &'static &'static [u8],
     },
     Not(IrRef, Pos),
     Neg(IrRef, Pos),

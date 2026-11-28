@@ -381,6 +381,21 @@ fn eval_json_forces_without_strict(bin: Iets) {
     assert_eq!(stdout(&o), r#"{"a":[2]}"#);
 }
 
+#[rstest]
+fn uncached_eval_can_read_its_own_drv(bin: Iets) {
+    let expr = r#"let
+      d = derivation { name = "read-own-drv"; system = "x86_64-linux"; builder = "/bin/sh";
+                       nonce = builtins.getEnv "HOME"; };
+      p = builtins.unsafeDiscardStringContext d.drvPath;
+    in [ (builtins.pathExists p) (builtins.substring 0 7 (builtins.readFile p)) ]"#;
+    let o = run(
+        &bin,
+        &["eval", "--no-cache", "--impure", "--json", "-E", expr],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), r#"[true,"Derive("]"#);
+}
+
 /// Nix's currentSystem is the host's unless `system` says otherwise.
 #[rstest]
 fn current_system_is_the_hosts(bin: Iets) {

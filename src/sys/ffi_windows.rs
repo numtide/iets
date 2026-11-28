@@ -16,6 +16,10 @@ pub fn path_from_internal(b: &[u8]) -> PathBuf {
     PathBuf::from(OsString::from_vec(winpath::to_native(b)))
 }
 
+pub(crate) fn native_path(b: &[u8]) -> Cow<'_, Path> {
+    Cow::Owned(path_from_internal(b))
+}
+
 /// The evaluator's name for a file system path.
 pub fn path_to_internal(p: &Path) -> Vec<u8> {
     winpath::to_internal(p.as_os_str().as_bytes())

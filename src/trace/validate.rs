@@ -6,7 +6,7 @@ use crate::sys::fs::file_id;
 use crate::sys::{self, OsStrExt};
 use std::collections::HashSet;
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{fs, thread};
@@ -43,13 +43,9 @@ enum Outcome {
     Changed(String),
 }
 
-fn os(p: &[u8]) -> PathBuf {
-    sys::path_from_internal(p)
-}
-
 /// A recorded path as the user's system writes it.
 fn lossy(p: &[u8]) -> String {
-    os(p).to_string_lossy().into_owned()
+    sys::native_path(p).to_string_lossy().into_owned()
 }
 
 /// Why a path no longer reads: it is not there, or it is there and the read
@@ -102,7 +98,12 @@ fn membership(paths: Option<&[Vec<u8>]>) -> impl FnMut(&Path) -> bool + '_ {
             }
         }
         fallback
-            .get_or_insert_with(|| paths.iter().map(|v| os(v)).collect::<HashSet<_>>())
+            .get_or_insert_with(|| {
+                paths
+                    .iter()
+                    .map(|v| sys::native_path(v))
+                    .collect::<HashSet<_>>()
+            })
             .contains(p)
     }
 }
@@ -118,7 +119,8 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             ino,
             hash,
         } => {
-            let m = match fs::metadata(os(path)) {
+            let at = sys::native_path(path);
+            let m = match fs::metadata(&at) {
                 Ok(m) => m,
                 Err(e) => return unreadable(path, &e),
             };
@@ -133,14 +135,11 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             if m.len() != *size {
                 return Outcome::Changed(format!("{} changed", lossy(path)));
             }
-            if mtime_ns(&m) == *mt
-                && ctime_ns(&os(path), &m) == *ct
-                && file_id(&os(path), &m) == (*dev, *ino)
-            {
+            if mtime_ns(&m) == *mt && ctime_ns(&at, &m) == *ct && file_id(&at, &m) == (*dev, *ino) {
                 return Outcome::Same;
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let now = match file_sha256(&os(path)) {
+            let now = match file_sha256(&at) {
                 Ok(h) => h,
                 Err(e) => return unreadable(path, &e),
             };
@@ -149,7 +148,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             }
             Outcome::Refresh(file_obs(path, &m, *hash))
         }
-        Obs::Dir { path, hash } => match dir_hash(&os(path), dirs) {
+        Obs::Dir { path, hash } => match dir_hash(&sys::native_path(path), dirs) {
             Ok(now) => {
                 if now == *hash {
                     Outcome::Same
@@ -160,7 +159,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             Err(e) => unreadable(path, &e),
         },
         Obs::Stat { path, follow, kind } => {
-            let now = stat_kind(&os(path), *follow);
+            let now = stat_kind(&sys::native_path(path), *follow);
             match (now, *kind) {
                 (now, was) if now == was => Outcome::Same,
                 (Kind::Missing, _) => Outcome::Changed(format!("{} is gone", lossy(path))),
@@ -181,7 +180,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             newest,
         } => {
             let mut accept = membership(filtered.as_ref().map(|f| f.accepted.as_slice()));
-            let root_p = os(root);
+            let root_p = sys::native_path(root);
             let expected_seen = filtered.as_ref().and_then(|f| f.seen_hash);
             match tree_fingerprint_with(&root_p, &mut accept) {
                 Ok((sh, seen)) if sh == *stat_hash && expected_seen.is_none_or(|s| s == seen) => {
@@ -213,7 +212,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             })
         }
         Obs::Canon { path, target } => {
-            let now = sys::fs::canonicalize(&os(path))
+            let now = sys::fs::canonicalize(&sys::native_path(path))
                 .ok()
                 .map(|p| p.as_os_str().as_bytes().to_vec());
             if now == *target {
@@ -232,7 +231,7 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             };
             Outcome::Changed(format!("environment variable ${} {what}", lossy(name)))
         }
-        Obs::Cmd { dir, query, hash } => match run_query(&os(dir), *query) {
+        Obs::Cmd { dir, query, hash } => match run_query(&sys::native_path(dir), *query) {
             Ok((status, out)) if cmd_hash(status, &out) == *hash => Outcome::Same,
             _ => Outcome::Changed(format!(
                 "the output of `{}` in {} changed",
@@ -326,7 +325,7 @@ mod tests {
     #[test]
     fn membership_preserves_native_path_equality_after_misses() {
         let paths = ["z", "a/./b", "a/b", "z/", "q", "a/c"].map(|p| p.as_bytes().to_vec());
-        let reference: HashSet<_> = paths.iter().map(|p| os(p)).collect();
+        let reference: HashSet<_> = paths.iter().map(|p| sys::path_from_internal(p)).collect();
         let mut accept = membership(Some(&paths));
         for q in [
             "z", "a//b", "missing", "z/", "a/c", "a/b/", "q", "a", "./z", "z",

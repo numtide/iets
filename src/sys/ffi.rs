@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 
 /// The file system path an evaluator path names. The same bytes on Unix.
 pub fn path_from_internal(b: &[u8]) -> PathBuf {
-    PathBuf::from(<std::ffi::OsStr as OsStrExt>::from_bytes(b))
+    native_path(b).into_owned()
+}
+
+pub(crate) fn native_path(b: &[u8]) -> Cow<'_, Path> {
+    Cow::Borrowed(Path::new(<std::ffi::OsStr as OsStrExt>::from_bytes(b)))
 }
 
 /// The evaluator's name for a file system path.

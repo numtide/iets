@@ -48,6 +48,7 @@ pub mod tty;
 pub mod vm;
 pub mod winpath;
 
+pub(crate) use ffi::native_path;
 pub use ffi::{
     OsStrExt, OsStringExt, anchor_len, from_native, path_from_internal, path_to_internal,
 };

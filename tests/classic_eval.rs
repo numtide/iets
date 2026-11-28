@@ -1010,8 +1010,8 @@ fn auto_call_a_function_file() {
             );
         }
     }
-    // a required formal nobody supplied: the same first error line
-    let na = s.write("needs-arg.nix", "{ a, b ? 2 }: { sum = a + b; }");
+    // A missing automatic argument is reported at the required formal.
+    let na = s.write("needs-arg.nix", "{ b ? 2,\n  a,\n}: { sum = a + b; }");
     let na = na.to_str().unwrap();
     let outs = [
         f.real("nix")
@@ -1032,6 +1032,11 @@ fn auto_call_a_function_file() {
             && lines.iter().all(|l| *l == lines[0]),
         format!("{lines:?}"),
     );
+    let location = format!("{na}:2:3");
+    for out in outs {
+        let message = stderr(&out);
+        assert!(message.contains(&location), "{message}");
+    }
 }
 
 const PKGS: &str = r#"let

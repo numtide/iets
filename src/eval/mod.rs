@@ -3430,7 +3430,7 @@ impl Evaluator {
                 None if f.default.is_some() => {}
                 None => bail!(
                     ErrorKind::Eval,
-                    l.lam.pos,
+                    f.pos,
                     "cannot evaluate a function that has an argument without a value ('{}')",
                     self.interner.name_str(f.sym)
                 ),

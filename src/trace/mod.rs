@@ -115,6 +115,7 @@ pub enum Obs {
     Tree {
         root: Vec<u8>,
         nar_hash: Digest32,
+        /// UNTRUSTED_TREE requires checking the NAR content.
         stat_hash: Digest32,
         filtered: Option<Filtered>,
         /// The newest `lstat` mtime in the tree, in seconds, when the
@@ -507,7 +508,7 @@ impl Trace {
 
     /// A tree copied to the store. `accepted` is the filter result, `None`
     /// for an unfiltered copy. `fp` is what the NAR dump's filter recorded;
-    /// without it the tree is walked once more with `lstat` only.
+    /// without it validation must check the NAR content.
     pub fn tree(
         &self,
         root: &Path,
@@ -547,12 +548,17 @@ impl Trace {
         if !self.is_on() {
             return;
         }
-        let Some((stat_hash, seen_hash)) = fp
-            .and_then(TreeFp::finish)
-            .or_else(|| tree_fingerprint(root, accepted).ok())
-        else {
-            self.mark_uncacheable();
-            return;
+        let (stat_hash, seen_hash) = match fp.and_then(TreeFp::finish_for_cache) {
+            Some(pair) => pair,
+            // A later walk cannot certify the bytes, filter calls, or mtime
+            // of the original dump. A bare NAR digest can still be checked.
+            None if newest.is_none() && !(keep_seen && accepted.is_some()) => {
+                (UNTRUSTED_TREE, [0; 32])
+            }
+            None => {
+                self.mark_uncacheable();
+                return;
+            }
         };
         let filtered = accepted.map(|a| {
             // Only the members under this root can decide this tree. The set
@@ -735,6 +741,8 @@ fn accepts(accepted: Option<&HashSet<PathBuf>>, p: &Path) -> bool {
     accepted.is_none_or(|a| a.contains(p))
 }
 
+const UNTRUSTED_TREE: Digest32 = [0; 32];
+
 /// The same two hashes `tree_fingerprint` computes, taken from the NAR dump
 /// that is already walking the tree. The dump offers every directory entry to
 /// its filter in NAR order, which is the order `tree_fingerprint` walks in, so
@@ -742,6 +750,9 @@ fn accepts(accepted: Option<&HashSet<PathBuf>>, p: &Path) -> bool {
 /// second `read_dir` walk is needed.
 pub struct TreeFp {
     root_len: usize,
+    /// A regular file newer than this cutoff may still change within its timestamp tick.
+    stable_before: i64,
+    trusted: bool,
     stat_h: Sha256,
     seen_h: Sha256,
     /// The newest mtime among the root and the accepted entries, in seconds.
@@ -763,6 +774,8 @@ impl TreeFp {
     pub fn new(root: &Path) -> Option<TreeFp> {
         let mut fp = TreeFp {
             root_len: nar::walk_root(root).len(),
+            stable_before: stable_before(),
+            trusted: true,
             stat_h: Sha256::new(),
             seen_h: Sha256::new(),
             newest: i64::MIN,
@@ -788,9 +801,17 @@ impl TreeFp {
             return;
         };
         self.newest = self.newest.max(mtime_secs(&st));
-        if hash_tree_stat(&mut self.stat_h, p, rel, &st).is_err() {
-            self.ok = false;
+        match hash_tree_stat(&mut self.stat_h, p, rel, &st) {
+            Ok((Kind::Regular, last_change)) => self.trusted &= last_change < self.stable_before,
+            Ok(_) => {}
+            Err(_) => self.ok = false,
         }
+    }
+
+    fn finish_for_cache(self) -> Option<(Digest32, Digest32)> {
+        let trusted = self.trusted;
+        self.finish()
+            .map(|(stat, seen)| (if trusted { stat } else { UNTRUSTED_TREE }, seen))
     }
 
     /// `(stat_hash, seen_hash)`, or `None` when any `lstat` on the way failed
@@ -807,20 +828,34 @@ fn hash_tree_entry(h: &mut Sha256, rel: &[u8], kind: Kind) {
     h.update([kind.to_u8()]);
 }
 
-fn hash_tree_stat(h: &mut Sha256, path: &Path, rel: &[u8], st: &fs::Metadata) -> io::Result<Kind> {
+fn hash_tree_stat(
+    h: &mut Sha256,
+    path: &Path,
+    rel: &[u8],
+    st: &fs::Metadata,
+) -> io::Result<(Kind, i64)> {
     let kind = Kind::of_file_type(&st.file_type());
     hash_tree_entry(h, rel, kind);
     h.update(st.len().to_le_bytes());
-    h.update(mtime_ns(st).to_le_bytes());
+    let mtime = mtime_ns(st);
+    let ctime = ctime_ns(path, st);
+    h.update(mtime.to_le_bytes());
     let (dev, ino) = file_id(path, st);
-    h.update(ctime_ns(path, st).to_le_bytes());
+    h.update(ctime.to_le_bytes());
     h.update(dev.to_le_bytes());
     h.update(ino.to_le_bytes());
     h.update(exec_bit(st).to_le_bytes());
     if kind == Kind::Symlink {
         h.update(fs::read_link(path)?.as_os_str().as_bytes());
     }
-    Ok(kind)
+    Ok((
+        kind,
+        if ctime == 0 {
+            i64::MAX
+        } else {
+            mtime.max(ctime)
+        },
+    ))
 }
 
 /// Walks `root` like the NAR dump does (sorted entries, no descent into
@@ -856,7 +891,7 @@ fn walk_fp(
         return Err(io::Error::other("tree too deep"));
     }
     let st = fs::symlink_metadata(path)?;
-    let kind = hash_tree_stat(stat_h, path, rel, &st)?;
+    let (kind, _) = hash_tree_stat(stat_h, path, rel, &st)?;
     if kind == Kind::Directory {
         let mut entries = read_dir_kinds(path)?;
         entries.sort();
@@ -884,12 +919,13 @@ pub fn tree_rehash(
     root: &Path,
     accepted: Option<&HashSet<PathBuf>>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
-    tree_rehash_with(root, &mut |p| accepts(accepted, p))
+    tree_rehash_with(root, &mut |p| accepts(accepted, p), TreeFp::finish)
 }
 
 fn tree_rehash_with(
     root: &Path,
     accept: &mut dyn FnMut(&Path) -> bool,
+    finish: fn(TreeFp) -> Option<(Digest32, Digest32)>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
     let mut fp = TreeFp::new(root).ok_or_else(|| io::Error::other("tree is gone"))?;
     let mut filter = |p: &Path, t: FileType| -> bool {
@@ -899,9 +935,8 @@ fn tree_rehash_with(
     };
     let (h, _) = nar::nar_hash_filtered(root, HashAlgo::Sha256, &mut filter)?;
     let newest = fp.newest;
-    let (stat_hash, seen_hash) = fp
-        .finish()
-        .ok_or_else(|| io::Error::other("tree changed while it was read"))?;
+    let (stat_hash, seen_hash) =
+        finish(fp).ok_or_else(|| io::Error::other("tree changed while it was read"))?;
     Ok((hash_to_digest(&h), seen_hash, stat_hash, newest))
 }
 

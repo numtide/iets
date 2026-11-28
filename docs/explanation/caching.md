@@ -180,6 +180,11 @@ cache hit can then replay an old file value or the old store path of a tree
 containing that file. If an input can change this way, run
 `iets eval --no-tracing-cache` to read it again. The IR cache can stay on.
 
+A tree whose NAR dump accepted a regular file with a recent mtime or ctime
+needs a content check on its next validation. Once the timestamps predate
+the verifying dump by more than two seconds, the cache can use its stat
+fingerprint again. A filtered-out file contributes no bytes to the NAR.
+
 What follows from an observation is not itself an observation. The date
 and the count of a revision follow from the revision, because a commit is
 named by the hash of its content, its date and its parents.

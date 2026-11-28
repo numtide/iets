@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{fs, thread};
 
 use super::{
-    Digest32, DirBuf, Kind, Obs, UNTRUSTED_MTIME, cmd_hash, ctime_ns, dir_hash, env_hash,
-    file_obs_with_cutoff, hash_to_digest, mtime_ns, run_query, stable_before, stat_metadata,
-    tree_fingerprint_with, tree_rehash_with,
+    Digest32, DirBuf, Kind, Obs, TreeFp, UNTRUSTED_MTIME, UNTRUSTED_TREE, cmd_hash, ctime_ns,
+    dir_hash, env_hash, file_obs_with_cutoff, hash_to_digest, mtime_ns, run_query, stable_before,
+    stat_metadata, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -195,18 +195,23 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf, stable_before: i64)
             let mut accept = membership(filtered.as_ref().map(|f| f.accepted.as_slice()));
             let root_p = sys::native_path(root);
             let expected_seen = filtered.as_ref().and_then(|f| f.seen_hash);
-            match tree_fingerprint_with(&root_p, &mut accept) {
-                Ok((sh, seen)) if sh == *stat_hash && expected_seen.is_none_or(|s| s == seen) => {
-                    return Outcome::Same;
+            if *stat_hash != UNTRUSTED_TREE {
+                match tree_fingerprint_with(&root_p, &mut accept) {
+                    Ok((sh, seen))
+                        if sh == *stat_hash && expected_seen.is_none_or(|s| s == seen) =>
+                    {
+                        return Outcome::Same;
+                    }
+                    Ok(_) => {}
+                    Err(e) => return unreadable(root, &e),
                 }
-                Ok(_) => {}
-                Err(e) => return unreadable(root, &e),
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let (nar, seen, sh, now) = match tree_rehash_with(&root_p, &mut accept) {
-                Ok(t) => t,
-                Err(e) => return unreadable(root, &e),
-            };
+            let (nar, seen, sh, now) =
+                match tree_rehash_with(&root_p, &mut accept, TreeFp::finish_for_cache) {
+                    Ok(t) => t,
+                    Err(e) => return unreadable(root, &e),
+                };
             if nar != *nar_hash || expected_seen.is_some_and(|s| s != seen) {
                 return Outcome::Changed(format!("source tree {} changed", lossy(root)));
             }
@@ -215,6 +220,9 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf, stable_before: i64)
                     "source tree {} has another modification time",
                     lossy(root)
                 ));
+            }
+            if sh == *stat_hash {
+                return Outcome::Same;
             }
             Outcome::Refresh(Obs::Tree {
                 root: root.clone(),
@@ -337,8 +345,10 @@ fn validate_with_cutoff(
 mod tests {
     use super::super::{Filtered, Trace, file_obs, sha256, tree_fingerprint, tree_rehash};
     use super::*;
+    use crate::store::nar;
     #[cfg(target_os = "linux")]
     use crate::sys::fs::symlink;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     use std::time::{self, Duration, SystemTime};
@@ -391,6 +401,64 @@ mod tests {
             newest: None,
         }];
         assert_eq!(validate(&mut obs, 1).unwrap_err().0, expected);
+    }
+
+    #[test]
+    fn a_racy_regular_file_in_a_nar_needs_a_content_check() {
+        let dir = tempdir().unwrap();
+        let leaf = dir.path().join("leaf");
+        let fixed = time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let write = |bytes| {
+            fs::write(&leaf, bytes).unwrap();
+            open_rw(&leaf).set_modified(fixed).unwrap();
+        };
+        let record = |root: &Path, accepted: Option<&HashSet<PathBuf>>, external| {
+            let trace = Trace::enabled();
+            let mut fp = trace.fp(root).unwrap();
+            let mut select = |p: &Path, kind| {
+                let keep = accepted.is_none_or(|set| set.contains(p));
+                fp.entry(p, kind, keep);
+                keep
+            };
+            let (nar, _) = nar::nar_hash_filtered(root, HashAlgo::Sha256, &mut select).unwrap();
+            let hash = hash_to_digest(&nar);
+            if external {
+                trace.tree_external(root, hash, accepted.unwrap(), Some(fp));
+            } else {
+                trace.tree(root, hash, accepted, Some(fp));
+            }
+            trace.take()
+        };
+
+        for root in [dir.path(), leaf.as_path()] {
+            write(b"AAAA");
+            let mut obs = record(root, None, false);
+            assert_eq!(validate(&mut obs, 1).unwrap().rehashed, 1);
+            write(b"BBBB");
+            assert!(validate(&mut obs, 1).is_err());
+        }
+
+        // Metadata collected after the dump cannot attest to the old bytes.
+        let old_nar = nar::nar_hash(dir.path()).unwrap();
+        write(b"next");
+        let trace = Trace::enabled();
+        trace.tree(dir.path(), hash_to_digest(&old_nar), None, None);
+        assert!(validate(&mut trace.take(), 1).is_err());
+
+        // Excluded bytes never enter the NAR. New offers still matter to a Nix
+        // filter, while an external set names exactly which paths to include.
+        let excluded = HashSet::new();
+        let mut filtered = record(dir.path(), Some(&excluded), false);
+        let mut external = record(dir.path(), Some(&excluded), true);
+        let Obs::Tree { stat_hash, .. } = &filtered[0] else {
+            panic!("expected a tree observation")
+        };
+        assert_ne!(stat_hash, &super::UNTRUSTED_TREE);
+        write(b"CCCC");
+        assert!(validate(&mut filtered, 1).is_ok());
+        fs::write(dir.path().join("new"), b"").unwrap();
+        assert!(validate(&mut filtered, 1).is_err());
+        assert!(validate(&mut external, 1).is_ok());
     }
 
     #[cfg(target_os = "linux")]

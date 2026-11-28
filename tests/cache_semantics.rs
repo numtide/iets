@@ -689,7 +689,13 @@ fn a_flake_keeps_one_entry(work: Work) {
         "{}",
         f.status
     );
-    assert!(ev().status.contains("cache: hit"));
+    // A content check after the recent writing tick promotes an unchanged
+    // tree. The following process only checks the fingerprint.
+    thread::sleep(Duration::from_secs(3));
+    let checked = ev();
+    assert!(checked.status.contains("cache: hit"), "{}", checked.status);
+    let stable = ev();
+    assert!(stable.status.contains(" 0 rehashed"), "{}", stable.status);
     work.write("fl/flake.nix", "{ outputs = _: { x = 40 + 2; }; }\n");
     let f = ev();
     assert_eq!(f.why, format!("re-evaluating: source tree {fl} changed"));

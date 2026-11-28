@@ -1020,7 +1020,9 @@ impl Evaluator {
         // Recursive bindings and formal defaults compile in symbol order.
         // If folding them interns a name the parser never saw, which name
         // comes first can depend on the imports preceding this file.
+        // The same compilation order can also change the order of warnings.
         let bypass_ir = used_home
+            || diags.len() > 1
             || self.interner.file_symbols.as_ref().is_some_and(|symbols| {
                 symbols
                     .iter()

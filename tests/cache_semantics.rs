@@ -588,6 +588,34 @@ fn flags_that_turn_the_cache_off(work: Work) {
     }
 }
 
+#[rstest]
+fn a_warm_import_preserves_the_callers_warning_order(work: Work) {
+    let file = work.write("warnings.nix", "rec { zebra = /first; yak = /second; }");
+    let warnings = |prior: &str, extra: &[&str]| {
+        let mut cmd = work.iets();
+        cmd.env("IETS_IR_MIN", "0")
+            .args([
+                "eval",
+                "--impure",
+                "--no-tracing-cache",
+                "--lint-scope",
+                "all",
+                "--lint",
+                "absolute-path-literal=warn",
+                "-E",
+                &format!("builtins.seq ({prior}) (builtins.seq (import {file}) 1)"),
+            ])
+            .args(extra);
+        stderr(&hermetic::ok(&mut cmd))
+    };
+    let seed = warnings("{}", &[]);
+    let caller = "{ yak = 1; zebra = 2; }";
+    let warm = warnings(caller, &[]);
+    let fresh = warnings(caller, &["--no-ir-cache"]);
+    assert_ne!(seed, fresh);
+    assert_eq!(warm, fresh);
+}
+
 /// A lint warning is an effect: the entry records it and a hit prints it again.
 #[rstest]
 fn a_lint_warning_is_replayed_on_a_hit(work: Work) {

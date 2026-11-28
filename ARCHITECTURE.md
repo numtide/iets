@@ -311,18 +311,17 @@ own strings: on nixos-server, ~630 MB at one worker and ~645 MB at four.
 
 ## Changing the evaluator
 
-Fibers migrate between threads and share every value, so these hold inside and around `src/eval` and `src/parallel`:
+Fibers share every value, so these hold inside and around `src/eval` and `src/parallel`:
 
 - `Evaluator` derives `Clone`. A new field must be `Clone`, and per-fiber
   state must be cheap to clone; a shared table goes behind a handle in
   `parallel::shared`.
 - An inline cache on an IR node or a heap object is read and written by
   several threads. Use atomics, and expect stale misses.
-- A function that reads thread-local storage must be `#[inline(never)]` and
-  must not force anything. LLVM may cache a TLS base across calls inside one
-  function, and a fiber that migrated between two accesses would touch
-  another thread's slot. No thread-local is read on the context-switch path
-  or inside the scheduler.
+- Workers steal tasks before they start. A parked fiber resumes on its
+  original worker so its native frames keep their thread-local state. A
+  force can still run another fiber on that worker; release thread-local
+  borrows and locks before forcing.
 - A new strict list or attribute-set consumer can call
   `parallel::fanout_list` or `fanout_attrs_coerce` after forcing the
   container. It is one line, and a no-op with one worker.

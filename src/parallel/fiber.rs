@@ -1,6 +1,5 @@
 //! Stackful coroutines with mmap'd stacks. A fiber is resumed by a worker
-//! thread and yields back to it; a suspended fiber can be resumed from any
-//! thread because its whole state lives on its own stack plus `sp`.
+//! thread and yields back to it. Its native frames stay on that thread.
 //!
 //! The switch saves the callee-saved registers on the current stack and
 //! swaps stack pointers. Nothing else is saved: the compiler treats the
@@ -263,7 +262,8 @@ impl Fiber {
     /// `state` to RUNNING first.
     ///
     /// # Safety
-    /// Exactly one thread resumes a given fiber at a time.
+    /// Exactly one thread may resume a fiber at a time. A yielded fiber
+    /// must resume on the thread where it yielded.
     #[inline(never)]
     pub unsafe fn resume(&mut self) {
         if self.sp.is_null() {
@@ -317,7 +317,7 @@ pub fn sp() -> usize {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-    use std::{hint, slice, thread};
+    use std::{hint, slice};
 
     struct Counter {
         fiber: *mut Fiber,
@@ -359,22 +359,6 @@ mod tests {
         f.state.store(RUNNING, Ordering::Relaxed);
         unsafe { f.resume() };
         assert_eq!(c.n.load(Ordering::Relaxed), 4);
-    }
-
-    #[test]
-    fn migrates_between_threads() {
-        let (c, f) = counting(1 << 20, count_entry);
-        let fp = f as *mut Fiber as usize;
-        for i in 1..=3 {
-            thread::spawn(move || {
-                let f = unsafe { &mut *(fp as *mut Fiber) };
-                f.state.store(RUNNING, Ordering::Relaxed);
-                unsafe { f.resume() };
-            })
-            .join()
-            .unwrap();
-            assert_eq!(c.n.load(Ordering::Relaxed), i);
-        }
     }
 
     #[test]

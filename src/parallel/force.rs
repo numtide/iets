@@ -7,12 +7,12 @@ use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::sched::{self, Driver, Runtime, Slot, Task, Worker};
+use super::sched::{self, Driver, Runtime, Slot, Task};
 use super::thunk::{self, Claim};
-use super::{Ctx, fiber};
+use super::{Ctx, fiber, interner};
 use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::jobs;
-use crate::runtime::{AttrsObj, Cell, Kind, ListObj, Value, Word};
+use crate::runtime::{Arena, AttrsObj, Cell, Kind, ListObj, Value, Word};
 use crate::syntax::symbol::FxHashSet;
 
 pub const MIN_FANOUT: usize = 4;
@@ -75,18 +75,18 @@ impl Driver for SyncEv {
         }
     }
 
-    fn on_switch(&self, slot: &mut Slot, w: &mut Worker) {
+    fn on_switch(&self, slot: &mut Slot, arena: &mut Arena, cache: &mut interner::Cache) {
         // SAFETY: the fiber is switched out and this worker holds the slot,
         // so nothing else references its evaluator.
         let ev = unsafe { ev_of(slot) };
-        mem::swap(&mut ev.arena, &mut w.arena);
-        ev.interner.swap_cache(&mut w.icache);
+        mem::swap(&mut ev.arena, arena);
+        ev.interner.swap_cache(cache);
         // a fiber parked in the middle of a task keeps its counters until it
         // is resumed, which a stats line printed meanwhile would not see
         ev.fold_counters();
         // the arena stays with the worker, so the run's memory is the sum over
-        // workers; on a switch-in `w.arena` is the placeholder and folds zero
-        ev.fold_arena(&mut w.arena);
+        // workers; on a switch-in `arena` is the placeholder and folds zero
+        ev.fold_arena(arena);
     }
 }
 
@@ -852,7 +852,7 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
     if let Some((start, t0)) = timing {
         // SAFETY: this fiber owns its slot; the borrow ends with the
         // statement and nothing else borrows the slot here.
-        let w = unsafe { slot_mut(ev) }.worker().idx;
+        let w = unsafe { slot_mut(ev) }.worker().index();
         errln!(
             "import t={}ms {}us main={} w{} {}",
             start.elapsed().as_millis(),

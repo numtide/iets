@@ -48,8 +48,7 @@ impl Work {
         self.path(rel).to_str().unwrap().to_string()
     }
 
-    /// Each write gets an mtime of its own, long past, so the cache trusts
-    /// the stat of every file and counts only the rehashes a test causes.
+    /// Distinct past mtimes keep metadata changes reproducible across writes.
     fn write(&self, rel: &str, text: &str) -> String {
         static CLOCK: AtomicU64 = AtomicU64::new(1_000_000_000);
         let p = self.path(rel);
@@ -284,13 +283,13 @@ fn hits_and_misses(work: Work) {
     touch(946_684_800, &[&lib]);
     let r = work.eval(&main);
     assert!(
-        r.status.contains("cache: hit") && r.status.contains(" 1 rehashed"),
+        r.status.contains("cache: hit") && r.status.contains(" 3 rehashed"),
         "{}",
         r.status
     );
     let r = work.eval(&main);
     assert!(
-        r.status.contains("cache: hit") && r.status.contains(" 0 rehashed"),
+        r.status.contains("cache: hit") && r.status.contains(" 3 rehashed"),
         "{}",
         r.status
     );

@@ -10,6 +10,7 @@ pub mod shared;
 pub mod thunk;
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use std::{ptr, thread};
 
 use crate::eval::Evaluator;
@@ -29,6 +30,7 @@ pub struct Ctx {
     /// Claimer id of the fiber running this evaluator.
     pub id: u32,
     pub is_main: bool,
+    timeline_start: Option<Instant>,
     pub cancelled: bool,
     /// Lowest stack address this fiber may use. Zero on the sequential
     /// path, which runs on the thread stack and never checks.
@@ -47,6 +49,7 @@ impl Default for Ctx {
             on: false,
             id: 0,
             is_main: true,
+            timeline_start: None,
             cancelled: false,
             stack_lo: 0,
             frames: 0,
@@ -147,7 +150,7 @@ pub fn try_run<R: Send + 'static>(
                     "parallel: fibers={} tasks={} effect-bails={} steals={} parks={} fiber-parks={} main-parks={} main-wait={}ms busy={}ms deadlocks={} main-stack-resident={}K",
                     rt.stats_fibers(),
                     rt.stat_tasks(),
-                    force::EFFECT_BAILS.load(Relaxed),
+                    rt.effect_bails.load(Relaxed),
                     rt.stat_steals.load(Relaxed),
                     rt.stat_parks.load(Relaxed),
                     rt.stat_fiber_parks.load(Relaxed),

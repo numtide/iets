@@ -605,16 +605,6 @@ impl<'a> Reader<'a> {
         Ok(&self.buf[self.start - take..self.start])
     }
 
-    /// Throws away `n` bytes: what a parse that wants only the framing does with
-    /// a file's body.
-    fn skip(&mut self, n: u64) -> io::Result<()> {
-        let mut left = n;
-        while left > 0 {
-            left -= self.some(left.min(BUF as u64) as usize)?.len() as u64;
-        }
-        Ok(())
-    }
-
     fn padding(&mut self, len: u64) -> io::Result<()> {
         let rem = (len % 8) as usize;
         if rem != 0 {
@@ -660,7 +650,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Copies `len` bytes of contents into `out`, then the padding.
-    fn contents_to(&mut self, out: &mut fs::File, len: u64) -> io::Result<()> {
+    fn contents_to(&mut self, out: &mut impl Write, len: u64) -> io::Result<()> {
         let mut left = len;
         while left > 0 {
             let chunk = self.some(left.min(BUF as u64) as usize)?;
@@ -674,27 +664,36 @@ impl<'a> Reader<'a> {
 /// Mirrors archive.cc:parseDump with RestoreSink: restores the NAR read from `source` at
 /// `dest`, which must not exist. Byte-exact inverse of `dump_path`.
 pub fn restore_path(source: &mut dyn Read, dest: &Path) -> io::Result<()> {
-    let mut r = Restorer {
-        r: Reader::new(source),
-        path: dest.as_os_str().as_bytes().to_vec(),
-        name: Vec::with_capacity(MAX_NAME),
-        prev: Vec::new(),
-    };
-    r.r.consume(&TOK_NAR, "a NAR header")?;
-    r.node(0)
+    Parser::<true>::new(source, dest.as_os_str().as_bytes()).parse()?;
+    Ok(())
 }
 
-/// The scratch a restore reuses: one path buffer, one entry-name buffer, and the
-/// previous name at each depth, which the format requires to be increasing.
-struct Restorer<'a> {
+/// Validates one NAR without unpacking it and returns its consumed length.
+pub fn parse_length(source: &mut dyn Read) -> io::Result<u64> {
+    Parser::<false>::new(source, &[]).parse()
+}
+
+struct Parser<'a, const RESTORE: bool> {
     r: Reader<'a>,
-    /// See `Walk::path`: truncation instead of `PathBuf::pop`.
     path: Vec<u8>,
-    name: Vec<u8>,
     prev: Vec<Vec<u8>>,
 }
 
-impl Restorer<'_> {
+impl<'a, const RESTORE: bool> Parser<'a, RESTORE> {
+    fn new(source: &'a mut dyn Read, path: &[u8]) -> Self {
+        Self {
+            r: Reader::new(source),
+            path: path.to_vec(),
+            prev: Vec::new(),
+        }
+    }
+
+    fn parse(mut self) -> io::Result<u64> {
+        self.r.consume(&TOK_NAR, "a NAR header")?;
+        self.node(0)?;
+        Ok(self.r.consumed)
+    }
+
     fn cur(&self) -> &Path {
         Path::new(OsStr::from_bytes(&self.path))
     }
@@ -704,20 +703,30 @@ impl Restorer<'_> {
             return Err(bad_nar("directory nesting too deep"));
         }
         match self.r.node_tag()? {
-            TAG_REG => {
-                self.r.consume(&TOK_REG, "'regular' 'contents'")?;
-                self.regular(false)?;
-            }
-            TAG_EXE => {
-                self.r
-                    .consume(&TOK_EXE, "'regular' 'executable' 'contents'")?;
-                self.regular(true)?;
+            tag @ (TAG_REG | TAG_EXE) => {
+                if tag == TAG_EXE {
+                    self.r
+                        .consume(&TOK_EXE, "'regular' 'executable' 'contents'")?;
+                } else {
+                    self.r.consume(&TOK_REG, "'regular' 'contents'")?;
+                }
+                let len = self.r.u64()?;
+                if RESTORE {
+                    self.regular(len, tag == TAG_EXE)?;
+                } else {
+                    self.r.contents_to(&mut io::sink(), len)?;
+                }
             }
             TAG_SYM => {
                 self.r.consume(&TOK_SYM, "'symlink' 'target'")?;
-                take(&mut self.r, MAX_TARGET, &mut self.name)?;
-                check_target(&self.name)?;
-                symlink(OsStr::from_bytes(&self.name), self.cur())?;
+                let target = self.r.token(MAX_TARGET)?;
+                check_target(target)?;
+                if RESTORE {
+                    symlink(
+                        OsStr::from_bytes(target),
+                        Path::new(OsStr::from_bytes(&self.path)),
+                    )?;
+                }
             }
             // The `)` that ends a directory's entry list is the node's own, so
             // `directory` consumes it and this one must not look for a second.
@@ -729,8 +738,7 @@ impl Restorer<'_> {
         self.r.consume(&TOK_PAR, "')'")
     }
 
-    fn regular(&mut self, executable: bool) -> io::Result<()> {
-        let len = self.r.u64()?;
+    fn regular(&mut self, len: u64, executable: bool) -> io::Result<()> {
         // exclusive: a symlink that is already there must never be written
         // through, and a NAR never names one entry twice
         let mut f = fs::OpenOptions::new()
@@ -745,7 +753,9 @@ impl Restorer<'_> {
     }
 
     fn directory(&mut self, depth: usize) -> io::Result<()> {
-        fs::create_dir(self.cur())?;
+        if RESTORE {
+            fs::create_dir(self.cur())?;
+        }
         if self.prev.len() <= depth {
             self.prev.resize(depth + 1, Vec::new());
         }
@@ -762,82 +772,19 @@ impl Restorer<'_> {
                 _ => return Err(bad_nar("expected 'entry' or ')'")),
             }
             self.r.consume(&TOK_ENT, "'entry' '(' 'name'")?;
-            take(&mut self.r, MAX_NAME, &mut self.name)?;
-            next_name(&self.name, &mut self.prev[depth])?;
+            next_name(self.r.token(MAX_NAME)?, &mut self.prev[depth])?;
             self.r.consume(&TOK_NOD, "'node' '(' 'type'")?;
-            self.path.push(b'/');
-            self.path.extend_from_slice(&self.prev[depth]);
-            let res = self.node(depth + 1);
-            self.path.truncate(base);
-            res?;
+            if RESTORE {
+                self.path.push(b'/');
+                self.path.extend_from_slice(&self.prev[depth]);
+            }
+            self.node(depth + 1)?;
+            if RESTORE {
+                self.path.truncate(base);
+            }
             self.r.consume(&TOK_PAR, "')'")?;
         }
     }
-}
-
-/// Parses the framing of the NAR in `source`, throwing the file contents away,
-/// and returns its length in bytes.
-///
-/// This is `restore_path` with no file system on the other end: it says whether
-/// a NAR is well formed and how long it is without unpacking it, and it prices
-/// the parser on its own.
-pub fn parse_length(source: &mut dyn Read) -> io::Result<u64> {
-    let mut r = Reader::new(source);
-    r.consume(&TOK_NAR, "a NAR header")?;
-    let mut name = Vec::with_capacity(MAX_NAME);
-    parse_node(&mut r, &mut name, &mut Vec::new(), 0)?;
-    Ok(r.consumed)
-}
-
-/// `prev[d]` is the last entry name read at depth `d`.
-fn parse_node(
-    r: &mut Reader<'_>,
-    name: &mut Vec<u8>,
-    prev: &mut Vec<Vec<u8>>,
-    depth: usize,
-) -> io::Result<()> {
-    if depth >= NAR_MAX_DEPTH {
-        return Err(bad_nar("directory nesting too deep"));
-    }
-    match r.node_tag()? {
-        tag @ (TAG_REG | TAG_EXE) => {
-            if tag == TAG_EXE {
-                r.consume(&TOK_EXE, "'regular' 'executable' 'contents'")?;
-            } else {
-                r.consume(&TOK_REG, "'regular' 'contents'")?;
-            }
-            let len = r.u64()?;
-            r.skip(len)?;
-            r.padding(len)?;
-        }
-        TAG_SYM => {
-            r.consume(&TOK_SYM, "'symlink' 'target'")?;
-            check_target(r.token(MAX_TARGET)?)?;
-        }
-        _ => {
-            r.consume(&TOK_DIR, "'directory'")?;
-            if prev.len() <= depth {
-                prev.resize(depth + 1, Vec::new());
-            }
-            prev[depth].clear();
-            loop {
-                match r.peek(16)?[0] {
-                    1 => return r.consume(&TOK_PAR, "')'"),
-                    5 => {}
-                    _ => return Err(bad_nar("expected 'entry' or ')'")),
-                }
-                r.consume(&TOK_ENT, "'entry' '(' 'name'")?;
-                take(r, MAX_NAME, name)?;
-                next_name(name, &mut prev[depth])?;
-                r.consume(&TOK_NOD, "'node' '(' 'type'")?;
-                // Nothing here keeps the name past this point, so one buffer
-                // serves the whole walk.
-                parse_node(r, name, prev, depth + 1)?;
-                r.consume(&TOK_PAR, "')'")?;
-            }
-        }
-    }
-    r.consume(&TOK_PAR, "')'")
 }
 
 /// archive.cc:parse's checks of an entry name: well formed, and after the
@@ -865,14 +812,6 @@ fn check_target(target: &[u8]) -> io::Result<()> {
     if target.is_empty() || target.contains(&0) {
         return Err(bad_nar("bad symlink target"));
     }
-    Ok(())
-}
-
-/// Reads one token into `out`, which the caller owns past the next read.
-fn take(r: &mut Reader<'_>, max: usize, out: &mut Vec<u8>) -> io::Result<()> {
-    let t = r.token(max)?;
-    out.clear();
-    out.extend_from_slice(t);
     Ok(())
 }
 

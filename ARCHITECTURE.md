@@ -277,6 +277,7 @@ measure against, and defaults to the pinned source in the scripts;
 
 | script | what it measures |
 |---|---|
+| `nix build .#experiments.x86_64-linux.pgoBolt` | optional native PGO and BOLT training/build pipeline; [optimization guide](docs/how-to/profile-guided-optimization.md) |
 | `bench/run.nu [workload...]` | `nix-instantiate` against iets with hyperfine, on `nixos-server` and `nixos-plasma` by default |
 | `nix run .#bench-ab -- BEFORE AFTER` | two iets binaries over NixOS configurations, cached reruns and job sets: wall, user, sys and peak RSS, with an interval for each change and a check that the outputs match. `--full` adds nixpkgs outpaths, `--threshold PCT` fails on a slowdown |
 | `nix run .#bench-callgrind -- --save-summary=json` | evaluation, parsing and value rendering under Callgrind, with the Nix-packaged matching Gungraun runner; [benchmark guide](docs/how-to/benchmark.md) |

@@ -128,6 +128,7 @@
       packages = lib.recursiveUpdate (forAll (
         scope: onLinux scope (scope.callPackages ./nix/packages.nix { }) { default = scope.iets; }
       )) { x86_64-linux = { inherit release; }; };
+      experiments = forAll (scope: onLinux scope (scope.callPackages ./nix/pgo.nix { }) { });
       # every package and dev shell, so that CI pushes them to the cache; the
       # fuzz campaigns run for an hour each
       checks = lib.mapAttrs (

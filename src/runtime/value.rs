@@ -126,7 +126,7 @@ pub enum Ctx {
 pub fn split_built(drv: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut names = Vec::new();
     let mut rest = drv;
-    while let Some(i) = rest.iter().position(|&b| b == b'!') {
+    while let Some(i) = memchr::memchr(b'!', rest) {
         names.push(&rest[..i]);
         rest = &rest[i + 1..];
     }

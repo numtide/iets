@@ -82,6 +82,11 @@ pub fn file_id(_path: &Path, m: &Metadata) -> (u64, u64) {
     (m.dev(), m.ino())
 }
 
+/// The identity and change time associated with the handle supplying the bytes.
+pub fn opened_stamp(_f: &File, m: &Metadata) -> io::Result<((u64, u64), i64)> {
+    Ok(((m.dev(), m.ino()), change_time(m)))
+}
+
 /// Whether `path` still names the open file `f`: false once it was unlinked,
 /// or replaced by another file.
 pub fn same_file(f: &File, path: &Path) -> bool {
@@ -103,6 +108,10 @@ pub fn mtime_ns(m: &Metadata) -> i64 {
 
 /// The last change of the inode, which a copy or a rename cannot hide.
 pub fn ctime_ns(_path: &Path, m: &Metadata) -> i64 {
+    change_time(m)
+}
+
+fn change_time(m: &Metadata) -> i64 {
     m.ctime()
         .wrapping_mul(1_000_000_000)
         .wrapping_add(m.ctime_nsec())

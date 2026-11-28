@@ -137,6 +137,63 @@ fn eval_cache_hit_checks_the_configured_fiber_reservation(work: Work) {
 }
 
 #[rstest]
+fn search_path_tracks_symlink_targets_and_failed_candidates(work: Work) {
+    let first = work.s("first");
+    let a = work.write("first/a", "same");
+    let b = work.write("first/b", "same");
+    let fallback = work.write("fallback/member", "same");
+    let link = work.path("first/member");
+    let retarget = |target: &str| {
+        fs::remove_file(&link).unwrap();
+        symlink(target, &link).unwrap();
+    };
+    let entries = format!("p={first}:p={}", work.s("fallback"));
+    let lookup = || {
+        work.eval_with(
+            &[("NIX_PATH", &entries)],
+            &["--raw", "-E", "toString <p/member>"],
+        )
+    };
+    // Strip parent symlinks too, e.g. /var on macOS.
+    let expected = |p: &str| fs::canonicalize(p).unwrap().display().to_string();
+    symlink("a", &link).unwrap();
+    assert_eq!(lookup().out, expected(&a));
+    assert!(lookup().status.contains("cache: hit"));
+    for (target, answer) in [("b", &b), ("absent", &fallback)] {
+        retarget(target);
+        let r = lookup();
+        assert_eq!((r.rc, r.out), (0, expected(answer)));
+        assert!(r.status.contains("miss ("), "{}", r.status);
+        assert!(lookup().status.contains("cache: hit"));
+    }
+    // A cycle and a dangling link both fail host canonicalization, but only
+    // the dangling link permits a later search entry to win.
+    retarget("member");
+    assert_ne!(lookup().rc, 0);
+    fs::remove_file(&link).unwrap();
+    assert_eq!(lookup().out, expected(&fallback));
+    assert!(lookup().status.contains("cache: hit"));
+    symlink("a", &link).unwrap();
+    assert_eq!(lookup().out, expected(&a));
+}
+
+#[rstest]
+fn find_file_resolves_relative_entries_and_clamps_the_suffix(work: Work) {
+    let leaf = work.write("base/member", "here");
+    let mut cmd = work.iets();
+    cmd.current_dir(work.dir.path()).args([
+        "eval",
+        "--impure",
+        "--raw",
+        "-E",
+        r#"toString (builtins.findFile [{ prefix = "p"; path = "base"; }] "p/../member")"#,
+    ]);
+    let r = run(cmd);
+    assert_eq!(r.rc, 0);
+    assert_eq!(r.out, fs::canonicalize(leaf).unwrap().display().to_string());
+}
+
+#[rstest]
 fn explicit_arguments_apply_to_each_final_selection(work: Work) {
     let root = ["--arg", "x", "7", "-E", "{x}: x"];
     let empty = ["--arg", "x", "7", "-E", "{x}: x", "-A", ""];

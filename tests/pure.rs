@@ -240,6 +240,7 @@ fn linked() -> TempDir {
 #[case::read_dir("builtins.readDir ./up")]
 #[case::file_type("builtins.readFileType ./up/outside.txt")]
 #[case::hash_file(r#"builtins.hashFile "sha256" ./out.txt"#)]
+#[case::find_file(r#"toString (builtins.findFile [{ path = ./.; }] "up/outside.txt")"#)]
 #[case::import("import ./two.nix")]
 #[case::import_below_a_link("import ./up/two.nix")]
 #[case::copy_below_a_link(r#"builtins.readFile "${./up/outside.txt}""#)]
@@ -266,6 +267,10 @@ fn a_link_out_of_the_project_is_not_followed(bin: Iets, #[case] expr: &str) {
 #[case::below_a_link("builtins.readFile ./sub-link/in.txt", r#""in""#)]
 #[case::import("import ./sub-link/one.nix", "1")]
 #[case::exists_inside("builtins.pathExists ./sub-link/in.txt", "true")]
+#[case::find_file(
+    r#"builtins.findFile [{ path = ./.; }] "sub-link/in.txt" == ./sub/in.txt"#,
+    "true"
+)]
 #[case::exists_outside("builtins.pathExists ./up/outside.txt", "false")]
 #[case::a_link_is_copied_as_a_link(r#"builtins.readFileType "${./up}""#, r#""symlink""#)]
 fn a_link_inside_the_project_is_followed(bin: Iets, #[case] expr: &str, #[case] want: &str) {

@@ -46,6 +46,22 @@ values for the same input:
 The inputs in `fuzz/regressions/drv-read/` once diverged; `fuzz-drv` runs
 them each time as seeds.
 
+## Properties of nix-pbt
+
+[nix-pbt](https://github.com/yorickvP/nix-pbt) draws expressions with Hegel
+and compares what each evaluator makes of them. `nix-pbt` runs its suites
+with the reference Nix first and iets second, on x86_64-linux:
+
+```sh
+nix run .#nix-pbt                  # every suite
+nix run .#nix-pbt -- arith lists   # some of them
+HEGEL_TEST_CASES=2000 nix run .#nix-pbt -- strings -- substring
+```
+
+No check runs it. The `arith`, `attrs`, `builtins`, `exprs`, `lists`,
+`strings` and `versions` suites pass; the suites of the store, the fetchers and flakes
+report differences that nobody has sorted into bugs and known divergences.
+
 ## Manual fuzzing
 
 To run a fuzzer yourself you need only the flake's stable Rust. `cargo fuzz`

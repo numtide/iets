@@ -11,7 +11,7 @@
       # CI-only inputs live in a private flake with its own lock, so they stay
       # out of this flake.lock and out of the lock of anyone using iets.
       ci = (import ./nix/flake-compat.nix { src = ./nix/ci; }).defaultNix;
-      inherit (ci) nix-conformance hercules-ci-effects;
+      inherit (ci) nix-conformance nix-pbt hercules-ci-effects;
       lib = nixpkgs.lib;
       # Cargo.toml must agree: checks.version fails when it does not
       version = lib.fileContents ./VERSION;
@@ -87,6 +87,11 @@
           # the differential fuzzer against Nix (docs/how-to/fuzz.md)
           fuzz = final.callPackage ./nix/fuzz.nix { };
           benchmarks = final.callPackage ./nix/bench.nix { nix = final.referenceNix; };
+          # yorickvP/nix-pbt with iets and the reference Nix as its evaluators
+          pbt = final.callPackage ./nix/pbt.nix {
+            src = nix-pbt;
+            nix = final.referenceNix;
+          };
           # for files that return a set of packages
           callPackages = pkgs.lib.callPackagesWith (pkgs // final);
         });
@@ -127,7 +132,12 @@
         pkgs.callPackage ./nix/classic.nix { inherit iets nix; };
       packages = lib.recursiveUpdate (forAll (
         scope: onLinux scope (scope.callPackages ./nix/packages.nix { }) { default = scope.iets; }
-      )) { x86_64-linux = { inherit release; }; };
+      )) {
+        x86_64-linux = {
+          inherit release;
+          nix-pbt = (scopeFor x86).pbt;
+        };
+      };
       # every package and dev shell, so that CI pushes them to the cache; the
       # fuzz campaigns run for an hour each
       checks = lib.mapAttrs (

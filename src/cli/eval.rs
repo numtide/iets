@@ -13,6 +13,7 @@ pub fn run_eval(a: EvalArgs) -> i32 {
     let mut run = run_for(&a).cached(&a, "eval");
     if let Some(out) = run.hit(|c| {
         let out = c.part(Part::Result)?;
+        run.cfg.prefetch_search_path();
         c.replay_warnings();
         Some(out)
     }) {

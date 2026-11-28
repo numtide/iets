@@ -733,12 +733,17 @@ impl EvalConfig {
         &self.session
     }
 
-    /// `system` and `pure-eval` shape the builtins, so they are fixed
-    /// before `builtins::install` (docs/reference/settings.md).
-    pub fn build(self) -> Evaluator {
+    /// Start the native store lookups shared by subsequent uses of this session.
+    pub(crate) fn prefetch_search_path(&self) {
         if !self.pure {
             prefetch_store_entries(&self.search_path, &self.session);
         }
+    }
+
+    /// `system` and `pure-eval` shape the builtins, so they are fixed
+    /// before `builtins::install` (docs/reference/settings.md).
+    pub fn build(self) -> Evaluator {
+        self.prefetch_search_path();
         // the evaluator's session, which a stats line reads too
         let fold_arenas = self.session.settings().stats >= 1;
         let mut arena = Arena::in_heap(self.session.heap.clone());

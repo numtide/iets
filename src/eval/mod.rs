@@ -1438,12 +1438,7 @@ impl Evaluator {
         match ir {
             Ir::Const(w) => *w,
             Ir::Local { depth, idx } => {
-                let mut e = env;
-                for _ in 0..*depth {
-                    e = e.up().expect("compile-time depth is valid");
-                }
-                e.mark_read();
-                let w = e.slot(*idx as usize).get();
+                let w = env.local_slot(*depth, *idx).get();
                 // a slot of the env under construction (`let x = x;`): thunk it
                 // so forcing reports infinite recursion instead of reading EMPTY
                 if w == Word::EMPTY {
@@ -1541,14 +1536,7 @@ impl Evaluator {
     fn peek(env: &'static EnvObj, ir: IrRef) -> Option<Word> {
         match ir {
             Ir::Const(w) => Some(*w),
-            Ir::Local { depth, idx } => {
-                let mut e = env;
-                for _ in 0..*depth {
-                    e = e.up()?;
-                }
-                e.mark_read();
-                Some(e.slot(*idx as usize).get())
-            }
+            Ir::Local { depth, idx } => Some(env.try_local_slot(*depth, *idx)?.get()),
             _ => None,
         }
     }
@@ -2242,12 +2230,7 @@ impl Evaluator {
         match ir {
             Ir::Const(w) => return Ok(*w),
             Ir::Local { depth, idx } => {
-                let mut e = env;
-                for _ in 0..*depth {
-                    e = e.up().expect("compile-time depth is valid");
-                }
-                e.mark_read();
-                let w = e.slot(*idx as usize).get();
+                let w = env.local_slot(*depth, *idx).get();
                 if !w.is_thunk() {
                     return Ok(w);
                 }
@@ -2308,12 +2291,7 @@ impl Evaluator {
     #[inline(never)]
     fn eval_k_local(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Local { depth, idx } = ir);
-        let mut e = env;
-        for _ in 0..*depth {
-            e = e.up().expect("compile-time depth is valid");
-        }
-        e.mark_read();
-        self.force_cell(e.slot(*idx as usize))
+        self.force_cell(env.local_slot(*depth, *idx))
     }
 
     #[inline(never)]

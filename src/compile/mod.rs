@@ -956,7 +956,6 @@ impl<'a> Compiler<'a> {
             ..
         } = m;
         let mut binds: Vec<BindIr> = Vec::with_capacity(statics.len());
-        let mut deferred_from: Vec<(usize, Sym, Pos, usize)> = Vec::new();
         for (sym, def, bpos) in statics {
             match def {
                 Def::Expr(e) => {
@@ -988,11 +987,13 @@ impl<'a> Compiler<'a> {
                     });
                 }
                 Def::InheritFrom(fi, name) => {
-                    deferred_from.push((fi, name, bpos, binds.len()));
-                    // placeholder, patched below
+                    let subject = self.alloc(Ir::Local {
+                        depth: 0,
+                        idx: fi as u32,
+                    });
                     binds.push(BindIr {
                         sym,
-                        value: self.alloc(Ir::Const(Word::NULL)),
+                        value: self.inherit_from(subject, name, bpos),
                         pos: bpos,
                         scope: BindScope::From,
                     });
@@ -1002,18 +1003,6 @@ impl<'a> Compiler<'a> {
         let mut from: Vec<IrRef> = Vec::with_capacity(from_exprs.len());
         for e in &from_exprs {
             from.push(self.expr(*e)?);
-        }
-        if !deferred_from.is_empty() {
-            self.scopes.push(Scope::frame(FxHashMap::default()));
-            // the from-env has `from.len()` anonymous slots at depth 0
-            for (fi, name, bpos, bi) in deferred_from {
-                let subject = self.alloc(Ir::Local {
-                    depth: 0,
-                    idx: fi as u32,
-                });
-                binds[bi].value = self.inherit_from(subject, name, bpos);
-            }
-            self.scopes.pop();
         }
         let dynamic = self.lower_dynamics(dynamics)?;
         binds.sort_by_key(|b| b.sym);

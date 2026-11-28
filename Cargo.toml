@@ -22,6 +22,7 @@ getrandom = "0.4"
 tempfile = "3"
 toml = "1"
 serde_json = "1"
+itoa = "1"
 zstd = "0.14"
 lz4_flex = { version = "0.14", default-features = false, features = ["frame", "safe-encode", "safe-decode"] }
 # ed25519 for binary cache signatures (src/store/narinfo.rs)

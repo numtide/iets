@@ -58,7 +58,6 @@ in [
 ]
 "#,
     );
-    // nlohmann writes a structuredAttrs float in its own shortest form
     w(
         "floats.nix",
         r#"derivation {
@@ -73,6 +72,7 @@ in [
   e = 2.5;
   f = 1.0;
   g = [ 0.0001 { h = 1.0e20; } ];
+  midpoint = 1.0e23;
 }
 "#,
     );

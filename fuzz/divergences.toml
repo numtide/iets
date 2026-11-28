@@ -85,12 +85,6 @@ doc = "docs/reference/divergences.md#the-limits-of-a-run"
 kind = "iets-only"
 nix = "stack overflow"
 
-[[eval]]
-id = "json-float-digits"
-doc = "docs/reference/divergences.md#the-digits-of-a-float-in-tojson"
-kind = "value"
-float_digits = true
-
 # `==`, `!=` and `elem` take equal words as equal without forcing what is
 # inside, where Nix compares and throws
 

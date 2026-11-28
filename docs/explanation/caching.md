@@ -165,6 +165,7 @@ Every primop that looks at the world records one observation.
 | a directory listing's hash | `readDir` | re-list and rehash |
 | a path's kind | `pathExists`, `readFileType`, the `default.nix` probe, every search-path candidate, every marker the SCM detection probed above a flake directory, a fetched store path that the store has as valid | re-stat |
 | a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | recompute the stat hash with `lstat` only; on a mismatch re-dump the NAR with the recorded filter and compare. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
+| a host path component followed during pure evaluation | the project path resolver | check the link text, including the absence of a link, before validating file contents |
 | a resolved symlink | `storePath`, `builtins.path` and `filterSource` when canonicalizing changed the path | canonicalize again |
 | an environment variable, as a keyed hash | `getEnv`; `HOME` when a `~/` literal is compiled | read it again and hash it again |
 | which query of which SCM was asked in which directory, and its exit status and output | the queries of the SCM that read a flake working tree or a repository; for git, `ls-files`, `status`, `rev-parse HEAD`, `show-ref --head` for a `ref`, and `config core.attributesFile` for `export-ignore` | ask the same query again, rehash |

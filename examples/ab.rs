@@ -1,6 +1,6 @@
 //! A/B of two iets binaries over the work CI gives iets.
 //!
-//! `cargo run --release --example ab -- BEFORE AFTER [--full] [--only SUBSTR]
+//! `cargo run --release --example ab -- BEFORE AFTER [--full] [--only SUBSTR] [--skip SUBSTR]
 //! [--rounds N] [--max-rounds N] [--threshold PCT] [--json FILE]`
 //!
 //! Each scenario runs at least `--rounds` rounds (6), and more, up to
@@ -653,6 +653,7 @@ mod ab {
         after: PathBuf,
         full: bool,
         only: Option<String>,
+        skip: Option<String>,
         rounds: usize,
         max_rounds: usize,
         threshold: Option<f64>,
@@ -661,7 +662,7 @@ mod ab {
 
     fn usage() -> ! {
         eprintln!(
-            "usage: cargo run --release --example ab -- BEFORE AFTER [--full] [--only SUBSTR] \
+            "usage: cargo run --release --example ab -- BEFORE AFTER [--full] [--only SUBSTR] [--skip SUBSTR] \
              [--rounds N] [--max-rounds N] [--threshold PCT] [--json FILE]"
         );
         process::exit(2);
@@ -675,6 +676,7 @@ mod ab {
             after: PathBuf::new(),
             full: false,
             only: None,
+            skip: None,
             rounds: 6,
             max_rounds: 20,
             threshold: None,
@@ -685,6 +687,7 @@ mod ab {
             match a.as_str() {
                 "--full" => o.full = true,
                 "--only" => o.only = Some(val()),
+                "--skip" => o.skip = Some(val()),
                 "--rounds" => o.rounds = val().parse().unwrap_or_else(|_| usage()),
                 "--max-rounds" => o.max_rounds = val().parse().unwrap_or_else(|_| usage()),
                 "--threshold" => o.threshold = Some(val().parse().unwrap_or_else(|_| usage())),
@@ -922,6 +925,7 @@ mod ab {
             .into_iter()
             .filter(|s| o.full || !s.full)
             .filter(|s| o.only.as_ref().is_none_or(|p| s.id.contains(p.as_str())))
+            .filter(|s| o.skip.as_ref().is_none_or(|p| !s.id.contains(p.as_str())))
             .collect();
         if todo.is_empty() {
             eprintln!("ab: no scenario matches (try --full for extended scenarios)");

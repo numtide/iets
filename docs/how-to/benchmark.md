@@ -11,7 +11,7 @@ Plasma, cache and release-initial-ramdisk evaluations. It also runs native
 `eval-jobs` with one and four workers on the same hash-selected slice of the
 locked host-system Nixpkgs outpaths jobset (chunk 0 of 4096, no worker memory
 limit). Each comparison checks all output records independent of worker order. Use `--only SUBSTR`
-to select scenarios. For example, compare the full host-system NixOS release
+to select matching scenarios or `--skip SUBSTR` to exclude them. For example, compare the full host-system NixOS release
 jobset or the whole host-system Nixpkgs outpaths jobset on a larger machine:
 
 ```sh
@@ -26,8 +26,8 @@ when interpreting small timing changes. With `--threshold`, the native runner
 checks wall time, peak RSS and, when fully available, retired hardware instructions.
 The GitHub Actions job summary shows the native paired intervals followed by
 a table of base and candidate Callgrind instructions. Open the **Summary**
-page of the **bench** workflow run and scroll to the **ab** job summary. Both
-binaries run on the same hosted Linux VM. The 5% gates use the lower bound
+page of the **bench** workflow run and scroll to the **ab** job summary. Each workload runs both binaries on the same hosted Linux VM. CI runs the outpaths cases and Callgrind on one PR runner and the
+remaining native cases on another. The 5% gates use the lower bound
 of each native interval and the change in total guest instructions. To run the CI comparison locally, use
 `nix run .#bench-compare -- /absolute/path/to/baseline/iets` in a writable
 directory with the candidate flake. The `ab` artifact contains `ab.json`,

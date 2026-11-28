@@ -13,15 +13,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ab:
+  measure:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(github.event_name == 'schedule' && '["ramdisk"]' || '["eval","outpaths"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
       - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://cache.numtide.com
+            extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
       - uses: Mic92/hestia@v3
         with:
           read-only: true
@@ -35,15 +43,54 @@ jobs:
       - run: nix build .#bench-compare -o result-compare
       - if: github.event_name == 'pull_request'
         run: sudo sysctl kernel.perf_event_paranoid=2
-      - name: Compare native performance and Callgrind instructions
+      - name: Compare
         shell: bash
         env:
-          SUITE: ${{ github.event_name == 'schedule' && '--ramdisk' || '' }}
-        run: result-compare/bin/iets-bench-compare result-base/bin/iets "$SUITE" | tee -a "$GITHUB_STEP_SUMMARY"
+          SUITE: ${{ matrix.suite }}
+        run: |
+          {
+            echo "Runner: $RUNNER_NAME ($RUNNER_ARCH, $(nproc) CPUs, image ${ImageVersion:-unknown})"
+            echo
+            result-compare/bin/iets-bench-compare result-base/bin/iets "--$SUITE"
+          } | tee summary.md
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.suite }}
+          retention-days: 1
+          path: |
+            summary.md
+            ab.json
+            target/gungraun
+
+  ab:
+    needs: measure
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bench-*
+          path: results
+      - name: Collect measurements
+        shell: bash
+        env:
+          MEASURE: ${{ needs.measure.result }}
+        run: |
+          cat results/*/summary.md >> "$GITHUB_STEP_SUMMARY"
+          shopt -s nullglob
+          profiles=(results/*/target)
+          if (( ${#profiles[@]} )); then mv "${profiles[@]}" .; fi
+          records=(results/*/ab.json)
+          if (( ${#records[@]} )); then jq -es 'add' "${records[@]}" > ab.json; fi
+          test "$MEASURE" = success
+          test -d target/gungraun
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then test "${#records[@]}" = 2; fi
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: ab
+          if-no-files-found: error
           path: |
             ab.json
             target/gungraun

@@ -15,6 +15,8 @@
 //! a wall-time, peak RSS or instruction interval lies wholly above it.
 //! Hardware counters are omitted unless every event ran for its entire enabled
 //! time; multiplexed counts are not treated as totals or scaled estimates.
+//! Two zero counts give a paired ratio of 1. A positive count after zero
+//! gives an infinite ratio, written as null in a JSON interval.
 
 use std::process::ExitCode;
 
@@ -833,11 +835,15 @@ mod ab {
         String::new()
     }
 
+    fn paired_ratio(before: f64, after: f64) -> f64 {
+        if before == after { 1.0 } else { after / before }
+    }
+
     fn ratios(runs: &[Vec<Run>; 2], f: impl Fn(&Run) -> f64) -> Interval {
         let r: Vec<f64> = runs[0]
             .iter()
             .zip(&runs[1])
-            .map(|(a, b)| f(b) / f(a))
+            .map(|(a, b)| paired_ratio(f(a), f(b)))
             .collect();
         interval(&r)
     }
@@ -1066,6 +1072,16 @@ mod ab {
 
         use super::*;
         use std::io::Write;
+
+        #[test]
+        fn zero_baselines_distinguish_ties_from_increases() {
+            let ties = paired_ratio(0.0, 0.0);
+            let increase = paired_ratio(0.0, 7.0);
+            assert_eq!(ties, 1.0);
+            assert_eq!(increase, f64::INFINITY);
+            assert_eq!(paired_ratio(7.0, 0.0), 0.0);
+            assert_eq!(json!([ties, increase]), json!([1.0, null]));
+        }
 
         #[test]
         fn fatal_cleanup_keeps_its_context_and_only_the_stderr_tail() {

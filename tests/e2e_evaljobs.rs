@@ -185,6 +185,33 @@ fn args(a: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn registers_rewritten_aggregate() {
+    let Some(c) = setup() else { return };
+    let args = args(&[
+        "--constituents",
+        "--select",
+        "j: { success = { inherit (j.success) anotherone indirect_aggregate recurseForDerivations; }; }",
+        "aggregates.nix",
+    ]);
+    let rows = ok(&mut c.iets(&args));
+    let aggregate = serde_json::Deserializer::from_slice(&rows.stdout)
+        .into_iter::<Value>()
+        .map(Result::unwrap)
+        .find(|job| job["attr"] == "success.indirect_aggregate")
+        .unwrap();
+    let path = aggregate["drvPath"].as_str().unwrap();
+    let bytes = fs::read(path).unwrap();
+    let references = || c.s.nix_store(&["-q", "--references", path]);
+    let registered = references();
+
+    // Recreate the same path independently in the same logical store.
+    c.s.nix_store(&["--delete", path]);
+    ok(&mut c.nej(&args));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+    assert_eq!(references(), registered);
+}
+
+#[test]
 fn flags_match_nix_eval_jobs() {
     let Some(c) = setup() else { return };
     let alt_lock = c.s.dir().join("alt.lock");

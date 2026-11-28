@@ -239,9 +239,13 @@ impl Hash {
 
 /// Mirrors hash.cc:hashString.
 pub fn hash_bytes(algo: HashAlgo, data: &[u8]) -> Hash {
-    let mut h = Hasher::new(algo);
-    h.update(data);
-    h.finish()
+    match algo {
+        HashAlgo::Md5 => Hash::raw(algo, &md5::Md5::digest(data)),
+        HashAlgo::Sha1 => Hash::raw(algo, &sha1::Sha1::digest(data)),
+        HashAlgo::Sha256 => Hash::raw(algo, &sha2::Sha256::digest(data)),
+        HashAlgo::Sha512 => Hash::raw(algo, &sha2::Sha512::digest(data)),
+        HashAlgo::Blake3 => Hash::raw(algo, blake3::hash(data).as_bytes()),
+    }
 }
 
 /// Mirrors hash.cc:compressHash.
@@ -582,13 +586,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn streaming_matches_oneshot() {
-        let mut w = Hasher::new(HashAlgo::Sha256);
+    #[rstest]
+    #[case(HashAlgo::Sha256)]
+    #[case(HashAlgo::Blake3)]
+    fn streaming_matches_oneshot(#[case] algo: HashAlgo) {
+        let mut w = Hasher::new(algo);
         w.write_all(b"a").unwrap();
         w.write_all(b"bc").unwrap();
         assert_eq!(w.bytes_written(), 3);
-        assert_eq!(w.finish(), hash_bytes(HashAlgo::Sha256, b"abc"));
+        assert_eq!(w.finish(), hash_bytes(algo, b"abc"));
     }
 
     #[test]

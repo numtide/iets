@@ -89,10 +89,11 @@ impl<'e> Value<'e> {
     /// The forced view, or `None` while the value is still a thunk.
     #[inline]
     fn view(self) -> Option<View> {
-        if self.w == Word::EMPTY || self.w.is_thunk() || self.w.is_blackhole() {
+        let w = self.w.peek_demanded();
+        if w == Word::EMPTY || w.is_thunk() || w.is_blackhole() {
             None
         } else {
-            Some(self.w.view())
+            Some(w.view())
         }
     }
 
@@ -533,10 +534,11 @@ mod tests {
 
     #[test]
     fn force_deep_forces_the_whole_tree() {
-        eval("{ a = [ (1 + 1) ]; }", |e, v| {
+        eval("{ a = [ (1 + 1) (builtins.seq 1 (x: x)) ]; }", |e, v| {
             let v = e.force_deep(v).unwrap();
             let a = e.attr(v, b"a").unwrap().unwrap();
             assert_eq!(a.list_get(0).unwrap().as_int(), Some(2));
+            assert_eq!(a.list_get(1).unwrap().kind(), ValueKind::Function);
         });
     }
 }

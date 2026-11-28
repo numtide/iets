@@ -121,6 +121,11 @@ in builtins.foldl' (a: b: a + builtins.foldl' (x: y: x + y) 0 b) 0 rows"#,
             true,
             "let SLOW t = (x: y: x) 1; A = [ t t t t t t t t ]; B = [ t t t t t t t t ]; in builtins.seq (builtins.any (x: false) A) (builtins.seq (slow 300000) (A == B))",
         ),
+        case(
+            "map-function-identity",
+            true,
+            "let SLOW m = builtins.mapAttrs (_: v: _: v) { a = 1; }; eq = _: (m // { b = 0; }) == (m // { b = 0; }); in [ (slow 200000) ] ++ builtins.genList eq 64",
+        ),
         // a thunk only a helper forced still prints as <CODE>
         case(
             "print-code",
@@ -450,6 +455,7 @@ fn all_cases() -> Vec<Case> {
 #[case::drv("drv")]
 #[case::json("json")]
 #[case::fn_identity("fn-identity")]
+#[case::map_function_identity("map-function-identity")]
 #[case::print_code("print-code")]
 #[case::print_code_single("print-code-single")]
 #[case::nan("nan")]

@@ -13,6 +13,7 @@ directory with no daemon and no signature.
 | fetched inputs | `~/.cache/iets/inputs` | one file | the store path the lock implies |
 | Git clones | `~/.cache/iets/git` | one bare repository | the URL |
 | Git LFS objects | `~/.cache/iets/lfs` | one file | the object's sha256 |
+| fetched revisions | `~/.cache/iets/revs` | one file | the URL of the archive |
 
 `--no-tracing-cache` and `--no-ir-cache` turn off one cache each, and
 `--no-cache`, `IETS_CACHE=0` and the `cache` setting turn off both. Nothing
@@ -379,6 +380,12 @@ only the files that changed: 4 to 5 MiB for revisions 200 commits apart,
 where a spool cost 247 MiB each. No tree is ever unpacked: with the index a
 full nixpkgs revision takes 7.7 s and 94 MB peak, unpacked 13.5 s and
 382 MB.
+
+`revs/` holds the NAR hash of each archive that was fetched by revision
+alone, one file per archive URL, so the archive is downloaded once. Unlike
+an input-store entry, these files are not verified: anyone who can write
+the cache directory can change which tree a revision maps to. Nix's fetcher
+cache is the same.
 
 The sweep removes entries, and a collection under the store's lock then
 removes the packs no entry names and rewrites a pack that is mostly dead. A

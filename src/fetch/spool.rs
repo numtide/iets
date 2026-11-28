@@ -300,7 +300,14 @@ impl Tree {
     /// kept for `dump`. `max_size` is `fetch-max-size`: the spool and everything
     /// a sparse member expands to must fit in it together.
     pub fn index(spool: Spool, max_size: u64) -> Result<Tree> {
+        Tree::index_dated(spool, max_size).map(|(tree, _)| tree)
+    }
+
+    /// [`Tree::index`], plus the newest member mtime: Nix's `lastModified`
+    /// for an archive (tarfile.cc).
+    pub fn index_dated(spool: Spool, max_size: u64) -> Result<(Tree, u64)> {
         let Spool(spool) = spool;
+        let mut newest = 0u64;
         let mut root = DraftDir::new();
         let mut links: BTreeMap<Parts, Parts> = Default::default();
         let mut sparse: Option<File> = None;
@@ -335,6 +342,11 @@ impl Tree {
                     continue;
                 }
                 let pax = pax_sparse(&mut entry)?;
+                let mtime = match pax_mtime(&mut entry)? {
+                    Some(t) => t,
+                    None => entry.header().mtime().unwrap_or(0),
+                };
+                newest = newest.max(mtime);
                 let name = member_name(pax.as_ref(), &entry)?;
                 let parts = parts_of(&unpack::member_path(&name));
                 if parts.is_empty() {
@@ -450,10 +462,11 @@ impl Tree {
             })?;
             insert(&mut root, &parts, Draft::Leaf(copy), false);
         }
-        Ok(Tree {
+        let tree = Tree {
             src: Source::Spool { spool, sparse, map },
             root: Node::Dir(dereference(Draft::finish(root))),
-        })
+        };
+        Ok((tree, newest))
     }
 
     /// The spool as one regular file, not executable: what `builtins.fetchurl`
@@ -929,6 +942,23 @@ fn number(v: &[u8]) -> Option<u64> {
     str::from_utf8(v).ok()?.parse().ok()
 }
 
+/// The whole seconds of a member's pax `mtime` record, which libarchive
+/// takes over the header's.
+fn pax_mtime(entry: &mut tar::Entry<'_, impl Read>) -> Result<Option<u64>> {
+    let ext = entry
+        .pax_extensions()
+        .map_err(|e| Error::io("cannot read the pax records of a tarball member", e))?;
+    let mut mtime = None;
+    for rec in ext.into_iter().flatten() {
+        let rec = rec.map_err(|e| Error::io("cannot read a pax record", e))?;
+        if rec.key_bytes() == b"mtime" {
+            let secs = rec.value_bytes().split(|&b| b == b'.').next();
+            mtime = secs.and_then(number);
+        }
+    }
+    Ok(mtime)
+}
+
 /// The name the pax sparse records give the member, else the header's.
 pub(super) fn member_name<'a>(
     pax: Option<&'a Sparse>,
@@ -1363,6 +1393,29 @@ pub(crate) mod tests {
         let index = encode_index(&root, (&hash, size));
         let packs = Arc::new(Packs::open(dir));
         (Tree::stored(root, packs), index)
+    }
+
+    #[test]
+    fn the_newest_member_dates_the_archive() {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, mtime) in [("top/a", 5), ("top/b", 9), ("top/c", 7)] {
+            let mut h = tar::Header::new_ustar();
+            h.set_size(0);
+            h.set_mtime(mtime);
+            b.append_data(&mut h, name, &b""[..]).unwrap();
+        }
+        let mut spool = Spool::scratch().unwrap();
+        spool.write_all(&b.into_inner().unwrap()).unwrap();
+        assert_eq!(Tree::index_dated(spool, u64::MAX).unwrap().1, 9);
+    }
+
+    #[test]
+    fn a_pax_mtime_dates_its_member() {
+        let mut spool = Spool::scratch().unwrap();
+        spool
+            .write_all(&pax_tar(&[("mtime", "9.5".into())], "top/a", b""))
+            .unwrap();
+        assert_eq!(Tree::index_dated(spool, u64::MAX).unwrap().1, 9);
     }
 
     fn spooled(entries: &[(&str, tar::EntryType, u32, &[u8])]) -> Tree {

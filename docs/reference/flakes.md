@@ -240,10 +240,25 @@ targets (`docs/reference/builders.md`).
 substitute it, and it has no input store entry, because its content address
 is not a flake `narHash`.
 
-## `fetchTree` result
+## `fetchTree`
 
-`builtins.fetchTree` on a locked node gets the store path from `narHash`.
-It returns the attributes Nix returns:
+What each input type needs:
+
+| Type | Needs | In pure evaluation |
+|---|---|---|
+| `path` | an absolute `path` | also a `narHash` |
+| `github`, `gitlab`, `sourcehut` | a `rev` (a full commit hash) | the same |
+| `git` | a `narHash` | also a `rev` |
+| `tarball` | a `narHash` | the same |
+
+Other types and a URL argument are errors. A flake's lock file needs a
+`narHash` for every node except a relative `path` input.
+
+A `github`, `gitlab` or `sourcehut` input with only a `rev` is downloaded
+on first use. Later runs reuse it. With only a `narHash`, it is read from
+a store that already has the tree, but cannot be downloaded.
+
+The result has the attributes Nix returns:
 
 - `outPath` and `narHash`;
 - `rev` and `shortRev`, when `rev` is there;
@@ -255,12 +270,11 @@ It returns the attributes Nix returns:
 `revCount` has Nix's value, but it is deprecated
 (`docs/reference/lints.md`, `rev-count`).
 
-A `path` input is NAR-hashed, checked against `narHash` when the lock has
-one, and is a virtual copy, like the root. A relative `path:` input
+A `path` input is NAR-hashed, checked against `narHash` when it has one,
+and is a virtual copy, like the root. A relative `path:` input
 (`path:./sub`) never reaches `fetchTree`. `nix flake lock` writes it as
 `{ path = "./sub"; type = "path"; }` with no `narHash`, iets accepts that,
-and `call-flake.nix` finds it under the parent's `outPath`. An unlocked
-remote input (no `narHash`) and a URL argument are errors.
+and `call-flake.nix` finds it under the parent's `outPath`.
 
 ## The root tree
 

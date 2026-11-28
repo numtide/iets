@@ -457,8 +457,9 @@ A name falls back in these cases:
      pure evaluation;
    - `fetchTarball` and `fetchurl` without a `sha256`;
    - `fetchTree` with a URL string, with an input type other than `path`,
-     `github`, `gitlab`, `sourcehut`, `git` or `tarball`, or without
-     a `narHash` for a type other than `path`, or, in pure evaluation,
+     `github`, `gitlab`, `sourcehut`, `git` or `tarball`, without a
+     `narHash` for `git` or `tarball`, without a `narHash` and a `rev`
+     for `github`, `gitlab` or `sourcehut`, or, in pure evaluation,
      without a `rev` for a type other than `path` and `tarball`;
    - `getFlake` on anything but a local path or local SCM reference.
      Pure evaluation needs a matching `narHash` for a path or a locked SCM revision,

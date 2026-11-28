@@ -507,13 +507,8 @@ impl SrcPath {
     pub fn stat(&self, ev: &Evaluator, follow: bool) -> io::Result<Kind> {
         match self.at().ok_or_else(missing)? {
             At::Disk(p) => {
-                let r = if follow {
-                    fs::metadata(os(&p))
-                } else {
-                    fs::symlink_metadata(os(&p))
-                };
-                let kind = Kind::of(&r);
-                ev.trace().stat(&p, follow, kind);
+                let r = trace::stat_metadata(&os(&p), follow);
+                let kind = ev.trace().record_stat(&p, follow, &r);
                 r.map(|_| kind)
             }
             At::Spool(tree, name) => {

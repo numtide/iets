@@ -13,7 +13,7 @@ use std::{fs, thread};
 
 use super::{
     Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_kind, tree_fingerprint_with, tree_rehash_with,
+    mtime_ns, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -159,7 +159,10 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             Err(e) => unreadable(path, &e),
         },
         Obs::Stat { path, follow, kind } => {
-            let now = stat_kind(&sys::native_path(path), *follow);
+            let now = match Kind::observed(&stat_metadata(&sys::native_path(path), *follow)) {
+                Ok(kind) => kind,
+                Err(e) => return unreadable(path, e),
+            };
             match (now, *kind) {
                 (now, was) if now == was => Outcome::Same,
                 (Kind::Missing, _) => Outcome::Changed(format!("{} is gone", lossy(path))),

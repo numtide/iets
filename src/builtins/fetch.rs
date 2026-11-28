@@ -127,7 +127,9 @@ fn check_locked(attrs: &Attrs, pos: Pos) -> EvalResult<()> {
     // fetchTree.cc only warns on a `narHash`
     let shown = match ty {
         _ if attrs.contains_key("narHash") => None,
-        "path" | "tarball" | "github" | "gitlab" => flakeref::attrs_to_string(attrs.clone()).ok(),
+        "path" | "tarball" | "github" | "gitlab" | "sourcehut" => {
+            flakeref::attrs_to_string(attrs.clone()).ok()
+        }
         _ => None,
     };
     match shown {

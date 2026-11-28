@@ -55,7 +55,7 @@ Every builtin that is not in this table works as it does in Nix.
 | `mul` | works | A `let` binding of `__mul` does not change `*`. In Nix it does. |
 | `nixVersion` | works | `"2.34.8"`. |
 | `outputOf` | works | A producer that this run did not make must be in `/nix/store`. In classic mode it needs the `dynamic-derivations` feature, as in Nix. |
-| `parseFlakeRef` | works | Accepts some references that Nix refuses. `sourcehut:`, `hg+...` and other schemes fail. |
+| `parseFlakeRef` | works | Accepts some references that Nix refuses. `hg+...` and other schemes fail. |
 | `sub` | works | A `let` binding of `__sub` does not change `-`. In Nix it does. |
 
 ## JSON float formatter license

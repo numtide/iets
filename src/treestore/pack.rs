@@ -491,6 +491,15 @@ impl PackWriter {
         self.file.write_all(&index)?;
         self.file.write_all(&tail)?;
         self.file.flush()?;
+        // The writer's open descriptor works even if umask removed owner read.
+        // A replacement must be readable before collection unlinks its source.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            self.file
+                .get_ref()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         // a reader checks the index, not the objects, so the bytes go
         // down before the name
         sysfs::sync_ordered(self.file.get_ref())?;
@@ -802,7 +811,19 @@ mod tests {
         for o in objects() {
             w.add(id_of(&o), &o).unwrap();
         }
+        // Model a temporary created under umask 0400 without changing the
+        // process-wide umask of parallel tests.
+        #[cfg(unix)]
+        w.file
+            .get_ref()
+            .set_permissions(fs::Permissions::from_mode(0o200))
+            .unwrap();
         let path = w.finish().unwrap().expect("a pack");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let p = Pack::open(&path).unwrap().expect("well formed");
         for o in objects() {
             let loc = p.find(&id_of(&o)).expect("indexed");

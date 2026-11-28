@@ -750,7 +750,6 @@ const MAX_NEST: u32 = 10_000;
 struct De<'a, 'e> {
     ev: &'e mut Evaluator,
     data: &'a [u8],
-    at: usize,
     syms: Vec<Sym>,
     base: u32,
     /// Byte length of the file this entry belongs to: every stored position
@@ -787,8 +786,7 @@ pub fn deserialize(
     }
     let mut d = De {
         ev,
-        data,
-        at: MAGIC.len(),
+        data: &data[MAGIC.len()..],
         syms: Vec::new(),
         base,
         span,
@@ -801,13 +799,8 @@ pub fn deserialize(
     let n = d.count();
     d.syms.reserve(n);
     for _ in 0..n {
-        let len = d.u32() as usize;
-        let end = d.at.saturating_add(len);
-        if end > data.len() {
-            return None;
-        }
-        let s = d.ev.interner.intern(&data[d.at..end]);
-        d.at = end;
+        let name = d.bytes()?;
+        let s = d.ev.interner.intern(name);
         d.syms.push(s);
     }
     let t1 = t0.elapsed();
@@ -820,7 +813,7 @@ pub fn deserialize(
         }
         let id = LintId::from_u8(d.u8());
         let pos = d.pos();
-        let msg = String::from_utf8_lossy(d.bytes()).into_owned();
+        let msg = String::from_utf8_lossy(d.bytes()?).into_owned();
         match id {
             Some(id) => diags.push(Diag { id, pos, msg }),
             None => d.ok = false,
@@ -852,7 +845,7 @@ pub fn deserialize(
             (t0.elapsed() - t1).as_micros()
         );
     }
-    if d.ok && d.at == data.len() {
+    if d.ok && d.data.is_empty() {
         Some((ir, diags, allows))
     } else {
         None
@@ -885,45 +878,46 @@ impl Frame {
 
 impl<'a> De<'a, '_> {
     fn u8(&mut self) -> u8 {
-        match self.data.get(self.at) {
-            Some(b) => {
-                self.at += 1;
-                *b
-            }
-            None => {
-                self.ok = false;
-                0
-            }
-        }
+        self.data.split_off_first().copied().unwrap_or_else(|| {
+            self.ok = false;
+            0
+        })
     }
 
     fn u64(&mut self) -> u64 {
-        let mut v = 0u64;
-        let mut shift = 0;
-        loop {
+        let mut value = 0;
+        for shift in (0..63).step_by(7) {
             let b = self.u8();
-            v |= u64::from(b & 0x7f) << shift;
-            if b < 0x80 || !self.ok || shift >= 63 {
-                return v;
+            value |= u64::from(b & 0x7f) << shift;
+            if b < 0x80 {
+                return value;
             }
-            shift += 7;
         }
+        let last = self.u8();
+        if last > 1 {
+            self.ok = false;
+            return 0;
+        }
+        value | u64::from(last) << 63
     }
 
     fn u32(&mut self) -> u32 {
-        self.u64() as u32
+        if let Some((&b @ 0..=127, rest)) = self.data.split_first() {
+            self.data = rest;
+            return u32::from(b);
+        }
+        u32::try_from(self.u64()).unwrap_or_else(|_| {
+            self.ok = false;
+            0
+        })
     }
 
-    fn bytes(&mut self) -> &[u8] {
+    fn bytes(&mut self) -> Option<&'a [u8]> {
         let n = self.u32() as usize;
-        let end = self.at.saturating_add(n);
-        if end > self.data.len() {
+        self.data.split_off(..n).or_else(|| {
             self.ok = false;
-            return &[];
-        }
-        let b = &self.data[self.at..end];
-        self.at = end;
-        b
+            None
+        })
     }
 
     fn sym(&mut self) -> Sym {
@@ -969,8 +963,8 @@ impl<'a> De<'a, '_> {
     /// budget, so a corrupt count cannot reserve gigabytes and a chain of
     /// them cannot do it one level at a time.
     fn count(&mut self) -> usize {
-        let n = (self.u32() as usize).min(self.data.len() - self.at.min(self.data.len()));
-        if n > self.budget {
+        let n = self.u32() as usize;
+        if n > self.budget || n > self.data.len() {
             self.ok = false;
             return 0;
         }
@@ -1013,21 +1007,6 @@ impl<'a> De<'a, '_> {
         })
     }
 
-    /// The bytes of a stored string or path, borrowed from the entry rather
-    /// than from `self`, so the arena can be written while they are held.
-    fn stored_bytes(&mut self) -> Option<&'a [u8]> {
-        let data = self.data;
-        let n = self.u32() as usize;
-        let end = self.at.saturating_add(n);
-        if end > data.len() {
-            self.ok = false;
-            return None;
-        }
-        let b = &data[self.at..end];
-        self.at = end;
-        Some(b)
-    }
-
     fn word(&mut self) -> Word {
         match ConstTag::from_u8(self.u8()) {
             Some(ConstTag::Imm) => match Word::imm_from_bits(self.u64()) {
@@ -1037,11 +1016,11 @@ impl<'a> De<'a, '_> {
                     Word::NULL
                 }
             },
-            Some(ConstTag::Str) => match self.stored_bytes() {
+            Some(ConstTag::Str) => match self.bytes() {
                 Some(b) => self.ev.arena.mk_string(b),
                 None => Word::NULL,
             },
-            Some(ConstTag::Path) => match self.stored_bytes() {
+            Some(ConstTag::Path) => match self.bytes() {
                 Some(b) => self.ev.arena.mk_path(b),
                 None => Word::NULL,
             },
@@ -1618,6 +1597,24 @@ mod tests {
         let (mut ev, bytes, base, span) = entry();
         let mut loads = |b: &[u8]| deserialize(&mut ev, b, base, span, false).is_some();
         assert!(loads(&bytes), "the entry it made loads");
+
+        // An overlong zero name count is valid. Overflowing the u32 count
+        // or continuing an integer past byte ten makes the entry a miss.
+        let body = &[0, 0, 1, 0, 0];
+        for (count, expected) in [
+            (&[0x80, 0][..], true),
+            (&[0x80, 0x80, 0x80, 0x80, 0x10][..], false),
+            (
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2][..],
+                false,
+            ),
+            (&[0x80; 10][..], false),
+        ] {
+            assert_eq!(loads(&[MAGIC.as_slice(), count, body].concat()), expected);
+        }
+
+        // The final allow-line count declares one item, but no bytes follow.
+        assert!(!loads(&[MAGIC.as_slice(), &[0, 0, 0, 1, 0, 1]].concat()));
 
         for n in 0..bytes.len() {
             assert!(!loads(&bytes[..n]), "{n} bytes of {} load", bytes.len());

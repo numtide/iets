@@ -1,15 +1,15 @@
 use std::collections::HashSet;
-#[cfg(target_os = "linux")]
 use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
+use crate::api::value::Eval;
 use crate::compile::Compiler;
 use crate::lint::{Config, Level};
-use crate::print;
 use crate::runtime::Value;
 use crate::syntax::{self, ast::FileId};
+use crate::{print, sys};
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -957,4 +957,27 @@ fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
     ev.force(entries[0].cell.get()).unwrap();
     let (_, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);
     assert_eq!(escapes, 1);
+}
+
+#[test]
+fn flat_path_keeps_the_bytes_it_addressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    fs::write(&file, b"original").unwrap();
+    let mut ev = Evaluator::new();
+    let mut api = Eval::new(&mut ev);
+    let values = api.eval_expr(
+        r#"let p = builtins.path { path = ./file; recursive = false; };
+               copy = recursive: builtins.path { path = p; inherit recursive; name = "copy"; };
+           in [ p (builtins.readFile p) (builtins.readFile (copy false)) (builtins.readFile (copy true)) ]"#,
+        &sys::path_to_internal(dir.path()),
+    ).unwrap();
+    api.force(values.list_get(0).unwrap()).unwrap();
+    fs::remove_file(file).unwrap();
+    for i in 1..4 {
+        assert_eq!(
+            api.force(values.list_get(i).unwrap()).unwrap().as_bytes(),
+            Some(&b"original"[..])
+        );
+    }
 }

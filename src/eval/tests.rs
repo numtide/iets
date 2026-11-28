@@ -997,3 +997,19 @@ fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
     let (_, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);
     assert_eq!(escapes, 1);
 }
+
+#[rstest]
+#[case("[]")]
+#[case(r#"["missing"]"#)]
+fn remove_attrs_keeps_members_but_returns_new_bindings(#[case] names: &str) {
+    let pairs = format!("let a = {{ x = {{ y = 1; }}; }}; in [ a (removeAttrs a {names}) ]");
+    assert_eq!(
+        eval_str(&pairs),
+        "[ { x = { y = 1; }; } { x = «repeated»; } ]"
+    );
+
+    let comparison = format!(
+        r#"let a = {{ x = throw "demand"; }}; in (builtins.tryEval (a == removeAttrs a {names})).success"#
+    );
+    assert_eq!(eval_str(&comparison), "false");
+}

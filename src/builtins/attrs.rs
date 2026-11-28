@@ -98,7 +98,7 @@ fn remove_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
         "while evaluating the second argument passed to builtins.removeAttrs",
     )?;
     if l.len == 0 {
-        return Ok(Word::from_ref(a));
+        return Ok(ev.arena.copy_attr_bindings(a));
     }
     // Each name is looked up in the set and its entry marked: sorting the
     // names took half the builtin on long lists.
@@ -121,9 +121,9 @@ fn remove_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
             removed += 1;
         }
     }
-    // nothing removed: the same entries, so the same set
+    // The bindings are fresh even when every member survives.
     if removed == 0 {
-        return Ok(Word::from_ref(a));
+        return Ok(ev.arena.copy_attr_bindings(flat));
     }
     if removed == src.len() {
         return Ok(ev.arena.mk_attrs_sorted_as(&[], Stat::AttrsRemove));

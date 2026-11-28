@@ -1322,30 +1322,43 @@ impl Arena {
     /// `a // b` as a union over the flat leaves of both sides; the caller
     /// checked the leaf budget (`leaf_count`).
     pub(crate) fn alloc_union(&mut self, a: &'static AttrsObj, b: &'static AttrsObj) -> Word {
-        self.alloc_union_with_hook(a, b, || {})
+        Word::from_ref(self.alloc_layers([a, b], Stat::AttrsUpd, || {}))
+    }
+
+    /// Fresh outer bindings with the same member slots, as for a no-op removeAttrs.
+    pub(crate) fn copy_attr_bindings(&mut self, a: &'static AttrsObj) -> Word {
+        if a.is_empty() {
+            return Word::from_ref(a);
+        }
+        let out = self.alloc_layers([a], Stat::AttrsRemove, || {});
+        out.len.store(a.len_raw(), Ordering::Relaxed);
+        if let [flat] = out.leaf_sets() {
+            out.union().flat.set(Word::from_ref(*flat));
+        }
+        Word::from_ref(out)
     }
 
     /// `hook` runs between counting the leaves and copying them, where
     /// another worker can flatten an operand. Only the test passes one.
     #[inline]
-    fn alloc_union_with_hook(
+    fn alloc_layers<const N: usize>(
         &mut self,
-        a: &'static AttrsObj,
-        b: &'static AttrsObj,
+        sets: [&'static AttrsObj; N],
+        bucket: Stat,
         hook: impl FnOnce(),
-    ) -> Word {
-        let n = leaf_count(a) + leaf_count(b);
+    ) -> &'static AttrsObj {
+        let n = sets.iter().map(|s| leaf_count(s)).sum();
         debug_assert!(n <= MAX_LEAVES as usize);
         hook();
         let size = AttrsObj::union_bytes(n);
-        self.stats.note(Stat::AttrsUpd, size);
+        self.stats.note(bucket, size);
         let p = self.alloc_raw(size, 8) as *mut AttrsObj;
         // SAFETY: fresh allocation sized for header, tail and n pointers. An
         // operand flattened since then has fewer leaves, never more.
         unsafe {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
-                origin: Stat::AttrsUpd.attrs_origin(),
+                origin: bucket.attrs_origin(),
                 flags: Default::default(),
                 leaves: n as u8,
                 len: AtomicU32::new(u32::MAX),
@@ -1355,7 +1368,7 @@ impl Arena {
                 flat: Cell::new(Word::EMPTY),
             });
             let mut leaves = tail.add(1) as *mut &'static AttrsObj;
-            for side in [a, b] {
+            for side in sets {
                 for_each_leaf(side, |leaf| {
                     leaves.write(leaf);
                     leaves = leaves.add(1);
@@ -1366,10 +1379,10 @@ impl Arena {
             #[cfg(feature = "stats2")]
             self.stats.census.note_attrs(
                 p,
-                Stat::AttrsUpd.attrs_origin(),
-                a.len_unmarked() + b.len_unmarked(),
+                bucket.attrs_origin(),
+                sets.iter().map(|s| s.len_unmarked()).sum(),
             );
-            Word::from_ref(&*p)
+            &*p
         }
     }
 
@@ -1828,10 +1841,9 @@ mod tests {
         let mut worker = Arena::new();
         #[cfg(feature = "stats2")]
         let bytes_before = arena.stats.bytes[Stat::AttrsUpd as usize];
-        let w = arena.alloc_union_with_hook(a, b, || {
+        let out = arena.alloc_layers([a, b], Stat::AttrsUpd, || {
             worker.flat(a);
         });
-        let out = unsafe { &*w.ptr::<AttrsObj>() };
         // before any traversal, which would read uninitialized slots
         assert_eq!(out.leaves, 2);
         assert_eq!(observed(out), vec![(1, 10), (2, 99), (3, 30)]);

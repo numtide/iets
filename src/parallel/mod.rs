@@ -32,6 +32,8 @@ pub struct Ctx {
     pub is_main: bool,
     timeline_start: Option<Instant>,
     pub cancelled: bool,
+    /// This helper encountered an operation which requires demand.
+    pub(crate) requires_demand: bool,
     /// Lowest stack address this fiber may use. Zero on the sequential
     /// path, which runs on the thread stack and never checks.
     pub stack_lo: usize,
@@ -51,6 +53,7 @@ impl Default for Ctx {
             is_main: true,
             timeline_start: None,
             cancelled: false,
+            requires_demand: false,
             stack_lo: 0,
             frames: 0,
             fx: force::Log::default(),

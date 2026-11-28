@@ -151,6 +151,14 @@ pub fn copy_mode(m: &Metadata, f: &File) -> io::Result<()> {
     f.set_permissions(m.permissions())
 }
 
+/// Opens a source file without waiting for a Unix FIFO writer.
+pub fn open_nonblocking(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NONBLOCK | OFlags::NOCTTY).bits() as i32)
+        .open(path)
+}
+
 /// Refuses a final symbolic link.
 pub fn no_follow(o: &mut OpenOptions) -> &mut OpenOptions {
     o.custom_flags(OFlags::NOFOLLOW.bits() as i32)

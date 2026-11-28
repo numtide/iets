@@ -221,6 +221,11 @@ pub fn copy_mode(m: &Metadata, f: &File) -> io::Result<()> {
     f.set_permissions(m.permissions())
 }
 
+/// Opens a source file without waiting for a Unix FIFO writer.
+pub fn open_nonblocking(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
 pub fn no_follow(o: &mut OpenOptions) -> &mut OpenOptions {
     o.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
 }

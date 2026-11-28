@@ -554,16 +554,21 @@ impl SrcPath {
         let sized = mode == ReadMode::FileBuiltin;
         match self.at().ok_or((STAT, enoent()))? {
             At::Disk(p) => {
-                let (meta, f) = if sized {
-                    let meta = fs::metadata(os(&p)).map_err(|e| (STAT, e))?;
-                    if !meta.is_file() {
+                let path = os(&p);
+                let f = if sized {
+                    // Reject devices before opening them. A replacement may have a different type.
+                    if !fs::metadata(&path).map_err(|e| (STAT, e))?.is_file() {
                         return Err((STAT, errno::is_a_directory()));
                     }
-                    (meta, fs::File::open(os(&p)).map_err(|e| (READ, e))?)
+                    sys::fs::open_nonblocking(&path)
                 } else {
-                    let f = fs::File::open(os(&p)).map_err(|e| (READ, e))?;
-                    (f.metadata().map_err(|e| (STAT, e))?, f)
-                };
+                    fs::File::open(&path)
+                }
+                .map_err(|e| (READ, e))?;
+                let meta = f.metadata().map_err(|e| (STAT, e))?;
+                if sized && !meta.is_file() {
+                    return Err((STAT, errno::is_a_directory()));
+                }
                 // Imports can also read streams, including completion's FIFO.
                 let sized = sized || mode == ReadMode::Import && meta.is_file();
                 let bytes =

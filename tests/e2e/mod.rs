@@ -318,9 +318,12 @@ impl Store {
         let mut cmd = Command::new(which("nix-daemon").unwrap());
         Store::env(self.dir(), &mut cmd);
         let log = fs::File::create(root.join("daemon.log")).unwrap();
+        let store = builder_store(&root, &self.store_dir());
+        // A daemon that execs a worker for each connection inherits NIX_REMOTE.
+        // Without a sandbox a builder would write into the first store's paths.
         cmd.env("NIX_DAEMON_SOCKET_PATH", root.join("socket"))
-            .arg("--store")
-            .arg(builder_store(&root, &self.store_dir()))
+            .env("NIX_REMOTE", &store)
+            .args(["--option", "sandbox-fallback", "false"])
             .args(["--option", "sandbox-paths", "/nix/store"]);
         for (k, v) in opts {
             cmd.args(["--option", k, v]);
@@ -331,7 +334,7 @@ impl Store {
             .process_group(0);
         let mut b = Builder {
             daemon: cmd.spawn().expect("spawn nix-daemon"),
-            store: builder_store(&root, &self.store_dir()),
+            store,
             root,
         };
         wait_for_daemon(self.dir(), &b.root, &mut b.daemon);

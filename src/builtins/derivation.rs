@@ -1028,17 +1028,18 @@ pub fn load_drv_traced(trace: &Trace, p: &StorePath) -> Result<Derivation, DrvEr
     if !trace.is_on() {
         return load_derivation_from_store(p);
     }
-    let full = p.to_string();
     let read = || -> io::Result<(Metadata, Vec<u8>)> {
-        let mut f = File::open(&full)?;
+        let mut f = File::open(p.on_disk())?;
         let meta = f.metadata()?;
         let mut d = Vec::with_capacity(meta.len() as usize);
         io::Read::read_to_end(&mut f, &mut d)?;
         Ok((meta, d))
     };
-    let (meta, bytes) =
-        read().map_err(|e| DrvError(format!("cannot read derivation '{full}': {e}")))?;
-    trace.file(full.as_bytes(), &meta, &bytes);
+    let (meta, bytes) = read().map_err(|e| {
+        trace.mark_uncacheable();
+        DrvError(format!("cannot read derivation '{p}': {e}"))
+    })?;
+    trace.file(p.to_full_string().as_bytes(), &meta, &bytes);
     Derivation::parse(&bytes, Derivation::name_from_path(p)?)
 }
 

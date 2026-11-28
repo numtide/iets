@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::{env, error, fmt};
 
@@ -250,6 +250,11 @@ impl StorePath {
 
     pub fn base_name(&self) -> &str {
         &self.base_name
+    }
+
+    /// Where the host filesystem stores this path.
+    pub fn on_disk(&self) -> PathBuf {
+        sys::native_path(&store_dir_info().internal).join(self.base_name())
     }
 
     pub fn hash_part(&self) -> &str {

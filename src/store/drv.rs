@@ -1046,9 +1046,8 @@ pub fn path_derivation_modulo(
 /// local store; the default `DrvLoader`.
 pub fn load_derivation_from_store(drv_path: &StorePath) -> Result<Derivation, DrvError> {
     let name = Derivation::name_from_path(drv_path)?;
-    let full = format!("{}/{}", store_dir(), drv_path.base_name());
-    let text =
-        fs::read(&full).map_err(|e| DrvError(format!("cannot read derivation '{full}': {e}")))?;
+    let text = fs::read(drv_path.on_disk())
+        .map_err(|e| DrvError(format!("cannot read derivation '{drv_path}': {e}")))?;
     Derivation::parse(&text, name)
 }
 

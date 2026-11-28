@@ -182,6 +182,16 @@ pub fn copy_mode(_m: &Metadata, _f: &File) -> io::Result<()> {
     Ok(())
 }
 
+/// Open the file through the host's preopened directory with nonblocking I/O.
+pub fn open_nonblocking(path: &Path) -> io::Result<File> {
+    Ok(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )?
+    .into())
+}
+
 /// `std` keeps the WASI lookup flags unstable, so this follows a link. The host
 /// keeps the walk inside the directories it gave.
 pub fn no_follow(o: &mut OpenOptions) -> &mut OpenOptions {

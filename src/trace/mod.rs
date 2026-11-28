@@ -96,8 +96,8 @@ pub enum Obs {
         path: Vec<u8>,
         size: u64,
         mtime_ns: i64,
-        /// Changes on every write, and no user program can set it: without
-        /// it a `cp -p` in place over a file of the same length is a hit.
+        /// A copy can preserve the mtime. Writes in the same filesystem
+        /// timestamp tick can also share this kernel-supplied change time.
         ctime_ns: i64,
         dev: u64,
         ino: u64,
@@ -115,6 +115,7 @@ pub enum Obs {
     Tree {
         root: Vec<u8>,
         nar_hash: Digest32,
+        /// UNTRUSTED_TREE requires checking the NAR content.
         stat_hash: Digest32,
         filtered: Option<Filtered>,
         /// The newest `lstat` mtime in the tree, in seconds, when the
@@ -320,6 +321,8 @@ pub fn cmd_hash(status: i32, stdout: &[u8]) -> Digest32 {
 }
 
 struct Inner {
+    /// Sampled before the reads whose bytes this trace records.
+    stable_before: i64,
     obs: Mutex<Vec<Obs>>,
     uncacheable: AtomicBool,
     /// Where the run keeps its entry, and what follows from a revision.
@@ -337,6 +340,7 @@ impl Trace {
 
     pub fn enabled_in(store: Option<store::Store>) -> Trace {
         Trace(Some(Arc::new(Inner {
+            stable_before: stable_before(),
             obs: Mutex::new(Vec::new()),
             uncacheable: AtomicBool::new(false),
             store,
@@ -403,15 +407,20 @@ impl Trace {
             .collect()
     }
 
-    /// A regular file whose bytes are in memory.
+    /// A regular file whose metadata and bytes were read during this trace.
     pub fn file(&self, path: &[u8], meta: &fs::Metadata, bytes: &[u8]) {
-        if self.is_on() {
+        if let Some(inner) = &self.0 {
             // A stream such as procfs can change without updating its size or times.
             if bytes.len() as u64 != meta.len() {
                 self.mark_uncacheable();
                 return;
             }
-            self.record(file_obs(&sys::from_native(path), meta, sha256(bytes)));
+            self.record(file_obs_with_cutoff(
+                &sys::from_native(path),
+                meta,
+                sha256(bytes),
+                inner.stable_before,
+            ));
         }
     }
 
@@ -499,7 +508,7 @@ impl Trace {
 
     /// A tree copied to the store. `accepted` is the filter result, `None`
     /// for an unfiltered copy. `fp` is what the NAR dump's filter recorded;
-    /// without it the tree is walked once more with `lstat` only.
+    /// without it validation must check the NAR content.
     pub fn tree(
         &self,
         root: &Path,
@@ -539,12 +548,17 @@ impl Trace {
         if !self.is_on() {
             return;
         }
-        let Some((stat_hash, seen_hash)) = fp
-            .and_then(TreeFp::finish)
-            .or_else(|| tree_fingerprint(root, accepted).ok())
-        else {
-            self.mark_uncacheable();
-            return;
+        let (stat_hash, seen_hash) = match fp.and_then(TreeFp::finish_for_cache) {
+            Some(pair) => pair,
+            // A later walk cannot certify the bytes, filter calls, or mtime
+            // of the original dump. A bare NAR digest can still be checked.
+            None if newest.is_none() && !(keep_seen && accepted.is_some()) => {
+                (UNTRUSTED_TREE, [0; 32])
+            }
+            None => {
+                self.mark_uncacheable();
+                return;
+            }
         };
         let filtered = accepted.map(|a| {
             // Only the members under this root can decide this tree. The set
@@ -595,27 +609,44 @@ fn exec_bit(st: &fs::Metadata) -> u32 {
     if is_executable(st) { 0o100 } else { 0 }
 }
 
-/// An mtime this close to the present may share its timestamp with a write
-/// still to come: FAT counts in 2 s, and Windows may set it late. A future
-/// one comes from a clock ahead of ours, such as an NFS server's.
+/// Filesystems may timestamp distinct writes within two seconds identically.
 const RACY_NS: i64 = 2_000_000_000;
 
-/// Never an mtime a file has, so the next validation rehashes.
+/// A recorded mtime that requires validation by content.
 const UNTRUSTED_MTIME: i64 = i64::MIN;
 
+fn stable_before() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .map_or(i64::MIN, |now| now.saturating_sub(RACY_NS))
+}
+
+/// A file observation made from previously acquired bytes. Without a time
+/// bound on their acquisition, the first validation must check the content.
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
+    file_obs_with_cutoff(path, meta, hash, i64::MIN)
+}
+
+fn file_obs_with_cutoff(
+    path: &[u8],
+    meta: &fs::Metadata,
+    hash: Digest32,
+    stable_before: i64,
+) -> Obs {
     let at = sys::native_path(path);
     let (dev, ino) = file_id(&at, meta);
     let mtime = mtime_ns(meta);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as i64);
-    let racy = mtime > now.saturating_sub(RACY_NS);
+    let ctime = ctime_ns(&at, meta);
+    // A writer can restore mtime. A recent ctime can still match another
+    // write in the same tick, even if a slow read has since finished.
+    let trusted = ctime != 0 && mtime.max(ctime) < stable_before;
     Obs::File {
         path: path.to_vec(),
         size: meta.len(),
-        mtime_ns: if racy { UNTRUSTED_MTIME } else { mtime },
-        ctime_ns: ctime_ns(&at, meta),
+        mtime_ns: if trusted { mtime } else { UNTRUSTED_MTIME },
+        ctime_ns: ctime,
         dev,
         ino,
         hash,
@@ -710,6 +741,8 @@ fn accepts(accepted: Option<&HashSet<PathBuf>>, p: &Path) -> bool {
     accepted.is_none_or(|a| a.contains(p))
 }
 
+const UNTRUSTED_TREE: Digest32 = [0; 32];
+
 /// The same two hashes `tree_fingerprint` computes, taken from the NAR dump
 /// that is already walking the tree. The dump offers every directory entry to
 /// its filter in NAR order, which is the order `tree_fingerprint` walks in, so
@@ -717,6 +750,9 @@ fn accepts(accepted: Option<&HashSet<PathBuf>>, p: &Path) -> bool {
 /// second `read_dir` walk is needed.
 pub struct TreeFp {
     root_len: usize,
+    /// A regular file newer than this cutoff may still change within its timestamp tick.
+    stable_before: i64,
+    trusted: bool,
     stat_h: Sha256,
     seen_h: Sha256,
     /// The newest mtime among the root and the accepted entries, in seconds.
@@ -738,6 +774,8 @@ impl TreeFp {
     pub fn new(root: &Path) -> Option<TreeFp> {
         let mut fp = TreeFp {
             root_len: nar::walk_root(root).len(),
+            stable_before: stable_before(),
+            trusted: true,
             stat_h: Sha256::new(),
             seen_h: Sha256::new(),
             newest: i64::MIN,
@@ -763,9 +801,17 @@ impl TreeFp {
             return;
         };
         self.newest = self.newest.max(mtime_secs(&st));
-        if hash_tree_stat(&mut self.stat_h, p, rel, &st).is_err() {
-            self.ok = false;
+        match hash_tree_stat(&mut self.stat_h, p, rel, &st) {
+            Ok((Kind::Regular, last_change)) => self.trusted &= last_change < self.stable_before,
+            Ok(_) => {}
+            Err(_) => self.ok = false,
         }
+    }
+
+    fn finish_for_cache(self) -> Option<(Digest32, Digest32)> {
+        let trusted = self.trusted;
+        self.finish()
+            .map(|(stat, seen)| (if trusted { stat } else { UNTRUSTED_TREE }, seen))
     }
 
     /// `(stat_hash, seen_hash)`, or `None` when any `lstat` on the way failed
@@ -782,20 +828,34 @@ fn hash_tree_entry(h: &mut Sha256, rel: &[u8], kind: Kind) {
     h.update([kind.to_u8()]);
 }
 
-fn hash_tree_stat(h: &mut Sha256, path: &Path, rel: &[u8], st: &fs::Metadata) -> io::Result<Kind> {
+fn hash_tree_stat(
+    h: &mut Sha256,
+    path: &Path,
+    rel: &[u8],
+    st: &fs::Metadata,
+) -> io::Result<(Kind, i64)> {
     let kind = Kind::of_file_type(&st.file_type());
     hash_tree_entry(h, rel, kind);
     h.update(st.len().to_le_bytes());
-    h.update(mtime_ns(st).to_le_bytes());
+    let mtime = mtime_ns(st);
+    let ctime = ctime_ns(path, st);
+    h.update(mtime.to_le_bytes());
     let (dev, ino) = file_id(path, st);
-    h.update(ctime_ns(path, st).to_le_bytes());
+    h.update(ctime.to_le_bytes());
     h.update(dev.to_le_bytes());
     h.update(ino.to_le_bytes());
     h.update(exec_bit(st).to_le_bytes());
     if kind == Kind::Symlink {
         h.update(fs::read_link(path)?.as_os_str().as_bytes());
     }
-    Ok(kind)
+    Ok((
+        kind,
+        if ctime == 0 {
+            i64::MAX
+        } else {
+            mtime.max(ctime)
+        },
+    ))
 }
 
 /// Walks `root` like the NAR dump does (sorted entries, no descent into
@@ -831,7 +891,7 @@ fn walk_fp(
         return Err(io::Error::other("tree too deep"));
     }
     let st = fs::symlink_metadata(path)?;
-    let kind = hash_tree_stat(stat_h, path, rel, &st)?;
+    let (kind, _) = hash_tree_stat(stat_h, path, rel, &st)?;
     if kind == Kind::Directory {
         let mut entries = read_dir_kinds(path)?;
         entries.sort();
@@ -859,12 +919,13 @@ pub fn tree_rehash(
     root: &Path,
     accepted: Option<&HashSet<PathBuf>>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
-    tree_rehash_with(root, &mut |p| accepts(accepted, p))
+    tree_rehash_with(root, &mut |p| accepts(accepted, p), TreeFp::finish)
 }
 
 fn tree_rehash_with(
     root: &Path,
     accept: &mut dyn FnMut(&Path) -> bool,
+    finish: fn(TreeFp) -> Option<(Digest32, Digest32)>,
 ) -> io::Result<(Digest32, Digest32, Digest32, i64)> {
     let mut fp = TreeFp::new(root).ok_or_else(|| io::Error::other("tree is gone"))?;
     let mut filter = |p: &Path, t: FileType| -> bool {
@@ -874,9 +935,8 @@ fn tree_rehash_with(
     };
     let (h, _) = nar::nar_hash_filtered(root, HashAlgo::Sha256, &mut filter)?;
     let newest = fp.newest;
-    let (stat_hash, seen_hash) = fp
-        .finish()
-        .ok_or_else(|| io::Error::other("tree changed while it was read"))?;
+    let (stat_hash, seen_hash) =
+        finish(fp).ok_or_else(|| io::Error::other("tree changed while it was read"))?;
     Ok((hash_to_digest(&h), seen_hash, stat_hash, newest))
 }
 

@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{fs, thread};
 
 use super::{
-    Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_metadata, tree_fingerprint_with, tree_rehash_with,
+    Digest32, DirBuf, Kind, Obs, TreeFp, UNTRUSTED_MTIME, UNTRUSTED_TREE, cmd_hash, ctime_ns,
+    dir_hash, env_hash, file_obs_with_cutoff, hash_to_digest, mtime_ns, run_query, stable_before,
+    stat_metadata, tree_fingerprint_with, tree_rehash_with,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -108,7 +109,7 @@ fn membership(paths: Option<&[Vec<u8>]>) -> impl FnMut(&Path) -> bool + '_ {
     }
 }
 
-fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
+fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf, stable_before: i64) -> Outcome {
     match o {
         Obs::File {
             path,
@@ -135,7 +136,11 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             if m.len() != *size {
                 return Outcome::Changed(format!("{} changed", lossy(path)));
             }
-            if mtime_ns(&m) == *mt && ctime_ns(&at, &m) == *ct && file_id(&at, &m) == (*dev, *ino) {
+            if *mt != UNTRUSTED_MTIME
+                && mtime_ns(&m) == *mt
+                && ctime_ns(&at, &m) == *ct
+                && file_id(&at, &m) == (*dev, *ino)
+            {
                 return Outcome::Same;
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
@@ -146,7 +151,12 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             if now != *hash {
                 return Outcome::Changed(format!("{} changed", lossy(path)));
             }
-            Outcome::Refresh(file_obs(path, &m, *hash))
+            let current = file_obs_with_cutoff(path, &m, *hash, stable_before);
+            if current == *o {
+                Outcome::Same
+            } else {
+                Outcome::Refresh(current)
+            }
         }
         Obs::Dir { path, hash } => match dir_hash(&sys::native_path(path), dirs) {
             Ok(now) => {
@@ -185,18 +195,23 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             let mut accept = membership(filtered.as_ref().map(|f| f.accepted.as_slice()));
             let root_p = sys::native_path(root);
             let expected_seen = filtered.as_ref().and_then(|f| f.seen_hash);
-            match tree_fingerprint_with(&root_p, &mut accept) {
-                Ok((sh, seen)) if sh == *stat_hash && expected_seen.is_none_or(|s| s == seen) => {
-                    return Outcome::Same;
+            if *stat_hash != UNTRUSTED_TREE {
+                match tree_fingerprint_with(&root_p, &mut accept) {
+                    Ok((sh, seen))
+                        if sh == *stat_hash && expected_seen.is_none_or(|s| s == seen) =>
+                    {
+                        return Outcome::Same;
+                    }
+                    Ok(_) => {}
+                    Err(e) => return unreadable(root, &e),
                 }
-                Ok(_) => {}
-                Err(e) => return unreadable(root, &e),
             }
             rehashed.fetch_add(1, Ordering::Relaxed);
-            let (nar, seen, sh, now) = match tree_rehash_with(&root_p, &mut accept) {
-                Ok(t) => t,
-                Err(e) => return unreadable(root, &e),
-            };
+            let (nar, seen, sh, now) =
+                match tree_rehash_with(&root_p, &mut accept, TreeFp::finish_for_cache) {
+                    Ok(t) => t,
+                    Err(e) => return unreadable(root, &e),
+                };
             if nar != *nar_hash || expected_seen.is_some_and(|s| s != seen) {
                 return Outcome::Changed(format!("source tree {} changed", lossy(root)));
             }
@@ -205,6 +220,9 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                     "source tree {} has another modification time",
                     lossy(root)
                 ));
+            }
+            if sh == *stat_hash {
+                return Outcome::Same;
             }
             Outcome::Refresh(Obs::Tree {
                 root: root.clone(),
@@ -261,6 +279,14 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
 /// failure: every index below it was already handed out, and a thread finishes
 /// the check it started, so the lowest failing index is among the ones seen.
 pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
+    validate_with_cutoff(obs, threads, stable_before())
+}
+
+fn validate_with_cutoff(
+    obs: &mut [Obs],
+    threads: usize,
+    stable_before: i64,
+) -> Result<Report, Mismatch> {
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let rehashed = AtomicUsize::new(0);
@@ -280,7 +306,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
                     if i >= obs.len() {
                         break;
                     }
-                    match check(&obs[i], &rehashed, &mut dirs) {
+                    match check(&obs[i], &rehashed, &mut dirs, stable_before) {
                         Outcome::Same => {}
                         Outcome::Refresh(o) => mine.push((i, o)),
                         Outcome::Changed(why) => {
@@ -317,10 +343,12 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Filtered, Trace, sha256, tree_fingerprint, tree_rehash};
+    use super::super::{Filtered, Trace, file_obs, sha256, tree_fingerprint, tree_rehash};
     use super::*;
+    use crate::store::nar;
     #[cfg(target_os = "linux")]
     use crate::sys::fs::symlink;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     use std::time::{self, Duration, SystemTime};
@@ -375,6 +403,64 @@ mod tests {
         assert_eq!(validate(&mut obs, 1).unwrap_err().0, expected);
     }
 
+    #[test]
+    fn a_racy_regular_file_in_a_nar_needs_a_content_check() {
+        let dir = tempdir().unwrap();
+        let leaf = dir.path().join("leaf");
+        let fixed = time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let write = |bytes| {
+            fs::write(&leaf, bytes).unwrap();
+            open_rw(&leaf).set_modified(fixed).unwrap();
+        };
+        let record = |root: &Path, accepted: Option<&HashSet<PathBuf>>, external| {
+            let trace = Trace::enabled();
+            let mut fp = trace.fp(root).unwrap();
+            let mut select = |p: &Path, kind| {
+                let keep = accepted.is_none_or(|set| set.contains(p));
+                fp.entry(p, kind, keep);
+                keep
+            };
+            let (nar, _) = nar::nar_hash_filtered(root, HashAlgo::Sha256, &mut select).unwrap();
+            let hash = hash_to_digest(&nar);
+            if external {
+                trace.tree_external(root, hash, accepted.unwrap(), Some(fp));
+            } else {
+                trace.tree(root, hash, accepted, Some(fp));
+            }
+            trace.take()
+        };
+
+        for root in [dir.path(), leaf.as_path()] {
+            write(b"AAAA");
+            let mut obs = record(root, None, false);
+            assert_eq!(validate(&mut obs, 1).unwrap().rehashed, 1);
+            write(b"BBBB");
+            assert!(validate(&mut obs, 1).is_err());
+        }
+
+        // Metadata collected after the dump cannot attest to the old bytes.
+        let old_nar = nar::nar_hash(dir.path()).unwrap();
+        write(b"next");
+        let trace = Trace::enabled();
+        trace.tree(dir.path(), hash_to_digest(&old_nar), None, None);
+        assert!(validate(&mut trace.take(), 1).is_err());
+
+        // Excluded bytes never enter the NAR. New offers still matter to a Nix
+        // filter, while an external set names exactly which paths to include.
+        let excluded = HashSet::new();
+        let mut filtered = record(dir.path(), Some(&excluded), false);
+        let mut external = record(dir.path(), Some(&excluded), true);
+        let Obs::Tree { stat_hash, .. } = &filtered[0] else {
+            panic!("expected a tree observation")
+        };
+        assert_ne!(stat_hash, &super::UNTRUSTED_TREE);
+        write(b"CCCC");
+        assert!(validate(&mut filtered, 1).is_ok());
+        fs::write(dir.path().join("new"), b"").unwrap();
+        assert!(validate(&mut filtered, 1).is_err());
+        assert!(validate(&mut external, 1).is_ok());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_proc_stream_and_a_sized_read_observe_different_bytes() {
@@ -403,19 +489,20 @@ mod tests {
     /// as it was, so a file that fresh is hashed again.
     #[test]
     fn a_file_written_just_now_is_rehashed() {
+        let cutoff = stable_before();
         let d = tempdir().unwrap();
         let f = d.path().join("a.nix");
         fs::write(&f, b"1").unwrap();
         let m = fs::metadata(&f).unwrap();
         let p = f.as_os_str().as_bytes().to_vec();
-        let mut obs = vec![super::super::file_obs(&p, &m, sha256(b"1"))];
-        let r = validate(&mut obs, 2).unwrap();
-        assert_eq!(r.rehashed, 1);
+        let mut obs = vec![file_obs_with_cutoff(&p, &m, sha256(b"1"), cutoff)];
+        let r = validate_with_cutoff(&mut obs, 2, cutoff).unwrap();
+        assert_eq!((r.rehashed, r.refreshed), (1, 0));
 
         let ahead = SystemTime::now() + Duration::from_secs(60);
         open_rw(&f).set_modified(ahead).unwrap();
         let m = fs::metadata(&f).unwrap();
-        let mut obs = vec![super::super::file_obs(&p, &m, sha256(b"1"))];
+        let mut obs = vec![file_obs_with_cutoff(&p, &m, sha256(b"1"), cutoff)];
         let r = validate(&mut obs, 2).unwrap();
         assert_eq!(r.rehashed, 1, "a future mtime is not trusted either");
     }
@@ -429,14 +516,18 @@ mod tests {
         open_rw(&f).set_modified(earlier).unwrap();
         let m = fs::metadata(&f).unwrap();
         let p = f.as_os_str().as_bytes().to_vec();
-        let mut obs = vec![super::super::file_obs(&p, &m, sha256(b"1"))];
+        let mut obs = vec![file_obs(&p, &m, sha256(b"1"))];
+        // A later validation rehashes the previously untrusted observation
+        // and promotes it only after both timestamps are old.
+        let r = validate_with_cutoff(&mut obs, 2, i64::MAX).unwrap();
+        assert_eq!((r.rehashed, r.refreshed), (1, 1));
         let r = validate(&mut obs, 2).unwrap();
         assert_eq!((r.rehashed, r.refreshed), (0, 0));
 
         // same content, new mtime: rehash once, refresh
         let later = SystemTime::now() - Duration::from_secs(30);
         open_rw(&f).set_modified(later).unwrap();
-        let r = validate(&mut obs, 2).unwrap();
+        let r = validate_with_cutoff(&mut obs, 2, i64::MAX).unwrap();
         assert_eq!((r.rehashed, r.refreshed), (1, 1));
         let r = validate(&mut obs, 2).unwrap();
         assert_eq!((r.rehashed, r.refreshed), (0, 0));
@@ -462,8 +553,7 @@ mod tests {
         trace.stat_now(d.path().join("missing").as_os_str().as_bytes(), true);
         let mut obs = trace.take();
         assert_eq!(obs.len(), 2);
-        let r = validate(&mut obs, 2).unwrap();
-        assert_eq!((r.rehashed, r.refreshed), (0, 0));
+        validate(&mut obs, 2).unwrap();
         fs::write(&f, b"22").unwrap();
         assert!(validate(&mut obs, 2).is_err());
     }
@@ -490,26 +580,19 @@ mod tests {
     fn a_copy_in_place_that_keeps_the_stat_still_misses() {
         let d = tempdir().unwrap();
         let f = d.path().join("a.nix");
-        let other = d.path().join("b.nix");
+        let trace = Trace::enabled();
         fs::write(&f, b"AAAA").unwrap();
-        fs::write(&other, b"BBBB").unwrap();
         let fixed = time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        for p in [&f, &other] {
-            open_rw(p).set_modified(fixed).unwrap();
-        }
+        open_rw(&f).set_modified(fixed).unwrap();
         let m = fs::metadata(&f).unwrap();
-        let p = f.as_os_str().as_bytes().to_vec();
-        let mut obs = vec![super::super::file_obs(&p, &m, sha256(b"AAAA"))];
-        validate(&mut obs, 1).unwrap();
+        trace.file(f.as_os_str().as_bytes(), &m, b"AAAA");
+        let mut obs = trace.take();
+        assert_eq!(
+            validate(&mut obs, 1).unwrap().rehashed,
+            1,
+            "a preserved mtime does not age the ctime"
+        );
 
-        // the kernel stamps ctime from a clock that ticks every few
-        // milliseconds, so wait until a write can get a new one
-        while {
-            open_rw(&other).set_modified(fixed).unwrap();
-            ctime_ns(&other, &fs::metadata(&other).unwrap()) == ctime_ns(&f, &m)
-        } {
-            thread::sleep(Duration::from_millis(1));
-        }
         let mut bytes = fs::File::create(&f).unwrap();
         io::Write::write_all(&mut bytes, b"BBBB").unwrap();
         drop(bytes);
